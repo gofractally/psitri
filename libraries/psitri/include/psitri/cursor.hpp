@@ -284,17 +284,11 @@ namespace psitri
       uint64_t                          _version = UINT64_MAX;
 
       /// Check if the current leaf entry is hidden at the cursor's version.
+      /// Delegates to the shared visibility predicate so count_keys and the
+      /// cursor agree about which entries a snapshot can see.
       bool is_leaf_entry_hidden(const leaf_node* l, branch_number bn) const noexcept
       {
-         const uint64_t created_at = l->get_version(bn);
-         if (_version != UINT64_MAX && created_at != 0 &&
-             version_newer_than(created_at, _version, value_version_bits))
-            return true;
-         if (l->get_value_type(bn) != leaf_node::value_type_flag::value_node)
-            return false;
-         auto ref           = _node.session()->get_ref<value_node>(l->get_value_address(bn));
-         auto [offset, idx] = ref->find_version(_version);
-         return offset == value_node::offset_tombstone || offset == value_node::offset_null;
+         return !leaf_entry_visible_at(*_node.session(), *l, bn, _version);
       }
 
       void append_key(key_view key) noexcept;
@@ -701,7 +695,7 @@ namespace psitri
       if (_node.address() == sal::null_ptr_address)
          return 0;
       auto read_lock = _node.session()->lock();
-      return psitri::count_keys(*_node.session(), _node.address(), {lower, upper});
+      return psitri::count_keys(*_node.session(), _node.address(), {lower, upper}, _version);
    }
    inline key_info cursor::get_key_info(key_view key) const noexcept
    {

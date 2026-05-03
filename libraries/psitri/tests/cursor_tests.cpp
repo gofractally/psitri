@@ -92,6 +92,24 @@ namespace
       std::reverse(keys.begin(), keys.end());
       return keys;
    }
+
+   uint64_t manual_count_keys(cursor rc, key_view lower = {}, key_view upper = {})
+   {
+      uint64_t total = 0;
+      if (lower.empty())
+         rc.seek_begin();
+      else
+         rc.lower_bound(lower);
+      while (!rc.is_end())
+      {
+         const auto key = rc.key();
+         if (!upper.empty() && key >= upper)
+            break;
+         ++total;
+         rc.next();
+      }
+      return total;
+   }
 }  // namespace
 
 // ============================================================
@@ -638,4 +656,51 @@ TEST_CASE("cursor: count_keys matches manual iteration for random ranges", "[cur
       INFO("range [" << lower << ", " << upper << ")");
       REQUIRE(api_count == manual_count);
    }
+}
+
+TEST_CASE("cursor: count_keys respects snapshot versions after insert and remove",
+          "[cursor][mvcc][count_keys]")
+{
+   sal::set_current_thread_name("main");
+   auto db_path = std::filesystem::path("count_keys_mvcc_versions_testdb");
+   std::filesystem::remove_all(db_path);
+
+   auto db = database::create(db_path);
+   auto ws = db->start_write_session();
+   auto rs = db->start_read_session();
+
+   {
+      auto tx = ws->start_transaction(0);
+      tx.upsert("key-a", "value-a");
+      tx.upsert("key-b", "value-b");
+      tx.upsert("key-c", "value-c");
+      tx.commit();
+   }
+
+   auto before_insert = rs->snapshot_cursor(0);
+   REQUIRE(manual_count_keys(before_insert) == 3);
+   REQUIRE(before_insert.count_keys() == 3);
+
+   ws->upsert(0, "key-d", "value-d");
+
+   auto after_insert = rs->snapshot_cursor(0);
+   REQUIRE(manual_count_keys(after_insert) == 4);
+   REQUIRE(after_insert.count_keys() == 4);
+
+   INFO("count_keys must ignore branches created after the cursor snapshot version");
+   REQUIRE(manual_count_keys(before_insert) == 3);
+   CHECK(before_insert.count_keys() == 3);
+
+   auto before_remove = rs->snapshot_cursor(0);
+   REQUIRE(manual_count_keys(before_remove) == 4);
+   REQUIRE(before_remove.count_keys() == 4);
+
+   ws->remove(0, "key-b");
+
+   auto after_remove = rs->snapshot_cursor(0);
+   REQUIRE(manual_count_keys(after_remove) == 3);
+
+   INFO("count_keys must keep pre-remove snapshots visible after a later tombstone");
+   REQUIRE(manual_count_keys(before_remove) == 4);
+   CHECK(before_remove.count_keys() == 4);
 }

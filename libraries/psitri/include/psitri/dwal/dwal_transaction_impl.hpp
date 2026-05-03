@@ -187,11 +187,11 @@ namespace psitri::dwal
       {
          auto* v = _root->rw_layer->map.get(key);
          if (v)
-         {
-            if (v->is_tombstone())
-               return {false, {}};
-            return {true, *v};
-         }
+	         {
+	            if (v->is_tombstone())
+	               return {false, {}};
+	            return lookup_result::make_borrowed(*v, _root->rw_layer);
+	         }
          if (_root->rw_layer->tombstones.is_deleted(key))
             return {false, {}};
       }
@@ -246,11 +246,11 @@ namespace psitri::dwal
 
       auto* v = ro->map.get(key);
       if (v)
-      {
-         if (v->is_tombstone())
-            return {false, btree_value::make_tombstone()};
-         return {true, *v};
-      }
+	         {
+	            if (v->is_tombstone())
+	               return {false, btree_value::make_tombstone()};
+	            return lookup_result::make_borrowed(*v, ro);
+	         }
       if (ro->tombstones.is_deleted(key))
          return {false, btree_value::make_tombstone()};
 

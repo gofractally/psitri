@@ -8,6 +8,7 @@
 #include <psitri/lock_policy.hpp>
 
 #include <cassert>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -172,21 +173,84 @@ namespace psitri::dwal
       /**
        * @brief Result of a point lookup or cursor value read.
        */
-      struct lookup_result
-      {
-         bool        found = false;
-         btree_value value;
-         std::string owned_data;
+	      struct lookup_result
+	      {
+	         bool        found = false;
+	         btree_value value;
+	         std::string owned_data;
+	         std::shared_ptr<const btree_layer> layer_guard;
 
-         static lookup_result make_owned(std::string data)
-         {
-            lookup_result r;
-            r.found      = true;
-            r.owned_data = std::move(data);
-            r.value      = btree_value::make_data(r.owned_data);
-            return r;
-         }
-      };
+	         lookup_result() = default;
+	         lookup_result(bool f, btree_value v) : found(f), value(v) {}
+	         lookup_result(bool f, btree_value v, std::shared_ptr<const btree_layer> guard)
+	             : found(f), value(v), layer_guard(std::move(guard))
+	         {
+	         }
+
+	         lookup_result(const lookup_result& other)
+	             : found(other.found),
+	               value(other.value),
+	               owned_data(other.owned_data),
+	               layer_guard(other.layer_guard)
+	         {
+	            rebind_owned_data();
+	         }
+
+	         lookup_result(lookup_result&& other) noexcept
+	             : found(other.found),
+	               value(other.value),
+	               owned_data(std::move(other.owned_data)),
+	               layer_guard(std::move(other.layer_guard))
+	         {
+	            rebind_owned_data();
+	         }
+
+	         lookup_result& operator=(const lookup_result& other)
+	         {
+	            if (this == &other)
+	               return *this;
+	            found       = other.found;
+	            value       = other.value;
+	            owned_data  = other.owned_data;
+	            layer_guard = other.layer_guard;
+	            rebind_owned_data();
+	            return *this;
+	         }
+
+	         lookup_result& operator=(lookup_result&& other) noexcept
+	         {
+	            if (this == &other)
+	               return *this;
+	            found       = other.found;
+	            value       = other.value;
+	            owned_data  = std::move(other.owned_data);
+	            layer_guard = std::move(other.layer_guard);
+	            rebind_owned_data();
+	            return *this;
+	         }
+
+	         static lookup_result make_owned(std::string data)
+	         {
+	            lookup_result r;
+	            r.found      = true;
+	            r.owned_data = std::move(data);
+	            r.value      = btree_value::make_data(r.owned_data);
+	            return r;
+	         }
+
+	         static lookup_result make_borrowed(btree_value value,
+	                                            std::shared_ptr<const btree_layer> guard)
+	         {
+	            return lookup_result(true, value, std::move(guard));
+	         }
+
+	      private:
+	         void rebind_owned_data() noexcept
+	         {
+	            if (found && value.is_data() && !owned_data.empty())
+	               value = btree_value::make_data(owned_data);
+	         }
+	      };
 
       lookup_result      get(std::string_view key) const;
       owned_merge_cursor create_cursor() const;

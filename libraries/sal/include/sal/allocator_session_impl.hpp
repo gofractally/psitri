@@ -213,7 +213,7 @@ namespace sal
    template <typename T>
    [[nodiscard]] smart_ref<T> allocator_session::get_ref(ptr_address adr) noexcept
    {
-      assert(adr != null_ptr_address);
+      assert(!is_reserved_ptr_address(adr));
       auto& cb    = _ptr_alloc.get(adr);
       auto  cread = cb.load(std::memory_order_acquire);
       auto  ptr   = reinterpret_cast<T*>(_block_base_ptr + *cread.loc().offset());
@@ -234,7 +234,7 @@ namespace sal
    /// the ref count.  Use this to pipeline page faults during sorted merges.
    inline void allocator_session::prefetch(ptr_address adr) const noexcept
    {
-      if (adr == null_ptr_address) [[unlikely]]
+      if (is_reserved_ptr_address(adr)) [[unlikely]]   // null / tombstone / sentinel
          return;
       auto& cb    = _ptr_alloc.get(adr);
       auto  cread = cb.load(std::memory_order_relaxed);
@@ -244,7 +244,7 @@ namespace sal
 
    inline bool allocator_session::is_read_only(ptr_address adr) const noexcept
    {
-      assert(adr != null_ptr_address);
+      assert(!is_reserved_ptr_address(adr));
       auto& cb    = _ptr_alloc.get(adr);
       auto  cread = cb.load(std::memory_order_acquire);
       return is_read_only(cread.loc());

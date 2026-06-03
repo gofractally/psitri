@@ -125,6 +125,7 @@ namespace sal
             if (size_bytes > max_cacheable_object_size)
                return false;
 
+            // ceil(size / cacheline_size); at least 1 so we never divide by 0
             uint64_t clines = (uint64_t(size_bytes) + cacheline_size - 1) / cacheline_size;
             if (clines == 0)
                clines = 1;

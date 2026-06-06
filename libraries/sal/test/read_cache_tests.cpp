@@ -99,8 +99,10 @@ TEST_CASE("cache policy cost-normalizes larger objects", "[sal][read_cache]")
 
    const uint64_t between_one_and_two_cacheline_thresholds = max_uint64 - ((gap * 3) / 4);
 
-   CHECK(state.should_cache(between_one_and_two_cacheline_thresholds, 64));
-   CHECK_FALSE(state.should_cache(between_one_and_two_cacheline_thresholds, 128));
+   // Sizes are grain-relative: ≤1 cacheline caches at this threshold; >1 cacheline (cost-
+   // normalized by clines) does not. (Recalibrated for the 128-byte allocation grain.)
+   CHECK(state.should_cache(between_one_and_two_cacheline_thresholds, sal::cacheline_size));
+   CHECK_FALSE(state.should_cache(between_one_and_two_cacheline_thresholds, 2 * sal::cacheline_size));
 }
 
 TEST_CASE("cache promoter tracks source residency", "[sal][read_cache]")
@@ -209,12 +211,15 @@ TEST_CASE("promoter skips young HOT advisories before copying", "[sal][read_cach
       CHECK(ses->get(adr).loc() == loc_before);
       CHECK(alloc._mapped_state->_cache_difficulty_state.total_young_hot_skips.load(
                 std::memory_order_relaxed) == 1);
+      // A 64-byte request rounds up to the allocation grain (128 B), so the byte
+      // accounting reflects the real footprint = sal::cacheline_size.
       CHECK(alloc._mapped_state->_cache_difficulty_state.total_young_hot_skipped_bytes.load(
-                std::memory_order_relaxed) == 64);
+                std::memory_order_relaxed) == sal::cacheline_size);
       CHECK(alloc._mapped_state->_cache_difficulty_state.total_promoted_bytes.load(
                 std::memory_order_relaxed) == 0);
       CHECK(alloc._mapped_state->_cache_difficulty_state
-                .total_cache_policy_satisfied_bytes.load(std::memory_order_relaxed) == 64);
+                .total_cache_policy_satisfied_bytes.load(std::memory_order_relaxed) ==
+            sal::cacheline_size);
    }
 
    fs::remove_all(path);

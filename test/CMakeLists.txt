@@ -183,10 +183,6 @@ if(SQLite3_FOUND)
     )
     set_target_properties(sqlite-arb-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endif()
-
-# bench_sal_dump_race — regression reproducer for the allocator::dump() SIGBUS
-# (dump() derefs a segment before reserve() commits its file backing).
-add_executable(bench_sal_dump_race ../libraries/psitri/tests/bench_sal_dump_race.cpp)
-target_link_libraries(bench_sal_dump_race PRIVATE psitri Threads::Threads)
-target_include_directories(bench_sal_dump_race PUBLIC $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>)
-set_target_properties(bench_sal_dump_race PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+# NOTE: the allocator::dump() SIGBUS *fix* lives in sal (block_allocator.hpp + allocator.cpp).
+# Its repro bench (bench_sal_dump_race.cpp) is wtree-driven and intentionally omitted on the
+# `heart` branch (pre-wtree). Re-add it once a non-wtree load generator exists.

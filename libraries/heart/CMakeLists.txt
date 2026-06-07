@@ -34,6 +34,7 @@ if(HEART_BUILD_TESTS)
         test/branch_smart_address_tests.cpp
         test/radix_tree_tests.cpp
         test/sal_radix_tree_tests.cpp
+        test/radix_engine_tests.cpp
     )
     target_link_libraries(heart-tests
         PRIVATE

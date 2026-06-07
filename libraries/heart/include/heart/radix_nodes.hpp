@@ -1,9 +1,12 @@
 #pragma once
 #include <cstdint>
+#include <cstring>
+#include <span>
 
 #include <heart/radix_bitset.hpp>
 #include <heart/radix_full.hpp>
 #include <heart/radix_node.hpp>
+#include <heart/radix_type_ids.hpp>
 #include <heart/smart_address.hpp>
 
 namespace heart
@@ -99,8 +102,63 @@ namespace heart
    /// reached by `byte >> 5`. The dense R8 fallback.
    struct full_radix_node : large_radix<full_radix_node, 4>
    {
-      static constexpr dispatch_shape tier = dispatch_shape::r8;
-      radix_full<256>                 branches;
+      static constexpr dispatch_shape   tier    = dispatch_shape::r8;
+      static constexpr sal::header_type type_id = radix_type_ids::full_radix;
+
+      radix_full<256> branches;  // @128 (CL1..8): 32 ptr_addresses per cacheline
+
+      full_radix_node() noexcept = default;  // for placement layout tests
+
+      // Offset of the segment region (CL1) — the skip-header descent reads
+      // branches[byte] at base + branch_offset + 4*byte without touching CL0.
+      // Pinned to 128 by the offsetof static_assert below the struct.
+      static constexpr uint32_t branch_offset = 128;
+
+      // ---- SAL construction contract (branches/term are pure pointers; no tail
+      // heap, so the allocation is exactly the fixed 9-cacheline struct). ----
+      static uint32_t alloc_size(std::span<const uint8_t> prefix) noexcept
+      {
+         (void)prefix;  // prefix lives in the CL0 variable region (prefix_data)
+         return uint32_t(sizeof(full_radix_node));  // 1152, already a cacheline multiple
+      }
+      full_radix_node(uint32_t asize, sal::ptr_address_seq seq,
+                      std::span<const uint8_t> prefix) noexcept
+      {
+         init_page(asize, type_id, seq);
+         _rtype         = radix_node_type::full256;
+         _term_value    = smart_address::null();
+         _prefix_length = 0;
+         set_prefix(prefix);
+         branches.init();
+      }
+
+      smart_address find(uint8_t b) const noexcept { return branches.find(b); }
+      bool          set_branch(uint8_t b, smart_address sa) noexcept
+      {
+         branches.set_branch(b, sa);  // direct index — always has room
+         return true;
+      }
+      bool branch_has_room(uint8_t) const noexcept { return true; }
+
+      std::span<const sal::ptr_address> branch_hint() const noexcept
+      {
+         return {reinterpret_cast<const sal::ptr_address*>(&branches.branches[0]), 256};
+      }
+
+      template <typename F>
+      void for_each_child(F&& f) const
+      {
+         if (_term_value.is_pointer())
+            f(_term_value.as_pointer());
+         for (int b = 0; b < 256; ++b)
+            if (branches.branches[b].is_pointer())
+               f(branches.branches[b].as_pointer());
+      }
+      template <typename Session>
+      void destroy(const Session& s) const
+      {
+         for_each_child([&](sal::ptr_address c) { s->release(c); });
+      }
    };
 
    static_assert(sizeof(suffix_value_node) == 128);

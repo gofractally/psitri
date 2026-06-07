@@ -85,6 +85,37 @@ TEST_CASE("radix_engine: string keys, prefixes, and terminals", "[radix_engine]"
    REQUIRE_FALSE(t.find("z", got));
 }
 
+TEST_CASE("radix_engine: forced fan-out exercises bitset_r2/r4 tiers", "[radix_engine]")
+{
+   // Keys share a 3-byte prefix then diverge on one byte over K distinct values,
+   // forcing the child node through setlist -> bitset_r2 -> bitset_r4 as K grows.
+   for (int K : {30, 100, 250})
+   {
+      radix_tree t(tmp("heart_re_fanout"));
+      for (int i = 0; i < K; ++i)
+      {
+         std::string key = "AAA";
+         key.push_back(char(uint8_t(i)));
+         key += "tail";
+         t.upsert(key, make_value(uint64_t(i)));
+      }
+      for (int i = 0; i < K; ++i)
+      {
+         std::string key = "AAA";
+         key.push_back(char(uint8_t(i)));
+         key += "tail";
+         value_view got;
+         REQUIRE(t.find(key, got));
+         REQUIRE(std::string(got) == make_value(uint64_t(i)));
+      }
+      auto tc = t.count_tiers();
+      if (K == 30)
+         REQUIRE(tc.bitset_r2 >= 1);  // 30 > setlist cap but fits 2 half-cachelines
+      if (K == 250)
+         REQUIRE((tc.bitset_r4 >= 1 || tc.full >= 1));  // 250 distinct → r4 or full
+   }
+}
+
 TEST_CASE("radix_engine: overwrite returns prior size + COW commit cycle", "[radix_engine]")
 {
    radix_tree t(tmp("heart_re_cow"));

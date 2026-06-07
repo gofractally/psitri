@@ -12,12 +12,14 @@
 // setlist→full upgrade. Branches/term are pure pointers (a terminal is a leaf).
 #pragma once
 #include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <memory>
 #include <span>
 #include <string_view>
+#include <type_traits>
 
 #include <sal/allocator.hpp>
 #include <sal/allocator_session_impl.hpp>
@@ -55,6 +57,8 @@ namespace heart::radix
       {
          _alloc->register_type_ops<leaf_node>();
          _alloc->register_type_ops<setlist_u8>();
+         _alloc->register_type_ops<bitset_r2_node>();
+         _alloc->register_type_ops<bitset_r4_node>();
          _alloc->register_type_ops<full_radix_node>();
          _root = make_node<setlist_u8>(bytes{});  // empty root: a sparse setlist
       }
@@ -65,7 +69,7 @@ namespace heart::radix
          auto        lock = _ses->lock();
          _old_value_size  = -1;
          bytes       kb   = as_bytes(key);
-         ptr_address nr   = insert_node(_root, kb, 0, as_bytes(val));
+         ptr_address nr   = insert_node(_root, kb, 0, as_bytes(val), {});
          if (nr != _root)
          {
             _ses->release(_root);
@@ -82,10 +86,11 @@ namespace heart::radix
          uint32_t    depth = 0;
          for (;;)
          {
-            auto ref = _ses->get_ref<sal::alloc_header>(addr);
-            // SKIP-HEADER FAST PATH: dispatch shape came from the control block, so
-            // route from the segment cacheline without touching CL0.
-            if (ref.cb_type() == uint8_t(dispatch_shape::r8))
+            auto    ref   = _ses->get_ref<sal::alloc_header>(addr);
+            uint8_t shape = ref.cb_type();
+            // SKIP-HEADER FAST PATH: the dispatch shape came from the control block,
+            // so route from the segment cacheline without touching CL0.
+            if (shape == uint8_t(dispatch_shape::r8))
             {
                if (depth < kb.size())
                {
@@ -104,19 +109,50 @@ namespace heart::radix
                   return false;
                return leaf_read(n->term_value().as_pointer(), kb, depth, out);
             }
-            // R1: read the header and dispatch by format.
+            if (shape == uint8_t(dispatch_shape::r2) || shape == uint8_t(dispatch_shape::r4))
+            {
+               if (depth < kb.size())
+               {
+                  const char*   base = reinterpret_cast<const char*>(ref.obj());
+                  uint8_t       byte = kb[depth];
+                  smart_address sa;
+                  if (shape == uint8_t(dispatch_shape::r2))
+                     sa = reinterpret_cast<const bitset_r2_node::segment*>(
+                              base + 128 + (byte >> 7) * 128)
+                              ->find(byte & 127);  // one segment line, no CL0
+                  else
+                     sa = reinterpret_cast<const bitset_r4_node::segment*>(
+                              base + 128 + (byte >> 6) * 128)
+                              ->find(byte & 63);
+                  if (sa.is_null())
+                     return false;
+                  addr = sa.as_pointer();
+                  ++depth;
+                  continue;
+               }
+               // key ends here → term (in the header)
+               smart_address tv = (shape == uint8_t(dispatch_shape::r2))
+                                      ? ref.as<bitset_r2_node>().obj()->term_value()
+                                      : ref.as<bitset_r4_node>().obj()->term_value();
+               if (tv.is_null())
+                  return false;
+               return leaf_read(tv.as_pointer(), kb, depth, out);
+            }
+            // R1: read the header and dispatch by format (leaf / prefixed router).
             auto t = _ses->get_ref<sal::alloc_header>(addr)->type();
             if (t == leaf_node::type_id)
                return leaf_read(addr, kb, depth, out);
+            bool cont;
             if (t == setlist_u8::type_id)
-            {
-               if (!route_r1(_ses->get_ref<setlist_u8>(addr).obj(), kb, depth, out, addr))
-                  return _route_done ? _route_found : false;
-               continue;
-            }
-            // full_radix carrying a prefix (stamped r1)
-            if (!route_r1(_ses->get_ref<full_radix_node>(addr).obj(), kb, depth, out, addr))
-               return _route_done ? _route_found : false;
+               cont = route_r1(_ses->get_ref<setlist_u8>(addr).obj(), kb, depth, out, addr);
+            else if (t == bitset_r2_node::type_id)
+               cont = route_r1(_ses->get_ref<bitset_r2_node>(addr).obj(), kb, depth, out, addr);
+            else if (t == bitset_r4_node::type_id)
+               cont = route_r1(_ses->get_ref<bitset_r4_node>(addr).obj(), kb, depth, out, addr);
+            else
+               cont = route_r1(_ses->get_ref<full_radix_node>(addr).obj(), kb, depth, out, addr);
+            if (!cont)
+               return _route_found;
          }
       }
 
@@ -132,7 +168,49 @@ namespace heart::radix
 
       uint64_t object_count() const { return _alloc->total_allocated_objects(); }
 
+      struct tier_counts
+      {
+         uint64_t leaf = 0, setlist = 0, bitset_r2 = 0, bitset_r4 = 0, full = 0;
+      };
+      tier_counts count_tiers()
+      {
+         auto        lock = _ses->lock();
+         tier_counts tc;
+         walk(_root, tc);
+         return tc;
+      }
+
      private:
+      void walk(ptr_address a, tier_counts& tc)
+      {
+         auto t = _ses->get_ref<sal::alloc_header>(a)->type();
+         if (t == leaf_node::type_id)
+         {
+            ++tc.leaf;
+            return;
+         }
+         if (t == setlist_u8::type_id)
+         {
+            ++tc.setlist;
+            _ses->get_ref<setlist_u8>(a).obj()->for_each_child([&](ptr_address c) { walk(c, tc); });
+         }
+         else if (t == bitset_r2_node::type_id)
+         {
+            ++tc.bitset_r2;
+            _ses->get_ref<bitset_r2_node>(a).obj()->for_each_child([&](ptr_address c) { walk(c, tc); });
+         }
+         else if (t == bitset_r4_node::type_id)
+         {
+            ++tc.bitset_r4;
+            _ses->get_ref<bitset_r4_node>(a).obj()->for_each_child([&](ptr_address c) { walk(c, tc); });
+         }
+         else
+         {
+            ++tc.full;
+            _ses->get_ref<full_radix_node>(a).obj()->for_each_child([&](ptr_address c) { walk(c, tc); });
+         }
+      }
+
       static std::unique_ptr<sal::allocator> make_alloc(const std::filesystem::path& dir)
       {
          std::filesystem::remove_all(dir);
@@ -157,15 +235,15 @@ namespace heart::radix
          ref.control().set_type(uint8_t(ref->stamp_shape()));  // r8 if prefix-less else r1
       }
       template <class N>
-      ptr_address make_node(bytes pfx)
+      ptr_address make_node(bytes pfx, sal::alloc_hint hint = {})
       {
-         ptr_address a = _ses->alloc<N>(sal::alloc_hint{}, pfx);
+         ptr_address a = _ses->alloc<N>(hint, pfx);
          stamp<N>(a);
          return a;
       }
-      ptr_address make_leaf(bytes suffix, bytes val)
+      ptr_address make_leaf(bytes suffix, bytes val, sal::alloc_hint hint = {})
       {
-         return _ses->alloc<leaf_node>(sal::alloc_hint{}, suffix, val);
+         return _ses->alloc<leaf_node>(hint, suffix, val);
       }
 
       // SHARED-mode COW: fresh same-size node, byte-copy the payload (everything
@@ -198,79 +276,146 @@ namespace heart::radix
       }
 
       // ── insert (tier dispatch) ─────────────────────────────────────────────────
-      ptr_address insert_node(ptr_address addr, bytes key, uint32_t depth, bytes val)
+      ptr_address insert_node(ptr_address addr, bytes key, uint32_t depth, bytes val,
+                              sal::alloc_hint peer_hint)
       {
          auto t = _ses->get_ref<sal::alloc_header>(addr)->type();
          if (t == leaf_node::type_id)
-            return leaf_insert(addr, key, depth, val);
+            return leaf_insert(addr, key, depth, val, peer_hint);
          if (t == setlist_u8::type_id)
-            return router_insert<setlist_u8>(addr, key, depth, val);
-         return router_insert<full_radix_node>(addr, key, depth, val);
+            return router_insert<setlist_u8>(addr, key, depth, val, peer_hint);
+         if (t == bitset_r2_node::type_id)
+            return router_insert<bitset_r2_node>(addr, key, depth, val, peer_hint);
+         if (t == bitset_r4_node::type_id)
+            return router_insert<bitset_r4_node>(addr, key, depth, val, peer_hint);
+         return router_insert<full_radix_node>(addr, key, depth, val, peer_hint);
       }
 
       template <class N>
-      ptr_address router_insert(ptr_address addr, bytes key, uint32_t depth, bytes val)
+      ptr_address router_insert(ptr_address addr, bytes key, uint32_t depth, bytes val,
+                                sal::alloc_hint peer_hint)
       {
-         const uint32_t depth0 = depth;
-         const N*       cn     = _ses->get_ref<N>(addr).obj();
-         bytes          pfx    = cn->prefix();
-         int avail = int(key.size() - depth);
-         int maxp  = std::min(int(pfx.size()), avail);
-         int p     = common_prefix_len(key.subspan(depth, size_t(maxp)), pfx.subspan(0, size_t(maxp)));
+         const ptr_address addr_orig = addr;  // what the caller holds / will release
+         const N*          cn        = _ses->get_ref<N>(addr).obj();
+         bytes             pfx       = cn->prefix();
+         int               avail     = int(key.size() - depth);
+         int               maxp      = std::min(int(pfx.size()), avail);
+         int p = common_prefix_len(key.subspan(depth, size_t(maxp)), pfx.subspan(0, size_t(maxp)));
          if (p < int(pfx.size()))
-            return prefix_split<N>(addr, key, depth, p, val);
+            return prefix_split<N>(addr, key, depth, p, val, peer_hint);
 
          depth += uint32_t(pfx.size());
          if (depth == key.size())  // key ends at this node → term
          {
-            set_term<N>(addr, val);
+            set_term<N>(addr, val, peer_hint);
             return addr;
          }
-         uint8_t       b  = key[depth];
-         smart_address sa = cn->find(b);
-         if (sa.is_null())  // new branch
+         uint8_t         b     = key[depth];
+         sal::alloc_hint chint = cn->branch_hint(b);  // cluster a new child with its segment-mates
+         smart_address   sa    = cn->find(b);
+         if (sa.is_null())  // new branch → a leaf
          {
+            ptr_address   lf  = make_leaf(key.subspan(depth + 1), val, chint);
+            smart_address sab = smart_address::from_pointer(lf);
             if constexpr (!std::is_same_v<N, full_radix_node>)
             {
-               if (!cn->branch_has_room(b))  // grow this tier, then retry
-               {
-                  ptr_address up = upgrade<full_radix_node, N>(addr);
-                  return insert_node(up, key, depth0, val);  // caller releases old `addr`
-               }
+               if (!cn->can_set(b, sab))  // tier full → grow to a wider tier
+                  return grow_and_set<N>(addr, b, sab, peer_hint);  // caller releases old `addr`
             }
-            ptr_address lf = make_leaf(key.subspan(depth + 1), val);
-            N*          n  = cow<N>(addr);
-            n->set_branch(b, smart_address::from_pointer(lf));
+            N*                    n  = cow<N>(addr);
+            [[maybe_unused]] bool ok = n->set_branch(b, sab);
+            assert(ok && "can_set said it would fit");
             return addr;
          }
          ptr_address child = sa.as_pointer();
-         ptr_address nc    = insert_node(child, key, depth + 1, val);
+         ptr_address nc    = insert_node(child, key, depth + 1, val, chint);
          if (nc != child)
          {
-            N* n = cow<N>(addr);
-            _ses->release(child);
-            n->set_branch(b, smart_address::from_pointer(nc));
+            smart_address nsab = smart_address::from_pointer(nc);
+            N*            n    = cow<N>(addr);
+            if (!n->set_branch(b, nsab))  // update re-home didn't fit → grow the tier
+            {
+               if constexpr (!std::is_same_v<N, full_radix_node>)
+               {
+                  // grow_and_set builds a wider node from `addr` (skipping b) and sets
+                  // b→nc; that node's destroy releases all of its children including
+                  // the old child at b — so do NOT release `child`. Release the COW'd
+                  // node only if it is a clone we own (else the caller releases addr_orig).
+                  ptr_address up = grow_and_set<N>(addr, b, nsab, peer_hint);
+                  if (addr != addr_orig)
+                     _ses->release(addr);
+                  return up;
+               }
+            }
+            _ses->release(child);  // normal in-tier replace (set_branch succeeded)
          }
          return addr;
       }
 
-      // Build a wider tier (To) from From's entries; To co-owns From's children via
-      // retain. Does NOT release `from_addr` — the caller releases it as the replaced
-      // node (so a snapshot still referencing it stays valid).
+      // Try to build a wider tier `To` from `From`'s entries plus the branch
+      // (setb→setsa), retaining each child the new node takes. `setb` is skipped
+      // during repopulation (it's set explicitly at the end — new or updated).
+      // On failure (a To segment can't hold an entry) `ok=false`, the candidate is
+      // released (its retained children balanced by destroy; setsa is never stored
+      // on failure so it survives), and `from`/its children are untouched.
       template <class To, class From>
-      ptr_address upgrade(ptr_address from_addr)
+      ptr_address try_upgrade(ptr_address from, uint8_t setb, smart_address setsa, sal::alloc_hint hint,
+                              bool& ok)
       {
-         const From* cn = _ses->get_ref<From>(from_addr).obj();
-         ptr_address na = make_node<To>(cn->prefix());
-         To*         nn = mut<To>(na);
-         nn->set_term_value(cn->term_value());
-         cn->for_each_entry([&](uint8_t byte, smart_address br) { nn->set_branch(byte, br); });
-         cn->for_each_child([&](ptr_address c) { _ses->retain(c); });
+         const From*   cn = _ses->get_ref<From>(from).obj();
+         ptr_address   na = make_node<To>(cn->prefix(), hint);
+         To*           nn = mut<To>(na);
+         ok               = true;
+         smart_address tv = cn->term_value();
+         if (!tv.is_null())
+         {
+            nn->set_term_value(tv);
+            if (tv.is_pointer())
+               _ses->retain(tv.as_pointer());
+         }
+         cn->for_each_entry([&](uint8_t byte, smart_address br) {
+            if (!ok || byte == setb)
+               return;
+            if (!nn->set_branch(byte, br))
+               ok = false;
+            else if (br.is_pointer())
+               _ses->retain(br.as_pointer());
+         });
+         if (ok && !nn->set_branch(setb, setsa))
+            ok = false;
+         if (!ok)
+         {
+            _ses->release(na);
+            return ptr_address(0);
+         }
          return na;
       }
 
+      // Grow `from` to the narrowest wider tier that fits all its entries plus
+      // (b→sab); full_radix always fits. Returns the new node; the CALLER releases
+      // `from` (so a snapshot still referencing it stays valid).
+      template <class From>
+      ptr_address grow_and_set(ptr_address from, uint8_t b, smart_address sab, sal::alloc_hint hint)
+      {
+         bool        ok = false;
+         ptr_address up;
+         if constexpr (std::is_same_v<From, setlist_u8>)
+         {
+            up = try_upgrade<bitset_r2_node, From>(from, b, sab, hint, ok);
+            if (ok)
+               return up;
+         }
+         if constexpr (!std::is_same_v<From, bitset_r4_node>)
+         {
+            up = try_upgrade<bitset_r4_node, From>(from, b, sab, hint, ok);
+            if (ok)
+               return up;
+         }
+         return try_upgrade<full_radix_node, From>(from, b, sab, hint, ok);  // always fits
+      }
+
       template <class N>
-      void set_term(ptr_address& addr, bytes val)
+      void set_term(ptr_address& addr, bytes val, sal::alloc_hint peer_hint)
       {
          const N* cn = _ses->get_ref<N>(addr).obj();
          if (!cn->term_value().is_null())
@@ -285,7 +430,7 @@ namespace heart::radix
             }
             return;
          }
-         ptr_address lf = make_leaf(bytes{}, val);
+         ptr_address lf = make_leaf(bytes{}, val, peer_hint);
          N*          n  = cow<N>(addr);
          n->set_term_value(smart_address::from_pointer(lf));
       }
@@ -293,7 +438,8 @@ namespace heart::radix
       // Split `addr`'s prefix at p: a new setlist parent takes key[depth..depth+p];
       // the demoted node (prefix loses p+1 bytes) hangs under its old prefix byte.
       template <class N>
-      ptr_address prefix_split(ptr_address addr, bytes key, uint32_t depth, int p, bytes val)
+      ptr_address prefix_split(ptr_address addr, bytes key, uint32_t depth, int p, bytes val,
+                               sal::alloc_hint peer_hint)
       {
          uint8_t ob = _ses->get_ref<N>(addr).obj()->prefix()[size_t(p)];
 
@@ -305,7 +451,7 @@ namespace heart::radix
          reprefix<N>(d, bytes{pbuf, size_t(newpl)});
          stamp<N>(dnode);  // prefix changed → r8/r1 may flip
 
-         ptr_address np = make_node<setlist_u8>(key.subspan(depth, size_t(p)));
+         ptr_address np = make_node<setlist_u8>(key.subspan(depth, size_t(p)), peer_hint);
          mut<setlist_u8>(np)->set_branch(ob, smart_address::from_pointer(dnode));
          if (dnode == addr)
             _ses->retain(dnode);  // in-place demote: np is a 2nd parent; caller releases addr
@@ -313,12 +459,12 @@ namespace heart::radix
          uint32_t d2 = depth + uint32_t(p);
          if (d2 == key.size())
          {
-            ptr_address lf = make_leaf(bytes{}, val);
+            ptr_address lf = make_leaf(bytes{}, val, peer_hint);
             mut<setlist_u8>(np)->set_term_value(smart_address::from_pointer(lf));
          }
          else
          {
-            ptr_address lf = make_leaf(key.subspan(d2 + 1), val);
+            ptr_address lf = make_leaf(key.subspan(d2 + 1), val, peer_hint);
             mut<setlist_u8>(np)->set_branch(key[d2], smart_address::from_pointer(lf));
          }
          return np;
@@ -386,7 +532,8 @@ namespace heart::radix
          return true;
       }
 
-      ptr_address leaf_insert(ptr_address addr, bytes key, uint32_t depth, bytes val)
+      ptr_address leaf_insert(ptr_address addr, bytes key, uint32_t depth, bytes val,
+                              sal::alloc_hint peer_hint)
       {
          const leaf_node* ln  = _ses->get_ref<leaf_node>(addr).obj();
          bytes            suf = ln->suffix();
@@ -403,27 +550,27 @@ namespace heart::radix
          std::memcpy(lval, ov.data(), ov.size());
          bytes oldval{lval, ov.size()};
 
-         ptr_address node = make_node<setlist_u8>(rem.subspan(0, size_t(cp)));
+         ptr_address node = make_node<setlist_u8>(rem.subspan(0, size_t(cp)), peer_hint);
          if (cp == int(suf.size()))  // old key ends at node → term
          {
-            ptr_address tl = make_leaf(bytes{}, oldval);
+            ptr_address tl = make_leaf(bytes{}, oldval, peer_hint);
             mut<setlist_u8>(node)->set_term_value(smart_address::from_pointer(tl));
          }
          else
          {
-            ptr_address cl = make_leaf(suf.subspan(size_t(cp + 1)), oldval);
+            ptr_address cl = make_leaf(suf.subspan(size_t(cp + 1)), oldval, peer_hint);
             mut<setlist_u8>(node)->set_branch(suf[size_t(cp)], smart_address::from_pointer(cl));
          }
          // old leaf at `addr` is released by the caller (replaced child)
 
          if (cp == int(rem.size()))  // new key ends at node → term
          {
-            ptr_address tl = make_leaf(bytes{}, val);
+            ptr_address tl = make_leaf(bytes{}, val, peer_hint);
             mut<setlist_u8>(node)->set_term_value(smart_address::from_pointer(tl));
          }
          else
          {
-            ptr_address nl = make_leaf(rem.subspan(size_t(cp + 1)), val);
+            ptr_address nl = make_leaf(rem.subspan(size_t(cp + 1)), val, peer_hint);
             mut<setlist_u8>(node)->set_branch(rem[size_t(cp)], smart_address::from_pointer(nl));
          }
          return node;

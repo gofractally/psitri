@@ -131,6 +131,16 @@ namespace heart
       {
          return !find(s).is_null() || room_for_one();
       }
+      // Uniform tier interface (setlist room is count-based, address-independent).
+      bool can_set(uint8_t b, smart_address) const noexcept { return branch_has_room(StemType(b)); }
+      // Alloc-hint: branch slots are an end-anchored contiguous block, so a new
+      // child can be placed near the siblings (clusters cachelines for dedup).
+      std::span<const sal::ptr_address> branch_hint(uint8_t = 0) const noexcept
+      {
+         const int n = nstems();
+         return {reinterpret_cast<const sal::ptr_address*>(this->prefix_data + var_capacity - n * 4),
+                 size_t(n)};
+      }
       // Update-or-append; false (no change) if a new stem won't fit.
       bool set_branch(StemType s, smart_address sa) noexcept
       {
@@ -215,18 +225,145 @@ namespace heart
 
    /// 3 cachelines: CL0 header, then 2 sub-range cachelines [0,128)/[128,256),
    /// each a self-contained radix_bitset<128> reached directly by `byte >> 7`.
+   /// Skip-header descent reads segment (base + 128 + (byte>>7)*128) and never CL0.
    struct bitset_r2_node : large_radix<bitset_r2_node, 2>
    {
-      static constexpr dispatch_shape tier = dispatch_shape::r2;
-      radix_bitset<128, 128> half[2];
+      static constexpr dispatch_shape   tier          = dispatch_shape::r2;
+      static constexpr sal::header_type type_id       = radix_type_ids::bitset_r2;
+      static constexpr uint32_t         branch_offset = 128;  // segment cachelines at CL1
+      static constexpr int              nseg          = 2;
+      static constexpr int              seg_shift     = 7;
+      static constexpr int              seg_mask      = 127;
+      using segment                                   = radix_bitset<128, 128>;
+
+      segment half[2];  // @128 (CL1), @256 (CL2)
+
+      bitset_r2_node() noexcept = default;
+
+      smart_address find(uint8_t b) const noexcept { return half[b >> 7].find(b & 127); }
+      bool          can_set(uint8_t b, smart_address sa) const noexcept
+      {
+         const segment& h = half[b >> 7];
+         return h.contains(b & 127) || h.can_insert(sa);
+      }
+      bool set_branch(uint8_t b, smart_address sa) noexcept
+      {
+         return half[b >> 7].set_branch(b & 127, sa);
+      }
+      // Alloc-hint: the cacheline bases of the segment this byte routes to, so a new
+      // child clusters with its segment-mates (keeps compact_addresses bases <= 16).
+      std::span<const sal::ptr_address> branch_hint(uint8_t b) const noexcept
+      {
+         return half[b >> 7].get_hint();
+      }
+      template <typename F>
+      void for_each_entry(F&& f) const
+      {
+         for (int s = 0; s < 2; ++s)
+            for (int lb = half[s].present.first_set(); lb >= 0; lb = half[s].present.next_set(lb + 1))
+               f(uint8_t(s * 128 + lb), half[s].find(lb));
+      }
+      template <typename F>
+      void for_each_child(F&& f) const
+      {
+         if (this->_term_value.is_pointer())
+            f(this->_term_value.as_pointer());
+         for_each_entry([&](uint8_t, smart_address br) {
+            if (br.is_pointer())
+               f(br.as_pointer());
+         });
+      }
+      template <typename Session>
+      void destroy(const Session& s) const
+      {
+         for_each_child([&](sal::ptr_address c) { s->release(c); });
+      }
+
+      static uint32_t alloc_size(std::span<const uint8_t> prefix) noexcept
+      {
+         (void)prefix;
+         return uint32_t(sizeof(bitset_r2_node));  // 384
+      }
+      bitset_r2_node(uint32_t asize, sal::ptr_address_seq seq, std::span<const uint8_t> prefix) noexcept
+      {
+         this->init_page(asize, type_id, seq);
+         this->_rtype         = radix_node_type::bitset128;
+         this->_term_value    = smart_address::null();
+         this->_prefix_length = 0;
+         half[0].init();
+         half[1].init();
+         this->set_prefix(prefix);
+      }
    };
 
    /// 5 cachelines: CL0 header, then 4 sub-range cachelines (64 each), reached by
    /// `byte >> 6`.
    struct bitset_r4_node : large_radix<bitset_r4_node, 4>
    {
-      static constexpr dispatch_shape tier = dispatch_shape::r4;
-      radix_bitset<64, 128> quad[4];
+      static constexpr dispatch_shape   tier          = dispatch_shape::r4;
+      static constexpr sal::header_type type_id       = radix_type_ids::bitset_r4;
+      static constexpr uint32_t         branch_offset = 128;
+      static constexpr int              nseg          = 4;
+      static constexpr int              seg_shift     = 6;
+      static constexpr int              seg_mask      = 63;
+      using segment                                   = radix_bitset<64, 128>;
+
+      segment quad[4];  // @128, @256, @384, @512
+
+      bitset_r4_node() noexcept = default;
+
+      smart_address find(uint8_t b) const noexcept { return quad[b >> 6].find(b & 63); }
+      bool          can_set(uint8_t b, smart_address sa) const noexcept
+      {
+         const segment& q = quad[b >> 6];
+         return q.contains(b & 63) || q.can_insert(sa);
+      }
+      bool set_branch(uint8_t b, smart_address sa) noexcept
+      {
+         return quad[b >> 6].set_branch(b & 63, sa);
+      }
+      std::span<const sal::ptr_address> branch_hint(uint8_t b) const noexcept
+      {
+         return quad[b >> 6].get_hint();
+      }
+      template <typename F>
+      void for_each_entry(F&& f) const
+      {
+         for (int s = 0; s < 4; ++s)
+            for (int lb = quad[s].present.first_set(); lb >= 0; lb = quad[s].present.next_set(lb + 1))
+               f(uint8_t(s * 64 + lb), quad[s].find(lb));
+      }
+      template <typename F>
+      void for_each_child(F&& f) const
+      {
+         if (this->_term_value.is_pointer())
+            f(this->_term_value.as_pointer());
+         for_each_entry([&](uint8_t, smart_address br) {
+            if (br.is_pointer())
+               f(br.as_pointer());
+         });
+      }
+      template <typename Session>
+      void destroy(const Session& s) const
+      {
+         for_each_child([&](sal::ptr_address c) { s->release(c); });
+      }
+
+      static uint32_t alloc_size(std::span<const uint8_t> prefix) noexcept
+      {
+         (void)prefix;
+         return uint32_t(sizeof(bitset_r4_node));  // 640
+      }
+      bitset_r4_node(uint32_t asize, sal::ptr_address_seq seq, std::span<const uint8_t> prefix) noexcept
+      {
+         this->init_page(asize, type_id, seq);
+         this->_rtype         = radix_node_type::bitset64;
+         this->_term_value    = smart_address::null();
+         this->_prefix_length = 0;
+         for (auto& q : quad)
+            q.init();
+         this->set_prefix(prefix);
+      }
    };
 
    /// 9 cachelines: CL0 header, then radix_full<256> direct index in CL1–CL8,
@@ -270,8 +407,9 @@ namespace heart
          return true;
       }
       bool branch_has_room(uint8_t) const noexcept { return true; }
+      bool can_set(uint8_t, smart_address) const noexcept { return true; }
 
-      std::span<const sal::ptr_address> branch_hint() const noexcept
+      std::span<const sal::ptr_address> branch_hint(uint8_t = 0) const noexcept
       {
          return {reinterpret_cast<const sal::ptr_address*>(&branches.branches[0]), 256};
       }

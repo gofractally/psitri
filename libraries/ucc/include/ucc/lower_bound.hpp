@@ -94,7 +94,7 @@ namespace ucc
          // All elements in this chunk are < value, move to next chunk
          offset += 16;
       }
-      if (offset == size)
+      if (static_cast<size_t>(offset) == size)
          return size;
 
       return total_count + lower_bound_small(arr + offset, size - offset, value);
@@ -185,8 +185,6 @@ namespace ucc
    inline uint16_t lower_bound_padded(const uint8_t* data, size_t size, uint8_t byte) noexcept
    {
 #if defined(__ARM_NEON)
-      const uint8_t* start_data =
-          data;  // Keep original start pointer for partial chunk calculation
       uint16_t         total_count = 0;
       const uint8x16_t search_val  = vdupq_n_u8(byte);
       const uint8x16_t one_mask    = vdupq_n_u8(1);  // For converting 0xFF to 0x01

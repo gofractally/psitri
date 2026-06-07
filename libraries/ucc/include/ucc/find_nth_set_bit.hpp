@@ -58,7 +58,7 @@ If the input to _tzcnt_u64 is 0 (i.e., n exceeds the number of set bits), it ret
          return 64;
 
       // Iterate to the nth set bit
-      for (int i = 0; i < n; i++)
+      for (unsigned i = 0; i < n; i++)
       {
          x &= (x - 1);  // Clear the least significant set bit
       }

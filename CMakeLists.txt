@@ -263,8 +263,10 @@ endif() # NOT PSITRI_AS_SUBDIRECTORY (DuckDB/SQLite/abseil)
 option(SAL_DEBUG "Enable debug logging for SAL library" ON)
 if(PSITRI_AS_SUBDIRECTORY)
     set(SAL_BUILD_TESTS OFF)
+    set(HEART_BUILD_TESTS OFF)
 else()
     set(SAL_BUILD_TESTS ${BUILD_TESTS})
+    set(HEART_BUILD_TESTS ${BUILD_TESTS})
 endif()
 
 add_subdirectory(libraries/sal)
@@ -272,6 +274,9 @@ add_subdirectory(libraries/psitri)
 add_subdirectory(libraries/hash)
 add_subdirectory(libraries/ucc)
 add_subdirectory(libraries/art)
+
+# heart: alternative radix-tree engine (depends only on sal + ucc, not psitri)
+add_subdirectory(libraries/heart)
 
 # PsiTriLevelDB: LevelDB-compatible wrapper around psitri (Bitcoin Core target)
 # Always built — small, header-light, and the primary external integration target.
@@ -438,6 +443,26 @@ option(BUILD_MDBX_TEST "Build the lmdbx benchmark test" OFF)
 # Psitri benchmark
 add_executable(psitri-benchmark programs/psitri_bench.cpp)
 target_link_libraries(psitri-benchmark PUBLIC Boost::program_options psitri)
+
+# Apples-to-apples baseline for the heart sal_radix_tree benchmark
+add_executable(psitri-radix-baseline programs/psitri_radix_baseline.cpp)
+target_link_libraries(psitri-radix-baseline PRIVATE psitri)
+target_compile_definitions(psitri-radix-baseline PRIVATE XXH_INLINE_ALL)
+set_target_properties(psitri-radix-baseline PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# System-dictionary query benchmark: heart sal_radix_tree vs default psitri
+add_executable(dict-query-bench programs/dict_query_bench.cpp)
+target_link_libraries(dict-query-bench PRIVATE psitri heart)
+target_include_directories(dict-query-bench PRIVATE ${CMAKE_SOURCE_DIR}/libraries/heart/test)
+target_compile_definitions(dict-query-bench PRIVATE XXH_INLINE_ALL)
+set_target_properties(dict-query-bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# u64-key head-to-head (random + sequential big-endian): heart vs psitri
+add_executable(kv-u64-bench programs/kv_u64_bench.cpp)
+target_link_libraries(kv-u64-bench PRIVATE psitri heart)
+target_include_directories(kv-u64-bench PRIVATE ${CMAKE_SOURCE_DIR}/libraries/heart/test)
+target_compile_definitions(kv-u64-bench PRIVATE XXH_INLINE_ALL)
+set_target_properties(kv-u64-bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 # COW amortization benchmark
 add_executable(cow-amort-bench programs/cow_amort_bench.cpp third_party/libart/art.c)

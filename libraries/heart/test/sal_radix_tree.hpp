@@ -189,6 +189,10 @@ namespace heart::sal_proto
       void visit_children(const std::function<void(ptr_address)>&) const {}  // no node children
       sal::alloc_hint branch_hint() const noexcept { return {}; }            // not a hint source
 
+      void destroy(const sal::allocator_session_ptr& s) const
+      {
+         visit_children([&](ptr_address c) { s->release(c); });
+      }
       static uint32_t page_size_for(uint32_t need) noexcept
       {
          return std::max(floor, ucc::round_up_multiple<sal::cacheline_size>(need));
@@ -292,6 +296,10 @@ namespace heart::sal_proto
       {
          return {reinterpret_cast<const ptr_address*>(vals), size_t(count)};
       }
+      void destroy(const sal::allocator_session_ptr& s) const
+      {
+         visit_children([&](ptr_address c) { s->release(c); });
+      }
       static uint32_t page_size_for(uint32_t need) noexcept
       {
          return std::max(floor, ucc::round_up_multiple<sal::cacheline_size>(need));
@@ -385,6 +393,10 @@ namespace heart::sal_proto
       {
          return {reinterpret_cast<const ptr_address*>(vals), size_t(count)};
       }
+      void destroy(const sal::allocator_session_ptr& s) const
+      {
+         visit_children([&](ptr_address c) { s->release(c); });
+      }
       static uint32_t page_size_for(uint32_t need) noexcept
       {
          return std::max(floor, ucc::round_up_multiple<sal::cacheline_size>(need));
@@ -471,6 +483,10 @@ namespace heart::sal_proto
       {
          return {reinterpret_cast<const ptr_address*>(&children.branches[0]), 256};
       }
+      void destroy(const sal::allocator_session_ptr& s) const
+      {
+         visit_children([&](ptr_address c) { s->release(c); });
+      }
       static uint32_t page_size_for(uint32_t need) noexcept
       {
          return ucc::round_up_multiple<uint32_t(1024)>(need);
@@ -527,7 +543,24 @@ namespace heart::sal_proto
          _alloc->register_type_ops<setlist_node>();
          _alloc->register_type_ops<bitset_node>();
          _alloc->register_type_ops<full_node>();
-         _root = _ses->alloc<leaf_node>(bytes{});  // tree starts as one empty leaf
+         _root = _ses->alloc<leaf_node>(bytes{});  // tree starts as one empty leaf (ref==1)
+      }
+
+      // COW-to-root transaction boundary (ref-based unique|shared). commit() pins
+      // the current root as a snapshot (an extra ref). That extra ref makes the
+      // root ref()>1, so the next write COWs it (shared) instead of mutating in
+      // place — keeping the snapshot immutable. The PRIOR snapshot is released,
+      // cascading frees (via each node's destroy()) the nodes now dead. With no
+      // commit, every node stays ref==1 → all writes mutate in place (unique mode),
+      // i.e. the old behavior. (MVCC in-place + version_history is the future 2nd mode.)
+      void commit()
+      {
+         auto lock = _ses->lock();
+         if (_snap_valid)
+            _ses->release(_snap);  // drop the prior snapshot → cascade-free its dead path
+         _snap = _root;
+         _ses->retain(_root);  // pin current root: ref>1 ⇒ next write COWs it
+         _snap_valid = true;
       }
 
       uint64_t object_count() const noexcept { return _alloc->total_allocated_objects(); }
@@ -554,12 +587,22 @@ namespace heart::sal_proto
          return walk_bytes(_root, true);
       }
 
-      void insert(bytes key, uint64_t value)
+      // upsert: insert or overwrite. Returns the prior value's byte size, or -1 if
+      // the key was newly inserted (matches psitri's int sentinel).
+      int upsert(bytes key, uint64_t value)
       {
-         auto  lock = _ses->lock();
-         bytes vspan(reinterpret_cast<const uint8_t*>(&value), sizeof(value));
-         _root = insert_node(_root, key, 0, vspan, {});
+         auto        lock = _ses->lock();
+         _old_value_size  = -1;
+         bytes       vspan(reinterpret_cast<const uint8_t*>(&value), sizeof(value));
+         ptr_address nr = insert_node(_root, key, 0, vspan, {});
+         if (nr != _root)
+         {
+            _ses->release(_root);  // tree drops its ref on the old root (snapshot keeps its own)
+            _root = nr;
+         }
+         return _old_value_size;
       }
+      void insert(bytes key, uint64_t value) { (void)upsert(key, value); }  // back-compat alias
 
       bool find(bytes key, uint64_t& out)
       {
@@ -800,6 +843,44 @@ namespace heart::sal_proto
          return _ses->get_ref<N>(a).modify().get();
       }
 
+      // SHARED-mode COW: allocate a NEW node (fresh control block, old untouched —
+      // it stays valid for the snapshot/version that still references it), copy
+      // head+tail, and RETAIN every pointer child (the clone is a 2nd parent). Used
+      // when ref()>1. Size it for `extra` heap bytes so the pending mutation fits
+      // in the same allocation (cow AS you mutate — no clone-then-regrow).
+      template <class N>
+      ptr_address clone(ptr_address a, uint32_t extra = 0)
+      {
+         auto        ref = _ses->get_ref<N>(a);
+         uint32_t    sz  = N::page_size_for(ref->head_size() + ref->heap_used + extra + N::headroom);
+         ptr_address na  = _ses->alloc<N>(sz, sal::alloc_hint{}, typename N::copy_tag{}, ref.obj());
+         _ses->get_ref<N>(na).obj()->visit_children([&](ptr_address c) { _ses->retain(c); });
+         return na;
+      }
+      // Make the node at `addr` writable for a mutation needing `extra` heap bytes.
+      //   ref()>1  → SHARED: clone to a new node (old preserved for the snapshot).
+      //   ref()==1 → UNIQUE: mutate in place; realloc-grow only if the heap is full.
+      // Either way the result has room for `extra`, so the caller's apply is one
+      // pass. `addr` is updated to the writable node. (ref-based unique|shared —
+      // a snapshot holding a ref is what forces the root to COW on the next write.)
+      template <class N>
+      N* cow(ptr_address& addr, uint32_t extra = 0)
+      {
+         auto ref = _ses->get_ref<N>(addr);
+         if (ref.ref() > 1)  // SHARED → copy-on-write to a fresh node
+         {
+            addr = clone<N>(addr, extra);
+            return mut<N>(addr);
+         }
+         if (ref->free_bytes() >= extra)  // UNIQUE, fits → in place
+            return ref.modify().get();
+         // UNIQUE but heap full → grow (realloc reuses the control block / address)
+         uint32_t sz = N::page_size_for(ref->head_size() + ref->heap_used + extra + N::headroom);
+         auto     nr = _ses->realloc<N>(ref, sz, typename N::copy_tag{}, ref.obj());
+         addr        = nr.address();
+         return nr.modify().get();
+      }
+
       // ── find ──────────────────────────────────────────────────────────────
       bool leaf_find(const leaf_node* n, bytes key, uint32_t depth, uint64_t& out) const
       {
@@ -874,27 +955,20 @@ namespace heart::sal_proto
       // ── leaf storage ────────────────────────────────────────────────────────
       ptr_address make_leaf(bytes pfx, sal::alloc_hint hint) { return _ses->alloc<leaf_node>(hint, pfx); }
 
-      // Append (suffix,value) to a leaf, growing the page (realloc) if needed.
-      void leaf_add(ptr_address& addr, leaf_node*& n, bytes suffix, bytes val)
+      // Append (suffix,value) to the leaf at `addr`. cow() makes it writable for
+      // the new entry (COW if shared / grow if the unique heap is full) in one
+      // pass; we then write — no clone-then-regrow. `addr` may change.
+      void leaf_add(ptr_address& addr, bytes suffix, bytes val)
       {
-         uint32_t need = uint32_t(inline_value::byte_size(int(suffix.size()), int(val.size())));
-         if (n->free_bytes() < need)
-         {
-            auto     ref   = _ses->get_ref<leaf_node>(addr);
-            uint32_t newsz = leaf_node::page_size_for(n->head_size() + n->heap_used + need +
-                                                      leaf_node::headroom);
-            auto     nr    = _ses->realloc<leaf_node>(ref, newsz, leaf_node::copy_tag{}, n);
-            addr           = nr.address();
-            n              = nr.modify().get();
-         }
-         auto* iv       = reinterpret_cast<inline_value*>(n->alloc_tail(uint16_t(need)));
-         iv->suffix_len = uint8_t(suffix.size());
-         iv->value_len  = uint8_t(val.size());
-         iv->value_type = 0;
+         uint32_t   need = uint32_t(inline_value::byte_size(int(suffix.size()), int(val.size())));
+         leaf_node* n    = cow<leaf_node>(addr, need);
+         auto*      iv   = reinterpret_cast<inline_value*>(n->alloc_tail(uint16_t(need)));
+         iv->suffix_len  = uint8_t(suffix.size());
+         iv->value_len   = uint8_t(val.size());
+         iv->value_type  = 0;
          std::memcpy(iv->data, suffix.data(), suffix.size());
          std::memcpy(iv->data + suffix.size(), val.data(), val.size());
-         // insert at the sorted (lexicographic-by-suffix) position so stems stay
-         // ascending — keeps SIMD find's equal-run contiguous and lower_bound valid.
+         // sorted insert position (lexicographic by suffix → ascending stems).
          int p = n->lower_bound_idx(suffix, /*strict=*/false);
          std::memmove(n->stems + p + 1, n->stems + p, size_t(n->count - p) * sizeof(uint32_t));
          std::memmove(n->vals + p + 1, n->vals + p, size_t(n->count - p) * sizeof(smart_address));
@@ -903,29 +977,24 @@ namespace heart::sal_proto
          ++n->count;
       }
 
-      // Write an inline value into a node's heap and point a branch at it.
-      // branch < 0 → term_value (key ends at this node's prefix); else → branch
-      // byte (a unique key continuing one byte past). Grows the page if needed.
+      // Write an inline value into a node's heap and point a branch at it (branch<0
+      // → term). cow() makes the node writable for the inline in one pass. Updating
+      // an existing term records its prior size in _old_value_size.
       template <class N>
-      void put_inline(ptr_address& addr, N*& n, int branch, bytes suffix, bytes val)
+      void put_inline(ptr_address& addr, int branch, bytes suffix, bytes val)
       {
-         if (branch < 0 && !n->term_value.is_null())
+         if (branch < 0 && !_ses->get_ref<N>(addr).obj()->term_value.is_null())
          {
+            N*            n  = cow<N>(addr, 0);  // value rewrite is still a write → COW if shared
             inline_value* iv = n->resolve_inline(n->term_value);
-            assert(iv->value_len == val.size());
+            _old_value_size  = iv->value_len;
+            assert(iv->value_len == val.size() && "in-place value update needs same size");
             std::memcpy(iv->data + iv->suffix_len, val.data(), val.size());
             return;
          }
-         uint32_t need = uint32_t(inline_value::byte_size(int(suffix.size()), int(val.size())));
-         if (n->free_bytes() < need)
-         {
-            auto     ref   = _ses->get_ref<N>(addr);
-            uint32_t newsz = N::page_size_for(n->head_size() + n->heap_used + need + N::headroom);
-            auto     nr    = _ses->realloc<N>(ref, newsz, typename N::copy_tag{}, n);
-            addr           = nr.address();
-            n              = nr.modify().get();
-         }
-         auto* iv       = reinterpret_cast<inline_value*>(n->alloc_tail(uint16_t(need)));
+         uint32_t need  = uint32_t(inline_value::byte_size(int(suffix.size()), int(val.size())));
+         N*       n     = cow<N>(addr, need);
+         auto*    iv    = reinterpret_cast<inline_value*>(n->alloc_tail(uint16_t(need)));
          iv->suffix_len = uint8_t(suffix.size());
          iv->value_len  = uint8_t(val.size());
          iv->value_type = 0;
@@ -940,9 +1009,9 @@ namespace heart::sal_proto
             assert(false && "inline branch only valid on routers");
       }
       template <class N>
-      void set_term(ptr_address& addr, N*& n, bytes val)
+      void set_term(ptr_address& addr, bytes val)
       {
-         put_inline(addr, n, -1, bytes{}, val);
+         put_inline<N>(addr, -1, bytes{}, val);
       }
 
       // ── radix build (leaf overflow → router subtree over leaf children) ──────
@@ -983,14 +1052,13 @@ namespace heart::sal_proto
 
          if (n <= leaf_node::CAP)
          {
-            ptr_address a = make_leaf(pfx, hint);
-            leaf_node*  ln = mut<leaf_node>(a);
+            ptr_address a = make_leaf(pfx, hint);  // fresh (ref==1) → all writes in place
             for (int i = 0; i < n; ++i)
             {
                if (ents[i].suf.empty())
-                  set_term(a, ln, ents[i].val);
+                  set_term<leaf_node>(a, ents[i].val);
                else
-                  leaf_add(a, ln, ents[i].suf, ents[i].val);
+                  leaf_add(a, ents[i].suf, ents[i].val);
             }
             return a;
          }
@@ -1076,46 +1144,26 @@ namespace heart::sal_proto
          else
             ref.as<full_node>().modify().get()->set_branch(b, smart_address::from_pointer(child));
       }
-      void set_router_term(ptr_address a, bytes val)
+      void set_router_term(ptr_address& a, bytes val)
       {
-         auto ref = _ses->get_ref<sal::alloc_header>(a);
-         auto t   = ref->type();
+         auto t = _ses->get_ref<sal::alloc_header>(a)->type();
          if (t == setlist_node::type_id)
-         {
-            auto* n = ref.as<setlist_node>().modify().get();
-            set_term(a, n, val);
-         }
+            set_term<setlist_node>(a, val);
          else if (t == bitset_node::type_id)
-         {
-            auto* n = ref.as<bitset_node>().modify().get();
-            set_term(a, n, val);
-         }
+            set_term<bitset_node>(a, val);
          else
-         {
-            auto* n = ref.as<full_node>().modify().get();
-            set_term(a, n, val);
-         }
+            set_term<full_node>(a, val);
       }
       // Inline terminal branch (unique key continuing past byte b) on any router.
-      void set_router_inline(ptr_address a, uint8_t b, bytes suffix, bytes val)
+      void set_router_inline(ptr_address& a, uint8_t b, bytes suffix, bytes val)
       {
-         auto ref = _ses->get_ref<sal::alloc_header>(a);
-         auto t   = ref->type();
+         auto t = _ses->get_ref<sal::alloc_header>(a)->type();
          if (t == setlist_node::type_id)
-         {
-            auto* n = ref.as<setlist_node>().modify().get();
-            put_inline(a, n, b, suffix, val);
-         }
+            put_inline<setlist_node>(a, b, suffix, val);
          else if (t == bitset_node::type_id)
-         {
-            auto* n = ref.as<bitset_node>().modify().get();
-            put_inline(a, n, b, suffix, val);
-         }
+            put_inline<bitset_node>(a, b, suffix, val);
          else
-         {
-            auto* n = ref.as<full_node>().modify().get();
-            put_inline(a, n, b, suffix, val);
-         }
+            put_inline<full_node>(a, b, suffix, val);
       }
 
       // ── insert ──────────────────────────────────────────────────────────────
@@ -1134,65 +1182,74 @@ namespace heart::sal_proto
 
       // Split a node's prefix at p: a new setlist parent takes key[depth..depth+p];
       // the old node (demoted: prefix loses p+1 bytes) hangs under branch old_byte;
-      // the new key gets a fresh leaf (or the parent's term). Returns the parent.
+      // the new key becomes the parent's inline terminal/term. COW-aware: the node
+      // being demoted is made current (clone if from a prior version) so the old
+      // version's view is untouched. Returns the new parent.
       template <class N>
-      ptr_address prefix_split(ptr_address addr, N*& n, bytes key, uint32_t depth, int p, bytes val,
+      ptr_address prefix_split(ptr_address addr, bytes key, uint32_t depth, int p, bytes val,
                                sal::alloc_hint peer_hint)
       {
-         uint8_t     ob  = n->prefix()[p];
-         ptr_address np  = make_router<setlist_node>(key.subspan(depth, size_t(p)), peer_hint);
-         auto*       pnp = mut<setlist_node>(np);
-         n               = mut<N>(addr);
-         int newpl       = n->nprefix - (p + 1);
+         ptr_address orig = addr;
+         cow<N>(addr);  // demote is a write → COW if shared (prior version preserved)
+         uint8_t     ob = mut<N>(addr)->prefix()[p];
+         ptr_address np = make_router<setlist_node>(key.subspan(depth, size_t(p)), peer_hint);
+         N*          n  = mut<N>(addr);
+         int         newpl = n->nprefix - (p + 1);
          std::memmove(n->prefix(), n->prefix() + p + 1, size_t(newpl));
          n->nprefix = uint16_t(newpl);
-         pnp->set_branch(ob, smart_address::from_pointer(addr));
+         mut<setlist_node>(np)->set_branch(ob, smart_address::from_pointer(addr));
+         if (addr == orig)
+            _ses->retain(addr);  // in-place demote: np is a 2nd parent of the shared node
          uint32_t d2 = depth + uint32_t(p);
          if (d2 == key.size())
-            set_term(np, pnp, val);
+            set_term<setlist_node>(np, val);
          else
-            put_inline(np, pnp, key[d2], key.subspan(d2 + 1), val);  // inline terminal on parent
+            put_inline<setlist_node>(np, key[d2], key.subspan(d2 + 1), val);
          return np;
       }
 
       ptr_address leaf_insert(ptr_address addr, bytes key, uint32_t depth, bytes val,
                               sal::alloc_hint peer_hint)
       {
-         leaf_node* n     = mut<leaf_node>(addr);
-         uint32_t   avail = uint32_t(key.size() - depth);
-         int        maxp  = int(std::min<uint32_t>(n->nprefix, avail));
-         int        p     = 0;
-         while (p < maxp && n->prefix()[p] == key[depth + p])
+         const leaf_node* cn    = _ses->get_ref<leaf_node>(addr).obj();
+         uint32_t         avail = uint32_t(key.size() - depth);
+         int              maxp  = int(std::min<uint32_t>(cn->nprefix, avail));
+         int              p     = 0;
+         while (p < maxp && cn->prefix()[p] == key[depth + p])
             ++p;
-         if (p < n->nprefix)
-            return prefix_split<leaf_node>(addr, n, key, depth, p, val, peer_hint);
+         if (p < cn->nprefix)
+            return prefix_split<leaf_node>(addr, key, depth, p, val, peer_hint);
 
-         depth += n->nprefix;
+         depth += cn->nprefix;
          bytes rem = key.subspan(depth);
          if (rem.empty())
          {
-            set_term(addr, n, val);
+            set_term<leaf_node>(addr, val);
             return addr;
          }
-         int idx = n->find_idx(rem);
+         int idx = cn->find_idx(rem);
          if (idx >= 0)
          {
+            leaf_node*    n  = cow<leaf_node>(addr);  // value update is a write → COW if shared
             inline_value* iv = n->resolve_inline(n->vals[idx]);
-            assert(iv->value_len == val.size());
+            _old_value_size  = iv->value_len;
+            assert(iv->value_len == val.size() && "in-place value update needs same size");
             std::memcpy(iv->data + iv->suffix_len, val.data(), val.size());
             return addr;
          }
-         if (n->count < leaf_node::CAP)
+         if (cn->count < leaf_node::CAP)
          {
-            leaf_add(addr, n, rem, val);
+            leaf_add(addr, rem, val);
             return addr;
          }
-         return leaf_overflow(addr, n, rem, val, peer_hint);
+         // overflow: read the (immutable) leaf, build a replacement subtree; the
+         // caller releases the old leaf when it swaps in the result.
+         return leaf_overflow(addr, cn, rem, val, peer_hint);
       }
 
-      // Leaf is full: gather its entries + the new one, build a router subtree,
-      // free the old leaf. The leaf prefix becomes the build `lead`.
-      ptr_address leaf_overflow(ptr_address addr, leaf_node* n, bytes rem, bytes val,
+      // Build a router subtree from a full leaf's entries + the new one. Does NOT
+      // mutate or free the old leaf (caller swaps it out and releases it).
+      ptr_address leaf_overflow(ptr_address /*addr*/, const leaf_node* n, bytes rem, bytes val,
                                 sal::alloc_hint peer_hint)
       {
          ent ents[leaf_node::CAP + 2];
@@ -1212,10 +1269,7 @@ namespace heart::sal_proto
          uint8_t leadbuf[300];
          std::memcpy(leadbuf, n->prefix(), n->nprefix);
          bytes lead(leadbuf, n->nprefix);
-
-         ptr_address sub = build(lead, ents, m, peer_hint);
-         _ses->release(addr);  // old leaf replaced
-         return sub;
+         return build(lead, ents, m, peer_hint);
       }
 
       template <class N>
@@ -1223,70 +1277,76 @@ namespace heart::sal_proto
                                 sal::alloc_hint peer_hint)
       {
          const uint32_t depth0 = depth;
-         N*             n      = mut<N>(addr);
+         const N*       cn     = _ses->get_ref<N>(addr).obj();
          uint32_t       avail  = uint32_t(key.size() - depth);
-         int            maxp   = int(std::min<uint32_t>(n->nprefix, avail));
+         int            maxp   = int(std::min<uint32_t>(cn->nprefix, avail));
          int            p      = 0;
-         while (p < maxp && n->prefix()[p] == key[depth + p])
+         while (p < maxp && cn->prefix()[p] == key[depth + p])
             ++p;
-         if (p < n->nprefix)
-            return prefix_split<N>(addr, n, key, depth, p, val, peer_hint);
+         if (p < cn->nprefix)
+            return prefix_split<N>(addr, key, depth, p, val, peer_hint);
 
-         depth += n->nprefix;
+         depth += cn->nprefix;
          if (depth == key.size())
          {
-            set_term(addr, n, val);
+            set_term<N>(addr, val);
             return addr;
          }
          uint8_t       b  = key[depth];
-         smart_address sa = n->find(b);
+         smart_address sa = cn->find(b);
          if (sa.is_null())
          {
-            if (!n->branch_has_room(b))
+            if (!cn->branch_has_room(b))
             {
+               cow<N>(addr);  // make current (clone if shared) → ref==1 before realloc-upgrade
                if constexpr (std::is_same_v<N, setlist_node>)
                   upgrade<bitset_node, setlist_node>(addr);
                else if constexpr (std::is_same_v<N, bitset_node>)
                   upgrade<full_node, bitset_node>(addr);
                return insert_node(addr, key, depth0, val, peer_hint);
             }
-            put_inline(addr, n, b, key.subspan(depth + 1), val);  // unique key → inline terminal
+            put_inline<N>(addr, b, key.subspan(depth + 1), val);  // unique key → inline terminal
             return addr;
          }
          if (sa.is_tail())
          {
             // collision: an existing inline terminal shares this byte → move both
             // into a flat LEAF (the catch-all) that absorbs further collisions.
-            inline_value* iv  = n->resolve_inline(sa);
-            bytes         suf = key.subspan(depth + 1);
+            const inline_value* iv  = cn->resolve_inline(sa);
+            bytes               suf = key.subspan(depth + 1);
             if (iv->suffix_len == suf.size() &&
                 std::memcmp(iv->data, suf.data(), iv->suffix_len) == 0)
             {
-               std::memcpy(iv->data + iv->suffix_len, val.data(), val.size());  // update
+               N*            wn  = cow<N>(addr);  // value update is a write → COW if shared
+               inline_value* wiv = wn->resolve_inline(wn->find(b));
+               _old_value_size   = wiv->value_len;
+               assert(wiv->value_len == val.size() && "in-place value update needs same size");
+               std::memcpy(wiv->data + wiv->suffix_len, val.data(), val.size());
                return addr;
             }
             uint8_t buf[inline_value::max_inline_size];
             std::memcpy(buf, iv, iv->byte_size());
-            auto* eiv = reinterpret_cast<inline_value*>(buf);
+            auto* eiv    = reinterpret_cast<inline_value*>(buf);
             ent   two[2] = {{{eiv->data, eiv->suffix_len}, {eiv->data + eiv->suffix_len, eiv->value_len}},
                             {suf, val}};
-            ptr_address lf = build(bytes{}, two, 2, n->branch_hint());  // 2 ≤ CAP → a leaf
-            n              = mut<N>(addr);
-            n->set_branch(b, smart_address::from_pointer(lf));
+            ptr_address lf = build(bytes{}, two, 2, cn->branch_hint());  // 2 ≤ CAP → a leaf
+            N*          n  = cow<N>(addr);
+            n->set_branch(b, smart_address::from_pointer(lf));  // old branch was inline (no ref)
             return addr;
          }
          ptr_address child = sa.as_pointer();
-         ptr_address nc    = insert_node(child, key, depth + 1, val, n->branch_hint());
+         ptr_address nc    = insert_node(child, key, depth + 1, val, cn->branch_hint());
          if (nc != child)
          {
-            n = mut<N>(addr);
-            n->set_branch(b, smart_address::from_pointer(nc));
+            N* n = cow<N>(addr);
+            _ses->release(child);  // this node drops the old child …
+            n->set_branch(b, smart_address::from_pointer(nc));  // … and takes the new one
          }
          return addr;
       }
 
       template <class To, class From>
-      void upgrade(ptr_address addr)
+      void upgrade(ptr_address addr)  // addr must already be current-version, ref==1 (caller cow'd it)
       {
          auto     ref   = _ses->get_ref<From>(addr);
          uint32_t newsz = To::page_size_for(uint32_t(sizeof(To)) + ref->nprefix + ref->heap_used +
@@ -1353,5 +1413,8 @@ namespace heart::sal_proto
       std::unique_ptr<sal::allocator> _alloc;
       sal::allocator_session_ptr      _ses;
       ptr_address                     _root;
+      ptr_address                     _snap;             // pinned committed snapshot (extra ref)
+      bool                            _snap_valid = false;
+      int                             _old_value_size = -1;  // set by upsert: prior value size / -1
    };
 }  // namespace heart::sal_proto

@@ -31,6 +31,51 @@ namespace
    }
 }  // namespace
 
+TEST_CASE("sal_radix_tree COW-to-root: commit snapshots + upsert prior-size", "[sal_radix_tree]")
+{
+   sal_radix_tree t(tmp("heart_cow"));
+   const int      N = 20000;
+
+   // chunked insert + commit per chunk. A brand-new key returns prior-size -1.
+   for (int c = 0; c < 10; ++c)
+   {
+      for (int i = c * (N / 10); i < (c + 1) * (N / 10); ++i)
+      {
+         uint64_t k = hkey(uint64_t(i));
+         REQUIRE(t.upsert(key_of(k), uint64_t(i)) == -1);
+      }
+      t.commit();
+   }
+   for (int i = 0; i < N; ++i)
+   {
+      uint64_t k = hkey(uint64_t(i)), v = 0;
+      REQUIRE(t.find(key_of(k), v));
+      REQUIRE(v == uint64_t(i));
+   }
+   uint64_t base_objs = t.object_count();
+
+   // Overwrite every key for 15 commit rounds. Each round COWs the touched paths
+   // (the committed snapshot pins them, ref>1), then commit releases the prior
+   // snapshot — so live object count must stay BOUNDED (no per-version leak).
+   for (int r = 1; r <= 15; ++r)
+   {
+      for (int i = 0; i < N; ++i)
+      {
+         uint64_t k = hkey(uint64_t(i));
+         REQUIRE(t.upsert(key_of(k), uint64_t(i) + 1000ull * uint64_t(r)) == 8);  // prior value size
+      }
+      t.commit();
+   }
+   for (int i = 0; i < N; ++i)
+   {
+      uint64_t k = hkey(uint64_t(i)), v = 0;
+      REQUIRE(t.find(key_of(k), v));
+      REQUIRE(v == uint64_t(i) + 1000ull * 15);
+   }
+   INFO("base=" << base_objs << " after=" << t.object_count());
+   REQUIRE(t.object_count() < base_objs * 3);  // snapshot release frees old versions
+}
+
 TEST_CASE("sal_radix_tree lower/upper bound vs std::map oracle", "[sal_radix_tree]")
 {
    auto span_of = [](const std::string& s)

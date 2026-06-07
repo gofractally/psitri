@@ -84,6 +84,7 @@ namespace heart
       bool set_branch(int i, smart_address a) noexcept
       {
          assert(i >= 0 && i < Bits);
+         assert(present.count() == branches.size() && "radix_bitset desync on entry");
          const int pos = present.rank(i);
          if (present.test(i))
             return branches.set(pos, a);  // replace existing branch
@@ -91,6 +92,7 @@ namespace heart
             return false;  // not enough room for a new branch
          branches.insert(a, pos);
          present.set(i);
+         assert(present.count() == branches.size() && "radix_bitset desync after insert");
          return true;
       }
 

@@ -134,6 +134,13 @@ namespace heart
          assert(pos >= 0 && pos <= _naddr);
          assert(can_insert(a));
 
+         // can_insert's last-resort feasibility assumes dead base slots get reclaimed,
+         // but the same-cacheline path below (find_base_with_room → ++share + one
+         // branch byte) does NOT canonicalize. Reclaim here when tight so that path
+         // has room for the branch byte (and the new-base path has room for both).
+         if (free_bytes() < 5 && live_base_count() < _nbase)
+            canonicalize();
+
          const uint32_t cl   = a.raw >> 4;
          const uint32_t slot = a.raw & 0xF;
 

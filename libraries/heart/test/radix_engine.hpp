@@ -181,33 +181,35 @@ namespace heart::radix
       }
 
      private:
+      template <class N>
+      void walk_kids(ptr_address a, tier_counts& tc)
+      {
+         _ses->get_ref<N>(a).obj()->for_each_child([&](ptr_address c) { walk(c, tc); });
+      }
       void walk(ptr_address a, tier_counts& tc)
       {
          auto t = _ses->get_ref<sal::alloc_header>(a)->type();
          if (t == leaf_node::type_id)
-         {
             ++tc.leaf;
-            return;
-         }
-         if (t == setlist_u8::type_id)
+         else if (t == setlist_u8::type_id)
          {
             ++tc.setlist;
-            _ses->get_ref<setlist_u8>(a).obj()->for_each_child([&](ptr_address c) { walk(c, tc); });
+            walk_kids<setlist_u8>(a, tc);
          }
          else if (t == bitset_r2_node::type_id)
          {
             ++tc.bitset_r2;
-            _ses->get_ref<bitset_r2_node>(a).obj()->for_each_child([&](ptr_address c) { walk(c, tc); });
+            walk_kids<bitset_r2_node>(a, tc);
          }
          else if (t == bitset_r4_node::type_id)
          {
             ++tc.bitset_r4;
-            _ses->get_ref<bitset_r4_node>(a).obj()->for_each_child([&](ptr_address c) { walk(c, tc); });
+            walk_kids<bitset_r4_node>(a, tc);
          }
          else
          {
             ++tc.full;
-            _ses->get_ref<full_radix_node>(a).obj()->for_each_child([&](ptr_address c) { walk(c, tc); });
+            walk_kids<full_radix_node>(a, tc);
          }
       }
 
@@ -328,7 +330,10 @@ namespace heart::radix
             return addr;
          }
          ptr_address child = sa.as_pointer();
-         ptr_address nc    = insert_node(child, key, depth + 1, val, chint);
+         // Thread the segment hint into the recursion (SAL memory is stable while the
+         // read lock is held, as psitri relies on) so a new subtree clusters near its
+         // siblings.
+         ptr_address nc = insert_node(child, key, depth + 1, val, chint);
          if (nc != child)
          {
             smart_address nsab = smart_address::from_pointer(nc);

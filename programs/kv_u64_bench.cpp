@@ -22,8 +22,10 @@
 #include <psitri/write_session_impl.hpp>
 
 #include <sal_radix_tree.hpp>
+#include <radix_engine.hpp>
 
 using heart::sal_proto::sal_radix_tree;
+using radix_engine_tree = heart::radix::radix_tree;
 
 namespace
 {
@@ -93,6 +95,71 @@ namespace
       std::printf("    [%s tiers: %llu leaf, %llu setlist, %llu bitset, %llu full(R8)]\n", tag,
                   (unsigned long long)tc.leaf, (unsigned long long)tc.setlist,
                   (unsigned long long)tc.bitset, (unsigned long long)tc.full);
+      return r;
+   }
+
+   // New engine (heart::radix on the DESIGNED segmented taxonomy). Values are the
+   // 8-byte index (arbitrary byte array via value_view).
+   template <class KeyFn>
+   row bench_radix(uint64_t N, KeyFn keyfn, const std::vector<uint32_t>& order, const char* tag)
+   {
+      auto dir = std::filesystem::temp_directory_path() / (std::string("heart_radix_") + tag);
+      radix_engine_tree t(dir);
+      row               r;
+      auto              vview = [](const uint64_t& v) {
+         return std::string_view(reinterpret_cast<const char*>(&v), sizeof(v));
+      };
+      auto t0 = now();
+      for (uint64_t i = 0; i < N; ++i)
+      {
+         uint64_t k = keyfn(i);
+         t.upsert(kspan(k), vview(i));
+      }
+      r.ins = ns(t0, now(), N);
+      uint64_t s = 0, q = 0;
+      auto     s0 = now();
+      for (uint64_t i = 0; i < N; ++i)
+      {
+         uint64_t          k = keyfn(i);
+         std::string_view  v;
+         if (t.find(kspan(k), v))
+         {
+            uint64_t got = 0;
+            std::memcpy(&got, v.data(), std::min<size_t>(8, v.size()));
+            s += got;
+         }
+      }
+      r.seq    = ns(s0, now(), N);
+      auto r0  = now();
+      for (uint64_t i = 0; i < N; ++i)
+      {
+         uint64_t         k = keyfn(order[i]);
+         std::string_view v;
+         if (t.find(kspan(k), v))
+         {
+            uint64_t got = 0;
+            std::memcpy(&got, v.data(), std::min<size_t>(8, v.size()));
+            q += got;
+         }
+      }
+      r.rnd                 = ns(r0, now(), N);
+      uint64_t missfound    = 0;
+      auto     m0           = now();
+      for (uint64_t i = 0; i < N; ++i)
+      {
+         uint64_t         k = keyfn(N + order[i]);
+         std::string_view v;
+         if (t.find(kspan(k), v))
+            ++missfound;
+      }
+      r.miss                = ns(m0, now(), N);
+      const uint64_t expect = N * (N - 1) / 2;
+      r.ok                  = (s == expect && q == expect && missfound == 0);
+      auto tc               = t.count_tiers();
+      std::printf("    [%s tiers: %llu leaf, %llu setlist, %llu r2, %llu r4, %llu full(R8)]\n", tag,
+                  (unsigned long long)tc.leaf, (unsigned long long)tc.setlist,
+                  (unsigned long long)tc.bitset_r2, (unsigned long long)tc.bitset_r4,
+                  (unsigned long long)tc.full);
       return r;
    }
 
@@ -265,13 +332,17 @@ namespace
       }
    }
 
-   void print_pair(const char* title, row h, row p)
+   void print_row(const char* name, row x)
+   {
+      std::printf("    %-7s: insert %6.1f   seq %6.1f   rand %6.1f   MISS %6.1f ns   [%s]\n", name,
+                  x.ins, x.seq, x.rnd, x.miss, x.ok ? "OK" : "BAD");
+   }
+   void print_trio(const char* title, row e, row h, row p)
    {
       std::printf("  %s\n", title);
-      std::printf("    heart  : insert %6.1f   seq %6.1f   rand %6.1f   MISS %6.1f ns   [%s]\n", h.ins,
-                  h.seq, h.rnd, h.miss, h.ok ? "OK" : "BAD");
-      std::printf("    psitri : insert %6.1f   seq %6.1f   rand %6.1f   MISS %6.1f ns   [%s]\n", p.ins,
-                  p.seq, p.rnd, p.miss, p.ok ? "OK" : "BAD");
+      print_row("engine", e);  // new engine (designed segmented taxonomy + skip-header)
+      print_row("proto", h);   // old prototype (sal_radix_tree)
+      print_row("psitri", p);
    }
 }  // namespace
 
@@ -299,16 +370,18 @@ int main(int argc, char** argv)
 
    if (mode == "rand" || mode == "both")
    {
+      row er = bench_radix(N, rand_key, order, "rand");
       row hr = bench_heart(N, rand_key, order, "rand");
       row pr = bench_psitri(N, rand_key, order, "rand");
-      print_pair("RANDOM keys (XXH3(i)):", hr, pr);
+      print_trio("RANDOM keys (XXH3(i)):", er, hr, pr);
       std::printf("\n");
    }
    if (mode == "seq" || mode == "both")
    {
+      row es = bench_radix(N, seq_key, order, "seq");
       row hs = bench_heart(N, seq_key, order, "seq");
       row ps = bench_psitri(N, seq_key, order, "seq");
-      print_pair("SEQUENTIAL big-endian keys (bswap64(i), ascending insert):", hs, ps);
+      print_trio("SEQUENTIAL big-endian keys (bswap64(i), ascending insert):", es, hs, ps);
    }
 
    std::fflush(stdout);

@@ -89,6 +89,10 @@ namespace
       r.miss                = ns(m0, now(), N);
       const uint64_t expect = N * (N - 1) / 2;
       r.ok                  = (s == expect && q == expect && missfound == 0);
+      auto tc               = t.count_tiers();
+      std::printf("    [%s tiers: %llu leaf, %llu setlist, %llu bitset, %llu full(R8)]\n", tag,
+                  (unsigned long long)tc.leaf, (unsigned long long)tc.setlist,
+                  (unsigned long long)tc.bitset, (unsigned long long)tc.full);
       return r;
    }
 

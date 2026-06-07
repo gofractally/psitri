@@ -255,6 +255,10 @@ namespace sal
       ptr_address         address() const noexcept { return _obj->address(); }
       uint32_t            ref() const noexcept { return _cached.ref; }
       location            loc() const noexcept { return _cached.loc(); }
+      // The 3-bit control-block user "type", read from the word get_ref already
+      // loaded to resolve the location — i.e. the node's dispatch shape WITHOUT
+      // touching the node header cacheline. This is the skip-header fast path.
+      uint8_t             cb_type() const noexcept { return uint8_t(_cached.type); }
       const alloc_header* obj() const noexcept { return _obj; }
 
       // return false if ref count overflow

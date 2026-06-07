@@ -22,6 +22,7 @@
 // Single writer, unique mode (ref==1), single version. Suffix+value must fit the
 // 64-byte inline cap (big-value promotion: TODO).
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -60,6 +61,19 @@ namespace heart::sal_proto
       setlist = uint8_t(sal::header_type::start_user_type) + 1,  // 4  router <=16
       bitset  = uint8_t(sal::header_type::start_user_type) + 2,  // 5  router 17..48
       full    = uint8_t(sal::header_type::start_user_type) + 3,  // 6  router 256
+   };
+
+   // Control-block dispatch shape (the 3-bit cb "type"): tells the descent how to
+   // route from key[depth] WITHOUT reading the node header (CL0). design3.md's
+   // skip-header innovation — one cacheline straight to the child vs libart's
+   // header-then-child. Only a prefix-LESS dense node qualifies for R8; anything
+   // with a prefix is forced to R1 (the prefix must be matched in the header first).
+   //   DS_R1: read CL0 (header) — small tiers, or any node carrying a prefix.
+   //   DS_R8: 8 segment cachelines of 32 ptr_addresses; child[byte] = base+128+4*byte.
+   enum dispatch_shape : uint8_t
+   {
+      DS_R1 = 0,
+      DS_R8 = 3,
    };
 
    // ── shared paged-arena base: inline-value heap grows down from tail() ─────
@@ -463,8 +477,14 @@ namespace heart::sal_proto
       struct upgrade_tag
       {
       };
+      // CL0 (the header) ends here; children begin on CL1 so the skip-header descent
+      // can read child[byte] at base+128+4*byte (cacheline 1+byte/32) without ever
+      // touching CL0. The 104B gap is design3.md's "header free space" (prefix /
+      // inline / meta) — currently unused padding.
+      static constexpr uint32_t header_bytes = 128;
 
-      radix_full<256> children;
+      uint8_t         _pad[header_bytes - 24];  // 24 == sizeof(paged_node)
+      radix_full<256> children;                 // @128 → CL1..8, 32 ptr_addresses each
 
       uint8_t*       prefix() noexcept { return reinterpret_cast<uint8_t*>(this) + sizeof(full_node); }
       const uint8_t* prefix() const noexcept
@@ -539,7 +559,9 @@ namespace heart::sal_proto
       void copy_to(alloc_header* dst) const noexcept { blit_head_tail(dst, head_size()); }
       void compact_to(alloc_header* dst) const noexcept { blit_head_tail(dst, head_size()); }
    };
-   static_assert(sizeof(full_node) == 24 + 1024);
+   static_assert(sizeof(full_node) == 128 + 1024);  // CL0 header + 8 segment cachelines
+   static_assert(offsetof(full_node, children) == full_node::header_bytes,
+                 "R8 skip-header dispatch requires children on CL1 (base+128+4*byte)");
 
    class sal_radix_tree
    {
@@ -623,7 +645,51 @@ namespace heart::sal_proto
          for (;;)
          {
             auto ref = _ses->get_ref<sal::alloc_header>(addr);
-            auto t   = ref->type();
+            // SKIP-HEADER FAST PATH (design3.md): the control-block shape — already
+            // loaded by get_ref to resolve the location — tells us this is a dense,
+            // prefix-less node. Read child[byte] straight from its segment cacheline
+            // (base+128+4*byte, i.e. CL 1+byte/32) and recurse, NEVER touching CL0.
+#ifndef HEART_NO_SKIP_HEADER
+            if (ref.cb_type() == DS_R8)
+            {
+               if (depth < kb.size())
+               {
+                  const char*   base = reinterpret_cast<const char*>(ref.obj());
+                  smart_address sa;
+                  std::memcpy(&sa, base + full_node::header_bytes + 4u * kb[depth],
+                              sizeof(sa));  // children[byte] — one cacheline, no header
+                  if (sa.is_pointer())
+                  {
+                     addr = sa.as_pointer();
+                     ++depth;
+                     continue;
+                  }
+                  if (sa.is_null())
+                     return false;
+                  // inline terminal (tail): the value lives in this node's heap, so
+                  // now we do read CL0 (alloc_size for tail()) — but only once, at the
+                  // end of the lookup, not on the traversal hops.
+                  const full_node*    n   = ref.as<full_node>().obj();
+                  const inline_value* iv  = n->resolve_inline(sa);
+                  bytes               suf = kb.subspan(depth + 1);
+                  if (iv->suffix_len == suf.size() &&
+                      std::memcmp(iv->data, suf.data(), iv->suffix_len) == 0)
+                  {
+                     read_value(iv, out);
+                     return true;
+                  }
+                  return false;
+               }
+               // key ends exactly at this node → term value (in the header).
+               const full_node* n = ref.as<full_node>().obj();
+               if (n->term_value.is_null())
+                  return false;
+               read_value(n->resolve_inline(n->term_value), out);
+               return true;
+            }
+#endif
+            // R1 path: header read + tier dispatch (small tiers, or a prefixed node).
+            auto t = ref->type();
             if (t == leaf_node::type_id)
                return leaf_find(ref.as<leaf_node>().obj(), kb, depth, out);
             bool        done, found;
@@ -882,6 +948,23 @@ namespace heart::sal_proto
          return _ses->get_ref<N>(a).modify().get();
       }
 
+      // Stamp the control-block dispatch shape so the descent can route from the
+      // cb alone (skip the header). Only full_node carries a non-default shape:
+      // R8 when prefix-less (skip-header eligible), else R1 (header holds the
+      // prefix that must be matched first). Other tiers are R1 == default 0, so
+      // this is a no-op for them. Must be called after any FRESH alloc of a
+      // full_node, or after its nprefix changes; realloc preserves the cb so an
+      // in-place grow keeps the shape.
+      template <class N>
+      void stamp_shape(ptr_address a)
+      {
+         if constexpr (std::is_same_v<N, full_node>)
+         {
+            auto ref = _ses->get_ref<full_node>(a);
+            ref.control().set_type(ref->nprefix == 0 ? DS_R8 : DS_R1);
+         }
+      }
+
       // SHARED-mode COW: allocate a NEW node (fresh control block, old untouched —
       // it stays valid for the snapshot/version that still references it), copy
       // head+tail, and RETAIN every pointer child (the clone is a 2nd parent). Used
@@ -894,6 +977,7 @@ namespace heart::sal_proto
          uint32_t    sz  = N::page_size_for(ref->head_size() + ref->heap_used + extra + N::headroom);
          ptr_address na  = _ses->alloc<N>(sz, sal::alloc_hint{}, typename N::copy_tag{}, ref.obj());
          _ses->get_ref<N>(na).obj()->visit_children([&](ptr_address c) { _ses->retain(c); });
+         stamp_shape<N>(na);  // fresh control block → re-stamp the dispatch shape
          return na;
       }
       // Make the node at `addr` writable for a mutation needing `extra` heap bytes.
@@ -1159,7 +1243,9 @@ namespace heart::sal_proto
       template <class N>
       ptr_address make_router(bytes pfx, sal::alloc_hint hint)
       {
-         return _ses->alloc<N>(hint, pfx);
+         ptr_address a = _ses->alloc<N>(hint, pfx);
+         stamp_shape<N>(a);  // fresh control block → stamp the dispatch shape
+         return a;
       }
       // Dispatch helpers so build() can drive any router tier by address.
       sal::alloc_hint router_hint(ptr_address a)
@@ -1236,6 +1322,7 @@ namespace heart::sal_proto
          int         newpl = n->nprefix - (p + 1);
          std::memmove(n->prefix(), n->prefix() + p + 1, size_t(newpl));
          n->nprefix = uint16_t(newpl);
+         stamp_shape<N>(addr);  // nprefix changed → R8/R1 may flip (no-op unless full_node)
          mut<setlist_node>(np)->set_branch(ob, smart_address::from_pointer(addr));
          if (addr == orig)
             _ses->retain(addr);  // in-place demote: np is a 2nd parent of the shared node
@@ -1391,6 +1478,7 @@ namespace heart::sal_proto
          uint32_t newsz = To::page_size_for(uint32_t(sizeof(To)) + ref->nprefix + ref->heap_used +
                                             To::headroom);
          (void)_ses->realloc<To>(ref, newsz, typename To::upgrade_tag{}, ref.obj());
+         stamp_shape<To>(addr);  // realloc kept the From cb type; re-stamp for the new node kind
       }
 
       // ── walks ────────────────────────────────────────────────────────────────

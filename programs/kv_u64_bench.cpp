@@ -155,6 +155,111 @@ namespace
       return r;
    }
 
+   // Progressive: insert in `batch`-sized chunks; before each chunk sample
+   // `sample` queries over what's already there. psitri COMMITS every chunk so the
+   // SAL compactor can reclaim COW garbage (a single giant tx would pin it all).
+   // Prints a row per chunk so growth-driven slowdowns are visible.
+   void prog_heart(uint64_t N, uint64_t batch, uint64_t sample)
+   {
+      auto dir = std::filesystem::temp_directory_path() / "heart_u64_prog";
+      std::filesystem::remove_all(dir);
+      sal_radix_tree  t(dir);
+      std::mt19937_64 qrng(123);
+      std::printf("  heart : keys(M)  insert_ns  query_ns   miss_ns   objects   live_MB\n");
+      for (uint64_t base = 0; base < N; base += batch)
+      {
+         double   qns = 0, mns = 0;
+         if (base > 0)
+         {
+            uint64_t f = 0;
+            auto     q0 = now();
+            for (uint64_t i = 0; i < sample; ++i)
+            {
+               uint64_t j = qrng() % base, v = 0, k = rand_key(j);
+               if (t.find(kspan(k), v) && v == j)
+                  ++f;
+            }
+            qns = ns(q0, now(), sample);
+            uint64_t mf = 0;
+            auto     m0 = now();
+            for (uint64_t i = 0; i < sample; ++i)
+            {
+               uint64_t k = rand_key(N + qrng() % N), v = 0;  // guaranteed absent
+               if (t.find(kspan(k), v))
+                  ++mf;
+            }
+            mns = ns(m0, now(), sample);
+            (void)f;
+            (void)mf;
+         }
+         auto i0 = now();
+         for (uint64_t i = base; i < base + batch; ++i)
+            t.insert(kspan(rand_key(i)), i);
+         double ins = ns(i0, now(), batch);
+         // bytes_used() walks the whole tree (O(n)) — only do it every 10 chunks.
+         uint64_t chunk = (base + batch) / batch;
+         long     mb    = (chunk % 10 == 0) ? long(t.bytes_used() >> 20) : -1;
+         std::printf("        %7.1f  %9.1f  %9.1f  %9.1f  %8llu  %7ld\n", double(base + batch) / 1e6,
+                     ins, qns, mns, (unsigned long long)t.object_count(), mb);
+         std::fflush(stdout);
+      }
+   }
+
+   void prog_psitri(uint64_t N, uint64_t batch, uint64_t sample)
+   {
+      auto dir = std::filesystem::temp_directory_path() / "psitri_u64_prog";
+      std::filesystem::remove_all(dir);
+      psitri::runtime_config cfg;
+      cfg.sync_mode               = sal::sync_type::none;
+      cfg.write_protect_on_commit = false;
+      cfg.checksum_on_commit      = false;
+      auto            db  = psitri::database::create(dir.string(), cfg);
+      auto            ses = db->start_write_session();
+      std::mt19937_64 qrng(123);
+      std::printf("  psitri: keys(M)  insert_ns  query_ns   miss_ns\n");
+      for (uint64_t base = 0; base < N; base += batch)
+      {
+         double qns = 0, mns = 0;
+         if (base > 0)
+         {
+            auto        rootp = ses->get_root(0);
+            std::string val;
+            auto        q0 = now();
+            for (uint64_t i = 0; i < sample; ++i)
+            {
+               uint64_t       j = qrng() % base, k = rand_key(j);
+               psitri::cursor cur(rootp);
+               val.clear();
+               cur.get(psitri::key_view(reinterpret_cast<const char*>(&k), sizeof(k)), &val);
+            }
+            qns         = ns(q0, now(), sample);
+            auto m0 = now();
+            for (uint64_t i = 0; i < sample; ++i)
+            {
+               uint64_t       k = rand_key(N + qrng() % N);
+               psitri::cursor cur(rootp);
+               val.clear();
+               cur.get(psitri::key_view(reinterpret_cast<const char*>(&k), sizeof(k)), &val);
+            }
+            mns = ns(m0, now(), sample);
+         }
+         auto i0 = now();
+         {
+            auto tx = ses->start_transaction(0);
+            for (uint64_t i = base; i < base + batch; ++i)
+            {
+               uint64_t k = rand_key(i);
+               tx.insert(psitri::key_view(reinterpret_cast<const char*>(&k), sizeof(k)),
+                         psitri::value_view(reinterpret_cast<const char*>(&i), sizeof(i)));
+            }
+            tx.commit();  // close the tx → compactor can reclaim
+         }
+         double ins = ns(i0, now(), batch);
+         std::printf("        %7.1f  %9.1f  %9.1f  %9.1f\n", double(base + batch) / 1e6, ins, qns, mns);
+         std::fflush(stdout);
+      }
+   }
+
    void print_pair(const char* title, row h, row p)
    {
       std::printf("  %s\n", title);
@@ -167,22 +272,39 @@ namespace
 
 int main(int argc, char** argv)
 {
-   const uint64_t N = (argc > 1) ? std::strtoull(argv[1], nullptr, 10) : 2'000'000;
+   const uint64_t    N    = (argc > 1) ? std::strtoull(argv[1], nullptr, 10) : 2'000'000;
+   const std::string mode = (argc > 2) ? argv[2] : "both";  // "rand" | "seq" | "both" | "prog"
+
+   std::printf("N = %llu  (8-byte u64 keys, value=i)\n\n", (unsigned long long)N);
+
+   if (mode == "prog")  // progressive random: 1M-insert chunks, 100k sampled queries, commit/chunk
+   {
+      std::printf("RANDOM keys, progressive (commit every chunk):\n");
+      prog_heart(N, 1'000'000, 100'000);
+      std::printf("\n");
+      prog_psitri(N, 1'000'000, 100'000);
+      std::fflush(stdout);
+      return 0;
+   }
 
    std::vector<uint32_t> order(N);
    for (uint64_t i = 0; i < N; ++i)
       order[i] = uint32_t(i);
    std::shuffle(order.begin(), order.end(), std::mt19937(98765));
 
-   std::printf("N = %llu  (8-byte u64 keys, value=i)\n\n", (unsigned long long)N);
-
-   row hr = bench_heart(N, rand_key, order, "rand");
-   row pr = bench_psitri(N, rand_key, order, "rand");
-   print_pair("RANDOM keys (XXH3(i)):", hr, pr);
-   std::printf("\n");
-   row hs = bench_heart(N, seq_key, order, "seq");
-   row ps = bench_psitri(N, seq_key, order, "seq");
-   print_pair("SEQUENTIAL big-endian keys (bswap64(i), ascending insert):", hs, ps);
+   if (mode == "rand" || mode == "both")
+   {
+      row hr = bench_heart(N, rand_key, order, "rand");
+      row pr = bench_psitri(N, rand_key, order, "rand");
+      print_pair("RANDOM keys (XXH3(i)):", hr, pr);
+      std::printf("\n");
+   }
+   if (mode == "seq" || mode == "both")
+   {
+      row hs = bench_heart(N, seq_key, order, "seq");
+      row ps = bench_psitri(N, seq_key, order, "seq");
+      print_pair("SEQUENTIAL big-endian keys (bswap64(i), ascending insert):", hs, ps);
+   }
 
    std::fflush(stdout);
    return 0;

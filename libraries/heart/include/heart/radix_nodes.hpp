@@ -67,11 +67,142 @@ namespace heart
 
    /// ART Node16 analogue (also the multi-byte stem variant): up to ~16 stems,
    /// SIMD dispatch. StemType u8/u16/u32 consumes 1/2/4 key bytes per node.
+   ///
+   /// CL0 variable region (radix_impl::prefix_data, `var_capacity` bytes) packs the
+   /// prefix, the stems, and the branches. To keep prefix changes (prefix_split)
+   /// cheap, branches are anchored to the END of the region (branch i at
+   /// var_capacity - (i+1)*4) so they NEVER move; only the prefix (front) and the
+   /// stems (just after the prefix) shift. A null branch slot marks an absent stem.
    template <typename StemType>
    struct setlist_node : radix_impl<setlist_node<StemType>, setlist_fixed>
    {
-      static constexpr dispatch_shape tier       = dispatch_shape::r1;
-      static constexpr int            stem_width = sizeof(StemType);
+      using base = radix_impl<setlist_node<StemType>, setlist_fixed>;
+      static constexpr dispatch_shape tier         = dispatch_shape::r1;
+      static constexpr int            stem_width   = sizeof(StemType);
+      static constexpr int            var_capacity = base::prefix_capacity;
+      static constexpr sal::header_type type_id =
+          stem_width == 1 ? radix_type_ids::setlist_u8
+                          : (stem_width == 2 ? radix_type_ids::setlist_u16
+                                             : radix_type_ids::setlist_u32);
+      static constexpr radix_node_type rtype_val =
+          stem_width == 1 ? radix_node_type::setlist_u8
+                          : (stem_width == 2 ? radix_node_type::setlist_u16
+                                             : radix_node_type::setlist_u32);
+
+      setlist_node() noexcept = default;
+
+      int  nstems() const noexcept { return this->fixed.nstems; }
+      void set_nstems(int n) noexcept { this->fixed.nstems = uint16_t(n); }
+
+      StemType stem_at(int i) const noexcept
+      {
+         StemType s;
+         std::memcpy(&s, this->prefix_data + this->_prefix_length + i * stem_width, stem_width);
+         return s;
+      }
+      void set_stem(int i, StemType s) noexcept
+      {
+         std::memcpy(this->prefix_data + this->_prefix_length + i * stem_width, &s, stem_width);
+      }
+      smart_address branch_at(int i) const noexcept
+      {
+         smart_address sa;
+         std::memcpy(&sa, this->prefix_data + var_capacity - (i + 1) * 4, 4);
+         return sa;
+      }
+      void set_branch_slot(int i, smart_address sa) noexcept
+      {
+         std::memcpy(this->prefix_data + var_capacity - (i + 1) * 4, &sa, 4);
+      }
+
+      bool room_for_one() const noexcept
+      {
+         return int(this->_prefix_length) + (nstems() + 1) * (stem_width + 4) <= var_capacity;
+      }
+      smart_address find(StemType s) const noexcept
+      {
+         const int n = nstems();
+         for (int i = 0; i < n; ++i)
+            if (stem_at(i) == s)
+               return branch_at(i);
+         return smart_address::null();
+      }
+      bool branch_has_room(StemType s) const noexcept
+      {
+         return !find(s).is_null() || room_for_one();
+      }
+      // Update-or-append; false (no change) if a new stem won't fit.
+      bool set_branch(StemType s, smart_address sa) noexcept
+      {
+         const int n = nstems();
+         for (int i = 0; i < n; ++i)
+            if (stem_at(i) == s)
+            {
+               set_branch_slot(i, sa);
+               return true;
+            }
+         if (!room_for_one())
+            return false;
+         set_stem(n, s);          // stems grow forward (after the prefix)
+         set_branch_slot(n, sa);  // branches grow backward (from the region end)
+         set_nstems(n + 1);
+         return true;
+      }
+
+      // Replace the prefix, preserving stems+branches. Branches are end-anchored so
+      // they stay put; only the stems (which follow the prefix) are restowed.
+      void reprefix(std::span<const uint8_t> p) noexcept
+      {
+         const int n = nstems();
+         StemType  tmp[64];
+         for (int i = 0; i < n; ++i)
+            tmp[i] = stem_at(i);
+         std::memcpy(this->prefix_data, p.data(), p.size());
+         this->_prefix_length = uint16_t(p.size());
+         for (int i = 0; i < n; ++i)
+            set_stem(i, tmp[i]);
+      }
+
+      template <typename F>
+      void for_each_child(F&& f) const
+      {
+         if (this->_term_value.is_pointer())
+            f(this->_term_value.as_pointer());
+         const int n = nstems();
+         for (int i = 0; i < n; ++i)
+            if (branch_at(i).is_pointer())
+               f(branch_at(i).as_pointer());
+      }
+      // (stem, branch) pairs — used by upgrade to repopulate a wider tier. Only
+      // meaningful for the single-byte (u8) stem variant.
+      template <typename F>
+      void for_each_entry(F&& f) const
+      {
+         const int n = nstems();
+         for (int i = 0; i < n; ++i)
+            f(uint8_t(stem_at(i)), branch_at(i));
+      }
+      template <typename Session>
+      void destroy(const Session& s) const
+      {
+         for_each_child([&](sal::ptr_address c) { s->release(c); });
+      }
+
+      // ---- SAL construction contract (single fixed cacheline) ----
+      static uint32_t alloc_size(std::span<const uint8_t> prefix) noexcept
+      {
+         (void)prefix;  // prefix lives in the CL0 variable region
+         return uint32_t(sizeof(setlist_node));  // 128
+      }
+      setlist_node(uint32_t asize, sal::ptr_address_seq seq, std::span<const uint8_t> prefix) noexcept
+      {
+         this->init_page(asize, type_id, seq);
+         this->_rtype         = rtype_val;
+         this->_term_value    = smart_address::null();
+         this->_prefix_length = 0;
+         set_nstems(0);
+         this->set_prefix(prefix);
+      }
    };
 
    // ---- bitset family (large_radix; group-counter COW) ----

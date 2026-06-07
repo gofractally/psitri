@@ -30,6 +30,95 @@ namespace
    }
 }  // namespace
 
+TEST_CASE("sal_radix_tree stem corner cases", "[sal_radix_tree]")
+{
+   auto span_of = [](const std::string& s)
+   { return std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(s.data()), s.size()); };
+
+   // Insert a key set in a given order, then verify every key round-trips with
+   // value = its index in `keys` (NOT insertion index), plus a guaranteed miss.
+   auto check_set = [&](const char* dir, std::vector<std::string> keys,
+                        std::vector<int> insert_order, const std::string& absent)
+   {
+      sal_radix_tree t(tmp(dir));
+      for (int idx : insert_order)
+         t.insert(span_of(keys[idx]), uint64_t(idx));
+      for (size_t i = 0; i < keys.size(); ++i)
+      {
+         uint64_t v = ~0ull;
+         REQUIRE(t.find(span_of(keys[i]), v));
+         REQUIRE(v == i);
+      }
+      uint64_t miss = 0;
+      REQUIRE_FALSE(t.find(span_of(absent), miss));
+   };
+
+   SECTION("terminal falls within the 4-byte stem range (nested prefixes)")
+   {
+      // a,ab,abc,abcd,abcde,abcdef,abcdefgh — each a prefix of the next, crossing
+      // the 4- and 8-byte stem boundaries. A short key terminates inside a longer
+      // key's stem window.
+      std::vector<std::string> ks = {"a",      "ab",      "abc",     "abcd",
+                                     "abcde",  "abcdef",  "abcdefg", "abcdefgh"};
+      std::vector<int>         fwd(ks.size()), rev(ks.size());
+      for (size_t i = 0; i < ks.size(); ++i) { fwd[i] = int(i); rev[i] = int(ks.size() - 1 - i); }
+      check_set("heart_corner_nest_fwd", ks, fwd, "abcdefghi");  // grow into stems
+      check_set("heart_corner_nest_rev", ks, rev, "abcdefghi");  // split when shorter arrives
+   }
+
+   SECTION("4-byte stems in the middle of long words")
+   {
+      // Long shared prefix, divergence past the first stem (byte 8) and at byte 4.
+      std::vector<std::string> ks;
+      for (int i = 0; i < 60; ++i)
+      {
+         char buf[32];
+         std::snprintf(buf, sizeof(buf), "abcdefgh%02d", i);  // diverge at byte 8 (mid-word)
+         ks.push_back(buf);
+      }
+      ks.push_back("abcdWXYZ0000");  // diverge at byte 4
+      ks.push_back("abcdefghijklmnop");
+      std::vector<int> ord(ks.size());
+      for (size_t i = 0; i < ks.size(); ++i) ord[i] = int(i);
+      check_set("heart_corner_midword", ks, ord, "abcdefgh60");
+   }
+
+   SECTION("stem value is a pointer (continuation), not a terminal")
+   {
+      // At the 4-byte point "stem"/"wxyz" there is BOTH a terminal key AND keys
+      // that continue past it (so the branch must be a pointer, not inline value).
+      std::vector<std::string> ks = {"stem",     "stemABCD", "stemABCE", "stemXYZW",
+                                     "wxyz",     "wxyzabcd", "wxyzabce"};
+      std::vector<int>         ord(ks.size()), rev(ks.size());
+      for (size_t i = 0; i < ks.size(); ++i) { ord[i] = int(i); rev[i] = int(ks.size()-1-i); }
+      check_set("heart_corner_ptr_fwd", ks, ord, "ste");
+      check_set("heart_corner_ptr_rev", ks, rev, "stemAB");
+   }
+
+   SECTION("heavy random variable-length keys (1..16 bytes)")
+   {
+      // Stress terminals-in-range + mid-word stems + pointer continuations at scale,
+      // in random insert order.
+      sal_radix_tree               t(tmp("heart_corner_varlen"));
+      std::mt19937                 rng(777);
+      std::unordered_map<std::string, uint64_t> ref;
+      for (int i = 0; i < 30000; ++i)
+      {
+         int         len = 1 + int(rng() % 16);
+         std::string k(size_t(len), 'a');
+         for (auto& c : k) c = char('a' + (rng() % 6));  // small alphabet → dense prefixes/collisions
+         ref[k] = uint64_t(i);  // last write wins
+         t.insert(span_of(k), uint64_t(i));
+      }
+      for (auto& [k, v] : ref)
+      {
+         uint64_t got = ~0ull;
+         REQUIRE(t.find(span_of(k), got));
+         REQUIRE(got == v);
+      }
+   }
+}
+
 TEST_CASE("sal_radix_tree path compression", "[sal_radix_tree]")
 {
    auto span_of = [](const std::string& s)

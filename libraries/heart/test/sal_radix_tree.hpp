@@ -33,6 +33,8 @@
 #include <sal/allocator_session_impl.hpp>
 #include <ucc/round.hpp>
 
+#include <ucc/lower_bound.hpp>  // ucc::find_u32x16 (SIMD)
+
 #include <heart/bitset.hpp>
 #include <heart/inline_value.hpp>
 #include <heart/radix_full.hpp>
@@ -99,7 +101,7 @@ namespace heart::sal_proto
    struct leaf_node : paged_node
    {
       static constexpr sal::header_type type_id  = sal::header_type(rtype::leaf);
-      static constexpr int              CAP      = 16;
+      static constexpr int              CAP      = 32;  // SIMD-scanned (2x find_u32x16)
       static constexpr uint32_t         floor    = 256;
       static constexpr uint32_t         headroom = 64;
       struct copy_tag
@@ -122,28 +124,66 @@ namespace heart::sal_proto
          return free_after(reinterpret_cast<const char*>(this) + head_size());
       }
 
+      // First 4 bytes packed big-endian (short keys left-justified, low bytes 0).
+      // Big-endian packing makes u32 compare == lexicographic on the first 4 bytes,
+      // so a suffix-sorted entry list has ASCENDING stems and equal-stem runs are
+      // contiguous — which is what makes both the SIMD find and lower_bound work.
       static uint32_t stem4(bytes s) noexcept
       {
          uint32_t x = 0;
          int      n = int(std::min<size_t>(4, s.size()));
          for (int i = 0; i < n; ++i)
             x = (x << 8) | s[size_t(i)];
-         x <<= 8 * (4 - n);  // left-justify so short keys pad low with 0
+         x <<= 8 * (4 - n);
          return x;
       }
-      // index of the entry whose suffix == rem, else -1.
+      // Lexicographic suffix order (the leaf's sort key).
+      static int cmp(bytes a, bytes b) noexcept
+      {
+         size_t m = std::min(a.size(), b.size());
+         int    c = m ? std::memcmp(a.data(), b.data(), m) : 0;
+         if (c)
+            return c;
+         return a.size() < b.size() ? -1 : a.size() > b.size() ? 1 : 0;
+      }
+      // SIMD point find (ucc::find_u32x16, chunked for CAP>16): locate the stem,
+      // then walk the contiguous equal-stem run confirming the full suffix.
       int find_idx(bytes rem) const noexcept
       {
-         uint32_t q = stem4(rem);
-         for (int i = 0; i < count; ++i)
-            if (stems[i] == q)
+         uint32_t q     = stem4(rem);
+         int      first = count;
+         for (int base = 0; base < count; base += 16)
+         {
+            int chunk = std::min(16, count - base);
+            int r     = ucc::find_u32x16(stems + base, size_t(chunk), q);
+            if (r < chunk)
             {
-               const inline_value* iv = resolve_inline(vals[i]);
-               if (iv->suffix_len == rem.size() &&
-                   std::memcmp(iv->data, rem.data(), iv->suffix_len) == 0)
-                  return i;
+               first = base + r;
+               break;
             }
+         }
+         for (int i = first; i < count && stems[i] == q; ++i)
+         {
+            const inline_value* iv = resolve_inline(vals[i]);
+            if (iv->suffix_len == rem.size() &&
+                std::memcmp(iv->data, rem.data(), iv->suffix_len) == 0)
+               return i;
+         }
          return -1;
+      }
+      // First entry index whose suffix is >= rem (strict: > rem). Sorted scan.
+      int lower_bound_idx(bytes rem, bool strict) const noexcept
+      {
+         int i = 0;
+         while (i < count)
+         {
+            const inline_value* iv = resolve_inline(vals[i]);
+            int                 c  = cmp({iv->data, iv->suffix_len}, rem);
+            if (c > 0 || (c == 0 && !strict))
+               break;
+            ++i;
+         }
+         return i;
       }
 
       void visit_children(const std::function<void(ptr_address)>&) const {}  // no node children
@@ -164,6 +204,8 @@ namespace heart::sal_proto
          nprefix    = uint16_t(pfx.size());
          term_value = smart_address::null();
          count      = 0;
+         for (int i = 0; i < CAP; ++i)
+            stems[i] = 0xFFFFFFFFu;  // sentinel: SIMD find reads the full lane width
          std::memcpy(prefix(), pfx.data(), pfx.size());
       }
       leaf_node(uint32_t asize, ptr_address_seq seq, copy_tag, const leaf_node* src) noexcept
@@ -179,7 +221,8 @@ namespace heart::sal_proto
       void copy_to(alloc_header* dst) const noexcept { blit_head_tail(dst, head_size()); }
       void compact_to(alloc_header* dst) const noexcept { blit_head_tail(dst, head_size()); }
    };
-   static_assert(sizeof(leaf_node) == 24 + 4 + 64 + 64, "24 + count(+pad) + stems[16] + vals[16]");
+   static_assert(sizeof(leaf_node) == 24 + 4 + leaf_node::CAP * 4 + leaf_node::CAP * 4,
+                 "24 + count(+pad) + stems[CAP] + vals[CAP]");
 
    // ── router tier 1: small fanout (ART Node16) ──────────────────────────────
    struct setlist_node : paged_node
@@ -543,6 +586,21 @@ namespace heart::sal_proto
          }
       }
 
+      // Smallest stored key >= key (lower_bound) / > key (upper_bound). Returns
+      // that key's value, or false if none. The whole tree is ordered: leaf
+      // entries are sorted, routers iterate branches in byte order, and a node's
+      // term (key ending at its prefix) precedes its branches.
+      bool lower_bound(bytes key, uint64_t& out)
+      {
+         auto lk = _ses->lock();
+         return lb(_root, key, 0, false, out);
+      }
+      bool upper_bound(bytes key, uint64_t& out)
+      {
+         auto lk = _ses->lock();
+         return lb(_root, key, 0, true, out);
+      }
+
      private:
       static std::unique_ptr<sal::allocator> make_alloc(const std::filesystem::path& dir)
       {
@@ -553,6 +611,181 @@ namespace heart::sal_proto
          cfg.write_protect_on_commit = false;
          cfg.enable_read_cache       = false;
          return std::make_unique<sal::allocator>(dir, cfg, true);
+      }
+
+      // ── ordered-query dispatch helpers (term/nprefix/heap are common base
+      //    fields; prefix()/find/branch-iteration differ per tier) ────────────
+      sal::header_type node_type(ptr_address a) { return _ses->get_ref<sal::alloc_header>(a)->type(); }
+      smart_address    node_term(ptr_address a)
+      {
+         return reinterpret_cast<const paged_node*>(_ses->get_ref<sal::alloc_header>(a).obj())
+             ->term_value;
+      }
+      const inline_value* node_resolve(ptr_address a, smart_address sa)
+      {
+         return reinterpret_cast<const paged_node*>(_ses->get_ref<sal::alloc_header>(a).obj())
+             ->resolve_inline(sa);
+      }
+      bytes node_prefix(ptr_address a)
+      {
+         auto     r  = _ses->get_ref<sal::alloc_header>(a);
+         auto     t  = r->type();
+         uint16_t np = reinterpret_cast<const paged_node*>(r.obj())->nprefix;
+         const uint8_t* p = (t == leaf_node::type_id)      ? r.as<leaf_node>().obj()->prefix()
+                            : (t == setlist_node::type_id) ? r.as<setlist_node>().obj()->prefix()
+                            : (t == bitset_node::type_id)  ? r.as<bitset_node>().obj()->prefix()
+                                                           : r.as<full_node>().obj()->prefix();
+         return {p, np};
+      }
+      smart_address router_find(ptr_address a, uint8_t b)  // routers only
+      {
+         auto r = _ses->get_ref<sal::alloc_header>(a);
+         auto t = r->type();
+         if (t == setlist_node::type_id)
+            return r.as<setlist_node>().obj()->find(b);
+         if (t == bitset_node::type_id)
+            return r.as<bitset_node>().obj()->find(b);
+         return r.as<full_node>().obj()->find(b);
+      }
+      int router_min_byte_ge(ptr_address a, int b)  // smallest branch byte >= b, or -1
+      {
+         if (b < 0)
+            b = 0;
+         if (b > 255)
+            return -1;
+         auto r = _ses->get_ref<sal::alloc_header>(a);
+         auto t = r->type();
+         if (t == setlist_node::type_id)
+         {
+            auto* n    = r.as<setlist_node>().obj();
+            int   best = 256;
+            for (int i = 0; i < n->count; ++i)
+               if (n->keys[i] >= b && n->keys[i] < best)
+                  best = n->keys[i];
+            return best < 256 ? best : -1;
+         }
+         if (t == bitset_node::type_id)
+            return r.as<bitset_node>().obj()->present.next_set(b);
+         auto* n = r.as<full_node>().obj();
+         for (int i = b; i < 256; ++i)
+            if (!n->children.branches[i].is_null())
+               return i;
+         return -1;
+      }
+
+      // Smallest key in the subtree at `addr`.
+      bool node_smallest(ptr_address a, uint64_t& out)
+      {
+         smart_address term = node_term(a);
+         if (!term.is_null())  // a key ending at this prefix is the smallest
+         {
+            read_value(node_resolve(a, term), out);
+            return true;
+         }
+         if (node_type(a) == leaf_node::type_id)
+         {
+            auto* L = _ses->get_ref<leaf_node>(a).obj();
+            if (L->count == 0)
+               return false;
+            read_value(L->resolve_inline(L->vals[0]), out);  // sorted → vals[0] smallest
+            return true;
+         }
+         int bb = router_min_byte_ge(a, 0);
+         if (bb < 0)
+            return false;
+         smart_address sa = router_find(a, uint8_t(bb));
+         if (sa.is_tail())
+         {
+            read_value(node_resolve(a, sa), out);
+            return true;
+         }
+         return node_smallest(sa.as_pointer(), out);
+      }
+
+      // First key >= query (strict: > query) in the subtree at `addr`.
+      bool lb(ptr_address a, bytes query, uint32_t depth, bool strict, uint64_t& out)
+      {
+         bytes  pfx  = node_prefix(a);
+         bytes  qrem = query.subspan(depth);
+         size_t m    = std::min(pfx.size(), qrem.size());
+         int    c    = m ? std::memcmp(pfx.data(), qrem.data(), m) : 0;
+         if (c > 0)
+            return node_smallest(a, out);  // whole subtree > query
+         if (c < 0)
+            return false;  // whole subtree < query
+         if (pfx.size() > qrem.size())
+            return node_smallest(a, out);  // query is a proper prefix → all keys > query
+         depth += uint32_t(pfx.size());
+         qrem = query.subspan(depth);
+         auto t = node_type(a);
+
+         if (qrem.empty())  // query ends exactly at this node
+         {
+            smart_address term = node_term(a);
+            if (!strict && !term.is_null())
+            {
+               read_value(node_resolve(a, term), out);
+               return true;
+            }
+            if (t == leaf_node::type_id)
+            {
+               auto* L = _ses->get_ref<leaf_node>(a).obj();
+               if (L->count == 0)
+                  return false;
+               read_value(L->resolve_inline(L->vals[0]), out);
+               return true;
+            }
+            int bb = router_min_byte_ge(a, 0);
+            if (bb < 0)
+               return false;
+            smart_address sa = router_find(a, uint8_t(bb));
+            if (sa.is_tail())
+            {
+               read_value(node_resolve(a, sa), out);
+               return true;
+            }
+            return node_smallest(sa.as_pointer(), out);
+         }
+
+         uint8_t b = qrem[0];
+         if (t == leaf_node::type_id)
+         {
+            auto* L   = _ses->get_ref<leaf_node>(a).obj();
+            int   idx = L->lower_bound_idx(qrem, strict);
+            if (idx < L->count)
+            {
+               read_value(L->resolve_inline(L->vals[idx]), out);
+               return true;
+            }
+            return false;
+         }
+         // router: try branch b, then fall to the smallest branch byte > b.
+         smart_address sa = router_find(a, b);
+         if (!sa.is_null())
+         {
+            if (sa.is_tail())
+            {
+               const inline_value* iv = node_resolve(a, sa);
+               int c2 = leaf_node::cmp({iv->data, iv->suffix_len}, qrem.subspan(1));  // b==qrem[0]
+               if (c2 > 0 || (c2 == 0 && !strict))
+               {
+                  read_value(iv, out);
+                  return true;
+               }
+            }
+            else if (lb(sa.as_pointer(), query, depth + 1, strict, out))
+               return true;
+         }
+         int bb = router_min_byte_ge(a, b + 1);
+         if (bb < 0)
+            return false;
+         smart_address sa2 = router_find(a, uint8_t(bb));
+         if (sa2.is_tail())
+         {
+            read_value(node_resolve(a, sa2), out);
+            return true;
+         }
+         return node_smallest(sa2.as_pointer(), out);
       }
 
       static void read_value(const inline_value* iv, uint64_t& out) noexcept
@@ -660,8 +893,13 @@ namespace heart::sal_proto
          iv->value_type = 0;
          std::memcpy(iv->data, suffix.data(), suffix.size());
          std::memcpy(iv->data + suffix.size(), val.data(), val.size());
-         n->stems[n->count] = leaf_node::stem4(suffix);
-         n->vals[n->count]  = smart_address::from_tail(n->heap_used);
+         // insert at the sorted (lexicographic-by-suffix) position so stems stay
+         // ascending — keeps SIMD find's equal-run contiguous and lower_bound valid.
+         int p = n->lower_bound_idx(suffix, /*strict=*/false);
+         std::memmove(n->stems + p + 1, n->stems + p, size_t(n->count - p) * sizeof(uint32_t));
+         std::memmove(n->vals + p + 1, n->vals + p, size_t(n->count - p) * sizeof(smart_address));
+         n->stems[p] = leaf_node::stem4(suffix);
+         n->vals[p]  = smart_address::from_tail(n->heap_used);
          ++n->count;
       }
 

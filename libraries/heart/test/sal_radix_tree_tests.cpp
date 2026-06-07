@@ -4,6 +4,7 @@
 #include <cstring>
 #include <filesystem>
 #include <random>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -29,6 +30,54 @@ namespace
       return std::filesystem::temp_directory_path() / name;
    }
 }  // namespace
+
+TEST_CASE("sal_radix_tree lower/upper bound vs std::map oracle", "[sal_radix_tree]")
+{
+   auto span_of = [](const std::string& s)
+   { return std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(s.data()), s.size()); };
+
+   sal_radix_tree                  t(tmp("heart_lub"));
+   std::map<std::string, uint64_t> oracle;
+   std::mt19937                    rng(2024);
+   for (int i = 0; i < 8000; ++i)
+   {
+      int         len = 1 + int(rng() % 12);
+      std::string k(size_t(len), 'a');
+      for (auto& ch : k) ch = char('a' + (rng() % 5));  // small alphabet → dense ordering
+      oracle[k] = uint64_t(i);              // last write wins (matches t.insert)
+      t.insert(span_of(k), uint64_t(i));
+   }
+
+   auto probe = [&](const std::string& q)
+   {
+      uint64_t lv = 0, uv = 0;
+      bool     lf = t.lower_bound(span_of(q), lv);
+      bool     uf = t.upper_bound(span_of(q), uv);
+      auto     ol = oracle.lower_bound(q);
+      auto     ou = oracle.upper_bound(q);
+      REQUIRE(lf == (ol != oracle.end()));
+      if (lf) REQUIRE(lv == ol->second);
+      REQUIRE(uf == (ou != oracle.end()));
+      if (uf) REQUIRE(uv == ou->second);
+   };
+
+   // exact keys, near-misses, prefixes, and random probes
+   for (auto& [k, v] : oracle)
+   {
+      probe(k);                 // exact: lower_bound hits it, upper_bound the next
+      probe(k + "a");           // just past
+      if (k.size() > 1) probe(k.substr(0, k.size() - 1));  // a prefix of it
+   }
+   for (int i = 0; i < 3000; ++i)
+   {
+      int         len = 1 + int(rng() % 13);
+      std::string q(size_t(len), 'a');
+      for (auto& ch : q) ch = char('a' + (rng() % 6));  // wider alphabet → many misses
+      probe(q);
+   }
+   probe("");           // before everything
+   probe("zzzzzzzz");   // after everything
+}
 
 TEST_CASE("sal_radix_tree stem corner cases", "[sal_radix_tree]")
 {

@@ -194,7 +194,8 @@ namespace
          }
          auto i0 = now();
          for (uint64_t i = base; i < base + batch; ++i)
-            t.insert(kspan(rand_key(i)), i);
+            t.upsert(kspan(rand_key(i)), i);
+         t.commit();  // COW-to-root version boundary (snapshot) — like psitri's commit
          double ins = ns(i0, now(), batch);
          // bytes_used() walks the whole tree (O(n)) — only do it every 10 chunks.
          uint64_t chunk = (base + batch) / batch;

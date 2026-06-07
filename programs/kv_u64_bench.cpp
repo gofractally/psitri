@@ -43,7 +43,7 @@ namespace
 
    struct row
    {
-      double ins = 0, seq = 0, rnd = 0;
+      double ins = 0, seq = 0, rnd = 0, miss = 0;
       bool   ok = false;
    };
 
@@ -76,9 +76,19 @@ namespace
          if (t.find(kspan(k), v))
             q += v;
       }
-      r.rnd                 = ns(r0, now(), N);
+      r.rnd = ns(r0, now(), N);
+      // MISS: keys keyfn(N..2N-1) were never inserted → guaranteed not-found.
+      uint64_t missfound = 0;
+      auto     m0        = now();
+      for (uint64_t i = 0; i < N; ++i)
+      {
+         uint64_t k = keyfn(N + order[i]), v = 0;
+         if (t.find(kspan(k), v))
+            ++missfound;
+      }
+      r.miss                = ns(m0, now(), N);
       const uint64_t expect = N * (N - 1) / 2;
-      r.ok                  = (s == expect && q == expect);
+      r.ok                  = (s == expect && q == expect && missfound == 0);
       return r;
    }
 
@@ -128,19 +138,30 @@ namespace
       auto r0  = now();
       for (uint64_t i = 0; i < N; ++i)
          query(keyfn(order[i]), q);
-      r.rnd                 = ns(r0, now(), N);
+      r.rnd = ns(r0, now(), N);
+      uint64_t missfound = 0;
+      auto     m0        = now();
+      for (uint64_t i = 0; i < N; ++i)
+      {
+         uint64_t       k = keyfn(N + order[i]);
+         psitri::cursor cur(rootp);
+         std::string    val;
+         if (cur.get(psitri::key_view(reinterpret_cast<const char*>(&k), sizeof(k)), &val) >= 0)
+            ++missfound;
+      }
+      r.miss                = ns(m0, now(), N);
       const uint64_t expect = N * (N - 1) / 2;
-      r.ok                  = (s == expect && q == expect);
+      r.ok                  = (s == expect && q == expect && missfound == 0);
       return r;
    }
 
    void print_pair(const char* title, row h, row p)
    {
       std::printf("  %s\n", title);
-      std::printf("    heart  : insert %6.1f   seq-query %6.1f   rand-query %6.1f ns   [%s]\n", h.ins,
-                  h.seq, h.rnd, h.ok ? "OK" : "BAD");
-      std::printf("    psitri : insert %6.1f   seq-query %6.1f   rand-query %6.1f ns   [%s]\n", p.ins,
-                  p.seq, p.rnd, p.ok ? "OK" : "BAD");
+      std::printf("    heart  : insert %6.1f   seq %6.1f   rand %6.1f   MISS %6.1f ns   [%s]\n", h.ins,
+                  h.seq, h.rnd, h.miss, h.ok ? "OK" : "BAD");
+      std::printf("    psitri : insert %6.1f   seq %6.1f   rand %6.1f   MISS %6.1f ns   [%s]\n", p.ins,
+                  p.seq, p.rnd, p.miss, p.ok ? "OK" : "BAD");
    }
 }  // namespace
 

@@ -165,6 +165,27 @@ TEST_CASE("sal_radix_tree stem corner cases", "[sal_radix_tree]")
          REQUIRE(t.find(span_of(k), got));
          REQUIRE(got == v);
       }
+      // negative lookups: keys NOT in the set must miss. Probe random strings
+      // (wider alphabet → mostly absent) and append-a-byte variants of stored
+      // keys (guaranteed absent), checking find() returns false.
+      int checked = 0;
+      for (int i = 0; i < 40000 && checked < 20000; ++i)
+      {
+         int         len = 1 + int(rng() % 18);
+         std::string q(size_t(len), 'a');
+         for (auto& c : q) c = char('a' + (rng() % 8));
+         if (ref.count(q))
+            continue;
+         uint64_t got = 0;
+         REQUIRE_FALSE(t.find(span_of(q), got));
+         ++checked;
+      }
+      for (auto& [k, v] : ref)  // every stored key + a trailing byte → absent
+      {
+         (void)v;
+         uint64_t got = 0;
+         REQUIRE_FALSE(t.find(span_of(k + '\x7f'), got));
+      }
    }
 }
 

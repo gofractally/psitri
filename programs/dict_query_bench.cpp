@@ -69,6 +69,13 @@ int main(int argc, char** argv)
       order[i] = uint32_t(i);
    std::shuffle(order.begin(), order.end(), std::mt19937(12345));
 
+   // Guaranteed-absent keys: each word with a 0xFF byte appended (no dictionary
+   // word contains 0xFF, and "word\xff" is never another word). Precomputed so
+   // the miss timing measures the lookup, not string building.
+   std::vector<std::string> absent(N);
+   for (size_t i = 0; i < N; ++i)
+      absent[i] = words[i] + '\xff';
+
    std::printf("dictionary: %zu words from %s\n\n", N, dict);
 
    // ───────────────────────────── heart ─────────────────────────────
@@ -101,14 +108,24 @@ int main(int argc, char** argv)
       }
       auto r1 = now();
 
+      uint64_t missfound = 0;
+      auto     m0        = now();
+      for (size_t i = 0; i < N; ++i)
+      {
+         uint64_t v = 0;
+         if (t.find(kspan(absent[order[i]]), v))
+            ++missfound;
+      }
+      auto m1 = now();
+
       const uint64_t expect = uint64_t(N) * (N - 1) / 2;
       auto           tc     = t.count_tiers();
-      std::printf("  heart sal_radix_tree : insert %6.1f ns   seq-query %6.1f ns   rand-query %6.1f ns"
-                  "   [%s]  %llu objects, %zu MB live / %zu MB compacted\n",
+      std::printf("  heart sal_radix_tree : insert %6.1f   seq %6.1f   rand %6.1f   MISS %6.1f ns"
+                  "   [%s]  %llu objects, %zu MB\n",
                   ns_per(el(i0, i1), N), ns_per(el(s0, s1), N), ns_per(el(r0, r1), N),
-                  (seq == expect && rnd == expect) ? "OK" : "MISMATCH",
-                  (unsigned long long)t.object_count(), t.bytes_used() >> 20,
-                  t.bytes_compacted() >> 20);
+                  ns_per(el(m0, m1), N),
+                  (seq == expect && rnd == expect && missfound == 0) ? "OK" : "MISMATCH",
+                  (unsigned long long)t.object_count(), t.bytes_used() >> 20);
       std::printf("    tiers: %llu leaf, %llu setlist, %llu bitset, %llu full\n",
                   (unsigned long long)tc.leaf, (unsigned long long)tc.setlist,
                   (unsigned long long)tc.bitset, (unsigned long long)tc.full);
@@ -163,11 +180,24 @@ int main(int argc, char** argv)
          query(words[order[i]], rnd);
       auto r1 = now();
 
+      uint64_t missfound = 0;
+      auto     m0        = now();
+      for (size_t i = 0; i < N; ++i)
+      {
+         const std::string& w = absent[order[i]];
+         psitri::cursor     cur(rootp);
+         std::string        val;
+         if (cur.get(psitri::key_view(w.data(), w.size()), &val) >= 0)
+            ++missfound;
+      }
+      auto m1 = now();
+
       const uint64_t expect = uint64_t(N) * (N - 1) / 2;
-      std::printf("  psitri (1 tx)        : insert %6.1f ns   seq-query %6.1f ns   rand-query %6.1f ns"
+      std::printf("  psitri (1 tx)        : insert %6.1f   seq %6.1f   rand %6.1f   MISS %6.1f ns"
                   "   [%s]\n",
                   ns_per(el(i0, i1), N), ns_per(el(s0, s1), N), ns_per(el(r0, r1), N),
-                  (seq == expect && rnd == expect) ? "OK" : "MISMATCH");
+                  ns_per(el(m0, m1), N),
+                  (seq == expect && rnd == expect && missfound == 0) ? "OK" : "MISMATCH");
    }
 
    std::fflush(stdout);

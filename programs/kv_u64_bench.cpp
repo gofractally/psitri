@@ -36,9 +36,9 @@ namespace
    uint64_t rand_key(uint64_t i) { return XXH3_64bits(&i, sizeof(i)); }
    uint64_t seq_key(uint64_t i) { return __builtin_bswap64(i); }  // big-endian ascending
 
-   std::span<const uint8_t> kspan(const uint64_t& k)
+   std::string_view kspan(const uint64_t& k)  // key_view over the 8 key bytes
    {
-      return {reinterpret_cast<const uint8_t*>(&k), sizeof(k)};
+      return {reinterpret_cast<const char*>(&k), sizeof(k)};
    }
 
    struct row

@@ -17,9 +17,9 @@ using heart::sal_proto::sal_radix_tree;
 
 namespace
 {
-   std::span<const uint8_t> key_of(const uint64_t& k)
+   std::string_view key_of(const uint64_t& k)  // key_view over the 8 key bytes
    {
-      return {reinterpret_cast<const uint8_t*>(&k), sizeof(k)};
+      return {reinterpret_cast<const char*>(&k), sizeof(k)};
    }
    // Hash-derived key: the benchmark stores NO input array — the i-th key is
    // hash(i), recomputed identically on the find/verify pass.
@@ -78,8 +78,7 @@ TEST_CASE("sal_radix_tree COW-to-root: commit snapshots + upsert prior-size", "[
 
 TEST_CASE("sal_radix_tree lower/upper bound vs std::map oracle", "[sal_radix_tree]")
 {
-   auto span_of = [](const std::string& s)
-   { return std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(s.data()), s.size()); };
+   auto span_of = [](const std::string& s) { return std::string_view(s); };
 
    sal_radix_tree                  t(tmp("heart_lub"));
    std::map<std::string, uint64_t> oracle;
@@ -126,8 +125,7 @@ TEST_CASE("sal_radix_tree lower/upper bound vs std::map oracle", "[sal_radix_tre
 
 TEST_CASE("sal_radix_tree stem corner cases", "[sal_radix_tree]")
 {
-   auto span_of = [](const std::string& s)
-   { return std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(s.data()), s.size()); };
+   auto span_of = [](const std::string& s) { return std::string_view(s); };
 
    // Insert a key set in a given order, then verify every key round-trips with
    // value = its index in `keys` (NOT insertion index), plus a guaranteed miss.
@@ -236,8 +234,7 @@ TEST_CASE("sal_radix_tree stem corner cases", "[sal_radix_tree]")
 
 TEST_CASE("sal_radix_tree path compression", "[sal_radix_tree]")
 {
-   auto span_of = [](const std::string& s)
-   { return std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(s.data()), s.size()); };
+   auto span_of = [](const std::string& s) { return std::string_view(s); };
 
    SECTION("long shared prefix compresses to few nodes")
    {
@@ -364,11 +361,11 @@ TEST_CASE("sal_radix_tree insert/find correctness", "[sal_radix_tree]")
    sal_radix_tree s(tmp("heart_sal_radix_varlen"));
    const char*    ks[] = {"a", "ab", "abc", "abd", "abce", "x", ""};
    for (uint32_t i = 0; i < 7; ++i)
-      s.insert({reinterpret_cast<const uint8_t*>(ks[i]), std::strlen(ks[i])}, 1000 + i);
+      s.insert(std::string_view(ks[i]), uint64_t(1000 + i));
    for (uint32_t i = 0; i < 7; ++i)
    {
       uint64_t got = 0;
-      REQUIRE(s.find({reinterpret_cast<const uint8_t*>(ks[i]), std::strlen(ks[i])}, got));
+      REQUIRE(s.find(std::string_view(ks[i]), got));
       REQUIRE(got == 1000 + i);
    }
 }

@@ -46,10 +46,7 @@ namespace
       return words;
    }
 
-   std::span<const uint8_t> kspan(const std::string& s)
-   {
-      return {reinterpret_cast<const uint8_t*>(s.data()), s.size()};
-   }
+   std::string_view kspan(const std::string& s) { return s; }  // key_view
 }  // namespace
 
 int main(int argc, char** argv)

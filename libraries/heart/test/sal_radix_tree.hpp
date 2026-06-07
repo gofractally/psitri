@@ -28,6 +28,7 @@
 #include <functional>
 #include <memory>
 #include <span>
+#include <string_view>
 
 #include <sal/allocator.hpp>
 #include <sal/allocator_session_impl.hpp>
@@ -44,7 +45,14 @@ namespace heart::sal_proto
 {
    using sal::ptr_address;
    using sal::ptr_address_seq;
-   using bytes = std::span<const uint8_t>;
+   using bytes = std::span<const uint8_t>;  // internal key/value byte span
+   // Public API mirrors psitri (node.hpp): keys and values are non-owning views.
+   using key_view   = std::string_view;
+   using value_view = std::string_view;
+   inline bytes as_bytes(std::string_view s) noexcept
+   {
+      return {reinterpret_cast<const uint8_t*>(s.data()), s.size()};
+   }
 
    enum class rtype : uint8_t
    {
@@ -588,13 +596,14 @@ namespace heart::sal_proto
       }
 
       // upsert: insert or overwrite. Returns the prior value's byte size, or -1 if
-      // the key was newly inserted (matches psitri's int sentinel).
-      int upsert(bytes key, uint64_t value)
+      // the key was newly inserted (matches psitri's int sentinel). key/value are
+      // non-owning views (key_view/value_view) — no copies; the value bytes are
+      // copied into the node's inline storage during the write.
+      int upsert(key_view key, value_view value)
       {
          auto        lock = _ses->lock();
          _old_value_size  = -1;
-         bytes       vspan(reinterpret_cast<const uint8_t*>(&value), sizeof(value));
-         ptr_address nr = insert_node(_root, key, 0, vspan, {});
+         ptr_address nr   = insert_node(_root, as_bytes(key), 0, as_bytes(value), {});
          if (nr != _root)
          {
             _ses->release(_root);  // tree drops its ref on the old root (snapshot keeps its own)
@@ -602,11 +611,13 @@ namespace heart::sal_proto
          }
          return _old_value_size;
       }
-      void insert(bytes key, uint64_t value) { (void)upsert(key, value); }  // back-compat alias
 
-      bool find(bytes key, uint64_t& out)
+      // Point lookup. On hit, `out` views the stored value bytes (valid until the
+      // next tree mutation — copy if you need to keep it). Returns false on miss.
+      bool find(key_view key, value_view& out)
       {
          auto        lock  = _ses->lock();
+         bytes       kb    = as_bytes(key);
          ptr_address addr  = _root;
          uint32_t    depth = 0;
          for (;;)
@@ -614,34 +625,63 @@ namespace heart::sal_proto
             auto ref = _ses->get_ref<sal::alloc_header>(addr);
             auto t   = ref->type();
             if (t == leaf_node::type_id)
-               return leaf_find(ref.as<leaf_node>().obj(), key, depth, out);
+               return leaf_find(ref.as<leaf_node>().obj(), kb, depth, out);
             bool        done, found;
             ptr_address next = ptr_address(0);
             if (t == setlist_node::type_id)
-               found = route_step(ref.as<setlist_node>().obj(), key, depth, out, done, next);
+               found = route_step(ref.as<setlist_node>().obj(), kb, depth, out, done, next);
             else if (t == bitset_node::type_id)
-               found = route_step(ref.as<bitset_node>().obj(), key, depth, out, done, next);
+               found = route_step(ref.as<bitset_node>().obj(), kb, depth, out, done, next);
             else
-               found = route_step(ref.as<full_node>().obj(), key, depth, out, done, next);
+               found = route_step(ref.as<full_node>().obj(), kb, depth, out, done, next);
             if (done)
                return found;
             addr = next;
          }
       }
 
-      // Smallest stored key >= key (lower_bound) / > key (upper_bound). Returns
-      // that key's value, or false if none. The whole tree is ordered: leaf
-      // entries are sorted, routers iterate branches in byte order, and a node's
-      // term (key ending at its prefix) precedes its branches.
-      bool lower_bound(bytes key, uint64_t& out)
+      // Smallest stored key >= key (lower_bound) / > key (upper_bound) → its value
+      // view, or false if none. The whole tree is ordered (sorted leaves, byte-
+      // ordered routers, term-before-branches).
+      bool lower_bound(key_view key, value_view& out)
       {
          auto lk = _ses->lock();
-         return lb(_root, key, 0, false, out);
+         return lb(_root, as_bytes(key), 0, false, out);
       }
-      bool upper_bound(bytes key, uint64_t& out)
+      bool upper_bound(key_view key, value_view& out)
       {
          auto lk = _ses->lock();
-         return lb(_root, key, 0, true, out);
+         return lb(_root, as_bytes(key), 0, true, out);
+      }
+
+      // Fixed-size-value convenience overloads (copy the value out under the lock —
+      // safe to use after the call). Used by the tests/benchmarks (8-byte values).
+      int upsert(key_view key, uint64_t value)
+      {
+         return upsert(key, value_view(reinterpret_cast<const char*>(&value), sizeof(value)));
+      }
+      void insert(key_view key, uint64_t value) { (void)upsert(key, value); }
+      bool find(key_view key, uint64_t& out)
+      {
+         value_view vv;
+         if (!find(key, vv))
+            return false;
+         out = 0;
+         std::memcpy(&out, vv.data(), std::min(sizeof(out), vv.size()));
+         return true;
+      }
+      bool lower_bound(key_view key, uint64_t& out) { return lb_u64(key, false, out); }
+      bool upper_bound(key_view key, uint64_t& out) { return lb_u64(key, true, out); }
+      bool lb_u64(key_view key, bool strict, uint64_t& out)
+      {
+         value_view vv;
+         bool       f = strict ? upper_bound(key, vv) : lower_bound(key, vv);
+         if (f)
+         {
+            out = 0;
+            std::memcpy(&out, vv.data(), std::min(sizeof(out), vv.size()));
+         }
+         return f;
       }
 
      private:
@@ -717,7 +757,7 @@ namespace heart::sal_proto
       }
 
       // Smallest key in the subtree at `addr`.
-      bool node_smallest(ptr_address a, uint64_t& out)
+      bool node_smallest(ptr_address a, value_view& out)
       {
          smart_address term = node_term(a);
          if (!term.is_null())  // a key ending at this prefix is the smallest
@@ -746,7 +786,7 @@ namespace heart::sal_proto
       }
 
       // First key >= query (strict: > query) in the subtree at `addr`.
-      bool lb(ptr_address a, bytes query, uint32_t depth, bool strict, uint64_t& out)
+      bool lb(ptr_address a, bytes query, uint32_t depth, bool strict, value_view& out)
       {
          bytes  pfx  = node_prefix(a);
          bytes  qrem = query.subspan(depth);
@@ -831,10 +871,9 @@ namespace heart::sal_proto
          return node_smallest(sa2.as_pointer(), out);
       }
 
-      static void read_value(const inline_value* iv, uint64_t& out) noexcept
+      static void read_value(const inline_value* iv, value_view& out) noexcept
       {
-         out = 0;
-         std::memcpy(&out, iv->data + iv->suffix_len, iv->value_len);
+         out = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len), iv->value_len);
       }
 
       template <class N>
@@ -882,7 +921,7 @@ namespace heart::sal_proto
       }
 
       // ── find ──────────────────────────────────────────────────────────────
-      bool leaf_find(const leaf_node* n, bytes key, uint32_t depth, uint64_t& out) const
+      bool leaf_find(const leaf_node* n, bytes key, uint32_t depth, value_view& out) const
       {
          if (n->nprefix > key.size() - depth)
             return false;
@@ -905,7 +944,7 @@ namespace heart::sal_proto
       }
 
       template <class N>
-      bool route_step(const N* n, bytes key, uint32_t& depth, uint64_t& out, bool& done,
+      bool route_step(const N* n, bytes key, uint32_t& depth, value_view& out, bool& done,
                       ptr_address& next) const
       {
          if (n->nprefix > key.size() - depth)

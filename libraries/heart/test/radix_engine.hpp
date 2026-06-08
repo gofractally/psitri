@@ -129,18 +129,23 @@ namespace heart::radix
                const char* base = reinterpret_cast<const char*>(ref.obj());
                if (depth < kb.size())
                {
-                  uint8_t       byte = kb[depth];
+                  // Address-generate BEFORE switching on the algo. The key bits consumed
+                  // before indexing the segment line differ per tier (r2:7 r4:6 r8:5), but
+                  // the *line* is the same closed form for all three — so we compute the
+                  // exact cacheline the algo will dereference, then PREFETCH it (never a
+                  // line we won't read), then switch only on the in-line algo (r8 direct
+                  // index vs r2/r4 popcount-rank). The segment-line miss overlaps the jump.
+                  static constexpr uint8_t skip_shift[4] = {0, 7, 6, 5};  // [r1] r2 r4 r8
+                  uint8_t                  byte          = kb[depth];
+                  const char*              cl = base + 128 + (size_t(byte >> skip_shift[shape]) << 7);
+                  __builtin_prefetch(cl);
                   smart_address sa;
                   if (shape == uint8_t(dispatch_shape::r8))
-                     std::memcpy(&sa, base + full_radix_node::branch_offset + 4u * byte, sizeof(sa));
+                     std::memcpy(&sa, cl + 4u * (byte & 31), sizeof(sa));
                   else if (shape == uint8_t(dispatch_shape::r2))
-                     sa = reinterpret_cast<const bitset_r2_node::segment*>(base + 128 +
-                                                                          (byte >> 7) * 128)
-                              ->find(byte & 127);
+                     sa = reinterpret_cast<const bitset_r2_node::segment*>(cl)->find(byte & 127);
                   else
-                     sa = reinterpret_cast<const bitset_r4_node::segment*>(base + 128 +
-                                                                          (byte >> 6) * 128)
-                              ->find(byte & 63);
+                     sa = reinterpret_cast<const bitset_r4_node::segment*>(cl)->find(byte & 63);
                   if (sa.is_null())
                      return false;
                   if (sa.is_tail())

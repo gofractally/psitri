@@ -1789,9 +1789,10 @@ namespace heart::radix
       ptr_address router_insert_wide(ptr_address addr, bytes key, uint32_t depth, bytes val,
                                      sal::alloc_hint peer_hint)
       {
-         const uint32_t depth0 = depth;
-         const N*       cn     = _ses->get_ref<N>(addr).obj();
-         bytes          pfx    = cn->prefix();
+         const uint32_t    depth0 = depth;
+         sal::smart_ref<N> ref    = _ses->get_ref<N>(addr);  // resolved once (reads + safe cows)
+         const N*          cn     = ref.obj();
+         bytes             pfx    = cn->prefix();
          int            avail  = int(key.size() - depth);
          int            maxp   = std::min(int(pfx.size()), avail);
          int p = common_prefix_len(key.subspan(depth, size_t(maxp)), pfx.subspan(0, size_t(maxp)));
@@ -1854,7 +1855,7 @@ namespace heart::radix
             }
             int           cp    = common_prefix_len(esuf, suf);
             ptr_address   child = make_collision_child(esuf, eval, suf, val, cp, chint);
-            N*            w     = cow<N>(addr);
+            N*            w     = cow<N>(ref, addr);  // ref valid (same-key make_value not taken here)
             if (sa.is_pointer())
                _ses->release(sa.as_pointer());
             w->set_branch(q, smart_address::from_pointer(child));
@@ -1866,7 +1867,7 @@ namespace heart::radix
          ptr_address nc    = insert_node(child, key, depth + uint32_t(cw), val, chint);
          if (nc != child)
          {
-            N* w = cow<N>(addr);
+            N* w = cow<N>(ref, addr);  // ref valid (insert_node recurses into child, not addr)
             w->set_branch(q, smart_address::from_pointer(nc));
             _ses->release(child);
          }
@@ -2071,22 +2072,23 @@ namespace heart::radix
       template <class N>
       void set_term(ptr_address& addr, bytes val, sal::alloc_hint peer_hint)
       {
-         smart_address tv = _ses->get_ref<N>(addr).obj()->term_value();
+         sal::smart_ref<N> ref = _ses->get_ref<N>(addr);  // resolved once; threaded into cow()
+         smart_address     tv  = ref->term_value();
          if (tv.is_tail())  // update inline term
          {
-            const inline_value* iv = inline_of(_ses->get_ref<N>(addr).obj(), tv);
+            const inline_value* iv = inline_of(ref.obj(), tv);
             _old_value_size        = iv->value_len;
-            if (iv->value_len == val.size())
+            if (iv->value_len == val.size())  // same size → overwrite in place
             {
-               N*    n   = cow<N>(addr);
+               N*    n   = cow<N>(ref, addr);
                auto* wiv = reinterpret_cast<inline_value*>(reinterpret_cast<char*>(n) + n->size() -
                                                            tv.tail_offset());
                std::memcpy(wiv->data + wiv->suffix_len, val.data(), val.size());
             }
-            else
+            else  // grow → new tail (old leaks), cow once
             {
-               smart_address sv = make_value<N>(addr, bytes{}, val, peer_hint);  // old leaks
-               mut<N>(addr)->set_term_value(sv);
+               N* n = cow<N>(ref, addr, value_tail_need(bytes{}, val));
+               n->set_term_value(make_value_into<N>(n, bytes{}, val, peer_hint));
             }
             return;
          }
@@ -2097,14 +2099,14 @@ namespace heart::radix
             ptr_address tl  = update_leaf_value(old, val);
             if (tl != old)
             {
-               N* n = cow<N>(addr);
+               N* n = cow<N>(ref, addr);
                _ses->release(old);
                n->set_term_value(smart_address::from_pointer(tl));
             }
             return;
          }
-         smart_address sv = make_value<N>(addr, bytes{}, val, peer_hint);  // new term
-         mut<N>(addr)->set_term_value(sv);
+         N* n = cow<N>(ref, addr, value_tail_need(bytes{}, val));  // new term, cow once
+         n->set_term_value(make_value_into<N>(n, bytes{}, val, peer_hint));
       }
 
       // Split `addr`'s prefix at p: a new setlist parent takes key[depth..depth+p];

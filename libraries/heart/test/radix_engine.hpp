@@ -272,6 +272,9 @@ namespace heart::radix
          // setlist headroom utilization: sum of tail_used (inline-value bytes actually used)
          // vs the 256-byte headroom each setlist reserves. Measures recoverable memory.
          uint64_t sl_tail_used = 0;
+         // full_radix (R8) occupancy: sum of occupied 64-wide quarters per full node (1-4).
+         // avg = full_quarters / full → if < 4, presence could eliminate the empty quarters.
+         uint64_t full_quarters = 0;
       };
       tier_counts count_tiers()
       {
@@ -389,6 +392,10 @@ namespace heart::radix
          else
          {
             ++tc.full;
+            uint8_t q = 0;  // which 64-wide quarters have any branch
+            _ses->get_ref<full_radix_node>(a).obj()->for_each_entry(
+                [&](uint8_t byte, smart_address) { q |= uint8_t(1u << (byte >> 6)); });
+            tc.full_quarters += uint64_t(std::popcount(unsigned(q)));
             walk_kids<full_radix_node>(a, tc);
          }
       }

@@ -388,7 +388,13 @@ namespace heart::radix
          }
          return smart_address::from_pointer(make_leaf(suffix, value, hint));
       }
-      // Copy a terminal's {suffix,value} (tail or SAL leaf) into `buf` (<=510 bytes).
+      // SNAPSHOT a terminal's {suffix,value} into the caller's stack `buf` (<=510 B: both
+      // lengths are uint8_t). Required, not defensive: every caller then ALLOCATES new
+      // nodes from these bytes (make_collision_child / make_value / add_inline), and a SAL
+      // allocation can relocate the whole arena (mapping.cpp moves the mmap base when it
+      // can't extend in place), dangling any pointer into node memory. The snapshot is read
+      // before those allocations. The read-only paths (find/seek) never alloc, so they use
+      // the zero-copy term_view() instead. (suffix_len+value_len are uint8_t → <=510 B.)
       void term_get(const sal::alloc_header* node, smart_address sa, uint8_t* buf, bytes& suf,
                     bytes& val) const
       {

@@ -80,6 +80,8 @@ int main(int argc, char** argv)
    {
       auto                          dir = std::filesystem::temp_directory_path() / "heart_radix_dict";
       heart::radix::radix_tree      t(dir);
+      if (std::getenv("WIDE"))
+         t.set_wide_stems(true);
       auto vview = [](const uint64_t& v) {
          return std::string_view(reinterpret_cast<const char*>(&v), sizeof(v));
       };

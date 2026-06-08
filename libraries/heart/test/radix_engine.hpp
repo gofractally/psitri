@@ -215,6 +215,42 @@ namespace heart::radix
          }
       }
 
+      // ── remove ──────────────────────────────────────────────────────────────────
+      // Delete `key` if present; returns true iff it was found+removed. COW-to-root just
+      // like upsert (unique → mutate in place; shared/snapshot → clone the path, the old
+      // tree stays valid for the snapshot). Releases every SAL object the deletion frees
+      // — external leaf/subtree values and any node that drains empty — with no leak and
+      // no double-free (mirrors insert's clone-retains-children / caller-releases-original
+      // contract). An inline-tail value's bytes stay in the node's tail heap (intra-node
+      // space, reclaimed on the next clone); that is not a refcount leak. A node that loses
+      // its last entry is dropped from its parent and freed, propagating to the root, which
+      // is reset to a fresh empty node (the tree always has a root).
+      bool remove(key_view key)
+      {
+         auto  lock = _ses->lock();
+         bytes kb   = as_bytes(key);
+         if (_bucket_mode)
+            return bkt_remove(kb);
+         _removed = false;
+         _emptied = false;
+         ptr_address nr = remove_node(_root, kb, 0);
+         if (!_removed)
+            return false;
+         if (_emptied)  // whole tree drained → free it, install a fresh empty root
+         {
+            if (nr != _root)
+               _ses->release(_root);  // shared: drop our ref to the original (snapshot keeps it)
+            _ses->release(nr);        // free the emptied (in-place or cloned) root
+            _root = make_node<setlist_u8>(bytes{});
+         }
+         else if (nr != _root)
+         {
+            _ses->release(_root);
+            _root = nr;
+         }
+         return true;
+      }
+
       // ── ordered queries (this is a SORTED container, not a hash map) ────────────
       // lower_bound: smallest key >= `key`; upper_bound: smallest key strictly > `key`.
       // On a hit, out_key holds the matched key (materialized) and out_val views its
@@ -247,6 +283,9 @@ namespace heart::radix
       }
 
       uint64_t object_count() const { return _alloc->total_allocated_objects(); }
+      // Live count is exact only once the background release thread has drained — releases of
+      // a sole-referenced object are deferred to it. Tests poll this to a quiescent point.
+      uint64_t pending_releases() const { return _alloc->total_pending_releases(); }
 
       // ── gated wide-stem feature ────────────────────────────────────────────────
       // When off (default), the growth algorithm only builds setlist_u8 → the engine is
@@ -1103,6 +1142,149 @@ namespace heart::radix
             default:  // full_radix
                return router_insert<full_radix_node>(addr, key, depth, val, peer_hint);
          }
+      }
+
+      // ── remove descent (mirrors insert_node dispatch; routers only — a terminal value
+      // is handled in-place by the parent via is_terminal_branch, never recursed into) ──
+      ptr_address remove_node(ptr_address addr, bytes key, uint32_t depth)
+      {
+         switch (unsigned(_ses->get_ref<sal::alloc_header>(addr)->type()))
+         {
+            case unsigned(bucket_node::type_id):  // adaptive bucket LEAF: in-place remove
+            {
+               const uint8_t* s  = key.data() + depth;
+               const int      sn = int(key.size() - depth);
+               if (!_ses->get_ref<bucket_node>(addr).obj()->find(s, sn))
+               {
+                  _removed = false;
+                  return addr;
+               }
+               bkt(addr)->remove(s, sn);  // buckets mutate in place (no-MVCC path)
+               _removed = true;
+               _emptied = (_ses->get_ref<bucket_node>(addr).obj()->nent == 0);
+               return addr;
+            }
+            case unsigned(setlist_u8::type_id):
+               return remove_router<setlist_u8>(addr, key, depth);
+            case unsigned(setlist_u16::type_id):
+               return remove_router<setlist_u16>(addr, key, depth);
+            case unsigned(setlist_u32::type_id):
+               return remove_router<setlist_u32>(addr, key, depth);
+            case unsigned(bitset_c1_32::type_id):
+               return remove_router<bitset_c1_32>(addr, key, depth);
+            case unsigned(bitset_c1_64::type_id):
+               return remove_router<bitset_c1_64>(addr, key, depth);
+            case unsigned(bitset_c1_128::type_id):
+               return remove_router<bitset_c1_128>(addr, key, depth);
+            case unsigned(bitset_r2_node::type_id):
+               return remove_router<bitset_r2_node>(addr, key, depth);
+            case unsigned(bitset_r4_node::type_id):
+               return remove_router<bitset_r4_node>(addr, key, depth);
+            default:  // full_radix
+               return remove_router<full_radix_node>(addr, key, depth);
+         }
+      }
+
+      // Remove `key` from the subtree rooted at `addr`. Sets _removed (was it found) and,
+      // when the node drains to nothing, _emptied (parent should drop+free it). Returns the
+      // (possibly COW'd) node address. Releases external terminal values; for an emptied or
+      // path-COW'd child it follows insert's contract — the PARENT releases the original.
+      template <class N>
+      ptr_address remove_router(ptr_address addr, bytes key, uint32_t depth)
+      {
+         const N* cn  = _ses->get_ref<N>(addr).obj();
+         bytes    pfx = cn->prefix();
+         if (pfx.size() > key.size() - depth ||
+             (pfx.size() && std::memcmp(pfx.data(), key.data() + depth, pfx.size()) != 0))
+         {
+            _removed = false;  // key diverges from this node's compressed prefix → absent
+            return addr;
+         }
+         depth += uint32_t(pfx.size());
+         if (depth == key.size())  // key ends here → remove the term value
+         {
+            smart_address tv = cn->term_value();
+            if (tv.is_null())
+            {
+               _removed = false;
+               return addr;
+            }
+            N* n = cow<N>(addr);
+            if (tv.is_pointer())
+               _ses->release(tv.as_pointer());  // external leaf/subtree value
+            n->set_term_value(smart_address::null());
+            _removed = true;
+            _emptied = (n->branch_count() == 0);
+            return addr;
+         }
+         // route by this node's stride (1 byte for every tier remove supports; wide setlist
+         // consumes its consume_width key bytes per hop, same as route_r1).
+         uint32_t            W;
+         typename N::stem_type cell;
+         if constexpr (N::stem_width == 1)
+         {
+            W    = 1;
+            cell = typename N::stem_type(key[depth]);
+         }
+         else
+         {
+            W = uint32_t(cn->consume_width());
+            if (key.size() - depth < W)
+            {
+               _removed = false;
+               return addr;
+            }
+            cell = typename N::stem_type(read_stem<N>(key, depth, W));
+         }
+         smart_address sa = cn->find(cell);
+         if (sa.is_null())
+         {
+            _removed = false;
+            return addr;
+         }
+         if (is_terminal_branch(sa))  // a leaf/inline terminal here → this is (maybe) the key
+         {
+            bytes      esuf;
+            value_view eval;
+            term_view(cn, sa, esuf, eval);
+            bytes suf = key.subspan(depth + W);
+            if (esuf.size() != suf.size() ||
+                (esuf.size() && std::memcmp(esuf.data(), suf.data(), esuf.size()) != 0))
+            {
+               _removed = false;  // same routing cell, different suffix → key absent
+               return addr;
+            }
+            N* n = cow<N>(addr);
+            if (sa.is_pointer())
+               _ses->release(sa.as_pointer());  // external leaf value (inline tail just orphans)
+            n->remove_branch(cell);
+            _removed = true;
+            _emptied = (n->branch_count() == 0 && !n->has_term_value());
+            return addr;
+         }
+         // pointer to an inner node → recurse
+         ptr_address child = sa.as_pointer();
+         ptr_address nc    = remove_node(child, key, depth + W);
+         if (!_removed)
+            return addr;  // absent in subtree → nothing changed here
+         if (_emptied)     // the child drained → drop its branch and free it
+         {
+            N* n = cow<N>(addr);
+            n->remove_branch(cell);
+            _ses->release(nc);  // the emptied child (in-place == child, or a clone)
+            if (nc != child)
+               _ses->release(child);  // shared: also drop the original child's ref
+            _emptied = (n->branch_count() == 0 && !n->has_term_value());
+            return addr;
+         }
+         if (nc != child)  // child was path-COW'd (shared) → repoint, release the original
+         {
+            N* n = cow<N>(addr);
+            n->set_branch(cell, smart_address::from_pointer(nc));
+            _ses->release(child);
+         }
+         _emptied = false;
+         return addr;
       }
 
       template <class N>
@@ -2266,6 +2448,72 @@ namespace heart::radix
          }
       }
 
+      // Bucket-mode remove (in-place, no MVCC — matches bkt_insert). Descends the full_radix
+      // routers to the bucket leaf / inline terminal holding the key. An emptied bucket leaf is
+      // released and its parent branch cleared; an inline terminal / router term is cleared in
+      // place (its tail orphans). Empty routers are left (correct for find; not a leak).
+      bool bkt_remove(bytes key)
+      {
+         ptr_address addr = _root, parent{};
+         uint8_t     pb = 0;
+         bool        have_parent = false;
+         uint32_t    depth       = 0;
+         for (;;)
+         {
+            if (ntype(addr) == bucket_node::type_id)
+            {
+               const uint8_t* s  = key.data() + depth;
+               const int      sn = int(key.size() - depth);
+               if (!_ses->get_ref<bucket_node>(addr).obj()->find(s, sn))
+                  return false;
+               bkt(addr)->remove(s, sn);
+               if (have_parent && _ses->get_ref<bucket_node>(addr).obj()->nent == 0)
+               {
+                  mut<full_radix_node>(parent)->remove_branch(pb);
+                  _ses->release(addr);  // free the drained bucket
+               }
+               return true;
+            }
+            const full_radix_node* r = _ses->get_ref<full_radix_node>(addr).obj();
+            bytes                  P = r->prefix();
+            if (key.size() - depth < P.size() ||
+                (P.size() && std::memcmp(key.data() + depth, P.data(), P.size()) != 0))
+               return false;
+            depth += uint32_t(P.size());
+            if (depth == key.size())  // router term value
+            {
+               smart_address tv = r->term_value();
+               if (tv.is_null())
+                  return false;
+               mut<full_radix_node>(addr)->set_term_value(smart_address::null());
+               if (tv.is_pointer())
+                  _ses->release(tv.as_pointer());
+               return true;
+            }
+            uint8_t       b  = key[depth];
+            smart_address br = r->find(b);
+            if (br.is_null())
+               return false;
+            if (br.is_tail())  // inline terminal in the router
+            {
+               bytes      esuf;
+               value_view ev;
+               term_view(r, br, esuf, ev);
+               bytes suf = key.subspan(depth + 1);
+               if (esuf.size() != suf.size() ||
+                   (esuf.size() && std::memcmp(esuf.data(), suf.data(), esuf.size()) != 0))
+                  return false;
+               mut<full_radix_node>(addr)->remove_branch(b);  // inline tail orphans
+               return true;
+            }
+            parent      = addr;
+            pb          = b;
+            have_parent = true;
+            addr        = br.as_pointer();
+            ++depth;
+         }
+      }
+
       std::unique_ptr<sal::allocator> _alloc;
       sal::allocator_session_ptr      _ses;
       ptr_address                     _root;
@@ -2273,6 +2521,8 @@ namespace heart::radix
       bool                            _snap_valid     = false;
       int                             _old_value_size = -1;
       bool                            _route_found    = false;
+      bool                            _removed        = false;  // remove(): key was found+deleted
+      bool                            _emptied        = false;  // remove(): node drained → drop it
       bool                            _wide_stems     = false;  // gate: off = byte radix
       bool                            _bucket_mode    = false;  // leaf=bucket, split to radix
       bool                            _adaptive       = false;  // gate: radix→bucket on deep-narrow

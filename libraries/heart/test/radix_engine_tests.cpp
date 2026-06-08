@@ -352,3 +352,221 @@ TEST_CASE("radix_engine: overwrite returns prior size + COW commit cycle", "[rad
       }
    }
 }
+
+// ───────────────────────────── remove ─────────────────────────────
+#include <algorithm>
+#include <chrono>
+#include <thread>
+
+namespace
+{
+   // Releases of a sole-referenced object are deferred to a background thread; poll until
+   // the queue is empty AND the live count is stable, so an exact leak assertion is sound.
+   void drain(radix_tree& t)
+   {
+      for (int i = 0; i < 4000 && t.pending_releases() > 0; ++i)
+         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      uint64_t prev = t.object_count();
+      for (int i = 0; i < 100; ++i)
+      {
+         std::this_thread::sleep_for(std::chrono::milliseconds(2));
+         uint64_t cur = t.object_count();
+         if (cur == prev && t.pending_releases() == 0)
+            return;
+         prev = cur;
+      }
+   }
+}
+
+TEST_CASE("radix_engine: remove basic — present, absent, re-find", "[radix_engine][remove]")
+{
+   radix_tree               t(tmp("heart_rm_basic"));
+   std::vector<std::string> keys = {"a",   "ab",  "abc", "abd",     "b",  "ba",
+                                    "hello", "help", "helping", "",  "x", "xyz"};
+   for (size_t i = 0; i < keys.size(); ++i)
+      t.upsert(keys[i], make_value(i + 1));
+
+   REQUIRE_FALSE(t.remove("nope"));   // absent
+   REQUIRE_FALSE(t.remove("he"));     // a proper prefix of present keys, but not itself a key
+   REQUIRE_FALSE(t.remove("abce"));   // diverges past a present key
+
+   REQUIRE(t.remove("abc"));          // present
+   value_view g;
+   REQUIRE_FALSE(t.find("abc", g));   // gone
+   REQUIRE(t.find("abd", g));         // sibling intact
+   REQUIRE(t.find("ab", g));          // ancestor intact
+   REQUIRE_FALSE(t.remove("abc"));    // second remove → absent
+
+   REQUIRE(t.remove(""));             // the empty key (a root term)
+   REQUIRE_FALSE(t.find("", g));
+   REQUIRE(t.find("a", g));
+
+   t.upsert("abc", make_value(999));  // re-insert after remove
+   REQUIRE(t.find("abc", g));
+   REQUIRE(std::string(g) == make_value(999));
+}
+
+TEST_CASE("radix_engine: remove all drains every tier with no leak", "[radix_engine][remove]")
+{
+   // Forced fan-out pushes a node through setlist → c1/bitset_r2/r4 → full; removing all
+   // must drain them back to an empty root with the live object count at baseline.
+   for (int K : {30, 120, 256})
+   {
+      radix_tree     t(tmp("heart_rm_tiers"));
+      const uint64_t base = t.object_count();
+      auto           mk   = [](int i) {
+         std::string k = "AAA";
+         k.push_back(char(uint8_t(i)));
+         k += "tail";
+         return k;
+      };
+      for (int i = 0; i < K; ++i)
+         t.upsert(mk(i), make_value(uint64_t(i)));
+      auto tc = t.count_tiers();
+      REQUIRE((tc.bitset_c1 + tc.bitset_r2 + tc.bitset_r4 + tc.full) >= 1);  // widened
+
+      for (int i = 0; i < K; ++i)
+         REQUIRE(t.remove(mk(i)));
+      value_view g;
+      for (int i = 0; i < K; ++i)
+         REQUIRE_FALSE(t.find(mk(i), g));
+      drain(t);
+      REQUIRE(t.object_count() == base);  // every node freed, no leak
+   }
+}
+
+TEST_CASE("radix_engine: remove on narrow c1 windows (promote on) — no leak",
+          "[radix_engine][remove]")
+{
+   radix_tree t(tmp("heart_rm_c1"));
+   t.set_c1_promote(true);
+   const uint64_t                    base = t.object_count();
+   std::map<std::string, std::string> oracle;
+   std::mt19937_64                    rng(7);
+   const int                          N = 8000;
+   for (int i = 0; i < N; ++i)
+   {
+      std::string k(4, 0);
+      for (int j = 0; j < 4; ++j)
+         k[j] = char(40 + int(rng() % 18));  // narrow byte window → c1 nodes
+      std::string v = make_value(uint64_t(i));
+      t.upsert(k, v);
+      oracle[k] = v;
+   }
+   REQUIRE(t.count_tiers().bitset_c1 >= 1);  // c1 tier actually exercised
+   value_view g;
+   for (auto& [k, v] : oracle)
+   {
+      REQUIRE(t.find(k, g));
+      REQUIRE(std::string(g) == v);
+   }
+   for (auto& [k, v] : oracle)
+      REQUIRE(t.remove(k));
+   for (auto& [k, v] : oracle)
+      REQUIRE_FALSE(t.find(k, g));
+   drain(t);
+   REQUIRE(t.object_count() == base);
+}
+
+TEST_CASE("radix_engine: remove fuzz vs std::map, exact no-leak", "[radix_engine][remove]")
+{
+   radix_tree                         t(tmp("heart_rm_fuzz"));
+   const uint64_t                     base = t.object_count();
+   std::map<std::string, std::string> oracle;
+   std::mt19937_64                    rng(0xC0FFEE);
+   const int                          OPS = 80000;
+   for (int op = 0; op < OPS; ++op)
+   {
+      std::string k = u64key(hashed(rng() % 6000));  // a bounded key space → frequent hits
+      if ((rng() & 3) == 0)                          // ~25% removes
+      {
+         bool exp = oracle.erase(k) > 0;
+         REQUIRE(t.remove(k) == exp);
+      }
+      else
+      {
+         std::string v = make_value(rng());
+         t.upsert(k, v);
+         oracle[k] = v;
+      }
+      if ((op & 4095) == 0)  // periodic spot check of a handful of live keys
+      {
+         value_view g;
+         int        n = 0;
+         for (auto it = oracle.begin(); it != oracle.end() && n < 64; ++it, ++n)
+         {
+            REQUIRE(t.find(it->first, g));
+            REQUIRE(std::string(g) == it->second);
+         }
+      }
+   }
+   // full cross-check, then remove everything → exact baseline (no reference leak)
+   value_view g;
+   for (auto& [k, v] : oracle)
+   {
+      REQUIRE(t.find(k, g));
+      REQUIRE(std::string(g) == v);
+   }
+   for (auto& [k, v] : oracle)
+      REQUIRE(t.remove(k));
+   for (auto& [k, v] : oracle)
+      REQUIRE_FALSE(t.find(k, g));
+   drain(t);
+   REQUIRE(t.object_count() == base);
+}
+
+TEST_CASE("radix_engine: remove under MVCC snapshots stays leak-bounded",
+          "[radix_engine][remove]")
+{
+   radix_tree     t(tmp("heart_rm_mvcc"));
+   const uint64_t base = t.object_count();
+   const int      N    = 6000;
+   for (int i = 0; i < N; ++i)
+      t.upsert(u64key(hashed(uint64_t(i))), make_value(uint64_t(i)));
+   t.commit();  // snapshot pins the whole tree (ref>1 → removes COW the path)
+
+   for (int i = 0; i < N; ++i)  // remove all from the live root (shared-mode COW path)
+      REQUIRE(t.remove(u64key(hashed(uint64_t(i)))));
+   value_view g;
+   for (int i = 0; i < N; ++i)
+      REQUIRE_FALSE(t.find(u64key(hashed(uint64_t(i))), g));
+
+   t.commit();  // drop the old snapshot → the original (full) tree is freed
+   drain(t);
+   REQUIRE(t.object_count() < base + 8);  // back to ~empty: no per-version leak
+}
+
+TEST_CASE("radix_engine: bucket-mode remove vs std::map", "[radix_engine][remove]")
+{
+   radix_tree t(tmp("heart_rm_bucket"));
+   t.set_bucket_mode(true);
+   std::map<std::string, std::string> oracle;
+   std::mt19937_64                    rng(123);
+   const int                          N = 5000;
+   for (int i = 0; i < N; ++i)
+   {
+      std::string k = u64key(hashed(uint64_t(i)));
+      std::string v = make_value(uint64_t(i));
+      t.upsert(k, v);
+      oracle[k] = v;
+   }
+   // remove a random half, verify against the oracle
+   std::vector<std::string> keys;
+   for (auto& [k, v] : oracle)
+      keys.push_back(k);
+   std::shuffle(keys.begin(), keys.end(), rng);
+   for (size_t i = 0; i < keys.size() / 2; ++i)
+   {
+      REQUIRE(t.remove(keys[i]));
+      oracle.erase(keys[i]);
+   }
+   REQUIRE_FALSE(t.remove(keys[0]));  // already removed
+   value_view g;
+   for (auto& [k, v] : oracle)
+   {
+      REQUIRE(t.find(k, g));
+      REQUIRE(std::string(g) == v);
+   }
+   for (size_t i = 0; i < keys.size() / 2; ++i)
+      REQUIRE_FALSE(t.find(keys[i], g));
+}

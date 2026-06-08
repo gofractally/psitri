@@ -49,6 +49,7 @@ namespace heart
       using base_t = radix_impl<bitset_c1_node<Width, TypeId>, c1_fixed<Width, TypeId>>;
       static constexpr dispatch_shape   tier       = dispatch_shape::r1;  // 1 CL → read CL0
       static constexpr int              stem_width = 1;                   // 1 key byte / hop
+      using stem_type                              = uint8_t;             // byte-indexed (engine generics)
       static constexpr int              width      = Width;
       static constexpr int              cap        = c1_cap(Width);
       static constexpr sal::header_type type_id    = TypeId;
@@ -65,6 +66,7 @@ namespace heart
       // a packed/unaligned offset, so the word is loaded with memcpy (an unaligned load).
       bool present(int d) const noexcept { return (this->fixed.mask[d >> 3] >> (d & 7)) & 1; }
       void set_present(int d) noexcept { this->fixed.mask[d >> 3] |= uint8_t(1u << (d & 7)); }
+      void clear_present(int d) noexcept { this->fixed.mask[d >> 3] &= uint8_t(~(1u << (d & 7))); }
       static uint64_t load64(const uint8_t* p) noexcept
       {
          uint64_t w;
@@ -165,6 +167,20 @@ namespace heart
          set_present(int(d));
          return true;
       }
+      // Remove byte `b` from the window: close the rank gap, clear the presence bit.
+      // No-op if absent. (The removed branch's value is the caller's to release.)
+      void remove_branch(uint8_t b) noexcept
+      {
+         const unsigned d = unsigned(b) - unsigned(this->fixed.base);
+         if (d >= unsigned(Width) || !present(int(d)))
+            return;
+         const int n   = count();
+         const int pos = rank(int(d));
+         std::memmove(this->fixed.branches + size_t(pos) * 4,
+                      this->fixed.branches + size_t(pos + 1) * 4, size_t(n - 1 - pos) * 4);
+         clear_present(int(d));
+      }
+      int branch_count() const noexcept { return count(); }
       // Alloc-hint: the branch slots (contiguous) so a new child clusters with siblings.
       std::span<const sal::ptr_address> branch_hint(uint8_t = 0) const noexcept
       {

@@ -165,6 +165,34 @@ namespace heart
          return 1;
       }
 
+      // ── remove: true if (s,sn) was found+deleted ─────────────────────────────────────
+      // Drops the entry's div+slot index pair (keeping both arrays sorted+aligned); the
+      // inline entry's tail bytes orphan (reclaimed on the next compact/COW). No SAL
+      // children, so nothing to release.
+      bool remove(const uint8_t* s, int sn) noexcept
+      {
+         const uint16_t q2  = stem2(s, sn);
+         uint16_t*      d   = div();
+         int            pos = ucc::lower_bound_u16_padded(d, nent, q2);
+         for (; pos < nent && d[pos] == q2; ++pos)
+         {
+            const int c = cmp(pos, s, sn);
+            if (c == 0)
+            {
+               // close the gap at pos in div[], then restow slot[] one u16 to the left
+               // (div shrank by one) dropping slot[pos]. Old slot block is at d+nent.
+               std::memmove(d + pos, d + pos + 1, size_t(nent - 1 - pos) * 2);
+               std::memmove(d + nent - 1, d + nent, size_t(pos) * 2);
+               std::memmove(d + nent - 1 + pos, d + nent + pos + 1, size_t(nent - 1 - pos) * 2);
+               --nent;
+               return true;
+            }
+            if (c > 0)
+               break;
+         }
+         return false;
+      }
+
       // ── in-order visit: f(const inline_value&) ──────────────────────────────────────
       template <typename F>
       void for_each(F&& f) const

@@ -281,6 +281,43 @@ namespace heart
          return true;
       }
 
+      int branch_count() const noexcept { return nstems(); }
+
+      // Remove stem `s` and its branch, keeping the arrays ordered+rank-aligned — the exact
+      // inverse of set_branch. No-op if `s` is absent. (The removed branch's value, if any,
+      // is the caller's to release; this only edits the index.)
+      void remove_branch(StemType s) noexcept
+      {
+         const int n = nstems();
+         const int p = lower_bound_index(s);
+         if (p >= n || stem_at(p) != s)
+            return;
+         if constexpr (stem_width == 1)
+         {
+            // stems forward (close the gap at p); branches END-anchored (shift [p+1,n) one slot
+            // toward the tail). Mirrors set_branch's insert exactly, reversed.
+            uint8_t* st   = this->prefix_data + this->_prefix_length;
+            uint8_t* base = this->prefix_data;
+            std::memmove(st + p, st + p + 1, size_t(n - 1 - p));
+            std::memmove(base + var_capacity - (n - 1) * 4, base + var_capacity - n * 4,
+                         size_t(n - 1 - p) * 4);
+         }
+         else
+         {
+            // forward parallel arrays: the stem array shrinks by one cell (branch base moves
+            // LEFT by stem_width). Close the stem gap, then restow the n-1 branches at the
+            // new base, dropping slot p (low dest first — everything moves toward lower addrs).
+            uint8_t*  pe     = this->prefix_data + this->_prefix_length;
+            const int sw     = stem_width;
+            uint8_t*  old_bb = pe + size_t(n) * sw;      // current branch base
+            uint8_t*  new_bb = pe + size_t(n - 1) * sw;  // base once the stem array shrinks
+            std::memmove(pe + size_t(p) * sw, pe + size_t(p + 1) * sw, size_t(n - 1 - p) * sw);
+            std::memmove(new_bb, old_bb, size_t(p) * 4);
+            std::memmove(new_bb + size_t(p) * 4, old_bb + size_t(p + 1) * 4, size_t(n - 1 - p) * 4);
+         }
+         set_nstems(n - 1);
+      }
+
       // Replace the prefix, preserving stems+branches.
       void reprefix(std::span<const uint8_t> p) noexcept
       {
@@ -377,6 +414,7 @@ namespace heart
    {
       static constexpr dispatch_shape   tier          = Tier;
       static constexpr int              stem_width    = 1;  // byte-indexed (1 key byte / hop)
+      using stem_type                                 = uint8_t;  // engine generics (remove_router)
       static constexpr sal::header_type type_id       = TypeId;
       static constexpr uint32_t         branch_offset = 128;  // segment cachelines at CL1
       static constexpr int              nseg          = 256 >> SegShift;
@@ -402,6 +440,18 @@ namespace heart
       bool set_branch(uint8_t b, smart_address sa) noexcept
       {
          return segs[b >> seg_shift].set_branch(b & seg_mask, sa);
+      }
+      void remove_branch(uint8_t b) noexcept
+      {
+         smart_address removed;  // value release is the caller's job; this only clears the slot
+         segs[b >> seg_shift].clear_branch(b & seg_mask, removed);
+      }
+      int branch_count() const noexcept
+      {
+         int c = 0;
+         for (const auto& s : segs)
+            c += s.size();
+         return c;
       }
       // Alloc-hint: the cacheline bases of the segment this byte routes to, so a new
       // child clusters with its segment-mates (keeps compact_addresses bases <= 16).
@@ -451,6 +501,7 @@ namespace heart
    {
       static constexpr dispatch_shape   tier       = dispatch_shape::r8;
       static constexpr int              stem_width = 1;  // byte-indexed (1 key byte / hop)
+      using stem_type                              = uint8_t;  // engine generics (remove_router)
       static constexpr sal::header_type type_id    = radix_type_ids::full_radix;
 
       radix_full<256> branches;  // @128 (CL1..8): 32 ptr_addresses per cacheline
@@ -503,6 +554,15 @@ namespace heart
       {
          branches.set_branch(b, sa);  // direct index — always has room
          return true;
+      }
+      void remove_branch(uint8_t b) noexcept { branches.clear_branch(b); }  // → null slot
+      int  branch_count() const noexcept
+      {
+         int c = 0;
+         for (int b = 0; b < 256; ++b)
+            if (!branches.branches[b].is_null())
+               ++c;
+         return c;
       }
       bool branch_has_room(uint8_t) const noexcept { return true; }
       bool can_set(uint8_t, smart_address) const noexcept { return true; }

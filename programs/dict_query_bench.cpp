@@ -22,6 +22,7 @@
 #include <psitri/write_session_impl.hpp>
 
 #include <sal_radix_tree.hpp>  // libraries/heart/test (added to include path)
+#include <radix_engine.hpp>
 
 using heart::sal_proto::sal_radix_tree;
 
@@ -75,7 +76,60 @@ int main(int argc, char** argv)
 
    std::printf("dictionary: %zu words from %s\n\n", N, dict);
 
-   // ───────────────────────────── heart ─────────────────────────────
+   // ──────────────────────── new engine (designed taxonomy) ─────────────────
+   {
+      auto                          dir = std::filesystem::temp_directory_path() / "heart_radix_dict";
+      heart::radix::radix_tree      t(dir);
+      auto vview = [](const uint64_t& v) {
+         return std::string_view(reinterpret_cast<const char*>(&v), sizeof(v));
+      };
+      auto i0 = now();
+      for (size_t i = 0; i < N; ++i)
+         t.upsert(kspan(words[i]), vview(uint64_t(i)));
+      auto i1 = now();
+      auto query = [&](const std::string& w, uint64_t& acc) {
+         std::string_view v;
+         if (t.find(kspan(w), v))
+         {
+            uint64_t got = 0;
+            std::memcpy(&got, v.data(), std::min<size_t>(8, v.size()));
+            acc += got;
+         }
+      };
+      uint64_t seq = 0;
+      auto     s0  = now();
+      for (size_t i = 0; i < N; ++i)
+         query(words[i], seq);
+      auto     s1  = now();
+      uint64_t rnd = 0;
+      auto     r0  = now();
+      for (size_t i = 0; i < N; ++i)
+         query(words[order[i]], rnd);
+      auto     r1        = now();
+      uint64_t missfound = 0;
+      auto     m0        = now();
+      for (size_t i = 0; i < N; ++i)
+      {
+         std::string_view v;
+         if (t.find(kspan(absent[order[i]]), v))
+            ++missfound;
+      }
+      auto           m1     = now();
+      const uint64_t expect = uint64_t(N) * (N - 1) / 2;
+      auto           tc     = t.count_tiers();
+      std::printf("  heart engine         : insert %6.1f   seq %6.1f   rand %6.1f   MISS %6.1f ns"
+                  "   [%s]  %llu objects\n",
+                  ns_per(el(i0, i1), N), ns_per(el(s0, s1), N), ns_per(el(r0, r1), N),
+                  ns_per(el(m0, m1), N),
+                  (seq == expect && rnd == expect && missfound == 0) ? "OK" : "MISMATCH",
+                  (unsigned long long)t.object_count());
+      std::printf("    tiers: %llu leaf, %llu setlist, %llu r2, %llu r4, %llu full\n",
+                  (unsigned long long)tc.leaf, (unsigned long long)tc.setlist,
+                  (unsigned long long)tc.bitset_r2, (unsigned long long)tc.bitset_r4,
+                  (unsigned long long)tc.full);
+   }
+
+   // ───────────────────────────── heart (prototype) ─────────────────────────
    {
       auto dir = std::filesystem::temp_directory_path() / "heart_dict_bench";
       sal_radix_tree t(dir);

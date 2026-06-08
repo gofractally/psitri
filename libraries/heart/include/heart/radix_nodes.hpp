@@ -8,9 +8,13 @@
 #include <heart/radix_node.hpp>
 #include <heart/radix_type_ids.hpp>
 #include <heart/smart_address.hpp>
+#include <ucc/round.hpp>
 
 namespace heart
 {
+   // Every radix node carries a tail heap for inline terminal values; head_bytes() is
+   // the fixed structure size (the tail heap follows), free_heap() the room left.
+   inline constexpr uint32_t radix_node_headroom = 256;
    // The concrete node taxonomy (type-only; layouts byte-pinned by static_assert,
    // no algorithm bodies). Maps to ART's N4/N16/N48/N256 dispatch classes:
    //
@@ -198,11 +202,18 @@ namespace heart
          for_each_child([&](sal::ptr_address c) { s->release(c); });
       }
 
-      // ---- SAL construction contract (single fixed cacheline) ----
+      // ---- tail heap for inline terminals ----
+      static constexpr uint32_t headroom  = radix_node_headroom;
+      static constexpr uint32_t head_bytes() noexcept { return uint32_t(sizeof(setlist_node)); }
+      uint32_t free_heap() const noexcept
+      {
+         return this->free_bytes(reinterpret_cast<const char*>(this) + sizeof(setlist_node));
+      }
+      // ---- SAL construction contract ----
       static uint32_t alloc_size(std::span<const uint8_t> prefix) noexcept
       {
-         (void)prefix;  // prefix lives in the CL0 variable region
-         return uint32_t(sizeof(setlist_node));  // 128
+         (void)prefix;  // prefix + stems + branches in CL0; tail heap follows
+         return ucc::round_up_multiple<sal::cacheline_size>(uint32_t(sizeof(setlist_node)) + headroom);
       }
       setlist_node(uint32_t asize, sal::ptr_address_seq seq, std::span<const uint8_t> prefix) noexcept
       {
@@ -282,7 +293,14 @@ namespace heart
       static uint32_t alloc_size(std::span<const uint8_t> prefix) noexcept
       {
          (void)prefix;
-         return uint32_t(sizeof(bitset_r2_node));  // 384
+         return ucc::round_up_multiple<sal::cacheline_size>(uint32_t(sizeof(bitset_r2_node)) +
+                                                            headroom);
+      }
+      static constexpr uint32_t headroom  = radix_node_headroom;
+      static constexpr uint32_t head_bytes() noexcept { return uint32_t(sizeof(bitset_r2_node)); }
+      uint32_t free_heap() const noexcept
+      {
+         return this->free_bytes(reinterpret_cast<const char*>(this) + sizeof(bitset_r2_node));
       }
       bitset_r2_node(uint32_t asize, sal::ptr_address_seq seq, std::span<const uint8_t> prefix) noexcept
       {
@@ -352,7 +370,14 @@ namespace heart
       static uint32_t alloc_size(std::span<const uint8_t> prefix) noexcept
       {
          (void)prefix;
-         return uint32_t(sizeof(bitset_r4_node));  // 640
+         return ucc::round_up_multiple<sal::cacheline_size>(uint32_t(sizeof(bitset_r4_node)) +
+                                                            headroom);
+      }
+      static constexpr uint32_t headroom  = radix_node_headroom;
+      static constexpr uint32_t head_bytes() noexcept { return uint32_t(sizeof(bitset_r4_node)); }
+      uint32_t free_heap() const noexcept
+      {
+         return this->free_bytes(reinterpret_cast<const char*>(this) + sizeof(bitset_r4_node));
       }
       bitset_r4_node(uint32_t asize, sal::ptr_address_seq seq, std::span<const uint8_t> prefix) noexcept
       {
@@ -387,7 +412,14 @@ namespace heart
       static uint32_t alloc_size(std::span<const uint8_t> prefix) noexcept
       {
          (void)prefix;  // prefix lives in the CL0 variable region (prefix_data)
-         return uint32_t(sizeof(full_radix_node));  // 1152, already a cacheline multiple
+         return ucc::round_up_multiple<sal::cacheline_size>(uint32_t(sizeof(full_radix_node)) +
+                                                            headroom);
+      }
+      static constexpr uint32_t headroom  = radix_node_headroom;
+      static constexpr uint32_t head_bytes() noexcept { return uint32_t(sizeof(full_radix_node)); }
+      uint32_t free_heap() const noexcept
+      {
+         return this->free_bytes(reinterpret_cast<const char*>(this) + sizeof(full_radix_node));
       }
       full_radix_node(uint32_t asize, sal::ptr_address_seq seq,
                       std::span<const uint8_t> prefix) noexcept

@@ -64,6 +64,9 @@ namespace heart::radix
          _alloc->register_type_ops<setlist_u8>();
          _alloc->register_type_ops<setlist_u16>();
          _alloc->register_type_ops<setlist_u32>();
+         _alloc->register_type_ops<bitset_c1_32>();
+         _alloc->register_type_ops<bitset_c1_64>();
+         _alloc->register_type_ops<bitset_c1_128>();
          _alloc->register_type_ops<bitset_r2_node>();
          _alloc->register_type_ops<bitset_r4_node>();
          _alloc->register_type_ops<full_radix_node>();
@@ -187,6 +190,12 @@ namespace heart::radix
                cont = route_r1(_ses->get_ref<bitset_r2_node>(addr).obj(), kb, depth, out, addr);
             else if (t == bitset_r4_node::type_id)
                cont = route_r1(_ses->get_ref<bitset_r4_node>(addr).obj(), kb, depth, out, addr);
+            else if (t == bitset_c1_32::type_id)
+               cont = route_r1(_ses->get_ref<bitset_c1_32>(addr).obj(), kb, depth, out, addr);
+            else if (t == bitset_c1_64::type_id)
+               cont = route_r1(_ses->get_ref<bitset_c1_64>(addr).obj(), kb, depth, out, addr);
+            else if (t == bitset_c1_128::type_id)
+               cont = route_r1(_ses->get_ref<bitset_c1_128>(addr).obj(), kb, depth, out, addr);
             else
                cont = route_r1(_ses->get_ref<full_radix_node>(addr).obj(), kb, depth, out, addr);
             if (!cont)
@@ -264,7 +273,7 @@ namespace heart::radix
       struct tier_counts
       {
          uint64_t leaf = 0, setlist = 0, setlist_w16 = 0, setlist_w32 = 0;
-         uint64_t bitset_r2 = 0, bitset_r4 = 0, full = 0;
+         uint64_t bitset_c1 = 0, bitset_r2 = 0, bitset_r4 = 0, full = 0;
          // compact_addresses sharing: branches / live cacheline bases across all bitset
          // segments (avg sharing factor s = cbranches / cbases; 1.0 = no sharing).
          uint64_t cbranches = 0, cbases = 0, csegs = 0;
@@ -381,6 +390,21 @@ namespace heart::radix
          {
             ++tc.setlist_w32;
             walk_kids<setlist_u32>(a, tc);
+         }
+         else if (t == bitset_c1_32::type_id)
+         {
+            ++tc.bitset_c1;
+            walk_kids<bitset_c1_32>(a, tc);
+         }
+         else if (t == bitset_c1_64::type_id)
+         {
+            ++tc.bitset_c1;
+            walk_kids<bitset_c1_64>(a, tc);
+         }
+         else if (t == bitset_c1_128::type_id)
+         {
+            ++tc.bitset_c1;
+            walk_kids<bitset_c1_128>(a, tc);
          }
          else if (t == bitset_r2_node::type_id)
          {
@@ -740,11 +764,44 @@ namespace heart::radix
             return np(int(floorcell));
          }
       };
+      template <class N>
+      struct C1Ad  // bitset_c1_*: cursor = present absolute byte (or 256 = end)
+      {
+         const N*                 p;
+         const sal::alloc_header* node() const { return reinterpret_cast<const sal::alloc_header*>(p); }
+         int                      np(int b) const  // smallest present byte >= b, else 256
+         {
+            const int bse = p->window_base();
+            const int nd  = p->next_present(b < bse ? 0 : b - bse);
+            return nd < 0 ? 256 : bse + nd;
+         }
+         bytes         prefix() const { return p->prefix(); }
+         smart_address term() const { return p->term_value(); }
+         int           cw() const { return 1; }
+         int           stem_width() const { return 1; }
+         int           first() const { return np(0); }
+         bool          valid(int c) const { return c < 256; }
+         int           next(int c) const { return np(c + 1); }
+         uint32_t      cell(int c) const { return uint32_t(c); }
+         smart_address branch(int c) const { return p->find(uint8_t(c)); }
+         int           lower(bytes r, bool& full, uint32_t& floorcell) const
+         {
+            full      = !r.empty();
+            floorcell = r.empty() ? 0u : uint32_t(r[0]);
+            return np(int(floorcell));
+         }
+      };
       // Dispatch `addr` to the right adaptor and invoke f(adaptor). f returns bool/void.
       template <class F>
       auto dispatch(ptr_address addr, F&& f)
       {
          const auto t = _ses->get_ref<sal::alloc_header>(addr)->type();
+         if (t == bitset_c1_32::type_id)
+            return f(C1Ad<bitset_c1_32>{_ses->get_ref<bitset_c1_32>(addr).obj()});
+         if (t == bitset_c1_64::type_id)
+            return f(C1Ad<bitset_c1_64>{_ses->get_ref<bitset_c1_64>(addr).obj()});
+         if (t == bitset_c1_128::type_id)
+            return f(C1Ad<bitset_c1_128>{_ses->get_ref<bitset_c1_128>(addr).obj()});
          if (t == setlist_u8::type_id)
             return f(SLAd<setlist_u8>{_ses->get_ref<setlist_u8>(addr).obj()});
          if (t == setlist_u16::type_id)

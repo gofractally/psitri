@@ -4,6 +4,7 @@
 #include <span>
 
 #include <heart/radix_bitset.hpp>
+#include <heart/radix_c1.hpp>
 #include <heart/radix_full.hpp>
 #include <heart/radix_node.hpp>
 #include <heart/radix_type_ids.hpp>

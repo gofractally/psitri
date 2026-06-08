@@ -606,15 +606,21 @@ namespace heart::radix
          return reinterpret_cast<const inline_value*>(reinterpret_cast<const char*>(node) +
                                                       node->size() - sa.tail_offset());
       }
-      // Allocate a terminal {suffix,value} attached to `addr`: a tail leaf in addr's
-      // heap (small; grows addr), else a SAL leaf pointer. Returns its smart_address.
+      // Tail bytes needed for an inline terminal {suffix,value}, or 0 if it spills to a SAL leaf.
+      static uint32_t value_tail_need(bytes suffix, bytes value) noexcept
+      {
+         return fits_inline(suffix, value)
+                    ? uint32_t(inline_value::byte_size(int(suffix.size()), int(value.size())))
+                    : 0;
+      }
+      // Write a terminal {suffix,value} INTO an already-writable node `n` — NO cow (the caller
+      // cow'd with value_tail_need() room). Small → a tail leaf in n's heap; else a SAL leaf.
       template <class N>
-      smart_address make_value(ptr_address& addr, bytes suffix, bytes value, sal::alloc_hint hint)
+      smart_address make_value_into(N* n, bytes suffix, bytes value, sal::alloc_hint hint)
       {
          if (fits_inline(suffix, value))
          {
             uint32_t need = uint32_t(inline_value::byte_size(int(suffix.size()), int(value.size())));
-            N*       n    = cow<N>(addr, need);
             auto*    iv   = reinterpret_cast<inline_value*>(n->alloc_tail(uint16_t(need)));
             iv->suffix_len = uint8_t(suffix.size());
             iv->value_len  = uint8_t(value.size());
@@ -625,6 +631,14 @@ namespace heart::radix
             return smart_address::from_tail(n->tail_used());
          }
          return smart_address::from_pointer(make_leaf(suffix, value, hint));
+      }
+      // Allocate a terminal attached to `addr`: cow (room for the value), then write it in.
+      // (Address overload for callers not threading a smart_ref.)
+      template <class N>
+      smart_address make_value(ptr_address& addr, bytes suffix, bytes value, sal::alloc_hint hint)
+      {
+         N* n = cow<N>(addr, value_tail_need(suffix, value));
+         return make_value_into<N>(n, suffix, value, hint);
       }
       // Zero-copy view of a terminal's {suffix,value} as raw bytes — a `bytes` overload of
       // the value_view term_view() the read path uses. No copy is needed: the node arena is
@@ -1606,8 +1620,12 @@ namespace heart::radix
       {
          const ptr_address addr_orig = addr;
          const uint32_t    depth0     = depth;  // where addr's region begins (for bucket collapse)
-         const N*          cn        = _ses->get_ref<N>(addr).obj();
-         bytes             pfx       = cn->prefix();
+         // Resolve the node ONCE and thread it by reference: cn covers every pre-COW read, and
+         // cow(ref, …) reuses it for an in-place mutation (no second get_ref). After a COW the
+         // ref is stale (clone → new address), so the post-COW writable `n` is used instead.
+         sal::smart_ref<N> ref = _ses->get_ref<N>(addr);
+         const N*          cn  = ref.obj();
+         bytes             pfx = cn->prefix();
          int               avail     = int(key.size() - depth);
          int               maxp      = std::min(int(pfx.size()), avail);
          int p = common_prefix_len(key.subspan(depth, size_t(maxp)), pfx.subspan(0, size_t(maxp)));
@@ -1627,14 +1645,14 @@ namespace heart::radix
 
          if (sa.is_null())  // new terminal at b
          {
-            // set_branch is the source of truth (a tail's compact base depends on its
-            // exact offset, so a probe can't predict it). Make the value, try to set;
-            // on failure widen (the value is re-made on the wider node). make_value
-            // may have COW'd addr to a clone — release that clone here (the caller
-            // releases the original), else it orphans.
+            // set_branch is the source of truth (a tail's compact base depends on its exact
+            // offset, so a probe can't predict it). COW ONCE (room for the inline value, ref
+            // threaded), write the value into that node, try to set; on failure widen (the value
+            // is re-made on the wider node). The COW may clone addr → release that clone here
+            // (the caller releases the original), else it orphans.
             const ptr_address pre = addr;
-            smart_address      sab = make_value<N>(addr, suf, val, chint);
-            N*                 n   = cow<N>(addr);
+            N*                 n   = cow<N>(ref, addr, value_tail_need(suf, val));
+            smart_address      sab = make_value_into<N>(n, suf, val, chint);
             bool               to_c1 = false;
             if constexpr (std::is_same_v<N, setlist_u8>)
                to_c1 = want_c1_promote(n, b);  // opt-in; reuses the tested grow_and_set widen path
@@ -1653,8 +1671,8 @@ namespace heart::radix
          // Is this branch a TERMINAL (an inline tail, or a pointer to a leaf_node)?
          if (is_terminal_branch(sa))
          {
-            bytes esuf, eval;  // zero-copy views into addr (stable arena, consumed pre-COW)
-            term_view(_ses->get_ref<N>(addr).obj(), sa, esuf, eval);
+            bytes esuf, eval;  // zero-copy views into the node (stable arena, consumed pre-COW)
+            term_view(cn, sa, esuf, eval);
             if (esuf.size() == suf.size() &&
                 std::memcmp(esuf.data(), suf.data(), esuf.size()) == 0)  // same key → update
             {
@@ -1677,7 +1695,7 @@ namespace heart::radix
             int           cp    = common_prefix_len(esuf, suf);
             ptr_address   child = make_collision_child(esuf, eval, suf, val, cp, chint);
             smart_address csa   = smart_address::from_pointer(child);
-            N*            n   = cow<N>(addr);
+            N*            n   = cow<N>(ref, addr);  // ref valid: make_collision_child didn't COW addr
             if (n->set_branch(b, csa))
             {
                if (sa.is_pointer())
@@ -1715,7 +1733,7 @@ namespace heart::radix
          if (nc != child)
          {
             smart_address nsab = smart_address::from_pointer(nc);
-            N*            n    = cow<N>(addr);
+            N*            n    = cow<N>(ref, addr);  // ref valid: the recursion didn't COW this node
             if (!n->set_branch(b, nsab))  // compact re-home failed → widen with the pointer
             {
                if constexpr (!std::is_same_v<N, full_radix_node>)
@@ -1814,8 +1832,8 @@ namespace heart::radix
 
          if (is_terminal_branch(sa))
          {
-            bytes esuf, eval;  // zero-copy views into addr (stable arena, consumed pre-COW)
-            term_view(_ses->get_ref<N>(addr).obj(), sa, esuf, eval);
+            bytes esuf, eval;  // zero-copy views into the node (stable arena, consumed pre-COW)
+            term_view(cn, sa, esuf, eval);
             if (esuf.size() == suf.size() &&
                 std::memcmp(esuf.data(), suf.data(), esuf.size()) == 0)  // same key → update
             {

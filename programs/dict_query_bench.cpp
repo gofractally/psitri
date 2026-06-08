@@ -118,12 +118,25 @@ int main(int argc, char** argv)
       }
       auto           m1     = now();
       const uint64_t expect = uint64_t(N) * (N - 1) / 2;
-      auto           tc     = t.count_tiers();
-      std::printf("  heart engine         : insert %6.1f   seq %6.1f   rand %6.1f   MISS %6.1f ns"
-                  "   [%s]  %llu objects\n",
+      // ITERATE: full forward scan via the engine's native (pinned + locked) cursor.
+      uint64_t isum = 0, icnt = 0;
+      auto     it0 = now();
+      {
+         heart::radix::radix_tree::cursor c(&t);
+         for (bool end = c.seek_begin(); !end; end = c.next())
+         {
+            isum += c.key().size();
+            ++icnt;
+         }
+      }
+      auto it1 = now();
+      (void)isum;
+      auto tc = t.count_tiers();
+      std::printf("  heart engine         : insert %6.1f   seq %6.1f   rand %6.1f   MISS %6.1f   "
+                  "ITER %5.1f ns   [%s]  %llu objects\n",
                   ns_per(el(i0, i1), N), ns_per(el(s0, s1), N), ns_per(el(r0, r1), N),
-                  ns_per(el(m0, m1), N),
-                  (seq == expect && rnd == expect && missfound == 0) ? "OK" : "MISMATCH",
+                  ns_per(el(m0, m1), N), ns_per(el(it0, it1), N),
+                  (seq == expect && rnd == expect && missfound == 0 && icnt == N) ? "OK" : "MISMATCH",
                   (unsigned long long)t.object_count());
       std::printf("    tiers: %llu leaf, %llu setlist, %llu c1, %llu r2, %llu r4, %llu full\n",
                   (unsigned long long)tc.leaf, (unsigned long long)tc.setlist,
@@ -283,12 +296,26 @@ int main(int argc, char** argv)
       }
       auto m1 = now();
 
+      // ITERATE: full forward scan, exactly psitri's native iterate_test pattern.
+      uint64_t icnt = 0;
+      auto     it0  = now();
+      {
+         psitri::cursor cur(rootp);
+         cur.seek_begin();
+         while (!cur.is_end())
+         {
+            ++icnt;
+            cur.next();
+         }
+      }
+      auto it1 = now();
+
       const uint64_t expect = uint64_t(N) * (N - 1) / 2;
-      std::printf("  psitri (1 tx)        : insert %6.1f   seq %6.1f   rand %6.1f   MISS %6.1f ns"
-                  "   [%s]\n",
+      std::printf("  psitri (1 tx)        : insert %6.1f   seq %6.1f   rand %6.1f   MISS %6.1f   "
+                  "ITER %5.1f ns   [%s]\n",
                   ns_per(el(i0, i1), N), ns_per(el(s0, s1), N), ns_per(el(r0, r1), N),
-                  ns_per(el(m0, m1), N),
-                  (seq == expect && rnd == expect && missfound == 0) ? "OK" : "MISMATCH");
+                  ns_per(el(m0, m1), N), ns_per(el(it0, it1), N),
+                  (seq == expect && rnd == expect && missfound == 0 && icnt == N) ? "OK" : "MISMATCH");
    }
 
    std::fflush(stdout);

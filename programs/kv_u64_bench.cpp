@@ -290,18 +290,18 @@ namespace
       }
       r.miss                = ns(m0, now(), N);
       const uint64_t expect = N * (N - 1) / 2;
-      // ITERATE: full forward scan via psitri's snapshot cursor (sums the 8-byte values).
+      // ITERATE: full forward scan, exactly psitri's native iterate_test pattern.
+      uint64_t iter_cnt = 0;
       {
-         uint64_t isum = 0, icnt = 0;
-         auto     i0 = now();
-         auto     c  = ses->get_root(0).snapshot_cursor();
-         for (bool end = c.seek_begin(); !end; end = c.next())
+         auto           i0 = now();
+         psitri::cursor cur(rootp);
+         cur.seek_begin();
+         while (!cur.is_end())
          {
-            isum += c.key().size();  // pure traversal: touch the key, no value access
-            ++icnt;
+            ++iter_cnt;
+            cur.next();
          }
-         r.iter = ns(i0, now(), icnt ? icnt : 1);
-         (void)isum;
+         r.iter = ns(i0, now(), iter_cnt ? iter_cnt : 1);
       }
       // REMOVE: per-batch transactions delete every key in keyfn order (ascending for the seq
       // keyfn = true sequential delete; scattered for random) — same cadence as heart.
@@ -328,7 +328,7 @@ namespace
          if (cur.get(psitri::key_view(reinterpret_cast<const char*>(&k), sizeof(k)), &val) >= 0)
             ++still;
       }
-      r.ok = (s == expect && q == expect && missfound == 0 && still == 0);
+      r.ok = (s == expect && q == expect && missfound == 0 && still == 0 && iter_cnt == N);
       return r;
    }
 

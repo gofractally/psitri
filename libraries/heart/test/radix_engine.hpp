@@ -164,40 +164,52 @@ namespace heart::radix
                                              : ref.as<bitset_r4_node>().obj()->term_value());
                return term_lookup(ref.obj(), tv, kb, depth, out);
             }
-            // R1: read CL0, dispatch by format (leaf value-holder / prefixed router).
-            auto t = _ses->get_ref<sal::alloc_header>(addr)->type();
-            if (t == leaf_node::type_id)
-               return leaf_read(addr, kb, depth, out);
-            if (t == bucket_node::type_id)  // a bucket LEAF: search its remaining-key suffix
-            {
-               const inline_value* iv =
-                   _ses->get_ref<bucket_node>(addr).obj()->find(kb.data() + depth,
-                                                                int(kb.size() - depth));
-               if (!iv)
-                  return false;
-               out = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len),
-                                iv->value_len);
-               return true;
-            }
+            // R1: read CL0, dispatch by format. The SAL type ids are contiguous, so this
+            // switch lowers to a JUMP TABLE (one indirect jump) rather than a compare chain
+            // — the data-dependent, mispredict-prone branch the per-hop dispatch turns on.
             bool cont;
-            if (t == setlist_u8::type_id)
-               cont = route_r1(_ses->get_ref<setlist_u8>(addr).obj(), kb, depth, out, addr);
-            else if (t == setlist_u16::type_id)
-               cont = route_r1(_ses->get_ref<setlist_u16>(addr).obj(), kb, depth, out, addr);
-            else if (t == setlist_u32::type_id)
-               cont = route_r1(_ses->get_ref<setlist_u32>(addr).obj(), kb, depth, out, addr);
-            else if (t == bitset_r2_node::type_id)
-               cont = route_r1(_ses->get_ref<bitset_r2_node>(addr).obj(), kb, depth, out, addr);
-            else if (t == bitset_r4_node::type_id)
-               cont = route_r1(_ses->get_ref<bitset_r4_node>(addr).obj(), kb, depth, out, addr);
-            else if (t == bitset_c1_32::type_id)
-               cont = route_r1(_ses->get_ref<bitset_c1_32>(addr).obj(), kb, depth, out, addr);
-            else if (t == bitset_c1_64::type_id)
-               cont = route_r1(_ses->get_ref<bitset_c1_64>(addr).obj(), kb, depth, out, addr);
-            else if (t == bitset_c1_128::type_id)
-               cont = route_r1(_ses->get_ref<bitset_c1_128>(addr).obj(), kb, depth, out, addr);
-            else
-               cont = route_r1(_ses->get_ref<full_radix_node>(addr).obj(), kb, depth, out, addr);
+            switch (unsigned(_ses->get_ref<sal::alloc_header>(addr)->type()))
+            {
+               case unsigned(leaf_node::type_id):
+                  return leaf_read(addr, kb, depth, out);
+               case unsigned(bucket_node::type_id):  // a bucket LEAF: search its key suffix
+               {
+                  const inline_value* iv = _ses->get_ref<bucket_node>(addr).obj()->find(
+                      kb.data() + depth, int(kb.size() - depth));
+                  if (!iv)
+                     return false;
+                  out = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len),
+                                   iv->value_len);
+                  return true;
+               }
+               case unsigned(setlist_u8::type_id):
+                  cont = route_r1(_ses->get_ref<setlist_u8>(addr).obj(), kb, depth, out, addr);
+                  break;
+               case unsigned(setlist_u16::type_id):
+                  cont = route_r1(_ses->get_ref<setlist_u16>(addr).obj(), kb, depth, out, addr);
+                  break;
+               case unsigned(setlist_u32::type_id):
+                  cont = route_r1(_ses->get_ref<setlist_u32>(addr).obj(), kb, depth, out, addr);
+                  break;
+               case unsigned(bitset_c1_32::type_id):
+                  cont = route_r1(_ses->get_ref<bitset_c1_32>(addr).obj(), kb, depth, out, addr);
+                  break;
+               case unsigned(bitset_c1_64::type_id):
+                  cont = route_r1(_ses->get_ref<bitset_c1_64>(addr).obj(), kb, depth, out, addr);
+                  break;
+               case unsigned(bitset_c1_128::type_id):
+                  cont = route_r1(_ses->get_ref<bitset_c1_128>(addr).obj(), kb, depth, out, addr);
+                  break;
+               case unsigned(bitset_r2_node::type_id):
+                  cont = route_r1(_ses->get_ref<bitset_r2_node>(addr).obj(), kb, depth, out, addr);
+                  break;
+               case unsigned(bitset_r4_node::type_id):
+                  cont = route_r1(_ses->get_ref<bitset_r4_node>(addr).obj(), kb, depth, out, addr);
+                  break;
+               default:  // full_radix
+                  cont = route_r1(_ses->get_ref<full_radix_node>(addr).obj(), kb, depth, out, addr);
+                  break;
+            }
             if (!cont)
                return _route_found;
          }

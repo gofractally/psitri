@@ -485,6 +485,13 @@ target_include_directories(kv-u64-bench PRIVATE ${CMAKE_SOURCE_DIR}/libraries/he
 target_compile_definitions(kv-u64-bench PRIVATE XXH_INLINE_ALL)
 set_target_properties(kv-u64-bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+# Engine-agnostic KV compatibility suite: one templated body run on heart AND psitri.
+add_executable(kv-compat-test programs/kv_compat_test.cpp)
+target_link_libraries(kv-compat-test PRIVATE psitri heart)
+target_include_directories(kv-compat-test PRIVATE ${CMAKE_SOURCE_DIR}/libraries/heart/test)
+target_compile_definitions(kv-compat-test PRIVATE XXH_INLINE_ALL)
+set_target_properties(kv-compat-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 # COW amortization benchmark
 add_executable(cow-amort-bench programs/cow_amort_bench.cpp third_party/libart/art.c)
 target_link_libraries(cow-amort-bench PRIVATE psitri absl::btree art)

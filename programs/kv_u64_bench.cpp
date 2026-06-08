@@ -45,7 +45,7 @@ namespace
 
    struct row
    {
-      double ins = 0, seq = 0, rnd = 0, miss = 0;
+      double ins = 0, seq = 0, rnd = 0, miss = 0, del = 0;
       bool   ok = false;
    };
 
@@ -180,6 +180,19 @@ namespace
                      tc.setlist ? double(tc.sl_tail_used) / double(tc.setlist) : 0.0,
                      (unsigned long long)tc.setlist);
       }
+      // REMOVE: delete every key (random order) → drains the tree back to empty.
+      auto d0 = now();
+      for (uint64_t i = 0; i < N; ++i)
+         t.remove(kspan(keyfn(order[i])));
+      r.del          = ns(d0, now(), N);
+      uint64_t still = 0;
+      for (uint64_t i = 0; i < N; ++i)
+      {
+         std::string_view v;
+         if (t.find(kspan(keyfn(i)), v))
+            ++still;
+      }
+      r.ok = r.ok && still == 0;
       return r;
    }
 
@@ -242,7 +255,29 @@ namespace
       }
       r.miss                = ns(m0, now(), N);
       const uint64_t expect = N * (N - 1) / 2;
-      r.ok                  = (s == expect && q == expect && missfound == 0);
+      // REMOVE: one transaction deletes every key (random order), then commit.
+      auto d0 = now();
+      {
+         auto tx = ses->start_transaction(0);
+         for (uint64_t i = 0; i < N; ++i)
+         {
+            uint64_t k = keyfn(order[i]);
+            tx.remove(psitri::key_view(reinterpret_cast<const char*>(&k), sizeof(k)));
+         }
+         tx.commit();
+      }
+      r.del          = ns(d0, now(), N);
+      auto     rootp2 = ses->get_root(0);
+      uint64_t still  = 0;
+      for (uint64_t i = 0; i < N; ++i)
+      {
+         uint64_t       k = keyfn(i);
+         psitri::cursor cur(rootp2);
+         std::string    val;
+         if (cur.get(psitri::key_view(reinterpret_cast<const char*>(&k), sizeof(k)), &val) >= 0)
+            ++still;
+      }
+      r.ok = (s == expect && q == expect && missfound == 0 && still == 0);
       return r;
    }
 
@@ -354,8 +389,8 @@ namespace
 
    void print_row(const char* name, row x)
    {
-      std::printf("    %-7s: insert %6.1f   seq %6.1f   rand %6.1f   MISS %6.1f ns   [%s]\n", name,
-                  x.ins, x.seq, x.rnd, x.miss, x.ok ? "OK" : "BAD");
+      std::printf("    %-7s: insert %6.1f   seq %6.1f   rand %6.1f   MISS %6.1f   REMOVE %6.1f ns   [%s]\n",
+                  name, x.ins, x.seq, x.rnd, x.miss, x.del, x.ok ? "OK" : "BAD");
    }
    void print_trio(const char* title, row e, row eb, row h, row p)
    {

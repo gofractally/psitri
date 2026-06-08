@@ -125,10 +125,10 @@ int main(int argc, char** argv)
                   ns_per(el(m0, m1), N),
                   (seq == expect && rnd == expect && missfound == 0) ? "OK" : "MISMATCH",
                   (unsigned long long)t.object_count());
-      std::printf("    tiers: %llu leaf, %llu setlist, %llu r2, %llu r4, %llu full\n",
+      std::printf("    tiers: %llu leaf, %llu setlist, %llu c1, %llu r2, %llu r4, %llu full\n",
                   (unsigned long long)tc.leaf, (unsigned long long)tc.setlist,
-                  (unsigned long long)tc.bitset_r2, (unsigned long long)tc.bitset_r4,
-                  (unsigned long long)tc.full);
+                  (unsigned long long)tc.bitset_c1, (unsigned long long)tc.bitset_r2,
+                  (unsigned long long)tc.bitset_r4, (unsigned long long)tc.full);
    }
 
    // ──────────────────────── new engine, BUCKET MODE ON (same harness) ──────────

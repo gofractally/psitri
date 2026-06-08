@@ -1080,6 +1080,12 @@ namespace heart::radix
             return router_insert<bitset_r2_node>(addr, key, depth, val, peer_hint);
          if (t == bitset_r4_node::type_id)
             return router_insert<bitset_r4_node>(addr, key, depth, val, peer_hint);
+         if (t == bitset_c1_32::type_id)
+            return router_insert<bitset_c1_32>(addr, key, depth, val, peer_hint);
+         if (t == bitset_c1_64::type_id)
+            return router_insert<bitset_c1_64>(addr, key, depth, val, peer_hint);
+         if (t == bitset_c1_128::type_id)
+            return router_insert<bitset_c1_128>(addr, key, depth, val, peer_hint);
          return router_insert<full_radix_node>(addr, key, depth, val, peer_hint);
       }
 
@@ -1679,6 +1685,75 @@ namespace heart::radix
          }
          return na;
       }
+      // Build a 1-CL narrow-window c1 node from `from`'s entries (+ setb) when they fit a
+      // [base, base+To::width) window with <= To::cap branches. Returns 0 (ok=false) if the
+      // key range is too wide or there are too many branches — the caller tries the next
+      // width, then R2. c1 carries no prefix, so a prefixed source can't upgrade to c1.
+      // Mirrors try_upgrade's tail-reinline / pointer-retain / setb-skip contract exactly.
+      template <class To, class From>
+      ptr_address try_upgrade_c1(ptr_address from, uint8_t setb, smart_address setsa, bytes suf,
+                                 bytes val, sal::alloc_hint hint, bool& ok)
+      {
+         ok             = false;
+         const From* cn = _ses->get_ref<From>(from).obj();
+         if (!cn->prefix().empty())
+            return ptr_address(0);  // c1 has no inline prefix
+         int lo = setb, hi = setb, n = 1;  // count the new branch being added
+         cn->for_each_entry([&](uint8_t byte, smart_address) {
+            lo = byte < lo ? byte : lo;
+            hi = byte > hi ? byte : hi;
+            ++n;
+         });
+         if (hi - lo >= To::width || n > To::cap)
+            return ptr_address(0);  // range too wide / too many branches → caller widens further
+         uint32_t need = ucc::round_up_multiple<sal::cacheline_size>(
+             To::head_bytes() + cn->tail_used() + tail_reserve + 64 + To::headroom);
+         ptr_address na = _ses->alloc<To>(need, hint, bytes{});
+         To*         nn = mut<To>(na);
+         nn->alloc_tail(tail_reserve);
+         nn->set_window_base(uint8_t(lo));
+         stamp<To>(na);
+         ok               = true;
+         smart_address tv = cn->term_value();
+         if (tv.is_tail())
+            nn->set_term_value(reinline<To>(nn, inline_of(cn, tv)));
+         else if (!tv.is_null())
+         {
+            nn->set_term_value(tv);
+            if (tv.is_pointer())
+               _ses->retain(tv.as_pointer());
+         }
+         cn->for_each_entry([&](uint8_t byte, smart_address br) {
+            if (!ok || byte == setb)
+               return;
+            if (br.is_tail())
+            {
+               if (!nn->set_branch(byte, reinline<To>(nn, inline_of(cn, br))))
+                  ok = false;
+            }
+            else if (!nn->set_branch(byte, br))
+               ok = false;
+            else if (br.is_pointer())
+               _ses->retain(br.as_pointer());
+         });
+         if (ok)
+         {
+            if (!setsa.is_null())
+               ok = nn->set_branch(setb, setsa);
+            else
+            {
+               smart_address sv = make_value<To>(na, suf, val, hint);
+               nn               = mut<To>(na);  // make_value may have grown na
+               ok               = nn->set_branch(setb, sv);
+            }
+         }
+         if (!ok)
+         {
+            _ses->release(na);
+            return ptr_address(0);
+         }
+         return na;
+      }
       // Returns a wider node holding all of `from`'s entries plus setb→(setsa | {suf,val}).
       // The CALLER releases `from` (so a snapshot still referencing it stays valid).
       template <class From>
@@ -1689,6 +1764,18 @@ namespace heart::radix
          ptr_address up;
          if constexpr (std::is_same_v<From, setlist_u8>)
          {
+            // Dense-in-a-narrow-range first: a 1-CL c1 window holds MORE than a setlist
+            // (23/22/20 vs ~19) and routes by popcount, not scan. Smallest window that
+            // fits wins; only a too-wide / too-populous range falls through to R2.
+            up = try_upgrade_c1<bitset_c1_32, From>(from, b, setsa, suf, val, hint, ok);
+            if (ok)
+               return up;
+            up = try_upgrade_c1<bitset_c1_64, From>(from, b, setsa, suf, val, hint, ok);
+            if (ok)
+               return up;
+            up = try_upgrade_c1<bitset_c1_128, From>(from, b, setsa, suf, val, hint, ok);
+            if (ok)
+               return up;
             up = try_upgrade<bitset_r2_node, From>(from, b, setsa, suf, val, hint, ok);
             if (ok)
                return up;

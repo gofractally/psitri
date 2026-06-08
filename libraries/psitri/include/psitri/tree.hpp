@@ -41,13 +41,15 @@ namespace psitri
       const sal::allocator_session_ptr& session() const noexcept { return _root.session(); }
       value_pin                         pin_values() const { return value_pin(_root.session()); }
       sal::ptr_address                  address() const noexcept { return _root.address(); }
-      sal::ptr_address                  ver() const noexcept { return _root.ver(); }
-      void                              set_ver(sal::ptr_address v) noexcept { _root.set_ver(v); }
-      sal::tree_id                      get_tree_id() const noexcept { return _root.get_tree_id(); }
+      // MVCC removed: a tree carries no version. ver() is always null, set_ver() a no-op,
+      // and the tree_id helpers pair the root with a null version for storage compatibility.
+      sal::ptr_address                  ver() const noexcept { return sal::null_ptr_address; }
+      void                              set_ver(sal::ptr_address) noexcept {}
+      sal::tree_id                      get_tree_id() const noexcept { return sal::tree_id{_root.address()}; }
       bool                              is_read_only() const noexcept { return _root.is_read_only(); }
       void                              release() noexcept { _root.release(); }
       sal::ptr_address                  take() noexcept { return _root.take(); }
-      sal::tree_id                      take_tree_id() noexcept { return _root.take_tree_id(); }
+      sal::tree_id                      take_tree_id() noexcept { return sal::tree_id{_root.take()}; }
       tree&                             give(sal::ptr_address adr) noexcept
       {
          _root.give(adr);

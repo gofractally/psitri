@@ -190,10 +190,10 @@ namespace psitri
          return sal::smart_ptr<sal::alloc_header>(this->_allocator_session, addr, retain);
       }
 
-      /// Create a reference-counted smart_ptr from a tree_id (root + ver).
+      /// Create a reference-counted smart_ptr from a tree_id (MVCC removed: root only, ver ignored).
       sal::smart_ptr<sal::alloc_header> make_ptr(sal::tree_id tid, bool retain = false)
       {
-         return sal::smart_ptr<sal::alloc_header>(this->_allocator_session, tid, retain);
+         return sal::smart_ptr<sal::alloc_header>(this->_allocator_session, tid.root, retain);
       }
 
       ///@}

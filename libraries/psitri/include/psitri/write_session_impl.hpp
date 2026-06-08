@@ -112,13 +112,7 @@ namespace psitri
    inline sal::smart_ptr<sal::alloc_header> basic_write_session<LockPolicy>::make_unique_root(
        sal::smart_ptr<sal::alloc_header> root)
    {
-      auto session   = this->_allocator_session;
-      auto ver_num   = this->_db->_dbm->global_version.fetch_add(1, std::memory_order_relaxed) + 1;
-      auto ver_adr   = session->alloc_custom_cb(ver_num);
-      auto prior_ver = root.ver();
-      root.set_ver(ver_adr);
-      if (prior_ver != sal::null_ptr_address)
-         session->release(prior_ver);
+      // MVCC removed: the working root carries no version. Identity (version == 0 everywhere).
       return root;
    }
 
@@ -174,19 +168,12 @@ namespace psitri
    /// (not the full modify_lock).  The root address is unchanged — only the
    /// version metadata in the root slot is swapped.
    template <class LockPolicy>
-   inline void basic_write_session<LockPolicy>::swap_root_ver(uint32_t root_index, uint64_t ver_num)
+   inline void basic_write_session<LockPolicy>::swap_root_ver(uint32_t root_index, uint64_t /*ver_num*/)
    {
-      auto ver_adr = this->_allocator_session->alloc_custom_cb(ver_num);
-
+      // MVCC removed: no version CB to swap. The fast path mutated the published
+      // node in place (address unchanged); re-publish the root to trigger the sync.
       std::lock_guard<typename LockPolicy::mutex_type> guard(this->_db->root_ver_lock(root_index));
-
-      auto root    = get_root(root_index);
-      auto old_ver = root.ver();
-      root.set_ver(ver_adr);
-      set_root(root_index, std::move(root), _sync);
-
-      if (old_ver != sal::null_ptr_address)
-         this->_allocator_session->release(old_ver);
+      set_root(root_index, get_root(root_index), _sync);
    }
 
    template <class LockPolicy>
@@ -196,35 +183,13 @@ namespace psitri
    {
       auto op_scope = this->_allocator_session->record_operation(
           sal::mapped_memory::session_operation::txn_upsert);
-      auto ver_num = this->_db->_dbm->global_version.fetch_add(1, std::memory_order_relaxed) + 1;
+      const uint64_t ver_num = 0;  // MVCC removed: single version (0) everywhere
       this->_db->maybe_publish_dead_versions_for_epoch(this->_db->_dbm->current_epoch_base());
 
-      // Fast path: stripe lock on target node (value_node or leaf).
-      // Handles existing-key cases (inline promotion and value_node append)
-      // plus same-leaf new-key inserts tagged by branch creation version.
-      {
-         auto ctx = make_tree_context(root_index);
-         ctx.set_root_version(ver_num);
-
-         auto target = ctx.find_versioned_write_target(key);
-         if (target != sal::null_ptr_address)
-         {
-            bool ok;
-            {
-               std::lock_guard<typename LockPolicy::mutex_type> guard(
-                   this->_db->stripe_mutex(target));
-               ok = ctx.try_upsert_at_version(key, value_type(value), ver_num);
-            }
-            if (ok)
-            {
-               swap_root_ver(root_index, ver_num);
-               return ver_num;
-            }
-            // Overflow — fall through to slow path
-         }
-      }
-
-      // Slow path: COW fallback (split, prefix mismatch, empty tree).
+      // MVCC removed → no fast path. The old stripe-locked fast path mutated a *published*
+      // node in place (safe only because per-txn versions isolated old snapshots). With a
+      // single version that would corrupt any node still shared by a snapshot / other root,
+      // so every write goes through COW-to-root (which mutates uniquely-owned nodes in place).
       auto&                                            lock = this->_db->modify_lock(root_index);
       std::lock_guard<typename LockPolicy::mutex_type> guard(lock);
 
@@ -235,15 +200,7 @@ namespace psitri
       ctx.upsert_at_version(key, value_type(value), ver_num);
 
       auto new_root = ctx.take_root();
-      auto old_ver  = new_root.ver();
-      auto ver_adr  = this->_allocator_session->alloc_custom_cb(ver_num);
-      new_root.set_ver(ver_adr);
-
       set_root(root_index, std::move(new_root), _sync);
-
-      if (old_ver != sal::null_ptr_address)
-         this->_allocator_session->release(old_ver);
-
       return ver_num;
    }
 
@@ -252,32 +209,10 @@ namespace psitri
    {
       auto op_scope = this->_allocator_session->record_operation(
           sal::mapped_memory::session_operation::txn_remove);
-      auto ver_num = this->_db->_dbm->global_version.fetch_add(1, std::memory_order_relaxed) + 1;
+      const uint64_t ver_num = 0;  // MVCC removed: single version (0) everywhere
       this->_db->maybe_publish_dead_versions_for_epoch(this->_db->_dbm->current_epoch_base());
 
-      // Fast path: stripe lock on target node (value_node or leaf).
-      {
-         auto ctx = make_tree_context(root_index);
-         ctx.set_root_version(ver_num);
-
-         auto target = ctx.find_versioned_write_target(key);
-         if (target != sal::null_ptr_address)
-         {
-            bool ok;
-            {
-               std::lock_guard<typename LockPolicy::mutex_type> guard(
-                   this->_db->stripe_mutex(target));
-               ok = ctx.try_remove_at_version(key, ver_num);
-            }
-            if (ok)
-            {
-               swap_root_ver(root_index, ver_num);
-               return ver_num;
-            }
-         }
-      }
-
-      // Slow path: COW fallback.
+      // MVCC removed → no fast path (see upsert): every write goes through COW-to-root.
       auto&                                            lock = this->_db->modify_lock(root_index);
       std::lock_guard<typename LockPolicy::mutex_type> guard(lock);
 
@@ -288,15 +223,7 @@ namespace psitri
       ctx.remove_at_version(key, ver_num);
 
       auto new_root = ctx.take_root();
-      auto old_ver  = new_root.ver();
-      auto ver_adr  = this->_allocator_session->alloc_custom_cb(ver_num);
-      new_root.set_ver(ver_adr);
-
       set_root(root_index, std::move(new_root), _sync);
-
-      if (old_ver != sal::null_ptr_address)
-         this->_allocator_session->release(old_ver);
-
       return ver_num;
    }
 

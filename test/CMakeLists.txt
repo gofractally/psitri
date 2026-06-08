@@ -44,9 +44,11 @@ add_executable(psitri-tests
     ../libraries/psitri/tests/dwal_tests.cpp
     ../libraries/psitri/tests/write_buffer_tests.cpp
     ../libraries/psitri/tests/value_node_tests.cpp
-    ../libraries/psitri/tests/mvcc_tests.cpp
     ../libraries/psitri/tests/live_range_map_tests.cpp
-    ../libraries/psitri/tests/per_txn_version_tests.cpp
+    # MVCC removed (single version 0 everywhere): these test multi-version snapshot
+    # isolation / per-txn versioning that no longer exists. Disabled, not deleted.
+    # ../libraries/psitri/tests/mvcc_tests.cpp
+    # ../libraries/psitri/tests/per_txn_version_tests.cpp
     test_dwal_cursor_visibility.cpp
 )
 target_link_libraries(psitri-tests

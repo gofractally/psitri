@@ -62,7 +62,9 @@ namespace psitri
       /// Takes ownership of the smart_ptr's reference count (the smart_ptr is consumed).
       void upsert(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
       {
-         auto tid = subtree_root.take_tree_id();  // release ownership without decrementing refs
+         // MVCC removed: a subtree value is just its root (ver dropped). Release ownership
+         // (take()) without decrementing refs — the stored value inherits the +1.
+         auto tid = sal::tree_id{subtree_root.take()};
          _ctx.upsert<upsert_mode::unique_upsert>(key, value_type::make_subtree(tid));
       }
 
@@ -74,7 +76,9 @@ namespace psitri
       /// Sorted variant of subtree upsert.
       void upsert_sorted(key_view key, sal::smart_ptr<sal::alloc_header> subtree_root)
       {
-         auto tid = subtree_root.take_tree_id();  // release ownership without decrementing refs
+         // MVCC removed: a subtree value is just its root (ver dropped). Release ownership
+         // (take()) without decrementing refs — the stored value inherits the +1.
+         auto tid = sal::tree_id{subtree_root.take()};
          _ctx.upsert<upsert_mode{upsert_mode::unique_upsert | upsert_mode::sorted_f}>(key, value_type::make_subtree(tid));
       }
 

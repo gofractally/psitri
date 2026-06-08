@@ -63,17 +63,8 @@ namespace psitri
       sal::smart_ptr<alloc_header> get_root() const { return _root; }
       sal::smart_ptr<alloc_header> take_root() { return std::move(_root); }
 
-      /// Per-txn version: read the version number from the working root's
-      /// ver custom CB. Returns 0 if no ver is attached (no active txn /
-      /// expect_failure that hasn't ensured a version yet). Cheap — one
-      /// load through the CB control block.
-      uint64_t txn_version() const noexcept
-      {
-         auto v = _root.ver();
-         if (v == sal::null_ptr_address)
-            return 0;
-         return _session.read_custom_cb(v);
-      }
+      /// Per-txn version: MVCC removed — always 0 (single version everywhere).
+      uint64_t txn_version() const noexcept { return 0; }
       tree_context(sal::smart_ptr<alloc_header> root)
           : _root(std::move(root)), _session(*(root.session()))
       {
@@ -3053,12 +3044,9 @@ namespace psitri
          return;
       }
 
-      if (try_upsert_at_version(key, value, version))
-         return;
-
-      // Prefix mismatch, stale structural freshness, overflow, or split.
-      // Fall back to the normal structural writer; snapshots remain protected
-      // by their older root while the new root carries this write version.
+      // MVCC removed: no in-place try (it mutated published/shared nodes, safe only with
+      // per-txn versions). Always COW-to-root — clones shared nodes, mutates unique ones in place.
+      (void)version;
       upsert<upsert_mode::unique_upsert>(key, std::move(value));
    }
 
@@ -3145,11 +3133,8 @@ namespace psitri
 
    inline void tree_context::remove_at_version(key_view key, uint64_t version)
    {
-      if (try_remove_at_version(key, version))
-         return;
-
-      // Stale structural freshness or an unsupported value-node layout needs
-      // the normal structural writer.
+      // MVCC removed: no in-place try; always COW-to-root.
+      (void)version;
       remove(key);
    }
 

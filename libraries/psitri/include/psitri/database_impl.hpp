@@ -146,33 +146,8 @@ namespace psitri
    template <class LockPolicy>
    void basic_database<LockPolicy>::recover_global_version_from_roots()
    {
-      auto     session     = _allocator.get_session();
-      uint64_t max_version = 0;
-      for (uint32_t i = 0; i < num_top_roots; ++i)
-      {
-         auto root = session->template get_root<>(sal::root_object_number(i));
-         auto ver  = root.ver();
-         if (ver == sal::null_ptr_address)
-            continue;
-
-         auto version_opt = session->try_read_custom_cb(ver);
-         if (!version_opt)
-            continue;
-
-         auto version = *version_opt;
-         if (version >= sal::control_block::max_cacheline_offset - 1)
-            continue;
-         max_version = std::max(max_version, version);
-      }
-
-      auto current = _dbm->global_version.load(std::memory_order_relaxed);
-      while (current < max_version &&
-             !_dbm->global_version.compare_exchange_weak(
-                 current, max_version, std::memory_order_relaxed,
-                 std::memory_order_relaxed))
-      {
-	      }
-	   }
+      // MVCC removed: roots carry no version, global_version stays 0. Nothing to recover.
+   }
 
 	   template <class LockPolicy>
 	   void basic_database<LockPolicy>::bootstrap_dead_versions_from_control_blocks()

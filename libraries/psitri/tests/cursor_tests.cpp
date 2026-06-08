@@ -658,8 +658,10 @@ TEST_CASE("cursor: count_keys matches manual iteration for random ranges", "[cur
    }
 }
 
+// MVCC removed (single version 0): old snapshots are no longer isolated from later writes,
+// so the snapshot-version expectations below no longer hold. Hidden ([.]) — not deleted.
 TEST_CASE("cursor: count_keys respects snapshot versions after insert and remove",
-          "[cursor][mvcc][count_keys]")
+          "[.][cursor][mvcc][count_keys]")
 {
    sal::set_current_thread_name("main");
    auto db_path = std::filesystem::path("count_keys_mvcc_versions_testdb");

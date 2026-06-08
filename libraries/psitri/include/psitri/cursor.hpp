@@ -350,15 +350,8 @@ namespace psitri
    }
    inline cursor::cursor(sal::smart_ptr<sal::alloc_header> n) : _node(std::move(n))
    {
-      // Inherit the snapshot's version from the smart_ptr's _ver. With
-      // per-txn versioning, value_node chains may carry entries at
-      // versions higher than this snapshot — the cursor must filter by
-      // its snapshot version to preserve isolation. If no _ver is
-      // attached (raw / pre-Phase-A roots), fall back to UINT64_MAX
-      // which means "see the latest entry."
-      if (_node.ver() != sal::null_ptr_address)
-         _version = _node.session()->read_custom_cb(_node.ver());
-
+      // MVCC removed: a single version (0) everywhere. _version keeps its default
+      // ("see the latest entry"); all version-0 entries are visible at any read version.
       _path_back         = _path.data();
       _path_back->branch = branch_number(-1);
       _key_len           = 0;
@@ -1113,13 +1106,14 @@ namespace psitri
       {
          auto val = l->get_value(_path_back->branch);
          // Construct smart_ptr with inc_ref=true — the leaf owns one ref, caller gets another.
-         return sal::smart_ptr<sal::alloc_header>(_node.session(), val.subtree_id(), true);
+         // MVCC removed: a subtree reference is just its root (ver dropped).
+         return sal::smart_ptr<sal::alloc_header>(_node.session(), val.subtree_id().root, true);
       }
       if (vt == leaf_node::value_type_flag::value_node)
       {
          auto ref = _node.session()->get_ref<value_node>(l->get_value_address(_path_back->branch));
          if (ref->is_subtree_container())
-            return sal::smart_ptr<sal::alloc_header>(_node.session(), ref->get_tree_id(), true);
+            return sal::smart_ptr<sal::alloc_header>(_node.session(), ref->get_tree_id().root, true);
       }
       return sal::smart_ptr<sal::alloc_header>(_node.session(), sal::null_ptr_address);
    }

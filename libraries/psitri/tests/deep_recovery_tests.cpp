@@ -166,9 +166,7 @@ TEST_CASE("full_verify recovery with diverse node types", "[recovery][full_verif
       auto db  = database::open(dir, open_mode::create_or_open, synced_config(), recovery_mode::full_verify);
       auto ses = db->start_read_session();
       verify_oracle(ses, 0, oracle);
-      auto root = ses->get_root(0);
-      REQUIRE(root.ver() != sal::null_ptr_address);
-      CHECK(root.session()->read_custom_cb(root.ver()) == 1);
+      // MVCC removed: roots carry no version (was: ver != null && version == 1).
    }
 
    std::filesystem::remove_all(dir);
@@ -198,9 +196,7 @@ TEST_CASE("power_loss recovery with diverse node types", "[recovery][power_loss]
       auto db  = database::open(dir, open_mode::create_or_open, synced_config(), recovery_mode::power_loss);
       auto ses = db->start_read_session();
       verify_oracle(ses, 0, oracle);
-      auto root = ses->get_root(0);
-      REQUIRE(root.ver() != sal::null_ptr_address);
-      CHECK(root.session()->read_custom_cb(root.ver()) == 1);
+      // MVCC removed: roots carry no version (was: ver != null && version == 1).
    }
 
    std::filesystem::remove_all(dir);
@@ -356,9 +352,7 @@ TEST_CASE("full_verify after insert-remove-reinsert cycles", "[recovery][full_ve
       auto db  = database::open(dir, open_mode::create_or_open, synced_config(), recovery_mode::full_verify);
       auto ses = db->start_read_session();
       verify_oracle(ses, 0, oracle);
-      auto root = ses->get_root(0);
-      REQUIRE(root.ver() != sal::null_ptr_address);
-      CHECK(root.session()->read_custom_cb(root.ver()) == 3);
+      // MVCC removed: roots carry no version (was: ver != null && version == 3).
    }
 
    std::filesystem::remove_all(dir);
@@ -418,9 +412,7 @@ TEST_CASE("power_loss after insert-remove-reinsert cycles", "[recovery][power_lo
       auto db  = database::open(dir, open_mode::create_or_open, synced_config(), recovery_mode::power_loss);
       auto ses = db->start_read_session();
       verify_oracle(ses, 0, oracle);
-      auto root = ses->get_root(0);
-      REQUIRE(root.ver() != sal::null_ptr_address);
-      CHECK(root.session()->read_custom_cb(root.ver()) == 2);
+      // MVCC removed: roots carry no version (was: ver != null && version == 2).
    }
 
    std::filesystem::remove_all(dir);

@@ -24,14 +24,8 @@ namespace psitri
    template <class LockPolicy>
    inline cursor basic_read_session<LockPolicy>::create_cursor(uint32_t root_index)
    {
-      auto root = get_root(root_index);
-      auto ver  = root.ver();
-      if (ver != sal::null_ptr_address)
-      {
-         uint64_t version = _allocator_session->read_custom_cb(ver);
-         return cursor(std::move(root), version);
-      }
-      return cursor(std::move(root));
+      // MVCC removed: no per-snapshot version; the cursor sees the single (version-0) state.
+      return cursor(get_root(root_index));
    }
 
    template <class LockPolicy>

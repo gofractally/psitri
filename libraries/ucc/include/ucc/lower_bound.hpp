@@ -626,4 +626,85 @@ namespace ucc
       return c;
 #endif
    }
+
+   /**
+    * Over-read variants of the above: identical results, but the final partial SIMD chunk
+    * is read in full and index-masked instead of handled by a scalar tail — fully
+    * branchless and measurably faster on the small arrays radix stems use (the scalar tail
+    * is the slow part). The caller MUST guarantee it is safe to read up to (lanes-1)
+    * elements past `n`: 3 for u32, 7 for u16. Radix setlist stems satisfy this — the branch
+    * array (and tail heap) immediately follow the stems within the same node allocation.
+    */
+   inline int lower_bound_u32_padded(const uint32_t* a, int n, uint32_t v) noexcept
+   {
+#if defined(__ARM_NEON)
+      uint32x4_t vv = vdupq_n_u32(v), acc = vdupq_n_u32(0);
+      int        i  = 0;
+      for (; i + 4 <= n; i += 4)
+         acc = vsubq_u32(acc, vcltq_u32(vld1q_u32(a + i), vv));
+      if (const int rem = n - i)
+      {
+         const uint32_t   id[4] = {0, 1, 2, 3};
+         const uint32x4_t valid = vcltq_u32(vld1q_u32(id), vdupq_n_u32(uint32_t(rem)));
+         acc = vsubq_u32(acc, vandq_u32(vcltq_u32(vld1q_u32(a + i), vv), valid));
+      }
+      return int(vaddvq_u32(acc));
+#else
+      return lower_bound_u32(a, n, v);
+#endif
+   }
+   inline int upper_bound_u32_padded(const uint32_t* a, int n, uint32_t v) noexcept
+   {
+#if defined(__ARM_NEON)
+      uint32x4_t vv = vdupq_n_u32(v), acc = vdupq_n_u32(0);
+      int        i  = 0;
+      for (; i + 4 <= n; i += 4)
+         acc = vsubq_u32(acc, vcleq_u32(vld1q_u32(a + i), vv));
+      if (const int rem = n - i)
+      {
+         const uint32_t   id[4] = {0, 1, 2, 3};
+         const uint32x4_t valid = vcltq_u32(vld1q_u32(id), vdupq_n_u32(uint32_t(rem)));
+         acc = vsubq_u32(acc, vandq_u32(vcleq_u32(vld1q_u32(a + i), vv), valid));
+      }
+      return int(vaddvq_u32(acc));
+#else
+      return upper_bound_u32(a, n, v);
+#endif
+   }
+   inline int lower_bound_u16_padded(const uint16_t* a, int n, uint16_t v) noexcept
+   {
+#if defined(__ARM_NEON)
+      uint16x8_t vv = vdupq_n_u16(v), acc = vdupq_n_u16(0);
+      int        i  = 0;
+      for (; i + 8 <= n; i += 8)
+         acc = vsubq_u16(acc, vcltq_u16(vld1q_u16(a + i), vv));
+      if (const int rem = n - i)
+      {
+         const uint16_t   id[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+         const uint16x8_t valid = vcltq_u16(vld1q_u16(id), vdupq_n_u16(uint16_t(rem)));
+         acc = vsubq_u16(acc, vandq_u16(vcltq_u16(vld1q_u16(a + i), vv), valid));
+      }
+      return int(vaddvq_u16(acc));
+#else
+      return lower_bound_u16(a, n, v);
+#endif
+   }
+   inline int upper_bound_u16_padded(const uint16_t* a, int n, uint16_t v) noexcept
+   {
+#if defined(__ARM_NEON)
+      uint16x8_t vv = vdupq_n_u16(v), acc = vdupq_n_u16(0);
+      int        i  = 0;
+      for (; i + 8 <= n; i += 8)
+         acc = vsubq_u16(acc, vcleq_u16(vld1q_u16(a + i), vv));
+      if (const int rem = n - i)
+      {
+         const uint16_t   id[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+         const uint16x8_t valid = vcltq_u16(vld1q_u16(id), vdupq_n_u16(uint16_t(rem)));
+         acc = vsubq_u16(acc, vandq_u16(vcleq_u16(vld1q_u16(a + i), vv), valid));
+      }
+      return int(vaddvq_u16(acc));
+#else
+      return upper_bound_u16(a, n, v);
+#endif
+   }
 }  // namespace ucc

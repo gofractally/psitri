@@ -786,3 +786,48 @@ TEST_CASE("u32/u16 lower_bound & upper_bound vs std", "[lower_bound][u32][u16]")
       }
    }
 }
+
+// The _padded over-read variants must match the plain ones (and std). Arrays are padded
+// so the final-chunk over-read (<=3 u32 / <=7 u16 past n) is in-bounds.
+TEST_CASE("u32/u16 lower/upper_bound _padded over-read variants vs std", "[lower_bound][padded]")
+{
+   std::mt19937 gen(31337);
+   SECTION("u32")
+   {
+      std::uniform_int_distribution<uint32_t> dist(0, 0xFFFFFFFFu);
+      for (int n = 0; n <= 40; ++n)
+      {
+         std::vector<uint32_t> a(n + 4, 0xFFFFFFFFu);  // 4 lanes of padding
+         for (int i = 0; i < n; ++i) a[i] = dist(gen);
+         std::sort(a.begin(), a.begin() + n);
+         auto probe = [&](uint32_t v) {
+            int lb = int(std::lower_bound(a.begin(), a.begin() + n, v) - a.begin());
+            int ub = int(std::upper_bound(a.begin(), a.begin() + n, v) - a.begin());
+            REQUIRE(ucc::lower_bound_u32_padded(a.data(), n, v) == lb);
+            REQUIRE(ucc::upper_bound_u32_padded(a.data(), n, v) == ub);
+         };
+         for (int i = 0; i < n; ++i) probe(a[i]);
+         for (int k = 0; k < 64; ++k) probe(dist(gen));
+         probe(0);
+      }
+   }
+   SECTION("u16")
+   {
+      std::uniform_int_distribution<int> dist(0, 0xFFFF);
+      for (int n = 0; n <= 40; ++n)
+      {
+         std::vector<uint16_t> a(n + 8, 0xFFFF);  // 8 lanes of padding
+         for (int i = 0; i < n; ++i) a[i] = uint16_t(dist(gen));
+         std::sort(a.begin(), a.begin() + n);
+         auto probe = [&](uint16_t v) {
+            int lb = int(std::lower_bound(a.begin(), a.begin() + n, v) - a.begin());
+            int ub = int(std::upper_bound(a.begin(), a.begin() + n, v) - a.begin());
+            REQUIRE(ucc::lower_bound_u16_padded(a.data(), n, v) == lb);
+            REQUIRE(ucc::upper_bound_u16_padded(a.data(), n, v) == ub);
+         };
+         for (int i = 0; i < n; ++i) probe(a[i]);
+         for (int k = 0; k < 64; ++k) probe(uint16_t(dist(gen)));
+         probe(0);
+      }
+   }
+}

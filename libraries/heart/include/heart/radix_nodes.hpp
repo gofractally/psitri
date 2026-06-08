@@ -163,35 +163,16 @@ namespace heart
       {
          return int(this->_prefix_length) + (nstems() + 1) * (stem_width + 4) <= int(index_cap());
       }
+      // Point lookup = lower_bound + equality. On the sorted stems this beats a dedicated
+      // exact-match SIMD scan for the small fan-outs radix nodes hold (the SIMD lower_bound
+      // scales with n; an exact 16-lane scan pays full width regardless), and unifies find
+      // with the insert/seek path on one primitive.
       smart_address find(StemType s) const noexcept
       {
-         const int n = nstems();
-         if constexpr (stem_width == 4)
-         {
-            // u32/u24 cells are contiguous 4-byte values right after the prefix, so a
-            // point lookup is an exact-match SIMD scan (ucc::find_u32x16, 16 lanes /
-            // instruction on NEON/AVX512/SSE2). find_u32x16 reads a full 16-lane (64 B)
-            // block; the bytes past the stems are this node's own branch/tail region
-            // (always >=64 B of slack from headroom), and any coincidental match there
-            // lands at index >= chunk and is discarded by the `< chunk` guard.
-            const uint32_t* stems =
-                reinterpret_cast<const uint32_t*>(this->prefix_data + this->_prefix_length);
-            for (int base = 0; base < n; base += 16)
-            {
-               const int chunk = n - base < 16 ? n - base : 16;
-               const int idx   = ucc::find_u32x16(stems + base, size_t(chunk), uint32_t(s));
-               if (idx < chunk)
-                  return branch_at(base + idx);
-            }
-            return smart_address::null();
-         }
-         else
-         {
-            for (int i = 0; i < n; ++i)
-               if (stem_at(i) == s)
-                  return branch_at(i);
-            return smart_address::null();
-         }
+         const int i = lower_bound_index(s);
+         if (i < nstems() && stem_at(i) == s)
+            return branch_at(i);
+         return smart_address::null();
       }
       bool branch_has_room(StemType s) const noexcept
       {
@@ -221,10 +202,12 @@ namespace heart
       {
          const int      n = nstems();
          const uint8_t* p = this->prefix_data + this->_prefix_length;
+         // _padded over-reads the final partial chunk (safe: the branch array follows the
+         // stems in-node) to stay fully branchless — fastest for these small arrays.
          if constexpr (stem_width == 4)
-            return ucc::lower_bound_u32(reinterpret_cast<const uint32_t*>(p), n, uint32_t(s));
+            return ucc::lower_bound_u32_padded(reinterpret_cast<const uint32_t*>(p), n, uint32_t(s));
          else if constexpr (stem_width == 2)
-            return ucc::lower_bound_u16(reinterpret_cast<const uint16_t*>(p), n, uint16_t(s));
+            return ucc::lower_bound_u16_padded(reinterpret_cast<const uint16_t*>(p), n, uint16_t(s));
          else
          {
             int lo = 0, hi = n;
@@ -245,9 +228,9 @@ namespace heart
          const int      n = nstems();
          const uint8_t* p = this->prefix_data + this->_prefix_length;
          if constexpr (stem_width == 4)
-            return ucc::upper_bound_u32(reinterpret_cast<const uint32_t*>(p), n, uint32_t(s));
+            return ucc::upper_bound_u32_padded(reinterpret_cast<const uint32_t*>(p), n, uint32_t(s));
          else if constexpr (stem_width == 2)
-            return ucc::upper_bound_u16(reinterpret_cast<const uint16_t*>(p), n, uint16_t(s));
+            return ucc::upper_bound_u16_padded(reinterpret_cast<const uint16_t*>(p), n, uint16_t(s));
          else
          {
             int lo = 0, hi = n;

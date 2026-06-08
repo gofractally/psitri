@@ -1210,61 +1210,62 @@ namespace heart::radix
       ptr_address re_stride_wide(ptr_address addr, int Wp, sal::alloc_hint hint)
       {
          ++_cc.restrides;
+         // `old` (the source) is read-only here and addr is not mutated/freed until the
+         // caller releases it, and the arena is address-stable, so we hold `old` and read
+         // it in place across the build allocations. Stems are stored SORTED, so we walk
+         // them in key order directly — no decode-all scratch array, no re-sort, no cap.
          const Src* old = _ses->get_ref<Src>(addr).obj();
-         int        W   = old->consume_width();
-         int        tw  = W - Wp;
-         int        n   = old->nstems();
+         const int  W   = old->consume_width();
+         const int  tw  = W - Wp;  // leftover stem bytes per entry (<=3: W<=4, Wp>=1)
+         const int  n   = old->nstems();
 
-         struct E { uint8_t b[4]; smart_address br; };
-         E es[768];  // max entries in a 4 KB node (u16: ~680 at 6 B/entry)
-         assert(n <= 768);
-         for (int i = 0; i < n; ++i)
-         {
-            uint32_t c = old->stem_at(i);  // left-justified in Src's cell
+         auto decode = [&](int i, uint8_t* b) {  // big-endian stem bytes of entry i (W bytes)
+            const uint32_t c = old->stem_at(i);
             for (int k = 0; k < W; ++k)
-               es[i].b[k] = uint8_t((c >> (8 * (Src::stem_width - 1 - k))) & 0xFF);
-            es[i].br = old->branch_at(i);
-         }
-         std::sort(es, es + n, [W](const E& x, const E& y) { return std::memcmp(x.b, y.b, W) < 0; });
+               b[k] = uint8_t((c >> (8 * (Src::stem_width - 1 - k))) & 0xFF);
+         };
 
-         ptr_address      na = make_wide_node(Wp, old->prefix(), hint,
-                                              old->head_size() + old->tail_used() + 64);
-         sal::header_type nt = _ses->get_ref<sal::alloc_header>(na)->type();
-         int              pcell = cell_width_for(Wp);
+         ptr_address      na    = make_wide_node(Wp, old->prefix(), hint,
+                                                 old->head_size() + old->tail_used() + 64);
+         sal::header_type nt    = _ses->get_ref<sal::alloc_header>(na)->type();
+         const int        pcell = cell_width_for(Wp);
 
-         smart_address term = _ses->get_ref<Src>(addr).obj()->term_value();
-         if (!term.is_null())
-         {
-            smart_address t = carry_value(na, nt, addr, term, hint);
-            set_term_of(na, nt, t);  // term carries (it's before the stride)
-         }
+         if (smart_address term = old->term_value(); !term.is_null())
+            set_term_of(na, nt, carry_value(na, nt, addr, term, hint));  // term is before the stride
 
-         int i = 0;
+         int     i = 0;
+         uint8_t bi[4], bj[4];
          while (i < n)
          {
+            decode(i, bi);
             int j = i + 1;
-            while (j < n && std::memcmp(es[i].b, es[j].b, size_t(Wp)) == 0)
-               ++j;
-            uint32_t pq = encode_cell(es[i].b, Wp, pcell);
-            bool single_inline = (j - i == 1) && is_terminal_branch(es[i].br);
-            if (single_inline)  // inline singleton: tail bytes ride into its suffix
+            for (; j < n; ++j)  // group entries sharing the high Wp bytes (sorted → contiguous)
             {
-               bytes suf, val;  // zero-copy views into addr (stable arena; addr live in loop)
-               term_view(_ses->get_ref<sal::alloc_header>(addr).obj(), es[i].br, suf, val);
-               uint8_t kb[540];
-               std::memcpy(kb, es[i].b + Wp, size_t(tw));
+               decode(j, bj);
+               if (std::memcmp(bi, bj, size_t(Wp)) != 0)
+                  break;
+            }
+            const uint32_t pq = encode_cell(bi, Wp, pcell);
+            if (j - i == 1 && is_terminal_branch(old->branch_at(i)))  // inline singleton
+            {
+               bytes suf, val;  // zero-copy views into `old` (stable arena, old stays live)
+               term_view(old, old->branch_at(i), suf, val);
+               uint8_t kb[4 + 256];  // tw (<=3) leftover stem bytes + inline suffix (len is u8)
+               std::memcpy(kb, bi + Wp, size_t(tw));
                std::memcpy(kb + tw, suf.data(), suf.size());
                add_inline(na, nt, pq, bytes{kb, size_t(tw) + suf.size()}, val, hint);
             }
             else  // group child (consumes the tw tail bytes)
             {
-               int              ccell = cell_width_for(tw);
+               const int        ccell = cell_width_for(tw);
                ptr_address      child = make_wide_node(tw, bytes{}, hint, uint32_t(j - i) * 16 + 64);
                sal::header_type ct    = _ses->get_ref<sal::alloc_header>(child)->type();
                for (int k = i; k < j; ++k)
                {
-                  uint32_t      cq = encode_cell(es[k].b + Wp, tw, ccell);
-                  smart_address cs = carry_value(child, ct, addr, es[k].br, hint);
+                  uint8_t bk[4];
+                  decode(k, bk);
+                  const uint32_t      cq = encode_cell(bk + Wp, tw, ccell);
+                  const smart_address cs = carry_value(child, ct, addr, old->branch_at(k), hint);
                   if (!is_terminal_branch(cs))  // a node pointer (carry_value retained it)
                      add_ptr(child, ct, cq, cs, hint);
                   else  // inline value already copied into child by carry_value → just set it
@@ -1363,7 +1364,7 @@ namespace heart::radix
          ptr_address dnode = addr;
          N*          d     = cow<N>(dnode);
          int         newpl = int(d->prefix_length()) - (p + 1);
-         uint8_t     pbuf[256];
+         uint8_t     pbuf[sal::cacheline_size];  // a prefix never exceeds prefix_capacity (<1 CL)
          std::memcpy(pbuf, d->prefix().data() + p + 1, size_t(newpl));
          reprefix<N>(d, bytes{pbuf, size_t(newpl)});
          stamp<N>(dnode);

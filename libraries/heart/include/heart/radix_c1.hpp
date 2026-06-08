@@ -59,26 +59,49 @@ namespace heart
       uint8_t window_base() const noexcept { return this->fixed.base; }
       void    set_window_base(uint8_t b) noexcept { this->fixed.base = b; }
 
-      // ── presence mask (byte-wise; width-uniform, no alignment hazard) ────────────
+      // ── presence mask: NATIVE-WORD popcount, not a byte loop ─────────────────────
+      // rank()/count() are the dispatch hot path, so they must be the single-instruction
+      // popcount the design intends (a byte-wise loop throws that away). The mask lives at
+      // a packed/unaligned offset, so the word is loaded with memcpy (an unaligned load).
       bool present(int d) const noexcept { return (this->fixed.mask[d >> 3] >> (d & 7)) & 1; }
       void set_present(int d) noexcept { this->fixed.mask[d >> 3] |= uint8_t(1u << (d & 7)); }
-      int  count() const noexcept
+      static uint64_t load64(const uint8_t* p) noexcept
       {
-         int c = 0;
-         for (int i = 0; i < Width / 8; ++i)
-            c += __builtin_popcount(this->fixed.mask[i]);
-         return c;
+         uint64_t w;
+         std::memcpy(&w, p, 8);
+         return w;
       }
-      // rank(d) = number of present bits strictly below window-index d (the dense
-      // branch slot for d). Full bytes below d/8 popcounted + the partial byte masked.
+      int count() const noexcept
+      {
+         if constexpr (Width == 32)
+         {
+            uint32_t m;
+            std::memcpy(&m, this->fixed.mask, 4);
+            return __builtin_popcount(m);
+         }
+         else if constexpr (Width == 64)
+            return __builtin_popcountll(load64(this->fixed.mask));
+         else
+            return __builtin_popcountll(load64(this->fixed.mask)) +
+                   __builtin_popcountll(load64(this->fixed.mask + 8));
+      }
+      // rank(d) = present bits strictly below window-index d (the dense branch slot).
+      // One masked popcount (two for the 128-window's high half) — no loop.
       int rank(int d) const noexcept
       {
-         int       r  = 0;
-         const int wb = d >> 3;
-         for (int i = 0; i < wb; ++i)
-            r += __builtin_popcount(this->fixed.mask[i]);
-         r += __builtin_popcount(this->fixed.mask[wb] & uint8_t((1u << (d & 7)) - 1));
-         return r;
+         if constexpr (Width == 32)
+         {
+            uint32_t m;
+            std::memcpy(&m, this->fixed.mask, 4);
+            return __builtin_popcount(m & ((1u << d) - 1u));
+         }
+         else if constexpr (Width == 64)
+            return __builtin_popcountll(load64(this->fixed.mask) & ((uint64_t(1) << d) - 1));
+         else  // 128: low word fully below 64; high word masked
+            return d < 64 ? __builtin_popcountll(load64(this->fixed.mask) & ((uint64_t(1) << d) - 1))
+                          : __builtin_popcountll(load64(this->fixed.mask)) +
+                                __builtin_popcountll(load64(this->fixed.mask + 8) &
+                                                     ((uint64_t(1) << (d - 64)) - 1));
       }
       // Smallest present window-index >= d, or -1 if none (ordered-walk helper).
       int next_present(int d) const noexcept

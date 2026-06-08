@@ -163,16 +163,26 @@ namespace heart
       {
          return int(this->_prefix_length) + (nstems() + 1) * (stem_width + 4) <= int(index_cap());
       }
-      // Point lookup = lower_bound + equality. On the sorted stems this beats a dedicated
-      // exact-match SIMD scan for the small fan-outs radix nodes hold (the SIMD lower_bound
-      // scales with n; an exact 16-lane scan pays full width regardless), and unifies find
-      // with the insert/seek path on one primitive.
+      // Point lookup. u8 uses a branchless LINEAR scan — on the small fan-outs radix nodes
+      // hold it beats binary search (no mispredicts), and dict is u8-dominated. u16/u32 use
+      // the SIMD lower_bound (lower_bound_index) + an equality check. (Earlier this was a
+      // unified lower_bound+eq, but that routed u8 through binary search and regressed dict
+      // random by ~12%.)
       smart_address find(StemType s) const noexcept
       {
-         const int i = lower_bound_index(s);
-         if (i < nstems() && stem_at(i) == s)
-            return branch_at(i);
-         return smart_address::null();
+         const int n = nstems();
+         if constexpr (stem_width == 1)
+         {
+            for (int i = 0; i < n; ++i)
+               if (stem_at(i) == s)
+                  return branch_at(i);
+            return smart_address::null();
+         }
+         else
+         {
+            const int i = lower_bound_index(s);
+            return (i < n && stem_at(i) == s) ? branch_at(i) : smart_address::null();
+         }
       }
       bool branch_has_room(StemType s) const noexcept
       {

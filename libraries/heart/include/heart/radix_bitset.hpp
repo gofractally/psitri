@@ -4,6 +4,7 @@
 
 #include <heart/bitset.hpp>
 #include <heart/compact_addresses.hpp>
+#include <heart/flat_addresses.hpp>
 #include <heart/radix_full.hpp>
 #include <sal/numbers.hpp>
 
@@ -30,13 +31,18 @@ namespace heart
     *
     * Trivially copyable — no constructors; call init() after placement.
     */
-   template <int Bits, int Size>
+   // `Addr` is the branch container (default compact_addresses; nodes may swap in
+   // flat_addresses — same API, same footprint — when cacheline sharing doesn't pay).
+   // The default uses `Bits/8` (== sizeof(bitset<Bits>)) rather than sizeof(bitset<Bits>)
+   // so naming radix_bitset<32,…> in split()/merge() signatures doesn't eagerly
+   // instantiate bitset<32> (which would trip bitset's "multiple of 64" assert).
+   template <int Bits, int Size, class Addr = compact_addresses<Size - Bits / 8>>
    struct radix_bitset
    {
       static constexpr int range = Bits;
 
       using present_type  = bitset<Bits>;
-      using branches_type = compact_addresses<Size - int(sizeof(bitset<Bits>))>;
+      using branches_type = Addr;
 
       present_type  present;
       branches_type branches;

@@ -260,6 +260,15 @@ namespace heart::radix
       {
          uint64_t leaf = 0, setlist = 0, setlist_w16 = 0, setlist_w32 = 0;
          uint64_t bitset_r2 = 0, bitset_r4 = 0, full = 0;
+         // compact_addresses sharing: branches / live cacheline bases across all bitset
+         // segments (avg sharing factor s = cbranches / cbases; 1.0 = no sharing).
+         uint64_t cbranches = 0, cbases = 0, csegs = 0;
+         // POINTER-only sharing (excludes inline-tail terminals, which can't co-locate):
+         // s_ptr = cptr / cptr_cl. ctail = inline-tail branches (local, not external CBs).
+         uint64_t cptr = 0, cptr_cl = 0, ctail = 0;
+         // Same breakdown for SETLIST nodes (sparse extreme; flat branches): pointer children
+         // co-location per node. s_setlist = slptr / slptr_cl.
+         uint64_t slptr = 0, slptr_cl = 0, sltail = 0;
       };
       tier_counts count_tiers()
       {
@@ -279,6 +288,67 @@ namespace heart::radix
       {
          _ses->get_ref<N>(a).obj()->for_each_child([&](ptr_address c) { walk(c, tc); });
       }
+      // Sum branches + live cacheline bases over a bitset node's non-empty segments —
+      // measures the real compact_addresses sharing factor (cbranches/cbases).
+      template <class N>
+      void accum_compact(ptr_address a, tier_counts& tc)
+      {
+         const N* n = _ses->get_ref<N>(a).obj();
+         for (int s = 0; s < N::nseg; ++s)
+         {
+            const auto& seg = n->seg(s);
+            const int   b   = seg.branches.size();
+            if (b == 0)
+               continue;
+            tc.cbranches += uint64_t(b);
+            tc.cbases += uint64_t(seg.branches.live_base_count());
+            ++tc.csegs;
+            // Classify each branch: inline tail (local) vs pointer (external CB). For
+            // pointers, count DISTINCT cachelines (raw>>4) to get true co-location.
+            uint32_t cls[256];
+            int      ncl = 0;
+            for (int i = 0; i < b; ++i)
+            {
+               const smart_address sa = seg.branches.at(i);
+               if (sa.is_tail())
+               {
+                  ++tc.ctail;
+                  continue;
+               }
+               ++tc.cptr;
+               const uint32_t cl = sa.raw >> 4;
+               bool           seen = false;
+               for (int j = 0; j < ncl; ++j)
+                  if (cls[j] == cl) { seen = true; break; }
+               if (!seen)
+                  cls[ncl++] = cl;
+            }
+            tc.cptr_cl += uint64_t(ncl);
+         }
+      }
+      // Pointer-child CB co-location for a setlist node (per node): distinct cachelines among
+      // its pointer children vs pointer count. s_setlist = slptr / slptr_cl.
+      template <class N>
+      void accum_setlist(ptr_address a, tier_counts& tc)
+      {
+         uint32_t cls[64];
+         int      ncl = 0;
+         _ses->get_ref<N>(a).obj()->for_each_entry([&](auto, smart_address br) {
+            if (br.is_tail())
+            {
+               ++tc.sltail;
+               return;
+            }
+            ++tc.slptr;
+            const uint32_t cl = br.raw >> 4;
+            for (int j = 0; j < ncl; ++j)
+               if (cls[j] == cl)
+                  return;
+            if (ncl < 64)
+               cls[ncl++] = cl;
+         });
+         tc.slptr_cl += uint64_t(ncl);
+      }
       void walk(ptr_address a, tier_counts& tc)
       {
          auto t = _ses->get_ref<sal::alloc_header>(a)->type();
@@ -287,6 +357,7 @@ namespace heart::radix
          else if (t == setlist_u8::type_id)
          {
             ++tc.setlist;
+            accum_setlist<setlist_u8>(a, tc);
             walk_kids<setlist_u8>(a, tc);
          }
          else if (t == setlist_u16::type_id)
@@ -302,11 +373,13 @@ namespace heart::radix
          else if (t == bitset_r2_node::type_id)
          {
             ++tc.bitset_r2;
+            accum_compact<bitset_r2_node>(a, tc);
             walk_kids<bitset_r2_node>(a, tc);
          }
          else if (t == bitset_r4_node::type_id)
          {
             ++tc.bitset_r4;
+            accum_compact<bitset_r4_node>(a, tc);
             walk_kids<bitset_r4_node>(a, tc);
          }
          else

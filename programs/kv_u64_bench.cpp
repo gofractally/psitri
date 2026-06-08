@@ -168,6 +168,14 @@ namespace
                      tag, (unsigned long long)tc.leaf, (unsigned long long)tc.setlist,
                      (unsigned long long)tc.bitset_r2, (unsigned long long)tc.bitset_r4,
                      (unsigned long long)tc.full, (unsigned long long)t.object_count());
+         std::printf("    [%s bitset: ptr %llu / %llu CLs (s_ptr=%.2f) | tails %llu]\n",
+                     tag, (unsigned long long)tc.cptr, (unsigned long long)tc.cptr_cl,
+                     tc.cptr_cl ? double(tc.cptr) / double(tc.cptr_cl) : 0.0,
+                     (unsigned long long)tc.ctail);
+         std::printf("    [%s setlist: ptr %llu / %llu CLs (s_setlist=%.2f) | tails %llu]\n",
+                     tag, (unsigned long long)tc.slptr, (unsigned long long)tc.slptr_cl,
+                     tc.slptr_cl ? double(tc.slptr) / double(tc.slptr_cl) : 0.0,
+                     (unsigned long long)tc.sltail);
       }
       return r;
    }

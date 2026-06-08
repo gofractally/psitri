@@ -381,7 +381,10 @@ namespace heart
       static constexpr int              seg_shift     = SegShift;
       static constexpr int              seg_width     = 1 << SegShift;
       static constexpr int              seg_mask      = seg_width - 1;
-      using segment                                   = radix_bitset<seg_width, 128>;
+      // FLAT branches (no cacheline-base dedup): measured pointer sharing (1.3-1.55) is
+      // below break-even and 94% of branches are un-shareable inline tails, so flat holds
+      // MORE per segment (27/29 vs compact's scattered 16), uncapped, with no decode.
+      using segment = radix_bitset<seg_width, 128, flat_addresses<128 - (seg_width / 8)>>;
 
       segment segs[nseg];  // @128, @256, ... one cacheline each
 

@@ -1086,7 +1086,7 @@ void read_version_metadata(const fs::path& db_dir, dashboard_snapshot& s)
                s.active_root_address_available = true;
                s.active_root_index             = i;
                s.active_root_address           = *tid.root;
-               s.active_root_version_address   = *tid.ver;
+               s.active_root_version_address   = *sal::null_ptr_address;  // MVCC removed
                s.active_root_record_version    = root_version;
             }
             const uint64_t root_check =

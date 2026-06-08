@@ -113,14 +113,9 @@ namespace psitri::dwal
          // If we're replacing another subtree entry, drop the old refs first.
          release_prior_subtree_if_any(key);
 
-         // Retain root + ver so our map slot owns one refcount each.
-         if (alloc)
-         {
-            if (tid.root != sal::null_ptr_address)
-               alloc->retain(tid.root);
-            if (tid.ver != sal::null_ptr_address)
-               alloc->retain(tid.ver);
-         }
+         // Retain root so our map slot owns one refcount (MVCC removed: no ver).
+         if (alloc && tid.root != sal::null_ptr_address)
+            alloc->retain(tid.root);
 
          map.upsert(key, btree_value::make_subtree(tid));
       }
@@ -160,8 +155,6 @@ namespace psitri::dwal
             {
                if (v.subtree.root != sal::null_ptr_address)
                   alloc->release(v.subtree.root);
-               if (v.subtree.ver != sal::null_ptr_address)
-                  alloc->release(v.subtree.ver);
                v.subtree = sal::null_tree_id;
             }
          }
@@ -179,8 +172,6 @@ namespace psitri::dwal
          {
             if (v->subtree.root != sal::null_ptr_address)
                alloc->release(v->subtree.root);
-            if (v->subtree.ver != sal::null_ptr_address)
-               alloc->release(v->subtree.ver);
             v->subtree = sal::null_tree_id;
          }
       }

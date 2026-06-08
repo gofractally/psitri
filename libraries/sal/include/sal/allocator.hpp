@@ -327,7 +327,7 @@ namespace sal
       ///@{
 
       /**
-       * Caller is responsible for releasing the returned tree_id (both root and ver).
+       * Caller is responsible for releasing the returned tree_id's root.
        */
       [[nodiscard]] tree_id get(root_object_number ro) noexcept
       {
@@ -337,14 +337,12 @@ namespace sal
          SAL_TRACE("get root object: {} adr: {}", ro, tid.root);
          if (tid.root != null_ptr_address)
             retain(tid.root);
-         if (tid.ver != null_ptr_address)
-            retain(tid.ver);
          return tid;
       }
 
       /**
-       * Caller is responsible for *giving* a valid reference (both root and ver),
-       * and releasing the returned tree_id.
+       * Caller is responsible for *giving* a valid root reference,
+       * and releasing the returned tree_id's root.
        */
       [[nodiscard]] tree_id set(root_object_number ro,
                                 tree_id            tid,

@@ -136,8 +136,6 @@ namespace sal
 
       assert(from.ref() == 1);
 
-      auto l = from.loc();
-
       auto [loc, node_ptr] =
           alloc_data<To>(size, from->address_seq(), std::forward<decltype(args)>(args)...);
       assert(loc != from.loc());
@@ -416,19 +414,16 @@ namespace sal
    smart_ptr<T> allocator_session::get_root(root_object_number ro) noexcept
    {
       auto tid = _sega.get(ro);
-      assert(tid.ver == null_ptr_address && "version removed: root slots must be version-free");
       return smart_ptr<T>(allocator_session_ptr(this, true), tid.root, false);
    }
 
    inline sync_root_info make_sync_root_info(
-       const allocator_session& session,
+       const allocator_session& /*session*/,
        root_object_number       ro,
        tree_id                  tid) noexcept
    {
-      sync_root_info info{*ro, *tid.root, *tid.ver, 0};
-      if (tid.ver != null_ptr_address)
-         info.root_version = session.read_custom_cb(tid.ver);
-      return info;
+      // MVCC removed: no version CB / version number — a version-free sync record.
+      return sync_root_info{*ro, *tid.root, *null_ptr_address, 0};
    }
 
    template <typename T>
@@ -436,11 +431,10 @@ namespace sal
                                                    smart_ptr<T>       ptr,
                                                    sync_type          st) noexcept
    {
-      tree_id new_tid{ptr.take(), null_ptr_address};
+      tree_id new_tid{ptr.take()};
       auto root_info = make_sync_root_info(*this, ro, new_tid);
       sync(st, _sega._mapped_state->_config, root_info);
       auto old_tid = _sega.set(ro, new_tid, st, root_info.root_version);
-      assert(old_tid.ver == null_ptr_address && "version removed: root slots must be version-free");
       return smart_ptr<T>(allocator_session_ptr(this, true), old_tid.root, false);
    }
 
@@ -450,8 +444,8 @@ namespace sal
                                                    smart_ptr<U>       desired,
                                                    sync_type          st) noexcept
    {
-      tree_id expect_tid{expect.address(), null_ptr_address};
-      tree_id desired_tid{desired.address(), null_ptr_address};
+      tree_id expect_tid{expect.address()};
+      tree_id desired_tid{desired.address()};
       auto    root_info = make_sync_root_info(*this, ro, desired_tid);
       if (_sega.cas_root(ro, expect_tid, desired_tid, st,
                          root_info.root_version,
@@ -482,12 +476,11 @@ namespace sal
        smart_ptr<alloc_header> desired,
                                                    sync_type               st) noexcept
    {
-      tree_id new_tid{desired.take(), null_ptr_address};
+      tree_id new_tid{desired.take()};
       auto root_info = make_sync_root_info(*this, ro, new_tid);
       sync(st, _sega._mapped_state->_config, root_info);
       auto old_tid =
           _sega.transaction_commit(ro, new_tid, st, root_info.root_version);
-      assert(old_tid.ver == null_ptr_address && "version removed: root slots must be version-free");
       return smart_ptr<alloc_header>(get_session_ptr(), old_tid.root, false);
    }
    inline void allocator_session::transaction_abort(root_object_number ro) noexcept

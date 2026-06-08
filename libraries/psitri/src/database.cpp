@@ -825,10 +825,7 @@ namespace psitri::detail
             continue;
 
          ++result.roots_checked;
-         if (tid.ver == sal::null_ptr_address)
-            ++result.roots_without_version;
-         else
-            ++result.roots_with_version;
+         ++result.roots_without_version;  // MVCC removed: roots never carry a version
 
          if (options.has_key_range())
             collect_tree_stats_node_range(alloc, tid.root, 1, {}, {}, std::nullopt,
@@ -844,12 +841,9 @@ namespace psitri::detail
 
    namespace
    {
-      uint64_t tree_version(const sal::allocator_session_ptr& session, sal::tree_id tid) noexcept
+      uint64_t tree_version(const sal::allocator_session_ptr& /*session*/, sal::tree_id /*tid*/) noexcept
       {
-         if (tid.ver == sal::null_ptr_address)
-            return 0;
-         auto version = session->try_read_custom_cb(tid.ver);
-         return version ? *version : 0;
+         return 0;  // MVCC removed: trees carry no version.
       }
 
       void record_version(std::unordered_set<uint64_t>& versions, uint64_t version)

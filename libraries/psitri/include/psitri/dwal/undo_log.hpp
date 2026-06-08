@@ -200,8 +200,6 @@ namespace psitri::dwal
                 entry.old_value.is_subtree())
             {
                release_fn(entry.old_value.subtree.root);
-               if (entry.old_value.subtree.ver != sal::null_ptr_address)
-                  release_fn(entry.old_value.subtree.ver);
             }
             if (entry.type == undo_entry::kind::erase_range && entry.range)
             {
@@ -210,8 +208,6 @@ namespace psitri::dwal
                   if (be.old_value.is_subtree())
                   {
                      release_fn(be.old_value.subtree.root);
-                     if (be.old_value.subtree.ver != sal::null_ptr_address)
-                        release_fn(be.old_value.subtree.ver);
                   }
                }
             }

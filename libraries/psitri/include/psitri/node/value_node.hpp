@@ -821,8 +821,6 @@ namespace psitri
                {
                   tree_id tid = get_stored_tree_id(off);
                   lam(tid.root);
-                  if (tid.ver != sal::null_ptr_address)
-                     lam(tid.ver);
                }
             }
          }
@@ -847,8 +845,6 @@ namespace psitri
                {
                   tree_id tid = get_stored_tree_id(off);
                   visitor(tid.root);
-                  if (tid.ver != sal::null_ptr_address)
-                     visitor(tid.ver);
                }
             }
          }
@@ -874,8 +870,6 @@ namespace psitri
                {
                   tree_id tid = get_stored_tree_id(off);
                   session->release(tid.root);
-                  if (tid.ver != sal::null_ptr_address)
-                     session->release(tid.ver);
                }
             }
          }
@@ -971,8 +965,6 @@ namespace psitri
 
          tree_id tid = get_stored_tree_id(off);
          if (!pending.push(tid.root))
-            return false;
-         if (tid.ver != sal::null_ptr_address && !pending.push(tid.ver))
             return false;
          return true;
       }

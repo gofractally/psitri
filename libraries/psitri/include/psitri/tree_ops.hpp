@@ -163,8 +163,6 @@ namespace psitri
             auto tid = value.subtree_id();
             if (tid.root != sal::null_ptr_address)
                _session.release(tid.root);
-            if (tid.ver != sal::null_ptr_address)
-               _session.release(tid.ver);
          }
       }
 

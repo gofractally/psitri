@@ -138,8 +138,8 @@ namespace sal
       std::vector<uint64_t> _versions;
    };
 
-   static constexpr uint64_t recovered_custom_cb_latest_version =
-      control_block::max_cacheline_offset - 1;
+   // MVCC removed: recovered_custom_cb_latest_version (used only by the old version-CB
+   // reconstruction) is gone.
 
    /// Set to true to enable compactor timing and unpinned-segment diagnostics.
    /// When false, all instrumentation is compiled out by the optimizer.
@@ -551,22 +551,7 @@ namespace sal
             auto& src_root = (*_root_objects)[i];
             auto& dst_root = (*dest._root_objects)[i];
             dst_root.copy_from(src_root);
-
-            // Copy custom CBs (ver_adr) referenced by root slots
-            auto tid = src_root.load(std::memory_order_relaxed);
-            if (tid.ver != null_ptr_address)
-            {
-               auto* cb = _ptr_alloc.try_get(tid.ver);
-               if (cb)
-               {
-                  auto data = cb->load(std::memory_order_relaxed);
-                  if (allocator_session::is_custom_cb(data))
-                  {
-                     auto& dst_cb = dest._ptr_alloc.get_or_alloc(tid.ver);
-                     dst_cb.store(data, std::memory_order_relaxed);
-                  }
-               }
-            }
+            // MVCC removed: root slots carry no version CB to copy.
          }
       }  // dest session released here, active segment finalized
 
@@ -649,8 +634,6 @@ namespace sal
          auto tid = _root_objects->at(i).load(std::memory_order_relaxed);
          if (tid.root != null_ptr_address)
             recursive_sum_size(tid.root, total, &visited);
-         if (tid.ver != null_ptr_address)
-            recursive_sum_size(tid.ver, total, &visited);
       }
       return total;
    }
@@ -828,29 +811,9 @@ namespace sal
       return results;
    }
 
-   void allocator::reconstruct_custom_cbs_from_roots(const void* recovered_versions_ptr)
+   void allocator::reconstruct_custom_cbs_from_roots(const void* /*recovered_versions_ptr*/)
    {
-      const auto* recovered_versions =
-          static_cast<const recovery_version_index*>(recovered_versions_ptr);
-
-      for (uint32_t i = 0; i < _root_objects->size(); ++i)
-      {
-         auto tid = _root_objects->at(i).load(std::memory_order_relaxed);
-         if (tid.ver != null_ptr_address)
-         {
-            auto& cb = _ptr_alloc.get_or_alloc(tid.ver);
-            auto version = recovered_versions ? recovered_versions->version_for(tid.ver) : 0;
-            if (version == 0)
-               version = _root_objects->at(i).version_for(tid);
-            if (version == 0)
-               version = recovered_custom_cb_latest_version;
-            cb.store(control_block_data()
-                         .set_ref(1)
-                         .set_pending_cache(true)
-                         .set_loc(location::from_cacheline(version)),
-                     std::memory_order_relaxed);
-         }
-      }
+      // MVCC removed: root slots carry no version CB, so there is nothing to reconstruct.
    }
 
    void allocator::recover()
@@ -950,8 +913,6 @@ namespace sal
          auto tid = _root_objects->at(i).load(std::memory_order_relaxed);
          if (tid.root != null_ptr_address)
             recursive_retain_all(tid.root, &visited);
-         if (tid.ver != null_ptr_address)
-            recursive_retain_all(tid.ver, &visited);
       }
 
       // Phase 5: Free leaked objects
@@ -1017,8 +978,6 @@ namespace sal
          auto tid = _root_objects->at(i).load(std::memory_order_relaxed);
          if (tid.root != null_ptr_address)
             recursive_retain_all(tid.root, &visited);
-         if (tid.ver != null_ptr_address)
-            recursive_retain_all(tid.ver, &visited);
       }
 
       _ptr_alloc.release_unreachable();
@@ -1228,8 +1187,8 @@ namespace sal
             auto resolved = resolve(ptr_address(entry.root_address));
             if (resolved.first)
             {
-               auto recovered_tid =
-                   tree_id(ptr_address(entry.root_address), ptr_address(entry.version_address));
+               // MVCC removed: recover root only (version_address is ignored / always null).
+               auto recovered_tid = tree_id(ptr_address(entry.root_address));
                _root_objects->at(entry.root_index)
                    .store(recovered_tid, entry.root_version, std::memory_order_relaxed);
                root_set[entry.root_index] = true;
@@ -1278,8 +1237,6 @@ namespace sal
          auto tid = _root_objects->at(i).load(std::memory_order_relaxed);
          if (tid.root != null_ptr_address)
             recursive_retain_all(tid.root, &visited);
-         if (tid.ver != null_ptr_address)
-            recursive_retain_all(tid.ver, &visited);
       }
 
       // Phase 7: Free leaked objects

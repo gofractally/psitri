@@ -14,24 +14,20 @@ namespace sal
    using ptr_address                             = ucc::typed_int<uint32_t, struct ptr_address_tag>;
    static constexpr ptr_address null_ptr_address = ptr_address(-1u);
 
-   /// A tree reference: the root node address paired with a version control
-   /// block address. The version number (41 bits) is stored in the ver
-   /// control block's cacheline_offset field. Two u32 ptr_addresses pack
-   /// into a single u64 for atomic load/store.
+   /// A tree reference: just the root node address (MVCC removed — the version
+   /// half was dropped). Kept as a distinct type (not a bare ptr_address) for
+   /// call-site clarity and because the root-object slot packs it into its
+   /// atomic u64 via pack()/unpack() (root in the low 32 bits, high 32 unused).
    struct tree_id
    {
       ptr_address root;
-      ptr_address ver;
 
-      constexpr tree_id() noexcept : root(null_ptr_address), ver(null_ptr_address) {}
-      constexpr tree_id(ptr_address r, ptr_address v = null_ptr_address) noexcept : root(r), ver(v) {}
+      constexpr tree_id() noexcept : root(null_ptr_address) {}
+      constexpr tree_id(ptr_address r) noexcept : root(r) {}
 
-      /// Pack into u64 for atomic load/store (root in low 32, ver in high 32)
-      uint64_t pack() const noexcept { return uint64_t(*root) | (uint64_t(*ver) << 32); }
-      static tree_id unpack(uint64_t packed) noexcept
-      {
-         return {ptr_address(uint32_t(packed)), ptr_address(uint32_t(packed >> 32))};
-      }
+      /// Pack into u64 for atomic load/store (root in low 32, high 32 = 0).
+      uint64_t pack() const noexcept { return uint64_t(*root); }
+      static tree_id unpack(uint64_t packed) noexcept { return {ptr_address(uint32_t(packed))}; }
 
       bool is_valid() const noexcept { return root != null_ptr_address; }
 

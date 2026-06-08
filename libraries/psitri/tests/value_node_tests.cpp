@@ -129,7 +129,7 @@ TEST_CASE("value_node large value", "[value_node]")
 
 TEST_CASE("value_node subtree value", "[value_node]")
 {
-   sal::tree_id tid{psitri::ptr_address(42), psitri::ptr_address(99)};
+   sal::tree_id tid{psitri::ptr_address(42)};  // MVCC removed: root-only tree_id
    auto         vt = psitri::value_type::make_subtree(tid);
    auto         node = create_value_node(vt);
 
@@ -144,22 +144,20 @@ TEST_CASE("value_node subtree value", "[value_node]")
    {
       auto result = node->get_tree_id();
       CHECK(result.root == psitri::ptr_address(42));
-      CHECK(result.ver == psitri::ptr_address(99));
    }
 
    SECTION("visit_branches yields tree_id addresses")
    {
       std::vector<psitri::ptr_address> visited;
       node->visit_branches([&](psitri::ptr_address addr) { visited.push_back(addr); });
-      REQUIRE(visited.size() == 2);
-      CHECK(visited[0] == psitri::ptr_address(42));  // root
-      CHECK(visited[1] == psitri::ptr_address(99));  // ver
+      REQUIRE(visited.size() == 1);
+      CHECK(visited[0] == psitri::ptr_address(42));  // root (MVCC removed: no ver)
    }
 }
 
 TEST_CASE("value_node subtree with null ver", "[value_node]")
 {
-   sal::tree_id tid{psitri::ptr_address(42), sal::null_ptr_address};
+   sal::tree_id tid{psitri::ptr_address(42)};
    auto         vt = psitri::value_type::make_subtree(tid);
    auto         node = create_value_node(vt);
 
@@ -241,7 +239,7 @@ TEST_CASE("value_node alloc_size", "[value_node]")
 
    SECTION("subtree value")
    {
-      auto vt    = psitri::value_type::make_subtree(sal::tree_id{psitri::ptr_address(1), psitri::ptr_address(2)});
+      auto vt    = psitri::value_type::make_subtree(sal::tree_id{psitri::ptr_address(1)});
       auto asize = psitri::value_node::alloc_size(vt);
       CHECK(asize >= 16 + 8 + 2 + sizeof(sal::tree_id));
       CHECK(asize % 64 == 0);
@@ -409,7 +407,6 @@ namespace
    {
       sal::tree_id actual = entry_tree_id(node, idx);
       CHECK(actual.root == expected.root);
-      CHECK(actual.ver == expected.ver);
    }
 
 }
@@ -675,7 +672,7 @@ TEST_CASE("passive value_node relocation prunes data-only history without releas
 TEST_CASE("value_node subtree prune reports dropped tree refs",
           "[value_node][mvcc][prune][subtree]")
 {
-   sal::tree_id tid{psitri::ptr_address(42), psitri::ptr_address(99)};
+   sal::tree_id tid{psitri::ptr_address(42)};  // MVCC removed: root-only
    auto         sub = create_value_node(psitri::value_type::make_subtree(tid));
    auto         tombstone = append_tombstone(sub.get(), 1);
 
@@ -684,9 +681,8 @@ TEST_CASE("value_node subtree prune reports dropped tree refs",
    sal::pending_release_list pending(pending_storage);
 
    CHECK(tombstone->collect_pruned_references(prune, pending));
-   REQUIRE(pending.size() == 2);
+   REQUIRE(pending.size() == 1);  // MVCC removed: only root, no ver
    CHECK(pending[0] == tid.root);
-   CHECK(pending[1] == tid.ver);
 
    auto pruned = copy_with_prune_floor(tombstone.get(), 1);
    REQUIRE(pruned->num_versions() == 1);
@@ -697,7 +693,7 @@ TEST_CASE("value_node subtree prune reports dropped tree refs",
 TEST_CASE("value_node subtree prune keeps the retained predecessor ref",
           "[value_node][mvcc][prune][subtree]")
 {
-   sal::tree_id tid{psitri::ptr_address(42), psitri::ptr_address(99)};
+   sal::tree_id tid{psitri::ptr_address(42)};  // MVCC removed: root-only
    auto         sub = create_value_node(psitri::value_type::make_subtree(tid));
    auto         tombstone = append_tombstone(sub.get(), 10);
 
@@ -739,7 +735,7 @@ TEST_CASE("value_node subtree prune keeps the retained predecessor ref",
 TEST_CASE("value_node subtree prune handles null version refs and overflow",
           "[value_node][mvcc][prune][subtree]")
 {
-   sal::tree_id tid{psitri::ptr_address(42), sal::null_ptr_address};
+   sal::tree_id tid{psitri::ptr_address(42)};
    auto         sub = create_value_node(psitri::value_type::make_subtree(tid));
    auto         tombstone = append_tombstone(sub.get(), 1);
 
@@ -761,7 +757,7 @@ TEST_CASE("value_node subtree prune handles null version refs and overflow",
 
    SECTION("release storage grows for passive collection")
    {
-      sal::tree_id two_refs{psitri::ptr_address(42), psitri::ptr_address(99)};
+      sal::tree_id two_refs{psitri::ptr_address(42)};
       auto         two_ref_sub = create_value_node(psitri::value_type::make_subtree(two_refs));
       auto         two_ref_tombstone = append_tombstone(two_ref_sub.get(), 1);
 
@@ -772,16 +768,15 @@ TEST_CASE("value_node subtree prune handles null version refs and overflow",
 
       CHECK(two_ref_tombstone->collect_pruned_references(prune, pending));
       CHECK_FALSE(pending.failed());
-      REQUIRE(pending.size() == 2);
+      REQUIRE(pending.size() == 1);
       CHECK(pending[0] == two_refs.root);
-      CHECK(pending[1] == two_refs.ver);
    }
 }
 
 TEST_CASE("value_node subtree dead-entry cleanup does not release the latest value",
           "[value_node][mvcc][subtree]")
 {
-   sal::tree_id tid{psitri::ptr_address(70), psitri::ptr_address(71)};
+   sal::tree_id tid{psitri::ptr_address(70)};
 
    SECTION("dead latest entry is preserved")
    {
@@ -816,9 +811,8 @@ TEST_CASE("value_node subtree dead-entry cleanup does not release the latest val
       sal::pending_release_list pending(pending_storage);
 
       CHECK(tombstone->collect_dead_references(dead.load_snapshot(), pending));
-      REQUIRE(pending.size() == 2);
+      REQUIRE(pending.size() == 1);
       CHECK(pending[0] == tid.root);
-      CHECK(pending[1] == tid.ver);
 
       auto copied = copy_with_dead_snapshot(tombstone.get(), dead.load_snapshot());
       REQUIRE(copied->num_versions() == 1);
@@ -830,16 +824,15 @@ TEST_CASE("value_node subtree dead-entry cleanup does not release the latest val
 TEST_CASE("value_node subtree replace-last reports replaced tree refs",
           "[value_node][mvcc][subtree]")
 {
-   sal::tree_id tid{psitri::ptr_address(7), psitri::ptr_address(8)};
+   sal::tree_id tid{psitri::ptr_address(7)};
    auto         sub = create_value_node(psitri::value_type::make_subtree(tid));
 
    std::vector<sal::ptr_address> pending_storage;
    sal::pending_release_list pending(pending_storage);
 
    CHECK(sub->collect_replace_last_references(pending));
-   REQUIRE(pending.size() == 2);
+   REQUIRE(pending.size() == 1);
    CHECK(pending[0] == tid.root);
-   CHECK(pending[1] == tid.ver);
 
    auto replaced = replace_last_with_tombstone(sub.get(), 0);
    REQUIRE(replaced->num_versions() == 1);
@@ -850,15 +843,14 @@ TEST_CASE("value_node subtree replace-last reports replaced tree refs",
 TEST_CASE("value_node subtree top replacement helper only releases matching top version",
           "[value_node][mvcc][prune][subtree]")
 {
-   sal::tree_id tid{psitri::ptr_address(7), psitri::ptr_address(8)};
+   sal::tree_id tid{psitri::ptr_address(7)};
    auto         sub = create_value_node(psitri::value_type::make_subtree(tid));
 
    std::vector<sal::ptr_address> pending_storage;
    sal::pending_release_list pending(pending_storage);
    CHECK(sub->collect_replaced_top_references(0, pending));
-   REQUIRE(pending.size() == 2);
+   REQUIRE(pending.size() == 1);
    CHECK(pending[0] == tid.root);
-   CHECK(pending[1] == tid.ver);
 
    std::vector<sal::ptr_address> untouched_storage;
    sal::pending_release_list untouched(untouched_storage);
@@ -869,7 +861,7 @@ TEST_CASE("value_node subtree top replacement helper only releases matching top 
 TEST_CASE("passive value_node relocation prunes subtree history with pending releases",
           "[value_node][mvcc][prune][passive][subtree]")
 {
-   sal::tree_id tid{psitri::ptr_address(100), psitri::ptr_address(101)};
+   sal::tree_id tid{psitri::ptr_address(100)};
    auto         sub = create_value_node(psitri::value_type::make_subtree(tid));
    auto         tombstone = append_tombstone(sub.get(), 1);
 
@@ -894,9 +886,8 @@ TEST_CASE("passive value_node relocation prunes subtree history with pending rel
    ops.passive_compact_to(tombstone.get(), header, pending);
 
    ValueNodePtr pruned(reinterpret_cast<psitri::value_node*>(header));
-   REQUIRE(pending.size() == 2);
+   REQUIRE(pending.size() == 1);
    CHECK(pending[0] == tid.root);
-   CHECK(pending[1] == tid.ver);
    REQUIRE(pruned->num_versions() == 1);
    CHECK(pruned->get_entry_version(0) == 1);
    CHECK(pruned->get_entry_offset(0) == psitri::value_node::offset_tombstone);

@@ -153,7 +153,7 @@ int main(int argc, char** argv)
          std::cout << "root_address=" << root.address() << "\n";
          std::cout << "root_ver=" << root.ver() << "\n";
          std::cout << "root_tree_root=" << *root.get_tree_id().root << "\n";
-         std::cout << "root_tree_ver=" << *root.get_tree_id().ver << "\n";
+         // MVCC removed: trees carry no version.
          std::cout << std::flush;
          if (!root)
          {

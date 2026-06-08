@@ -10,9 +10,13 @@
 
 namespace heart
 {
-   // Spare tail-heap headroom every radix node is allocated beyond its fixed struct, so
-   // inline terminal values have somewhere to grow before a COW-grow is forced.
-   inline constexpr uint32_t radix_node_headroom = 256;
+   // Spare tail-heap headroom every radix node is allocated beyond its fixed struct, so inline
+   // terminal values have somewhere to grow before a COW-grow is forced. 128 (was 256): measured
+   // avg setlist tail_used is ~51 B, so 256 over-reserved ~205 B/node on the DOMINANT tier.
+   // Dropping to 128 shrinks setlist 384→256 (-33%) and bitset_r2 640→512 (-20%) with NO object
+   // increase (nothing spilled to external leaves — values >60 B are external regardless) and
+   // same-or-faster lookups (smaller nodes pack denser); dense nodes still COW-grow on demand.
+   inline constexpr uint32_t radix_node_headroom = 128;
 
    /**
     * The R1 dispatch *format* — what CL0 holds once you've committed to reading the

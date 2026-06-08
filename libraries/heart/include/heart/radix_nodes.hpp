@@ -350,6 +350,7 @@ namespace heart
          this->_rtype         = rtype_val;
          this->_term_value    = smart_address::null();
          this->_prefix_length = 0;
+         this->_seg_presence  = 0;
          set_nstems(0);
          this->set_prefix(prefix);
       }
@@ -431,6 +432,7 @@ namespace heart
          this->_rtype         = RType;
          this->_term_value    = smart_address::null();
          this->_prefix_length = 0;
+         this->_seg_presence  = 0;
          for (auto& s : segs)
             s.init();
          this->set_prefix(prefix);
@@ -468,6 +470,7 @@ namespace heart
          _rtype         = radix_node_type::full256;
          _term_value    = smart_address::null();
          _prefix_length = 0;
+         _seg_presence  = 0;
          set_prefix(prefix);
          branches.init();
       }

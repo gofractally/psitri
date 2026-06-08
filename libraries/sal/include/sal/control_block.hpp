@@ -22,24 +22,25 @@ namespace sal
       // Default constructor to ensure proper initialization of the atomic
       control_block() noexcept : _data(0) {}
 
-      static constexpr uint64_t location_offset      = 21;
-      static constexpr uint64_t max_cacheline_offset = (1ULL << 41) - 1;
+      static constexpr uint64_t location_offset      = 24;  // ref(18)+type(2)+presence(4)
+      static constexpr uint64_t max_cacheline_offset = (1ULL << 38) - 1;  // 32 TB @ 128 B
       /**
        * The internal structure of the bits stored in the atomic _data
        */
       struct control_block_data
       {
-         /// reference count, up to 256K shared references (bits 18-20 reclaimed for `type`)
+         /// reference count, up to 256K shared references (bits 0-17)
          uint64_t ref : 18;
-         /// Opaque 3-bit user/application field — SAL never reads or interprets it; it is
-         /// carried in the control block for the application's own use. (It occupies the bits
-         /// the old pf2 prefetch hint used, grown from 1 to 3.) `type` sits just above `ref`,
-         /// so the optimistic fetch_add/sub refcount path never carries into it
-         /// (max_ref_count guard keeps ref + thread overshoot below 2^18).
-         uint64_t type : 3;
-         /// index to the cacheline of up to 256 TB of memory at 128 bytes per cacheline
-         /// (sal::cacheline_size); this is the maximum addressable by mapped memory.
-         uint64_t cacheline_offset : 41;
+         /// Opaque 6-bit user/application field (was 3) — SAL never reads or interprets it. The
+         /// radix engine splits it as 2 bits dispatch tier (r1/r2/r4/r8) + 4 bits segment-
+         /// presence map; both are DERIVED HINTS for skip-header routing (the node is the source
+         /// of truth — control blocks are rebuilt on recovery). Sits just above `ref`, so the
+         /// optimistic fetch_add/sub refcount path never carries into it (max_ref_count guard
+         /// keeps ref + thread overshoot below 2^18).
+         uint64_t type : 6;
+         /// index to the cacheline of up to 32 TB of memory at 128 bytes per cacheline
+         /// (sal::cacheline_size = max_database_size; static_assert below pins the width).
+         uint64_t cacheline_offset : 38;
 
          /// set this bit when object is read, clearered when ref count goes to 0
          uint64_t active : 1;
@@ -47,7 +48,10 @@ namespace sal
          /// when reference count goes to 0 along with the active bit.
          uint64_t pending_cache : 1;
 
-         control_block_data() noexcept : ref(0), type(0), cacheline_offset(0), active(0), pending_cache(0) {}
+         control_block_data() noexcept
+             : ref(0), type(0), cacheline_offset(0), active(0), pending_cache(0)
+         {
+         }
          control_block_data(uint64_t value) noexcept { from_int(value); }
          uint64_t to_int() const noexcept { return std::bit_cast<uint64_t>(*this); }
          void     from_int(uint64_t value) noexcept
@@ -77,10 +81,10 @@ namespace sal
             pending_cache = p;
             return *this;
          }
-         /// Set the opaque 3-bit user field (only the low 3 bits are stored).
+         /// Set the opaque 6-bit user field (only the low 6 bits are stored).
          control_block_data& set_type(uint8_t t) noexcept
          {
-            type = uint64_t(t) & 0x7u;
+            type = uint64_t(t) & 0x3Fu;
             return *this;
          }
          friend std::ostream& operator<<(std::ostream& os, const control_block_data& data)
@@ -200,12 +204,13 @@ namespace sal
              !_data.compare_exchange_weak(expected, updated.to_int(), std::memory_order_release));
       }
 
-      /// Opaque 3-bit user/application field — SAL never interprets it.
+      /// Opaque 6-bit user/application field — SAL never interprets it (the radix engine
+      /// splits it 2 bits dispatch tier + 4 bits segment presence).
       uint8_t get_type(std::memory_order order = std::memory_order_relaxed) const noexcept
       {
          return uint8_t(load(order).type);
       }
-      /// Atomically set the user `type` (low 3 bits) without disturbing ref/loc/active/cache.
+      /// Atomically set the user `type` (low 6 bits) without disturbing the other fields.
       void set_type(uint8_t t, std::memory_order order = std::memory_order_relaxed) noexcept
       {
          uint64_t           expected = _data.load(std::memory_order_relaxed);
@@ -287,6 +292,29 @@ namespace sal
       }
 
       /**
+       * Like move(), but sets the location AND the opaque `type` (6 bits) in the SAME CAS — so a
+       * reader's single atomic load never sees a new location paired with a stale type/presence
+       * (the segment layout and the routing hint that describes it must change together). Used by
+       * the grow path that reallocs a bitset node to splice in a previously-absent segment
+       * cacheline (the engine bumps the presence nibble inside `type`).
+       * @return the prior control_block_data.
+       */
+      control_block_data move_with_type(location loc, uint8_t type,
+                                        std::memory_order order = std::memory_order_relaxed) noexcept
+      {
+         assert(loc.cacheline() != max_cacheline_offset);
+         auto               expected = _data.load(order);
+         control_block_data updated;
+         do
+         {
+            updated.from_int(expected);
+            updated.set_loc(loc).set_type(type);
+         } while (not _data.compare_exchange_weak(expected, updated.to_int(), order));
+         updated.from_int(expected);
+         return updated;
+      }
+
+      /**
        * Attempts to increment the activity counter in a non-blocking way.
        * If the object is not marked as active, tries to set the active bit.
        * If already active, tries to set the pending_cache bit.
@@ -356,6 +384,11 @@ namespace sal
       }
 
       static_assert(sizeof(control_block_data) == 8, "shared_ptr_data must be 8 bytes");
+      // cacheline_offset shrank 41→38 to free 3 bits for `presence`. 38 bits × 128 B = 32 TB,
+      // which must still cover the whole addressable database. If max_database_size grows,
+      // steal the bits back from presence/type.
+      static_assert(max_database_size / cacheline_size <= (1ull << 38),
+                    "cacheline_offset (38 bits) can't address max_database_size");
    };
    static_assert(sizeof(control_block) == 8, "shared_ptr must be 8 bytes");
 

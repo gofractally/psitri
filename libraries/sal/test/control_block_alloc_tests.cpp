@@ -1090,13 +1090,14 @@ TEST_CASE("ControlBlockAllocRandomAllocFree10M_Multithreaded",
    fs::remove_all(temp_path);
 }
 
-// ── Opaque 3-bit user `type` field (replaces the old pf2 bit) ──────────────────
-// SAL never interprets `type`; verify round-trip and that it shares the atomic word
-// with ref/loc/active/pending without disturbing them.
+// ── Opaque 6-bit user `type` field (was 3; widened by stealing 3 bits from the
+// 41→38-bit cacheline_offset). SAL never interprets it — the radix engine splits it
+// 2 bits dispatch tier + 4 bits segment presence. Verify round-trip and that it shares
+// the atomic word with ref/loc/active/pending without disturbing them.
 TEST_CASE("control_block_data type field round-trips", "[control_block][type]")
 {
    using sal::control_block;
-   for (uint8_t t = 0; t < 8; ++t)
+   for (uint8_t t = 0; t < 64; ++t)
    {
       control_block::control_block_data d;
       d.set_ref(12345).set_active(true).set_pending_cache(true).set_type(t);
@@ -1107,10 +1108,10 @@ TEST_CASE("control_block_data type field round-trips", "[control_block][type]")
       REQUIRE(r.active);
       REQUIRE(r.pending_cache);
    }
-   // only the low 3 bits are stored
+   // only the low 6 bits are stored
    control_block::control_block_data d;
    d.set_type(0xFF);
-   REQUIRE(uint8_t(d.type) == 0x7);
+   REQUIRE(uint8_t(d.type) == 0x3F);
    // max_ref_count fits in the 18-bit ref field
    REQUIRE(control_block::max_ref_count < (1ull << 18));
 }
@@ -1121,7 +1122,7 @@ TEST_CASE("control_block::set_type is atomic and preserves ref/loc", "[control_b
    control_block cb;
    cb.reset(sal::location::from_cacheline(777), /*ref*/ 5);
    REQUIRE(cb.get_type() == 0);
-   for (uint8_t t = 0; t < 8; ++t)
+   for (uint8_t t = 0; t < 64; ++t)
    {
       cb.set_type(t);
       REQUIRE(cb.get_type() == t);

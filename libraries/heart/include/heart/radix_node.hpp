@@ -58,8 +58,14 @@ namespace heart
    struct radix_base : paged
    {
       radix_node_type _rtype;
-      smart_address   _term_value;     // child value when a key ends here; null if none
-      uint16_t        _prefix_length;  // logical shared-prefix length
+      smart_address   _term_value;        // child value when a key ends here; null if none
+      // The 2-byte prefix word is split: 12 bits of length (prefix_capacity < 4096, so ample)
+      // + a 4-bit segment-presence map. seg_presence is the PERSISTENT truth for the bitset
+      // tiers (which 64-wide quarters have a live cacheline); the control-block `type` field
+      // mirrors it (high nibble) as a skip-header hint, but control blocks are rebuilt on
+      // recovery so the node must carry it. Other tiers leave it 0.
+      uint16_t _prefix_length : 12;
+      uint16_t _seg_presence : 4;
 
       radix_node_type rtype() const noexcept { return _rtype; }
       void            set_rtype(radix_node_type t) noexcept { _rtype = t; }
@@ -69,6 +75,8 @@ namespace heart
       void          set_term_value(smart_address v) noexcept { _term_value = v; }
 
       uint16_t prefix_length() const noexcept { return _prefix_length; }
+      uint8_t  seg_presence() const noexcept { return uint8_t(_seg_presence); }
+      void     set_seg_presence(uint8_t p) noexcept { _seg_presence = p; }
    } __attribute__((packed));
 
    static_assert(sizeof(radix_base) == 29, "paged(22) + rtype(1) + term_value(4) + prefix_length(2)");

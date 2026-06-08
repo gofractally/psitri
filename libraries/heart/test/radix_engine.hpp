@@ -388,22 +388,18 @@ namespace heart::radix
          }
          return smart_address::from_pointer(make_leaf(suffix, value, hint));
       }
-      // SNAPSHOT a terminal's {suffix,value} into the caller's stack `buf` (<=510 B: both
-      // lengths are uint8_t). Required, not defensive: every caller then ALLOCATES new
-      // nodes from these bytes (make_collision_child / make_value / add_inline), and a SAL
-      // allocation can relocate the whole arena (mapping.cpp moves the mmap base when it
-      // can't extend in place), dangling any pointer into node memory. The snapshot is read
-      // before those allocations. The read-only paths (find/seek) never alloc, so they use
-      // the zero-copy term_view() instead. (suffix_len+value_len are uint8_t → <=510 B.)
-      void term_get(const sal::alloc_header* node, smart_address sa, uint8_t* buf, bytes& suf,
-                    bytes& val) const
+      // Zero-copy view of a terminal's {suffix,value} as raw bytes — a `bytes` overload of
+      // the value_view term_view() the read path uses. No copy is needed: the node arena is
+      // a fixed PROT_NONE reservation committed with MAP_FIXED (block_allocator), so it
+      // never relocates, and mutation callers consume these views before the node they live
+      // in is COW-released. So views into node memory stay valid across later allocations.
+      void term_view(const sal::alloc_header* node, smart_address sa, bytes& suf, bytes& val) const
       {
-         const inline_value* iv = sa.is_tail() ? inline_of(node, sa)
-                                               : &_ses->get_ref<leaf_node>(sa.as_pointer()).obj()->value;
-         int s = iv->suffix_len, v = iv->value_len;
-         std::memcpy(buf, iv->data, size_t(s + v));
-         suf = {buf, size_t(s)};
-         val = {buf + s, size_t(v)};
+         const inline_value* iv = sa.is_tail()
+                                      ? inline_of(node, sa)
+                                      : &_ses->get_ref<leaf_node>(sa.as_pointer()).obj()->value;
+         suf = bytes{iv->data, size_t(iv->suffix_len)};
+         val = bytes{iv->data + iv->suffix_len, size_t(iv->value_len)};
       }
       // Resolve an inline tail on `node`: its suffix must equal `rem`.
       bool inline_at(const sal::alloc_header* node, smart_address sa, bytes rem, value_view& out) const
@@ -935,9 +931,8 @@ namespace heart::radix
          // Is this branch a TERMINAL (an inline tail, or a pointer to a leaf_node)?
          if (is_terminal_branch(sa))
          {
-            uint8_t tbuf[512];
-            bytes   esuf, eval;
-            term_get(_ses->get_ref<N>(addr).obj(), sa, tbuf, esuf, eval);
+            bytes esuf, eval;  // zero-copy views into addr (stable arena, consumed pre-COW)
+            term_view(_ses->get_ref<N>(addr).obj(), sa, esuf, eval);
             if (esuf.size() == suf.size() &&
                 std::memcmp(esuf.data(), suf.data(), esuf.size()) == 0)  // same key → update
             {
@@ -1084,9 +1079,8 @@ namespace heart::radix
 
          if (is_terminal_branch(sa))
          {
-            uint8_t tbuf[512];
-            bytes   esuf, eval;
-            term_get(_ses->get_ref<N>(addr).obj(), sa, tbuf, esuf, eval);
+            bytes esuf, eval;  // zero-copy views into addr (stable arena, consumed pre-COW)
+            term_view(_ses->get_ref<N>(addr).obj(), sa, esuf, eval);
             if (esuf.size() == suf.size() &&
                 std::memcmp(esuf.data(), suf.data(), esuf.size()) == 0)  // same key → update
             {
@@ -1177,9 +1171,8 @@ namespace heart::radix
             _ses->retain(sa.as_pointer());
             return sa;
          }
-         uint8_t buf[512];
-         bytes   suf, val;
-         term_get(_ses->get_ref<sal::alloc_header>(src).obj(), sa, buf, suf, val);
+         bytes suf, val;  // zero-copy views into src (stable arena; src stays live here)
+         term_view(_ses->get_ref<sal::alloc_header>(src).obj(), sa, suf, val);
          return mv_into(dst, dtype, suf, val, hint);
       }
       // re_stride routers are only ever full_radix (cw=1), setlist_u16 (cw=2), or
@@ -1256,9 +1249,8 @@ namespace heart::radix
             bool single_inline = (j - i == 1) && is_terminal_branch(es[i].br);
             if (single_inline)  // inline singleton: tail bytes ride into its suffix
             {
-               uint8_t buf[512];
-               bytes   suf, val;
-               term_get(_ses->get_ref<sal::alloc_header>(addr).obj(), es[i].br, buf, suf, val);
+               bytes suf, val;  // zero-copy views into addr (stable arena; addr live in loop)
+               term_view(_ses->get_ref<sal::alloc_header>(addr).obj(), es[i].br, suf, val);
                uint8_t kb[540];
                std::memcpy(kb, es[i].b + Wp, size_t(tw));
                std::memcpy(kb + tw, suf.data(), suf.size());

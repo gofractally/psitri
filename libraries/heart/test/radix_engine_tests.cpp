@@ -435,6 +435,42 @@ TEST_CASE("radix_engine: remove all drains every tier with no leak", "[radix_eng
    }
 }
 
+TEST_CASE("radix_engine: remove downgrades a drained wide node to a smaller tier",
+          "[radix_engine][remove]")
+{
+   // A 256-way fan-out node widens to a big tier (r4/full); removing it down to a handful of
+   // entries must shrink it back (hysteresis: ~25% below the regrow point), so a sparse node
+   // doesn't keep its big-tier cacheline footprint. Verify via the tier census + correctness.
+   radix_tree t(tmp("heart_rm_downgrade"));
+   auto       mk = [](int i) {
+      std::string k = "AAA";
+      k.push_back(char(uint8_t(i)));
+      k += "t";
+      return k;
+   };
+   const int K = 256;
+   for (int i = 0; i < K; ++i)
+      t.upsert(mk(i), make_value(uint64_t(i)));
+   auto wide = t.count_tiers();
+   REQUIRE((wide.bitset_r4 + wide.full) >= 1);  // widened to a multi-CL tier
+
+   for (int i = 0; i < K - 8; ++i)  // drain to 8 entries (well below every downgrade floor)
+      REQUIRE(t.remove(mk(i)));
+   auto narrow = t.count_tiers();
+   REQUIRE(narrow.full == 0);                              // the full/r4 node is gone…
+   REQUIRE(narrow.bitset_r4 < wide.bitset_r4 + 1);         // …shrunk
+   REQUIRE((narrow.setlist + narrow.bitset_c1 + narrow.bitset_r2) >= 1);  // …into a smaller tier
+
+   value_view g;  // surviving keys intact, removed keys gone
+   for (int i = K - 8; i < K; ++i)
+   {
+      REQUIRE(t.find(mk(i), g));
+      REQUIRE(std::string(g) == make_value(uint64_t(i)));
+   }
+   for (int i = 0; i < K - 8; ++i)
+      REQUIRE_FALSE(t.find(mk(i), g));
+}
+
 TEST_CASE("radix_engine: remove on narrow c1 windows (promote on) — no leak",
           "[radix_engine][remove]")
 {

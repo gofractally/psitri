@@ -1189,9 +1189,29 @@ namespace heart::radix
       // when the node drains to nothing, _emptied (parent should drop+free it). Returns the
       // (possibly COW'd) node address. Releases external terminal values; for an emptied or
       // path-COW'd child it follows insert's contract — the PARENT releases the original.
+      // After a reducing removal, downgrade `addr` to a smaller tier if it now fits one with
+      // hysteresis; if the rebuild replaces a COW'd clone (shared mode, addr != pre), free the
+      // clone here (in unique mode addr == pre and the PARENT frees the original). Skipped when
+      // the node emptied (it's being dropped). Returns the node to hand back to the parent.
+      template <class N>
+      ptr_address finalize_remove(ptr_address addr, ptr_address pre)
+      {
+         if (_emptied)
+            return addr;
+         ptr_address dg = maybe_downgrade<N>(addr);
+         if (dg != addr)
+         {
+            if (addr != pre)
+               _ses->release(addr);
+            addr = dg;
+         }
+         return addr;
+      }
+
       template <class N>
       ptr_address remove_router(ptr_address addr, bytes key, uint32_t depth)
       {
+         const ptr_address pre = addr;  // original (pre-COW) node, for clone-release on downgrade
          const N* cn  = _ses->get_ref<N>(addr).obj();
          bytes    pfx = cn->prefix();
          if (pfx.size() > key.size() - depth ||
@@ -1215,7 +1235,7 @@ namespace heart::radix
             n->set_term_value(smart_address::null());
             _removed = true;
             _emptied = (n->branch_count() == 0);
-            return addr;
+            return finalize_remove<N>(addr, pre);
          }
          // route by this node's stride (1 byte for every tier remove supports; wide setlist
          // consumes its consume_width key bytes per hop, same as route_r1).
@@ -1260,7 +1280,7 @@ namespace heart::radix
             n->remove_branch(cell);
             _removed = true;
             _emptied = (n->branch_count() == 0 && !n->has_term_value());
-            return addr;
+            return finalize_remove<N>(addr, pre);
          }
          // pointer to an inner node → recurse
          ptr_address child = sa.as_pointer();
@@ -1275,7 +1295,7 @@ namespace heart::radix
             if (nc != child)
                _ses->release(child);  // shared: also drop the original child's ref
             _emptied = (n->branch_count() == 0 && !n->has_term_value());
-            return addr;
+            return finalize_remove<N>(addr, pre);
          }
          if (nc != child)  // child was path-COW'd (shared) → repoint, release the original
          {
@@ -2009,6 +2029,98 @@ namespace heart::radix
                return up;
          }
          return try_upgrade<full_radix_node, From>(from, b, setsa, suf, val, hint, ok);  // always fits
+      }
+
+      // ── downgrade (the inverse of widen) ─────────────────────────────────────────
+      // After a remove shrinks a wide node, re-encode it into the smallest tier that holds
+      // its entries with HYSTERESIS — the count must sit ~25% below where that tier would
+      // re-widen, so churn around the boundary doesn't thrash grow↔shrink. A node stuck at a
+      // big tier wastes cachelines (worse aggregate cache footprint on memory-bound queries)
+      // and lengthens a setlist scan; shrinking keeps the tree tight. These caps are the
+      // regrow points; the rebuild is the source of truth (it fails → we keep the tier).
+      static constexpr int dn_setlist = 14;  // setlist re-widens ~19  → shrink to setlist at <=14
+      static constexpr int dn_r2      = 40;  // r2 (2x~27) re-widens ~54 → shrink to r2 at <=40
+      static constexpr int dn_r4      = 87;  // r4 (4x~29) re-widens ~116 → shrink to r4 at <=87
+
+      // Rebuild ALL of `from`'s entries (+ term) into a fresh `To` (no added key); returns the
+      // new node or 0 (ok=false) if they don't fit To. Same tail-reinline / pointer-retain
+      // contract as try_upgrade — so the caller releases `from` and refcounts stay balanced.
+      template <class To, class From>
+      ptr_address rebuild_into(ptr_address from, bool& ok)
+      {
+         const From* cn   = _ses->get_ref<From>(from).obj();
+         uint32_t    need = ucc::round_up_multiple<sal::cacheline_size>(
+             To::head_bytes() + cn->tail_used() + tail_reserve + 64 + To::headroom);
+         ptr_address na = _ses->alloc<To>(need, sal::alloc_hint{}, cn->prefix());
+         To*         nn = mut<To>(na);
+         nn->alloc_tail(tail_reserve);
+         stamp<To>(na);
+         ok               = true;
+         smart_address tv = cn->term_value();
+         if (tv.is_tail())
+            nn->set_term_value(reinline<To>(nn, inline_of(cn, tv)));
+         else if (!tv.is_null())
+         {
+            nn->set_term_value(tv);
+            if (tv.is_pointer())
+               _ses->retain(tv.as_pointer());
+         }
+         cn->for_each_entry([&](uint8_t byte, smart_address br) {
+            if (!ok)
+               return;
+            if (br.is_tail())
+            {
+               if (!nn->set_branch(byte, reinline<To>(nn, inline_of(cn, br))))
+                  ok = false;
+            }
+            else if (!nn->set_branch(byte, br))
+               ok = false;
+            else if (br.is_pointer())
+               _ses->retain(br.as_pointer());
+         });
+         if (!ok)
+         {
+            _ses->release(na);
+            return ptr_address(0);
+         }
+         return na;
+      }
+
+      // If `addr` (a wide tier) has shrunk enough, return a smaller-tier rebuild (caller frees
+      // the old per the COW contract); else return `addr` unchanged. setlist is the floor.
+      template <class N>
+      ptr_address maybe_downgrade(ptr_address addr)
+      {
+         if constexpr (std::is_same_v<N, setlist_u8> || std::is_same_v<N, setlist_u16> ||
+                       std::is_same_v<N, setlist_u32>)
+            return addr;  // already the floor / wide-stem variants don't byte-downgrade
+         else
+         {
+            const int   cnt = _ses->get_ref<N>(addr).obj()->branch_count();
+            bool        ok  = false;
+            ptr_address dg;
+            if (cnt <= dn_setlist)  // smallest first: a 1-CL setlist if it fits
+            {
+               dg = rebuild_into<setlist_u8, N>(addr, ok);
+               if (ok)
+                  return dg;
+            }
+            if constexpr (std::is_same_v<N, full_radix_node> || std::is_same_v<N, bitset_r4_node>)
+               if (cnt <= dn_r2)
+               {
+                  dg = rebuild_into<bitset_r2_node, N>(addr, ok);
+                  if (ok)
+                     return dg;
+               }
+            if constexpr (std::is_same_v<N, full_radix_node>)
+               if (cnt <= dn_r4)
+               {
+                  dg = rebuild_into<bitset_r4_node, N>(addr, ok);
+                  if (ok)
+                     return dg;
+               }
+            return addr;
+         }
       }
 
       // ── bucket mode: radix routers (full_radix here) + bucket_node leaves ───────────

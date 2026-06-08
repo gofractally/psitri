@@ -424,60 +424,56 @@ namespace heart::radix
       }
       void walk(ptr_address a, tier_counts& tc)
       {
-         auto t = _ses->get_ref<sal::alloc_header>(a)->type();
-         if (t == leaf_node::type_id)
-            ++tc.leaf;
-         else if (t == setlist_u8::type_id)
+         switch (unsigned(_ses->get_ref<sal::alloc_header>(a)->type()))
          {
-            ++tc.setlist;
-            accum_setlist<setlist_u8>(a, tc);
-            walk_kids<setlist_u8>(a, tc);
-         }
-         else if (t == setlist_u16::type_id)
-         {
-            ++tc.setlist_w16;
-            walk_kids<setlist_u16>(a, tc);
-         }
-         else if (t == setlist_u32::type_id)
-         {
-            ++tc.setlist_w32;
-            walk_kids<setlist_u32>(a, tc);
-         }
-         else if (t == bitset_c1_32::type_id)
-         {
-            ++tc.bitset_c1;
-            walk_kids<bitset_c1_32>(a, tc);
-         }
-         else if (t == bitset_c1_64::type_id)
-         {
-            ++tc.bitset_c1;
-            walk_kids<bitset_c1_64>(a, tc);
-         }
-         else if (t == bitset_c1_128::type_id)
-         {
-            ++tc.bitset_c1;
-            walk_kids<bitset_c1_128>(a, tc);
-         }
-         else if (t == bitset_r2_node::type_id)
-         {
-            ++tc.bitset_r2;
-            accum_compact<bitset_r2_node>(a, tc);
-            walk_kids<bitset_r2_node>(a, tc);
-         }
-         else if (t == bitset_r4_node::type_id)
-         {
-            ++tc.bitset_r4;
-            accum_compact<bitset_r4_node>(a, tc);
-            walk_kids<bitset_r4_node>(a, tc);
-         }
-         else
-         {
-            ++tc.full;
-            uint8_t q = 0;  // which 64-wide quarters have any branch
-            _ses->get_ref<full_radix_node>(a).obj()->for_each_entry(
-                [&](uint8_t byte, smart_address) { q |= uint8_t(1u << (byte >> 6)); });
-            tc.full_quarters += uint64_t(std::popcount(unsigned(q)));
-            walk_kids<full_radix_node>(a, tc);
+            case unsigned(leaf_node::type_id):
+               ++tc.leaf;
+               break;
+            case unsigned(setlist_u8::type_id):
+               ++tc.setlist;
+               accum_setlist<setlist_u8>(a, tc);
+               walk_kids<setlist_u8>(a, tc);
+               break;
+            case unsigned(setlist_u16::type_id):
+               ++tc.setlist_w16;
+               walk_kids<setlist_u16>(a, tc);
+               break;
+            case unsigned(setlist_u32::type_id):
+               ++tc.setlist_w32;
+               walk_kids<setlist_u32>(a, tc);
+               break;
+            case unsigned(bitset_c1_32::type_id):
+               ++tc.bitset_c1;
+               walk_kids<bitset_c1_32>(a, tc);
+               break;
+            case unsigned(bitset_c1_64::type_id):
+               ++tc.bitset_c1;
+               walk_kids<bitset_c1_64>(a, tc);
+               break;
+            case unsigned(bitset_c1_128::type_id):
+               ++tc.bitset_c1;
+               walk_kids<bitset_c1_128>(a, tc);
+               break;
+            case unsigned(bitset_r2_node::type_id):
+               ++tc.bitset_r2;
+               accum_compact<bitset_r2_node>(a, tc);
+               walk_kids<bitset_r2_node>(a, tc);
+               break;
+            case unsigned(bitset_r4_node::type_id):
+               ++tc.bitset_r4;
+               accum_compact<bitset_r4_node>(a, tc);
+               walk_kids<bitset_r4_node>(a, tc);
+               break;
+            default:  // full_radix
+            {
+               ++tc.full;
+               uint8_t q = 0;  // which 64-wide quarters have any branch
+               _ses->get_ref<full_radix_node>(a).obj()->for_each_entry(
+                   [&](uint8_t byte, smart_address) { q |= uint8_t(1u << (byte >> 6)); });
+               tc.full_quarters += uint64_t(std::popcount(unsigned(q)));
+               walk_kids<full_radix_node>(a, tc);
+               break;
+            }
          }
       }
 

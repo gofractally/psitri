@@ -33,7 +33,7 @@ namespace
    }
    std::filesystem::path tmp(const char* n) { return std::filesystem::temp_directory_path() / n; }
 
-   // Run the same battery on whatever native database type DB is.
+   // Run the same battery on whatever native database type DB is (cursor deduced from get_root).
    template <class DB>
    bool run(const char* name, const std::filesystem::path& dir)
    {
@@ -107,6 +107,42 @@ namespace
          for (int i = N; i < N + 3000; ++i)
             miss.push_back(u64key(hashed(uint64_t(i))));
          verify_absent(miss);
+      }
+
+      // ── Iterator: a full forward scan (get_root().snapshot_cursor() + seek_begin + next)
+      // must enumerate keys in std::map order with matching values — the psitri pattern.
+      {
+         auto root = ses->get_root(0);
+         auto c    = root.snapshot_cursor();
+         c.seek_begin();
+         auto it  = oracle.begin();
+         long cnt = 0;
+         while (!c.is_end() && it != oracle.end())
+         {
+            auto v = c.template value<std::string>();
+            ok(std::string(c.key()) == it->first && v && *v == it->second);
+            ++it;
+            ++cnt;
+            c.next();
+         }
+         std::printf("    [%s] forward scan enumerated %ld of %zu\n", name, cnt, oracle.size());
+         ok(c.is_end() && it == oracle.end());  // both exhausted together — same length & order
+      }
+      // ── Iterator range: lower_bound(lo) .. up to (not incl) hi, vs the std::map range.
+      {
+         std::string lo = "str/5";  // a prefix-ish bound that lands mid-tree
+         std::string hi = "str/8";
+         auto        c  = ses->get_root(0).snapshot_cursor();
+         c.lower_bound(lo);
+         auto it = oracle.lower_bound(lo);
+         while (!c.is_end() && std::string(c.key()) < hi)
+         {
+            auto v = c.template value<std::string>();
+            ok(it != oracle.end() && std::string(c.key()) == it->first && v && *v == it->second);
+            ++it;
+            c.next();
+         }
+         ok(it == oracle.lower_bound(hi));  // oracle's matching range exhausted at hi too
       }
 
       // ── Phase 2: update every key with a new value (upsert overwrite)

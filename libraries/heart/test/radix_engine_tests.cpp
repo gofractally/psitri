@@ -191,6 +191,52 @@ TEST_CASE("radix_engine: wide stems split (re_stride) on 4 KB overflow stays cor
    REQUIRE(t.counters().restrides >= 1);  // a split actually happened
 }
 
+TEST_CASE("radix_engine: bucket mode — radix routers + bucket leaves vs std::map",
+          "[radix_engine]")
+{
+   // The hybrid: start as a bucket, split full buckets into radix nodes with bucket leaves.
+   // Drives many splits + prefix_splits (shared "pre" family + random + long-common-prefix).
+   radix_tree t(tmp("heart_bucket_mode"));
+   t.set_bucket_mode(true);
+   std::map<std::string, std::string> oracle;
+   std::mt19937_64                    rng(20240608);
+   const int                          N = 40000;  // >> one bucket -> forces the split path
+   for (int i = 0; i < N; ++i)
+   {
+      std::string k;
+      switch (int(rng() % 3))
+      {
+         case 0:
+            for (int j = 0, len = 1 + int(rng() % 12); j < len; ++j) k.push_back(char(uint8_t(rng())));
+            break;
+         case 1:
+            k = "pre";
+            for (int j = 0, len = 1 + int(rng() % 10); j < len; ++j) k.push_back(char('a' + int(rng() % 6)));
+            break;
+         default:
+            k = "commonprefix/";
+            for (int j = 0, len = 1 + int(rng() % 6); j < len; ++j) k.push_back(char(uint8_t(rng())));
+      }
+      std::string v = make_value(rng());
+      if (oracle.emplace(k, v).second)  // unique-key insert path (v1 bucket mode: see note)
+         t.upsert(k, v);
+   }
+   for (auto& [k, v] : oracle)
+   {
+      value_view got;
+      REQUIRE(t.find(k, got));
+      REQUIRE(std::string(got) == v);
+   }
+   for (int i = 0; i < 5000; ++i)  // misses
+   {
+      std::string q(1 + int(rng() % 14), 0);
+      for (auto& c : q) c = char(uint8_t(rng()));
+      value_view got;
+      if (!oracle.count(q))
+         REQUIRE_FALSE(t.find(q, got));
+   }
+}
+
 TEST_CASE("radix_engine: ordered container — in-order, lower_bound, upper_bound vs std::map",
           "[radix_engine]")
 {

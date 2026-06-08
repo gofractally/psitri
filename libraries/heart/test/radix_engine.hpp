@@ -27,6 +27,7 @@
 #include <sal/allocator_session_impl.hpp>
 #include <ucc/round.hpp>
 
+#include <heart/bucket_node.hpp>
 #include <heart/leaf_node.hpp>
 #include <heart/radix_nodes.hpp>
 
@@ -66,16 +67,36 @@ namespace heart::radix
          _alloc->register_type_ops<bitset_r2_node>();
          _alloc->register_type_ops<bitset_r4_node>();
          _alloc->register_type_ops<full_radix_node>();
+         _alloc->register_type_ops<bucket_node>();
          _root = make_node<setlist_u8>(bytes{});
+      }
+
+      // Radix + bucket hybrid: leaf -> bucket-of-leaves -> radix with bucket/leaf branches.
+      // The tree "starts as a bucket"; a full bucket splits into a radix node (the existing
+      // router tiers) with bucket leaves. Fewer hops than pure radix (a bucket absorbs a
+      // whole sparse terminal region), so it reclaims dict rand/miss vs psitri. Call on an
+      // empty tree. (in-place mutation; COW/MVCC is a later add.)
+      void set_bucket_mode(bool on)
+      {
+         if (on == _bucket_mode)
+            return;
+         _bucket_mode = on;
+         _ses->release(_root);
+         _root = on ? _ses->alloc<bucket_node>(sal::alloc_hint{}) : make_node<setlist_u8>(bytes{});
       }
 
       // ── public API (psitri key_view/value_view; values are arbitrary bytes) ───
       int upsert(key_view key, value_view val)
       {
-         auto        lock = _ses->lock();
-         _old_value_size  = -1;
-         bytes       kb   = as_bytes(key);
-         ptr_address nr   = insert_node(_root, kb, 0, as_bytes(val), {});
+         auto  lock = _ses->lock();
+         _old_value_size = -1;
+         bytes kb   = as_bytes(key);
+         if (_bucket_mode)
+         {
+            _root = bkt_insert(_root, kb, 0, as_bytes(val));
+            return _old_value_size;
+         }
+         ptr_address nr = insert_node(_root, kb, 0, as_bytes(val), {});
          if (nr != _root)
          {
             _ses->release(_root);
@@ -88,6 +109,8 @@ namespace heart::radix
       {
          auto        lock  = _ses->lock();
          bytes       kb    = as_bytes(key);
+         if (_bucket_mode)
+            return bkt_find(kb, out);
          ptr_address addr  = _root;
          uint32_t    depth = 0;
          for (;;)
@@ -1479,6 +1502,190 @@ namespace heart::radix
          return try_upgrade<full_radix_node, From>(from, b, setsa, suf, val, hint, ok);  // always fits
       }
 
+      // ── bucket mode: radix routers (full_radix here) + bucket_node leaves ───────────
+      // Reuses the engine's session/make_node/mut + bucket_node + full_radix_node. In-place
+      // mutation (no MVCC snapshots). A full bucket splits into a router over child buckets;
+      // a router whose prefix a new key diverges from is prefix-split (path compression).
+      sal::header_type ntype(ptr_address a) { return _ses->get_ref<sal::alloc_header>(a)->type(); }
+      bucket_node*     bkt(ptr_address a) { return _ses->get_ref<bucket_node>(a).modify().get(); }
+
+      ptr_address bkt_make(bytes suf, bytes val)
+      {
+         ptr_address bp = _ses->alloc<bucket_node>(sal::alloc_hint{});
+         bkt(bp)->insert(suf.data(), int(suf.size()), val.data(), int(val.size()));
+         return bp;
+      }
+      void bkt_set_term(ptr_address rp, bytes v)  // store value as an empty-suffix inline term
+      {
+         // If a term already exists and the new value fits its slot, overwrite IN PLACE.
+         // Otherwise alloc_tail leaks the old slot on every update — and repeated updates of
+         // the same terminal (e.g. duplicate-key upserts) grow the tail past the node's
+         // headroom and into the branch array. (The leak on a genuine grow is rare + bounded.)
+         smart_address tv = _ses->get_ref<full_radix_node>(rp).obj()->term_value();
+         if (!tv.is_null())
+         {
+            full_radix_node* r  = mut<full_radix_node>(rp);
+            auto*            iv = reinterpret_cast<inline_value*>(
+                reinterpret_cast<char*>(r) + r->size() - tv.tail_offset());
+            if (iv->value_len >= int(v.size()))  // empty-suffix term; reuse the slot
+            {
+               iv->value_len = uint8_t(v.size());
+               std::memcpy(iv->data, v.data(), v.size());
+               return;
+            }
+         }
+         const int        need = inline_value::byte_size(0, int(v.size()));
+         full_radix_node* r    = mut<full_radix_node>(rp);
+         auto*            iv   = reinterpret_cast<inline_value*>(r->alloc_tail(uint16_t(need)));
+         iv->suffix_len = 0;
+         iv->value_len  = uint8_t(v.size());
+         iv->value_type = 0;
+         std::memcpy(iv->data, v.data(), v.size());
+         mut<full_radix_node>(rp)->set_term_value(smart_address::from_tail(r->tail_used()));
+      }
+      ptr_address bkt_split(ptr_address bp)
+      {
+         // SNAPSHOT all entries (suffix+value bytes) off the bucket BEFORE allocating any
+         // child: a child-build allocation can trigger the SAL compactor to relocate `bp`,
+         // dangling raw pointers into it. After the snapshot bp is released. (Same discipline
+         // as term_get — guard against object relocation, not just mmap base moves.)
+         struct E { uint16_t off; uint8_t sl; uint8_t vl; };
+         E        ent[1200];
+         uint8_t  buf[bucket_node::page_bytes];
+         int      n   = 0;
+         uint16_t pos = 0;
+         _ses->get_ref<bucket_node>(bp).obj()->for_each([&](const inline_value& iv) {
+            assert(n < 1200 && pos + iv.suffix_len + iv.value_len <= int(sizeof(buf)));
+            ent[n] = {pos, iv.suffix_len, iv.value_len};
+            std::memcpy(buf + pos, iv.data, size_t(iv.suffix_len) + iv.value_len);
+            pos = uint16_t(pos + iv.suffix_len + iv.value_len);
+            ++n;
+         });
+         assert(n >= 2);
+         auto val = [&](int k) { return bytes{buf + ent[k].off + ent[k].sl, ent[k].vl}; };
+
+         int cp = 0, m = ent[0].sl < ent[n - 1].sl ? ent[0].sl : ent[n - 1].sl;
+         while (cp < m && buf[ent[0].off + cp] == buf[ent[n - 1].off + cp]) ++cp;
+         ptr_address rp = make_node<full_radix_node>(bytes{buf + ent[0].off, size_t(cp)});
+         int         i  = 0;
+         if (ent[0].sl == cp)  // lone key ending exactly at the common prefix
+         {
+            bkt_set_term(rp, val(0));
+            i = 1;
+         }
+         while (i < n)
+         {
+            const uint8_t bch = buf[ent[i].off + cp];
+            int           j   = i;
+            while (j < n && ent[j].sl > cp && buf[ent[j].off + cp] == bch) ++j;
+            ptr_address cbp = _ses->alloc<bucket_node>(sal::alloc_hint{});
+            for (int k = i; k < j; ++k)  // recursive: a bucket-sized group becomes a sub-radix
+               cbp = bkt_insert(cbp, bytes{buf + ent[k].off + cp + 1, size_t(ent[k].sl - cp - 1)}, 0,
+                                val(k));
+            mut<full_radix_node>(rp)->set_branch(bch, smart_address::from_pointer(cbp));
+            i = j;
+         }
+         _ses->release(bp);  // release the old bucket only AFTER the new subtree is built
+         return rp;
+      }
+      ptr_address bkt_prefix_split(ptr_address rp, bytes key, uint32_t depth, int p, bytes val)
+      {
+         bytes   P  = _ses->get_ref<full_radix_node>(rp).obj()->prefix();
+         uint8_t ob = P[size_t(p)];
+         uint8_t pbuf[128];
+         int     newpl = int(P.size()) - (p + 1);
+         std::memcpy(pbuf, P.data() + p + 1, size_t(newpl));
+         ptr_address np = make_node<full_radix_node>(bytes{key.data() + depth, size_t(p)});
+         mut<full_radix_node>(rp)->set_prefix(bytes{pbuf, size_t(newpl)});
+         mut<full_radix_node>(np)->set_branch(ob, smart_address::from_pointer(rp));
+         const uint32_t d2 = depth + uint32_t(p);
+         if (d2 == key.size())
+            bkt_set_term(np, val);
+         else
+            mut<full_radix_node>(np)->set_branch(
+                key[d2],
+                smart_address::from_pointer(bkt_make({key.data() + d2 + 1, key.size() - d2 - 1}, val)));
+         return np;
+      }
+      ptr_address bkt_insert(ptr_address addr, bytes key, uint32_t depth, bytes val)
+      {
+         if (ntype(addr) == bucket_node::type_id)
+         {
+            int r = bkt(addr)->insert(key.data() + depth, int(key.size() - depth), val.data(),
+                                      int(val.size()));
+            if (r != 0)
+            {
+               _old_value_size = r < 0 ? 0 : -1;
+               return addr;
+            }
+            addr = bkt_split(addr);
+            return bkt_insert(addr, key, depth, val);
+         }
+         bytes     P     = _ses->get_ref<full_radix_node>(addr).obj()->prefix();
+         const int avail = int(key.size() - depth);
+         const int mm    = int(P.size()) < avail ? int(P.size()) : avail;
+         int       p     = 0;
+         while (p < mm && key[depth + p] == P[p]) ++p;
+         if (p < int(P.size()))
+            return bkt_prefix_split(addr, key, depth, p, val);
+         depth += uint32_t(P.size());
+         if (depth == key.size())
+         {
+            bkt_set_term(addr, val);
+            return addr;
+         }
+         const uint8_t byte = key[depth];
+         smart_address br   = _ses->get_ref<full_radix_node>(addr).obj()->find(byte);
+         if (br.is_null())
+         {
+            mut<full_radix_node>(addr)->set_branch(
+                byte,
+                smart_address::from_pointer(bkt_make({key.data() + depth + 1, key.size() - depth - 1}, val)));
+            return addr;
+         }
+         ptr_address nc = bkt_insert(br.as_pointer(), key, depth + 1, val);
+         if (nc != br.as_pointer())
+            mut<full_radix_node>(addr)->set_branch(byte, smart_address::from_pointer(nc));
+         return addr;
+      }
+      bool bkt_find(bytes key, value_view& out)
+      {
+         ptr_address addr  = _root;
+         uint32_t    depth = 0;
+         for (;;)
+         {
+            if (ntype(addr) == bucket_node::type_id)
+            {
+               const inline_value* iv =
+                   _ses->get_ref<bucket_node>(addr).obj()->find(key.data() + depth, int(key.size() - depth));
+               if (!iv)
+                  return false;
+               out = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len), iv->value_len);
+               return true;
+            }
+            const full_radix_node* r = _ses->get_ref<full_radix_node>(addr).obj();
+            bytes                  P = r->prefix();
+            if (key.size() - depth < P.size() ||
+                (P.size() && std::memcmp(key.data() + depth, P.data(), P.size()) != 0))
+               return false;
+            depth += uint32_t(P.size());
+            if (depth == key.size())
+            {
+               smart_address tv = r->term_value();
+               if (tv.is_null())
+                  return false;
+               const inline_value* iv = inline_of(r, tv);
+               out = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len), iv->value_len);
+               return true;
+            }
+            smart_address br = r->find(key[depth]);
+            if (br.is_null())
+               return false;
+            addr = br.as_pointer();
+            ++depth;
+         }
+      }
+
       std::unique_ptr<sal::allocator> _alloc;
       sal::allocator_session_ptr      _ses;
       ptr_address                     _root;
@@ -1487,6 +1694,7 @@ namespace heart::radix
       int                             _old_value_size = -1;
       bool                            _route_found    = false;
       bool                            _wide_stems     = false;  // gate: off = byte radix
+      bool                            _bucket_mode    = false;  // leaf=bucket, split to radix
       cow_counters                    _cc;
    };
 }  // namespace heart::radix

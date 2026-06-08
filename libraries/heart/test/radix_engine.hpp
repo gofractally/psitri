@@ -269,6 +269,9 @@ namespace heart::radix
          // Same breakdown for SETLIST nodes (sparse extreme; flat branches): pointer children
          // co-location per node. s_setlist = slptr / slptr_cl.
          uint64_t slptr = 0, slptr_cl = 0, sltail = 0;
+         // setlist headroom utilization: sum of tail_used (inline-value bytes actually used)
+         // vs the 256-byte headroom each setlist reserves. Measures recoverable memory.
+         uint64_t sl_tail_used = 0;
       };
       tier_counts count_tiers()
       {
@@ -331,6 +334,7 @@ namespace heart::radix
       template <class N>
       void accum_setlist(ptr_address a, tier_counts& tc)
       {
+         tc.sl_tail_used += _ses->get_ref<N>(a).obj()->tail_used();
          uint32_t cls[64];
          int      ncl = 0;
          _ses->get_ref<N>(a).obj()->for_each_entry([&](auto, smart_address br) {

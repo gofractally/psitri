@@ -172,10 +172,13 @@ namespace
                      tag, (unsigned long long)tc.cptr, (unsigned long long)tc.cptr_cl,
                      tc.cptr_cl ? double(tc.cptr) / double(tc.cptr_cl) : 0.0,
                      (unsigned long long)tc.ctail);
-         std::printf("    [%s setlist: ptr %llu / %llu CLs (s_setlist=%.2f) | tails %llu]\n",
+         std::printf("    [%s setlist: ptr %llu / %llu CLs (s_setlist=%.2f) | tails %llu | "
+                     "avg tail_used %.0f B of 256 headroom over %llu setlists]\n",
                      tag, (unsigned long long)tc.slptr, (unsigned long long)tc.slptr_cl,
                      tc.slptr_cl ? double(tc.slptr) / double(tc.slptr_cl) : 0.0,
-                     (unsigned long long)tc.sltail);
+                     (unsigned long long)tc.sltail,
+                     tc.setlist ? double(tc.sl_tail_used) / double(tc.setlist) : 0.0,
+                     (unsigned long long)tc.setlist);
       }
       return r;
    }

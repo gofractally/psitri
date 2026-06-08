@@ -1,8 +1,10 @@
 #pragma once
 #include <cstdint>
+#include <cstring>
 
 #include <heart/smart_address.hpp>  // tail_ptr
 #include <heart/versioned.hpp>
+#include <ucc/fast_memcpy.hpp>  // memcpy_aligned_64byte
 
 namespace heart
 {
@@ -85,6 +87,33 @@ namespace heart
       {
          assert(sa.is_tail());
          return tail() - sa.tail_offset();
+      }
+
+      // ── COW / compaction: copy a page's LIVE contents, skipping the free hole ────────
+      // SIMD copy for an arbitrary length: 64-byte aligned bulk + scalar remainder. Never
+      // over-reads/over-writes, so it is safe even against a tightly-sized compaction dst.
+      static void fast_copy(void* dst, const void* src, uint32_t n) noexcept
+      {
+         const uint32_t bulk = n & ~uint32_t(63);
+         ucc::memcpy_aligned_64byte(dst, src, bulk);
+         if (n & 63u)
+            std::memcpy(static_cast<char*>(dst) + bulk, static_cast<const char*>(src) + bulk,
+                        n & 63u);
+      }
+      // Clone this page's live contents into `dst` (sized cow_size for COW, or compact_size
+      // for compaction) with TWO copies — the head [0,hsize) and the used tail heap — skipping
+      // the free middle. `dst` keeps its OWN SAL header (checksum/address/size); version,
+      // heap_alloc_pos, index and entries come from this page. Tail offsets are tail()-relative
+      // so they stay valid even though dst->tail() lands at a different (smaller) address.
+      void blit_head_tail(sal::alloc_header* dst, uint32_t hsize) const noexcept
+      {
+         const sal::alloc_header saved = *dst;                 // dst's own checksum/address/size
+         fast_copy(dst, this, hsize);                          // head: fixed struct + index
+         std::memcpy(dst, &saved, sizeof(sal::alloc_header));  // restore SAL header
+         auto*          out = static_cast<paged*>(dst);
+         const uint16_t tu  = tail_used();
+         fast_copy(out->tail() - tu, this->tail() - tu, tu);   // tail: used heap only
+         out->clear_checksum();
       }
    } __attribute__((packed));
 

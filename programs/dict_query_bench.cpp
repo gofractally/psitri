@@ -134,7 +134,7 @@ int main(int argc, char** argv)
    // ──────────────────────── new engine, BUCKET MODE ON (same harness) ──────────
    {
       heart::radix::radix_tree t(std::filesystem::temp_directory_path() / "heart_bucket_dict");
-      t.set_bucket_mode(true);
+      t.set_adaptive(true);
       auto vview = [](const uint64_t& v) {
          return std::string_view(reinterpret_cast<const char*>(&v), sizeof(v));
       };
@@ -155,7 +155,7 @@ int main(int argc, char** argv)
       for (size_t i = 0; i < N; ++i) { std::string_view v; if (t.find(kspan(absent[order[i]]), v)) ++missfound; }
       auto           m1     = now();
       const uint64_t expect = uint64_t(N) * (N - 1) / 2;
-      std::printf("  heart BUCKET ON      : insert %6.1f   seq %6.1f   rand %6.1f   MISS %6.1f ns"
+      std::printf("  heart ADAPTIVE       : insert %6.1f   seq %6.1f   rand %6.1f   MISS %6.1f ns"
                   "   [%s]  %llu objects\n",
                   ns_per(el(i0, i1), N), ns_per(el(s0, s1), N), ns_per(el(r0, r1), N),
                   ns_per(el(m0, m1), N),

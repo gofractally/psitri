@@ -101,10 +101,14 @@ namespace
    // New engine (heart::radix on the DESIGNED segmented taxonomy). Values are the
    // 8-byte index (arbitrary byte array via value_view).
    template <class KeyFn>
-   row bench_radix(uint64_t N, KeyFn keyfn, const std::vector<uint32_t>& order, const char* tag)
+   row bench_radix(uint64_t N, KeyFn keyfn, const std::vector<uint32_t>& order, const char* tag,
+                   bool bucket = false)
    {
-      auto dir = std::filesystem::temp_directory_path() / (std::string("heart_radix_") + tag);
+      auto dir = std::filesystem::temp_directory_path() /
+                 (std::string("heart_radix_") + tag + (bucket ? "_bkt" : ""));
       radix_engine_tree t(dir);
+      if (bucket)
+         t.set_adaptive(true);
       row               r;
       auto              vview = [](const uint64_t& v) {
          return std::string_view(reinterpret_cast<const char*>(&v), sizeof(v));
@@ -155,11 +159,16 @@ namespace
       r.miss                = ns(m0, now(), N);
       const uint64_t expect = N * (N - 1) / 2;
       r.ok                  = (s == expect && q == expect && missfound == 0);
-      auto tc               = t.count_tiers();
-      std::printf("    [%s tiers: %llu leaf, %llu setlist, %llu r2, %llu r4, %llu full(R8)]\n", tag,
-                  (unsigned long long)tc.leaf, (unsigned long long)tc.setlist,
-                  (unsigned long long)tc.bitset_r2, (unsigned long long)tc.bitset_r4,
-                  (unsigned long long)tc.full);
+      if (bucket)  // count_tiers walks radix node types; bucket terminals would be misread
+         std::printf("    [%s ADAPTIVE: %llu obj]\n", tag, (unsigned long long)t.object_count());
+      else
+      {
+         auto tc = t.count_tiers();
+         std::printf("    [%s tiers: %llu leaf, %llu setlist, %llu r2, %llu r4, %llu full(R8); %llu obj]\n",
+                     tag, (unsigned long long)tc.leaf, (unsigned long long)tc.setlist,
+                     (unsigned long long)tc.bitset_r2, (unsigned long long)tc.bitset_r4,
+                     (unsigned long long)tc.full, (unsigned long long)t.object_count());
+      }
       return r;
    }
 
@@ -337,11 +346,12 @@ namespace
       std::printf("    %-7s: insert %6.1f   seq %6.1f   rand %6.1f   MISS %6.1f ns   [%s]\n", name,
                   x.ins, x.seq, x.rnd, x.miss, x.ok ? "OK" : "BAD");
    }
-   void print_trio(const char* title, row e, row h, row p)
+   void print_trio(const char* title, row e, row eb, row h, row p)
    {
       std::printf("  %s\n", title);
-      print_row("engine", e);  // new engine (designed segmented taxonomy + skip-header)
-      print_row("proto", h);   // old prototype (sal_radix_tree)
+      print_row("engine", e);   // new engine, bucket OFF (designed segmented taxonomy)
+      print_row("adaptive", eb); // new engine, adaptive radix->bucket on deep-narrow
+      print_row("proto", h);    // old prototype (sal_radix_tree)
       print_row("psitri", p);
    }
 }  // namespace
@@ -370,18 +380,20 @@ int main(int argc, char** argv)
 
    if (mode == "rand" || mode == "both")
    {
-      row er = bench_radix(N, rand_key, order, "rand");
-      row hr = bench_heart(N, rand_key, order, "rand");
-      row pr = bench_psitri(N, rand_key, order, "rand");
-      print_trio("RANDOM keys (XXH3(i)):", er, hr, pr);
+      row er  = bench_radix(N, rand_key, order, "rand");
+      row erb = bench_radix(N, rand_key, order, "rand", /*bucket=*/true);
+      row hr  = bench_heart(N, rand_key, order, "rand");
+      row pr  = bench_psitri(N, rand_key, order, "rand");
+      print_trio("RANDOM keys (XXH3(i)):", er, erb, hr, pr);
       std::printf("\n");
    }
    if (mode == "seq" || mode == "both")
    {
-      row es = bench_radix(N, seq_key, order, "seq");
-      row hs = bench_heart(N, seq_key, order, "seq");
-      row ps = bench_psitri(N, seq_key, order, "seq");
-      print_trio("SEQUENTIAL big-endian keys (bswap64(i), ascending insert):", es, hs, ps);
+      row es  = bench_radix(N, seq_key, order, "seq");
+      row esb = bench_radix(N, seq_key, order, "seq", /*bucket=*/true);
+      row hs  = bench_heart(N, seq_key, order, "seq");
+      row ps  = bench_psitri(N, seq_key, order, "seq");
+      print_trio("SEQUENTIAL big-endian keys (bswap64(i), ascending insert):", es, esb, hs, ps);
    }
 
    std::fflush(stdout);

@@ -69,6 +69,12 @@ namespace heart::radix
          _alloc->register_type_ops<full_radix_node>();
          _alloc->register_type_ops<bucket_node>();
          _root = make_node<setlist_u8>(bytes{});
+         // Start SAL's background threads ONLY AFTER this (main) thread has its session and root
+         // — exactly as psitri's database does. Constructing with start_threads_now=true spins
+         // the threads up mid-construction; they race the thread-local session handout so this
+         // thread can end up bound to a background-thread-owned session (tripping the session
+         // thread-ownership check and racing the compactor on unsynchronized session state).
+         _alloc->start_background_threads();
       }
 
       // Radix + bucket hybrid: leaf -> bucket-of-leaves -> radix with bucket/leaf branches.
@@ -82,7 +88,7 @@ namespace heart::radix
             return;
          _bucket_mode = on;
          _ses->release(_root);
-         _root = on ? _ses->alloc<bucket_node>(sal::alloc_hint{}) : make_node<setlist_u8>(bytes{});
+         _root = on ? make_bucket() : make_node<setlist_u8>(bytes{});
       }
 
       // ── public API (psitri key_view/value_view; values are arbitrary bytes) ───
@@ -154,6 +160,17 @@ namespace heart::radix
             auto t = _ses->get_ref<sal::alloc_header>(addr)->type();
             if (t == leaf_node::type_id)
                return leaf_read(addr, kb, depth, out);
+            if (t == bucket_node::type_id)  // a bucket LEAF: search its remaining-key suffix
+            {
+               const inline_value* iv =
+                   _ses->get_ref<bucket_node>(addr).obj()->find(kb.data() + depth,
+                                                                int(kb.size() - depth));
+               if (!iv)
+                  return false;
+               out = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len),
+                                iv->value_len);
+               return true;
+            }
             bool cont;
             if (t == setlist_u8::type_id)
                cont = route_r1(_ses->get_ref<setlist_u8>(addr).obj(), kb, depth, out, addr);
@@ -212,6 +229,14 @@ namespace heart::radix
       // Routing is already stride-aware; nothing else in the engine changes.
       void set_wide_stems(bool on) { _wide_stems = on; }
       bool wide_stems() const { return _wide_stems; }
+
+      // Adaptive radix↔bucket: start radix; when insert descent crosses 2 levels that each
+      // have < 3 branches (children + term) — i.e. going deep without widening, the signature
+      // of clustered/non-radix-friendly data caught while the region is still a provably small
+      // number of keys — collapse that subtree into a bucket leaf. Wide (radix-friendly) data
+      // never trips it. Off by default so the gated baseline stays libart-exact.
+      void set_adaptive(bool on) { _adaptive = on; }
+      bool adaptive() const { return _adaptive; }
 
       // ── introspection (for the tree-structure dump / stats tool) ───────────────
       // COW/alloc accounting: how mutation actually played out over the run. `clones`
@@ -299,7 +324,7 @@ namespace heart::radix
          cfg.sync_mode               = sal::sync_type::none;
          cfg.write_protect_on_commit = false;
          cfg.enable_read_cache       = false;
-         return std::make_unique<sal::allocator>(dir, cfg, true);
+         return std::make_unique<sal::allocator>(dir, cfg, false);  // threads started post-ctor
       }
 
       // ── node construction + COW ────────────────────────────────────────────────
@@ -314,6 +339,11 @@ namespace heart::radix
          auto ref = _ses->get_ref<N>(a);
          ref.control().set_type(uint8_t(ref->stamp_shape()));  // r8 if prefix-less else r1
       }
+      // A bucket is a LEAF (no skip-header routing) → it wants dispatch shape r1. alloc already
+      // defaults the control type to r1 (0), so no explicit stamp is needed: the infrastructure
+      // makes the safe shape the default, and only the wide tiers (set by make_node/clone/reprefix)
+      // ever stamp away from it.
+      ptr_address make_bucket() { return _ses->alloc<bucket_node>(sal::alloc_hint{}); }
       template <class N>
       ptr_address make_node(bytes pfx, sal::alloc_hint hint = {})
       {
@@ -892,6 +922,8 @@ namespace heart::radix
                               sal::alloc_hint peer_hint)
       {
          auto t = _ses->get_ref<sal::alloc_header>(addr)->type();
+         if (t == bucket_node::type_id)  // a bucket LEAF: insert here (split to a router on overflow)
+            return bucket_leaf_insert(addr, key, depth, val);
          if (t == setlist_u8::type_id)
             return router_insert<setlist_u8>(addr, key, depth, val, peer_hint);
          if (t == setlist_u16::type_id)
@@ -910,6 +942,7 @@ namespace heart::radix
                                 sal::alloc_hint peer_hint)
       {
          const ptr_address addr_orig = addr;
+         const uint32_t    depth0     = depth;  // where addr's region begins (for bucket collapse)
          const N*          cn        = _ses->get_ref<N>(addr).obj();
          bytes             pfx       = cn->prefix();
          int               avail     = int(key.size() - depth);
@@ -999,7 +1032,20 @@ namespace heart::radix
 
          // pointer to an inner node → recurse
          ptr_address child = sa.as_pointer();
-         ptr_address nc    = insert_node(child, key, depth + 1, val, chint);
+         // ADAPTIVE: this node + the child it routes into are BOTH narrow (< 3 branches incl
+         // term) → 2 levels deep without widening = clustered, provably small (caught early).
+         // Collapse addr's whole subtree into a bucket leaf instead of noding further.
+         if constexpr (std::is_same_v<N, setlist_u8>)
+         {
+            if (_adaptive && !_in_bucket && cn->nstems() + (cn->has_term_value() ? 1 : 0) < 3 &&
+                !is_bucket(child) && node_narrow(child))
+            {
+               ptr_address bp;
+               if (convert_subtree_to_bucket(addr, bp))
+                  return bucket_leaf_insert(bp, key, depth0, val);  // caller releases old addr
+            }
+         }
+         ptr_address nc = insert_node(child, key, depth + 1, val, chint);
          if (nc != child)
          {
             smart_address nsab = smart_address::from_pointer(nc);
@@ -1389,8 +1435,7 @@ namespace heart::radix
          int         newpl = int(d->prefix_length()) - (p + 1);
          uint8_t     pbuf[sal::cacheline_size];  // a prefix never exceeds prefix_capacity (<1 CL)
          std::memcpy(pbuf, d->prefix().data() + p + 1, size_t(newpl));
-         reprefix<N>(d, bytes{pbuf, size_t(newpl)});
-         stamp<N>(dnode);
+         reprefix<N>(dnode, bytes{pbuf, size_t(newpl)});  // changes prefix AND re-stamps the shape
 
          ptr_address np = make_node<setlist_u8>(key.subspan(depth, size_t(p)), peer_hint);
          mut<setlist_u8>(np)->set_branch(ob, smart_address::from_pointer(dnode));
@@ -1400,18 +1445,27 @@ namespace heart::radix
          add_continuation(np, key.subspan(depth + uint32_t(p)), val, peer_hint);
          return np;
       }
+      // The SINGLE prefix-change primitive — and it ALSO re-stamps the dispatch shape, because
+      // the shape is a function of the prefix (a prefix forces r1; prefix-less keeps the wide
+      // tier). Coupling the two here means no call site can leave a wide-stamped node holding a
+      // prefix — the desync that made the skip-header find misroute (nondeterministically) in
+      // adaptive mode. Prefix changes are the ONLY shape-affecting mutation; alloc already
+      // defaults the control type to r1 (the safe slow path), so this is the only stamp a
+      // mutation must do.
       template <class N>
-      void reprefix(N* n, bytes p)
+      void reprefix(ptr_address a, bytes p)
       {
-         // Every setlist width stores stems+branches at a prefix-relative offset, so a
-         // prefix change must relocate that block — the node's own reprefix() (wide-aware
-         // for u16/u32, end-anchored for u8). bitset/full keep branches in separate
-         // cachelines, so the cheap base set_prefix() is correct for them.
+         N* n = mut<N>(a);
+         // Every setlist width stores stems+branches at a prefix-relative offset, so a prefix
+         // change must relocate that block — the node's own reprefix() (wide-aware for u16/u32,
+         // end-anchored for u8). bitset/full keep branches in separate cachelines, so the cheap
+         // base set_prefix() is correct for them.
          if constexpr (std::is_same_v<N, setlist_u8> || std::is_same_v<N, setlist_u16> ||
                        std::is_same_v<N, setlist_u32>)
             n->reprefix(p);
          else
             n->set_prefix(p);
+         stamp<N>(a);
       }
 
       // ── widen: build a wider encoding from `from` + add (setb→{suf,val}) ─────────
@@ -1509,9 +1563,155 @@ namespace heart::radix
       sal::header_type ntype(ptr_address a) { return _ses->get_ref<sal::alloc_header>(a)->type(); }
       bucket_node*     bkt(ptr_address a) { return _ses->get_ref<bucket_node>(a).modify().get(); }
 
+      // ── adaptive radix→bucket (deep-narrow detection + subtree collapse) ─────────
+      bool is_bucket(ptr_address a)
+      {
+         return _ses->get_ref<sal::alloc_header>(a)->type() == bucket_node::type_id;
+      }
+      // < 3 branches (children + term) → "narrow". Only setlist/single-child nodes can be
+      // narrow; bitset/full are wide; leaf/bucket aren't radix routers.
+      bool node_narrow(ptr_address a)
+      {
+         auto t = _ses->get_ref<sal::alloc_header>(a)->type();
+         if (t == setlist_u8::type_id)
+         {
+            auto* n = _ses->get_ref<setlist_u8>(a).obj();
+            return n->nstems() + (n->has_term_value() ? 1 : 0) < 3;
+         }
+         if (t == setlist_u16::type_id)
+         {
+            auto* n = _ses->get_ref<setlist_u16>(a).obj();
+            return n->nstems() + (n->has_term_value() ? 1 : 0) < 3;
+         }
+         if (t == setlist_u32::type_id)
+         {
+            auto* n = _ses->get_ref<setlist_u32>(a).obj();
+            return n->nstems() + (n->has_term_value() ? 1 : 0) < 3;
+         }
+         return false;
+      }
+      // Insert into a bucket LEAF; on overflow split it to a radix router (bkt_split) and route
+      // the key into that router via the normal engine. Returns the (possibly new) address.
+      ptr_address bucket_leaf_insert(ptr_address bp, bytes key, uint32_t depth, bytes val)
+      {
+         // Everything reached from here lives in a bucket subtree; suppress the radix→bucket
+         // trigger so a split's rebuilt radix (collision setlists) doesn't re-collapse mid-build.
+         const bool was = _in_bucket;
+         _in_bucket     = true;
+         ptr_address r  = bucket_leaf_insert_impl(bp, key, depth, val);
+         _in_bucket     = was;
+         return r;
+      }
+      ptr_address bucket_leaf_insert_impl(ptr_address bp, bytes key, uint32_t depth, bytes val)
+      {
+         if (!is_bucket(bp))  // already split to a router (e.g. mid-collapse) → route normally
+            return insert_node(bp, key, depth, val, {});
+         int r = bkt(bp)->insert(key.data() + depth, int(key.size() - depth), val.data(),
+                                 int(val.size()));
+         if (r != 0)
+         {
+            _old_value_size = r < 0 ? 0 : -1;
+            return bp;
+         }
+         ptr_address rp  = bkt_split(bp);                // overflow → router (bp freed by CALLER)
+         ptr_address nrp = insert_node(rp, key, depth, val, {});  // normal path adds the key
+         if (nrp != rp)
+            _ses->release(rp);  // the freshly-split router got replaced (COW) → free it
+         return nrp;
+      }
+      // Collect (suffix,value) of every key in addr's subtree, suffix relative to addr. Bounded:
+      // returns false (abort, stay radix) if the subtree is bigger than a bucket should absorb —
+      // which, with early detection, is rare.
+      static constexpr int conv_sbuf = 8192, conv_vbuf = 4096, conv_cap = 300;
+      struct CE { uint16_t so, vo; uint8_t sl, vl; };
+      template <class Ad>
+      bool collect_in(Ad ad, KB& acc, uint8_t* sb, uint16_t& sp, uint8_t* vb, uint16_t& vp,
+                      CE* ents, int& n, int cap)
+      {
+         const uint32_t save = acc.len;
+         bytes          pfx  = ad.prefix();
+         acc.append(pfx.data(), pfx.size());
+         auto record = [&](bytes suf, value_view v) -> bool {
+            const int sl = int(acc.len) + int(suf.size());
+            if (n >= cap || sl > 255 || int(v.size()) > 255 || int(sp) + sl > conv_sbuf ||
+                int(vp) + int(v.size()) > conv_vbuf)
+               return false;
+            ents[n].so = sp;
+            ents[n].sl = uint8_t(sl);
+            std::memcpy(sb + sp, acc.buf, acc.len);
+            std::memcpy(sb + sp + acc.len, suf.data(), suf.size());
+            sp = uint16_t(sp + sl);
+            ents[n].vo = vp;
+            ents[n].vl = uint8_t(v.size());
+            std::memcpy(vb + vp, v.data(), v.size());
+            vp = uint16_t(vp + v.size());
+            ++n;
+            return true;
+         };
+         if (!ad.term().is_null())
+         {
+            bytes      s;
+            value_view v;
+            term_view(ad.node(), ad.term(), s, v);
+            if (!record(s, v))
+               return false;
+         }
+         for (int c = ad.first(); ad.valid(c); c = ad.next(c))
+         {
+            const uint32_t s0 = acc.len;
+            uint8_t        sbb[4];
+            const int      nb = stem_bytes(ad.cell(c), ad.stem_width(), ad.cw(), sbb);
+            acc.append(sbb, size_t(nb));
+            smart_address br = ad.branch(c);
+            if (is_terminal_branch(br))
+            {
+               bytes      s;
+               value_view v;
+               term_view(ad.node(), br, s, v);
+               if (!record(s, v))
+                  return false;
+            }
+            else if (!collect_walk(br.as_pointer(), acc, sb, sp, vb, vp, ents, n, cap))
+               return false;
+            acc.truncate(s0);
+         }
+         acc.truncate(save);
+         return true;
+      }
+      bool collect_walk(ptr_address a, KB& acc, uint8_t* sb, uint16_t& sp, uint8_t* vb, uint16_t& vp,
+                        CE* ents, int& n, int cap)
+      {
+         if (is_bucket(a))  // a deeper region is already a bucket → don't try to collapse
+            return false;
+         return dispatch(a, [&](auto ad) { return collect_in(ad, acc, sb, sp, vb, vp, ents, n, cap); });
+      }
+      // Build a bucket holding the whole subtree at addr; false if it's too big to collapse.
+      bool convert_subtree_to_bucket(ptr_address addr, ptr_address& out)
+      {
+         uint8_t  sb[conv_sbuf];
+         uint8_t  vb[conv_vbuf];
+         CE       ents[conv_cap];
+         uint16_t sp = 0, vp = 0;
+         int      n  = 0;
+         KB       acc;
+         acc.len = 0;
+         if (!collect_walk(addr, acc, sb, sp, vb, vp, ents, n, conv_cap))
+            return false;
+         ptr_address bp = make_bucket();
+         for (int i = 0; i < n; ++i)
+         {
+            ptr_address nb = bucket_leaf_insert(bp, bytes{sb + ents[i].so, ents[i].sl}, 0,
+                                                bytes{vb + ents[i].vo, ents[i].vl});
+            if (nb != bp)
+               _ses->release(bp);  // bp split/COW'd into nb → free the consumed node
+            bp = nb;
+         }
+         out = bp;
+         return true;
+      }
       ptr_address bkt_make(bytes suf, bytes val)
       {
-         ptr_address bp = _ses->alloc<bucket_node>(sal::alloc_hint{});
+         ptr_address bp = make_bucket();
          bkt(bp)->insert(suf.data(), int(suf.size()), val.data(), int(val.size()));
          return bp;
       }
@@ -1542,6 +1742,95 @@ namespace heart::radix
          iv->value_type = 0;
          std::memcpy(iv->data, v.data(), v.size());
          mut<full_radix_node>(rp)->set_term_value(smart_address::from_tail(r->tail_used()));
+      }
+      // Store a single (suffix,value) terminal INLINE in router rp under byte b — a from_tail
+      // branch in the router's own tail heap, NOT a separate object. This is what stops a dense
+      // terminal byte (sequential keys) from exploding into one bucket per key. Returns false
+      // if it doesn't fit the inline cap or the router's tail is full (caller uses a bucket).
+      // Grow a compact router to its working page ONCE its inline-terminal tail overflows, so a
+      // dense terminal byte fills one page instead of spilling to a per-key bucket. In-place
+      // model (no MVCC sharing): alloc the bigger page, blit head+tail, retain children, release
+      // the old router. Returns the new address (the old one is freed here).
+      ptr_address bkt_grow_router(ptr_address rp)
+      {
+         // Copy the prefix to the stack FIRST: the alloc below can relocate/compact the arena,
+         // so neither rp's pointer nor a span into it may be held across it.
+         uint8_t pbuf[256];
+         int     pl;
+         {
+            bytes p = _ses->get_ref<full_radix_node>(rp).obj()->prefix();
+            pl      = int(p.size());
+            std::memcpy(pbuf, p.data(), size_t(pl));
+         }
+         ptr_address np = _ses->alloc<full_radix_node>(full_radix_node::page_bytes, sal::alloc_hint{},
+                                                       bytes{pbuf, size_t(pl)});
+         full_radix_node* nn = mut<full_radix_node>(np);
+         _ses->get_ref<full_radix_node>(rp).obj()->copy_to(nn);  // re-resolve rp AFTER the alloc
+         nn->for_each_child([&](ptr_address c) { _ses->retain(c); });
+         stamp<full_radix_node>(np);  // dispatch shape (find reads cb_type) — copy_to didn't set it
+         _ses->release(rp);  // drop old router (its destroy releases each child once → net no change)
+         return np;
+      }
+      bool bkt_try_inline(ptr_address& rp, uint8_t b, bytes suf, bytes val)
+      {
+         if (!fits_inline(suf, val))
+            return false;
+         full_radix_node* r    = mut<full_radix_node>(rp);
+         const uint32_t   need = uint32_t(inline_value::byte_size(int(suf.size()), int(val.size())));
+         if (r->free_heap() < need)
+         {
+            if (r->size() >= full_radix_node::page_bytes)
+               return false;  // already at the working page and still full → spill to a bucket
+            rp = bkt_grow_router(rp);
+            r  = mut<full_radix_node>(rp);
+            if (r->free_heap() < need)
+               return false;
+         }
+         auto* iv       = reinterpret_cast<inline_value*>(r->alloc_tail(uint16_t(need)));
+         iv->suffix_len = uint8_t(suf.size());
+         iv->value_len  = uint8_t(val.size());
+         iv->value_type = 0;
+         std::memcpy(iv->data, suf.data(), suf.size());
+         std::memcpy(iv->data + suf.size(), val.data(), val.size());
+         r->set_branch(b, smart_address::from_tail(r->tail_used()));
+         return true;
+      }
+      // A new key collides with an existing inline terminal under `byte`. Either update it in
+      // place (same key) or promote: build a bucket holding the existing + new entries and
+      // repoint the branch at it (the old inline slot leaks — rare).
+      ptr_address bkt_promote_inline(ptr_address rp, uint8_t byte, smart_address br, bytes key,
+                                     uint32_t depth, bytes val)
+      {
+         full_radix_node*    r  = mut<full_radix_node>(rp);
+         const inline_value* iv = inline_of(r, br);
+         bytes               esuf{iv->data, size_t(iv->suffix_len)};
+         bytes               nsuf = key.subspan(depth + 1);
+         if (esuf.size() == nsuf.size() &&
+             (nsuf.empty() || std::memcmp(esuf.data(), nsuf.data(), nsuf.size()) == 0))
+         {  // same key -> overwrite the value in place if it fits the slot, else re-inline (leak)
+            if (iv->value_len >= int(val.size()))
+            {
+               auto* w      = const_cast<inline_value*>(iv);
+               w->value_len = uint8_t(val.size());
+               std::memcpy(w->data + w->suffix_len, val.data(), val.size());
+               _old_value_size = 0;
+               return rp;
+            }
+            if (bkt_try_inline(rp, byte, esuf, val))
+            {
+               _old_value_size = 0;
+               return rp;
+            }
+         }
+         // different key (or a value grow with no room): snapshot the existing entry off the
+         // router tail, then build a bucket holding it + the new key.
+         uint8_t   tmp[inline_value::max_inline_size];
+         const int sl = iv->suffix_len, vl = iv->value_len;
+         std::memcpy(tmp, iv->data, size_t(sl) + size_t(vl));
+         ptr_address nb = bkt_make(bytes{tmp, size_t(sl)}, bytes{tmp + sl, size_t(vl)});
+         nb             = bkt_insert(nb, key, depth + 1, val);
+         mut<full_radix_node>(rp)->set_branch(byte, smart_address::from_pointer(nb));
+         return rp;
       }
       ptr_address bkt_split(ptr_address bp)
       {
@@ -1578,14 +1867,25 @@ namespace heart::radix
             const uint8_t bch = buf[ent[i].off + cp];
             int           j   = i;
             while (j < n && ent[j].sl > cp && buf[ent[j].off + cp] == bch) ++j;
-            ptr_address cbp = _ses->alloc<bucket_node>(sal::alloc_hint{});
+            // a lone key under this byte → inline terminal in the router (no per-key object);
+            // this is what keeps a dense terminal byte from exploding into one bucket per key.
+            if (j - i == 1 &&
+                bkt_try_inline(rp, bch, bytes{buf + ent[i].off + cp + 1, size_t(ent[i].sl - cp - 1)},
+                               val(i)))
+            {
+               i = j;
+               continue;
+            }
+            ptr_address cbp = make_bucket();
             for (int k = i; k < j; ++k)  // recursive: a bucket-sized group becomes a sub-radix
                cbp = bkt_insert(cbp, bytes{buf + ent[k].off + cp + 1, size_t(ent[k].sl - cp - 1)}, 0,
                                 val(k));
             mut<full_radix_node>(rp)->set_branch(bch, smart_address::from_pointer(cbp));
             i = j;
          }
-         _ses->release(bp);  // release the old bucket only AFTER the new subtree is built
+         // Engine COW contract: return the new node; the CALLER releases the old `bp` (exactly
+         // once). Freeing it here too would double-free, since router_insert/upsert already do
+         // `if (nc != child) release(child)`.
          return rp;
       }
       ptr_address bkt_prefix_split(ptr_address rp, bytes key, uint32_t depth, int p, bytes val)
@@ -1596,7 +1896,7 @@ namespace heart::radix
          int     newpl = int(P.size()) - (p + 1);
          std::memcpy(pbuf, P.data() + p + 1, size_t(newpl));
          ptr_address np = make_node<full_radix_node>(bytes{key.data() + depth, size_t(p)});
-         mut<full_radix_node>(rp)->set_prefix(bytes{pbuf, size_t(newpl)});
+         reprefix<full_radix_node>(rp, bytes{pbuf, size_t(newpl)});  // changes prefix AND re-stamps
          mut<full_radix_node>(np)->set_branch(ob, smart_address::from_pointer(rp));
          const uint32_t d2 = depth + uint32_t(p);
          if (d2 == key.size())
@@ -1618,8 +1918,9 @@ namespace heart::radix
                _old_value_size = r < 0 ? 0 : -1;
                return addr;
             }
-            addr = bkt_split(addr);
-            return bkt_insert(addr, key, depth, val);
+            ptr_address split = bkt_split(addr);  // bkt_split no longer frees its input
+            _ses->release(addr);                   // so THIS caller frees the consumed bucket
+            return bkt_insert(split, key, depth, val);
          }
          bytes     P     = _ses->get_ref<full_radix_node>(addr).obj()->prefix();
          const int avail = int(key.size() - depth);
@@ -1638,11 +1939,15 @@ namespace heart::radix
          smart_address br   = _ses->get_ref<full_radix_node>(addr).obj()->find(byte);
          if (br.is_null())
          {
-            mut<full_radix_node>(addr)->set_branch(
-                byte,
-                smart_address::from_pointer(bkt_make({key.data() + depth + 1, key.size() - depth - 1}, val)));
+            bytes suf{key.data() + depth + 1, key.size() - depth - 1};
+            if (!bkt_try_inline(addr, byte, suf, val))  // inline terminal, else a child bucket
+               mut<full_radix_node>(addr)->set_branch(byte,
+                                                      smart_address::from_pointer(bkt_make(suf, val)));
+            _old_value_size = -1;
             return addr;
          }
+         if (br.is_tail())  // existing inline terminal under this byte: update or promote
+            return bkt_promote_inline(addr, byte, br, key, depth, val);
          ptr_address nc = bkt_insert(br.as_pointer(), key, depth + 1, val);
          if (nc != br.as_pointer())
             mut<full_radix_node>(addr)->set_branch(byte, smart_address::from_pointer(nc));
@@ -1681,6 +1986,8 @@ namespace heart::radix
             smart_address br = r->find(key[depth]);
             if (br.is_null())
                return false;
+            if (br.is_tail())  // inline terminal in the router: suffix == key[depth+1:]
+               return inline_at(r, br, key.subspan(depth + 1), out);
             addr = br.as_pointer();
             ++depth;
          }
@@ -1695,6 +2002,8 @@ namespace heart::radix
       bool                            _route_found    = false;
       bool                            _wide_stems     = false;  // gate: off = byte radix
       bool                            _bucket_mode    = false;  // leaf=bucket, split to radix
+      bool                            _adaptive       = false;  // gate: radix→bucket on deep-narrow
+      bool                            _in_bucket      = false;  // re-entrancy: in a bucket subtree
       cow_counters                    _cc;
    };
 }  // namespace heart::radix

@@ -469,6 +469,28 @@ namespace heart
          branches.init();
       }
 
+      // A bucket-mode dense router stores many single-key terminals INLINE in its own tail
+      // heap (smart_address::from_tail branches) instead of as one SAL object per key — so a
+      // dense terminal byte (e.g. sequential integer keys) collapses to one router page rather
+      // than exploding into one bucket per key. A fresh router stays compact (good cache
+      // density for the sparse/random common case, where it holds pointer branches); the
+      // bucket engine GROWS it once to this working page only when inline terminals overflow,
+      // and the compactor shrinks rarely-filled routers back down via compact_to.
+      static constexpr uint32_t page_bytes = 4096;  // grow target once inline terminals overflow
+      // alloc_size stays the inherited compact (sizeof + headroom). cow/compact must reflect the
+      // ACTUAL grown size, not a fixed page, so a SAL-driven COW never truncates a grown router.
+      uint32_t cow_size() const noexcept
+      {
+         return ucc::round_up_multiple<sal::cacheline_size>(this->head_size() + this->tail_used() +
+                                                            headroom);
+      }
+      uint32_t compact_size() const noexcept
+      {
+         return ucc::round_up_multiple<sal::cacheline_size>(this->head_size() + this->tail_used());
+      }
+      void copy_to(sal::alloc_header* dst) const noexcept { this->blit_head_tail(dst, this->head_size()); }
+      void compact_to(sal::alloc_header* dst) const noexcept { this->blit_head_tail(dst, this->head_size()); }
+
       smart_address find(uint8_t b) const noexcept { return branches.find(b); }
       bool          set_branch(uint8_t b, smart_address sa) noexcept
       {

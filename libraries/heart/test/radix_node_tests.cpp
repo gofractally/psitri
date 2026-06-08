@@ -348,3 +348,77 @@ TEST_CASE("bucket_node: 2-3-4 leaf bucket — find/lower_bound/in-order vs std::
       lb(q);
    }
 }
+
+TEST_CASE("bucket_node: COW/compact blit copies head+tail, skips the free hole", "[radix_node]")
+{
+   using heart::bucket_node;
+   using heart::inline_value;
+   alignas(128) static unsigned char src[bucket_node::page_bytes];
+   auto* b = new (src) bucket_node(bucket_node::page_bytes,
+                                   sal::ptr_address_seq{sal::ptr_address(1), 1});
+
+   std::map<std::string, std::string> oracle;
+   std::mt19937_64                    rng(424242);
+   int                                inserted = 0;
+   for (;;)
+   {
+      std::string k(1 + int(rng() % 18), 0);
+      for (auto& ch : k) ch = char(uint8_t(rng()));
+      std::string v(1 + int(rng() % 20), char(uint8_t(rng())));
+      int         r = b->insert(reinterpret_cast<const uint8_t*>(k.data()), int(k.size()),
+                                reinterpret_cast<const uint8_t*>(v.data()), int(v.size()));
+      if (r == 0) break;
+      oracle[k] = v;
+      if (++inserted >= 60) break;  // stop half-full so there's a free hole to skip/reclaim
+   }
+   REQUIRE(inserted == 60);
+
+   // compact_size must actually shrink the page (it isn't full of head+tail) and copy proof:
+   const uint32_t cs = b->compact_size();
+   REQUIRE(cs <= bucket_node::page_bytes);
+   REQUIRE(cs < bucket_node::alloc_size());  // the free hole is reclaimed
+
+   auto verify = [&](const bucket_node* p) {
+      REQUIRE(int(p->nent) == inserted);
+      for (auto& [k, v] : oracle)  // every key still resolves to its value
+      {
+         const inline_value* iv =
+             p->find(reinterpret_cast<const uint8_t*>(k.data()), int(k.size()));
+         REQUIRE(iv != nullptr);
+         REQUIRE(std::string(reinterpret_cast<const char*>(iv->data) + iv->suffix_len,
+                             iv->value_len) == v);
+      }
+      auto it  = oracle.begin();  // in-order preserved
+      int  cnt = 0;
+      p->for_each([&](const inline_value& iv) {
+         REQUIRE(std::string(reinterpret_cast<const char*>(iv.data), iv.suffix_len) == it->first);
+         ++it;
+         ++cnt;
+      });
+      REQUIRE(cnt == inserted);
+   };
+
+   // compact_to: blit into a TIGHTLY sized destination (the compactor's job).
+   alignas(128) static unsigned char cbuf[bucket_node::page_bytes];
+   auto* c = new (cbuf) bucket_node(cs, sal::ptr_address_seq{sal::ptr_address(2), 1});
+   b->compact_to(c);
+   REQUIRE(c->size() == cs);
+   verify(c);
+
+   // copy_to: blit (COW) into a full working page; it must still accept inserts in place.
+   alignas(128) static unsigned char wbuf[bucket_node::page_bytes];
+   auto* w = new (wbuf) bucket_node(bucket_node::alloc_size(),
+                                    sal::ptr_address_seq{sal::ptr_address(3), 1});
+   b->copy_to(w);
+   REQUIRE(w->size() == bucket_node::alloc_size());
+   verify(w);
+
+   // round-trip: a compacted page COW-expanded back to a working page is identical and writable.
+   auto* w2 = new (src) bucket_node(bucket_node::alloc_size(),  // reuse src storage
+                                    sal::ptr_address_seq{sal::ptr_address(4), 1});
+   c->copy_to(w2);
+   verify(w2);
+   std::string nk = "\x01zzznew", nv = "v";
+   REQUIRE(w2->insert(reinterpret_cast<const uint8_t*>(nk.data()), int(nk.size()),
+                      reinterpret_cast<const uint8_t*>(nv.data()), int(nv.size())) == 1);
+}

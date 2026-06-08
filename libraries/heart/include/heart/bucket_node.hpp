@@ -5,6 +5,7 @@
 #include <heart/paged.hpp>
 #include <heart/radix_type_ids.hpp>
 #include <heart/smart_address.hpp>  // tail_ptr
+#include <ucc/fast_memcpy.hpp>      // memcpy_aligned_64byte
 #include <ucc/lower_bound.hpp>      // lower_bound_u16_padded (SIMD), find
 #include <ucc/round.hpp>
 
@@ -37,12 +38,25 @@ namespace heart
       uint16_t nent;  // entry count
 
       // ── page lifecycle (concrete) ───────────────────────────────────────────────────
+      // The head region is the fixed struct + the two forward index arrays (div[], slot[]);
+      // the tail region is the (used) entry heap. Everything in between is free space we never
+      // touch — COW and compaction copy ONLY head + used-tail (two fast memcpys), never the hole.
       static constexpr uint32_t head_bytes() noexcept { return uint32_t(sizeof(bucket_node)); }
-      uint32_t head_size() const noexcept { return uint32_t(sizeof(bucket_node)); }
-      static uint32_t alloc_size() noexcept
+      uint32_t head_size() const noexcept { return uint32_t(sizeof(bucket_node)) + 4u * nent; }
+      static uint32_t alloc_size() noexcept  // the 4 KB working page (room to grow → 1 grow/txn)
       {
          return ucc::round_up_multiple<sal::cacheline_size>(page_bytes);
       }
+      // COW always expands back to the full working page so a unique-mode insert run mutates in
+      // place afterward (no repeated grow phases); the compactor later shrinks it to fit.
+      uint32_t cow_size() const noexcept { return alloc_size(); }
+      uint32_t compact_size() const noexcept
+      {
+         return ucc::round_up_multiple<sal::cacheline_size>(head_size() + tail_used());
+      }
+      void copy_to(sal::alloc_header* dst) const noexcept { blit_head_tail(dst, head_size()); }
+      void compact_to(sal::alloc_header* dst) const noexcept { blit_head_tail(dst, head_size()); }
+
       template <typename F>
       void for_each_child(F&&) const  // no SAL children (entries are inline) -> destroy is no-op
       {

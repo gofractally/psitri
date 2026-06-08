@@ -49,6 +49,12 @@ namespace
       bool   ok = false;
    };
 
+   // Apples-to-apples txn granularity: BOTH engines commit every TX_BATCH ops (psitri via
+   // start_transaction/commit per chunk, heart via commit() per chunk → shared/COW mode).
+   // A realistic bulk cadence — avoids the single-giant-txn pathology (which pins all of
+   // psitri's COW garbage) and makes both pay equal commit/COW cost.
+   constexpr uint64_t TX_BATCH = 4096;
+
    template <class KeyFn>
    row bench_heart(uint64_t N, KeyFn keyfn, const std::vector<uint32_t>& order, const char* tag)
    {
@@ -114,10 +120,15 @@ namespace
          return std::string_view(reinterpret_cast<const char*>(&v), sizeof(v));
       };
       auto t0 = now();
-      for (uint64_t i = 0; i < N; ++i)
+      for (uint64_t base = 0; base < N; base += TX_BATCH)
       {
-         uint64_t k = keyfn(i);
-         t.upsert(kspan(k), vview(i));
+         const uint64_t end = std::min(N, base + TX_BATCH);
+         for (uint64_t i = base; i < end; ++i)
+         {
+            uint64_t k = keyfn(i);
+            t.upsert(kspan(k), vview(i));
+         }
+         t.commit();  // batch boundary → subsequent writes COW (shared mode), like a psitri txn
       }
       r.ins = ns(t0, now(), N);
       uint64_t s = 0, q = 0;
@@ -180,12 +191,16 @@ namespace
                      tc.setlist ? double(tc.sl_tail_used) / double(tc.setlist) : 0.0,
                      (unsigned long long)tc.setlist);
       }
-      // REMOVE: delete every key in keyfn order → empties the tree. For the seq keyfn this
-      // is an ASCENDING (true sequential) delete that drains the tree front-to-back; for the
-      // random keyfn the keys are scattered, so it's effectively a random delete.
+      // REMOVE: delete every key in keyfn order → empties the tree (ascending = true
+      // sequential delete for the seq keyfn; scattered for random). Committed per batch.
       auto d0 = now();
-      for (uint64_t i = 0; i < N; ++i)
-         t.remove(kspan(keyfn(i)));
+      for (uint64_t base = 0; base < N; base += TX_BATCH)
+      {
+         const uint64_t end = std::min(N, base + TX_BATCH);
+         for (uint64_t i = base; i < end; ++i)
+            t.remove(kspan(keyfn(i)));
+         t.commit();
+      }
       r.del          = ns(d0, now(), N);
       uint64_t still = 0;
       for (uint64_t i = 0; i < N; ++i)
@@ -212,9 +227,11 @@ namespace
       row  r;
 
       auto t0 = now();
+      for (uint64_t base = 0; base < N; base += TX_BATCH)
       {
-         auto tx = ses->start_transaction(0);
-         for (uint64_t i = 0; i < N; ++i)
+         const uint64_t end = std::min(N, base + TX_BATCH);
+         auto           tx  = ses->start_transaction(0);
+         for (uint64_t i = base; i < end; ++i)
          {
             uint64_t k = keyfn(i);
             tx.insert(psitri::key_view(reinterpret_cast<const char*>(&k), sizeof(k)),
@@ -257,12 +274,14 @@ namespace
       }
       r.miss                = ns(m0, now(), N);
       const uint64_t expect = N * (N - 1) / 2;
-      // REMOVE: one transaction deletes every key in keyfn order (ascending for the seq
-      // keyfn = true sequential delete; scattered for random), then commit.
+      // REMOVE: per-batch transactions delete every key in keyfn order (ascending for the seq
+      // keyfn = true sequential delete; scattered for random) — same cadence as heart.
       auto d0 = now();
+      for (uint64_t base = 0; base < N; base += TX_BATCH)
       {
-         auto tx = ses->start_transaction(0);
-         for (uint64_t i = 0; i < N; ++i)
+         const uint64_t end = std::min(N, base + TX_BATCH);
+         auto           tx  = ses->start_transaction(0);
+         for (uint64_t i = base; i < end; ++i)
          {
             uint64_t k = keyfn(i);
             tx.remove(psitri::key_view(reinterpret_cast<const char*>(&k), sizeof(k)));

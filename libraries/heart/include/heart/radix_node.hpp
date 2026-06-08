@@ -6,9 +6,14 @@
 #include <heart/paged.hpp>
 #include <heart/smart_address.hpp>
 #include <sal/config.hpp>  // cacheline_size
+#include <ucc/round.hpp>   // round_up_multiple (alloc_size default)
 
 namespace heart
 {
+   // Spare tail-heap headroom every radix node is allocated beyond its fixed struct, so
+   // inline terminal values have somewhere to grow before a COW-grow is forced.
+   inline constexpr uint32_t radix_node_headroom = 256;
+
    /**
     * The R1 dispatch *format* — what CL0 holds once you've committed to reading the
     * header. (The control_block carries the cacheline-division *shape* below; this
@@ -111,6 +116,28 @@ namespace heart
 
       Derived&       self() noexcept { return *static_cast<Derived*>(this); }
       const Derived& self() const noexcept { return *static_cast<const Derived*>(this); }
+
+      // ── default node lifecycle (a node is sizeof(Derived) + a trailing tail heap) ──
+      // A node knows how to size, measure, and free itself from sizeof(Derived) alone.
+      // setlist overrides head_size()/free_heap() (its wide variant grows the index past
+      // the struct); everyone else — and alloc_size/head_bytes/destroy — uses these.
+      static constexpr uint32_t headroom = radix_node_headroom;
+      static constexpr uint32_t head_bytes() noexcept { return uint32_t(sizeof(Derived)); }
+      uint32_t                  head_size() const noexcept { return uint32_t(sizeof(Derived)); }
+      uint32_t                  free_heap() const noexcept
+      {
+         return this->free_bytes(reinterpret_cast<const char*>(this) + sizeof(Derived));
+      }
+      static uint32_t alloc_size(std::span<const uint8_t> prefix) noexcept
+      {
+         (void)prefix;  // prefix lives in CL0's variable region; size is fixed + headroom
+         return ucc::round_up_multiple<sal::cacheline_size>(uint32_t(sizeof(Derived)) + headroom);
+      }
+      template <typename Session>
+      void destroy(const Session& s) const
+      {
+         self().for_each_child([&](sal::ptr_address c) { s->release(c); });
+      }
    } __attribute__((packed));
 
    /**

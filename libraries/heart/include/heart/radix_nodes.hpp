@@ -12,9 +12,9 @@
 
 namespace heart
 {
-   // Every radix node carries a tail heap for inline terminal values; head_bytes() is
-   // the fixed structure size (the tail heap follows), free_heap() the room left.
-   inline constexpr uint32_t radix_node_headroom = 256;
+   // radix_node_headroom + the default node lifecycle (alloc_size/head_bytes/head_size/
+   // free_heap/destroy) live on radix_impl in radix_node.hpp; nodes inherit them and only
+   // setlist overrides head_size()/free_heap() for its wide (index-past-CL0) layout.
    // The concrete node taxonomy (type-only; layouts byte-pinned by static_assert,
    // no algorithm bodies). Maps to ART's N4/N16/N48/N256 dispatch classes:
    //
@@ -352,18 +352,9 @@ namespace heart
          for (int i = 0; i < n; ++i)
             f(uint8_t(stem_at(i)), branch_at(i));
       }
-      template <typename Session>
-      void destroy(const Session& s) const
-      {
-         for_each_child([&](sal::ptr_address c) { s->release(c); });
-      }
-
-      // ---- tail heap for inline terminals ----
-      static constexpr uint32_t headroom  = radix_node_headroom;
-      static constexpr uint32_t head_bytes() noexcept { return uint32_t(sizeof(setlist_node)); }
-      // Bytes from the start of the node up to the end of the live index region. u8: the
-      // index lives in CL0 so this is just sizeof. wide: prefix+stems+branches grow past
-      // CL0, so the head is variable (used by the engine's clone/grow + free_heap).
+      // head_size()/free_heap() OVERRIDE the radix_impl defaults: the wide variant grows
+      // prefix+stems+branches past CL0, so the head (and thus the tail-heap start) is
+      // variable. u8 keeps the sizeof() head. (alloc_size/head_bytes/destroy inherited.)
       uint32_t head_size() const noexcept
       {
          if constexpr (stem_width == 1)
@@ -379,12 +370,6 @@ namespace heart
             return this->free_bytes(reinterpret_cast<const char*>(this) + sizeof(setlist_node));
          else
             return this->free_bytes(reinterpret_cast<const char*>(this) + head_size());
-      }
-      // ---- SAL construction contract ----
-      static uint32_t alloc_size(std::span<const uint8_t> prefix) noexcept
-      {
-         (void)prefix;  // prefix + stems + branches in CL0; tail heap follows
-         return ucc::round_up_multiple<sal::cacheline_size>(uint32_t(sizeof(setlist_node)) + headroom);
       }
       setlist_node(uint32_t asize, sal::ptr_address_seq seq, std::span<const uint8_t> prefix) noexcept
       {
@@ -463,25 +448,7 @@ namespace heart
                f(br.as_pointer());
          });
       }
-      template <typename Session>
-      void destroy(const Session& s) const
-      {
-         for_each_child([&](sal::ptr_address c) { s->release(c); });
-      }
-
-      static uint32_t alloc_size(std::span<const uint8_t> prefix) noexcept
-      {
-         (void)prefix;
-         return ucc::round_up_multiple<sal::cacheline_size>(uint32_t(sizeof(bitset_rN_node)) +
-                                                            headroom);
-      }
-      static constexpr uint32_t headroom  = radix_node_headroom;
-      static constexpr uint32_t head_bytes() noexcept { return uint32_t(sizeof(bitset_rN_node)); }
-      uint32_t head_size() const noexcept { return uint32_t(sizeof(bitset_rN_node)); }
-      uint32_t free_heap() const noexcept
-      {
-         return this->free_bytes(reinterpret_cast<const char*>(this) + sizeof(bitset_rN_node));
-      }
+      // alloc_size / head_bytes / head_size / free_heap / destroy: inherited from radix_impl.
       bitset_rN_node(uint32_t asize, sal::ptr_address_seq seq, std::span<const uint8_t> prefix) noexcept
       {
          this->init_page(asize, type_id, seq);
@@ -516,21 +483,8 @@ namespace heart
       // Pinned to 128 by the offsetof static_assert below the struct.
       static constexpr uint32_t branch_offset = 128;
 
-      // ---- SAL construction contract (branches/term are pure pointers; no tail
-      // heap, so the allocation is exactly the fixed 9-cacheline struct). ----
-      static uint32_t alloc_size(std::span<const uint8_t> prefix) noexcept
-      {
-         (void)prefix;  // prefix lives in the CL0 variable region (prefix_data)
-         return ucc::round_up_multiple<sal::cacheline_size>(uint32_t(sizeof(full_radix_node)) +
-                                                            headroom);
-      }
-      static constexpr uint32_t headroom  = radix_node_headroom;
-      static constexpr uint32_t head_bytes() noexcept { return uint32_t(sizeof(full_radix_node)); }
-      uint32_t head_size() const noexcept { return uint32_t(sizeof(full_radix_node)); }
-      uint32_t free_heap() const noexcept
-      {
-         return this->free_bytes(reinterpret_cast<const char*>(this) + sizeof(full_radix_node));
-      }
+      // alloc_size / head_bytes / head_size / free_heap / destroy: inherited from radix_impl
+      // (branches/term are pure pointers; no tail heap, so the alloc is the fixed struct).
       full_radix_node(uint32_t asize, sal::ptr_address_seq seq,
                       std::span<const uint8_t> prefix) noexcept
       {
@@ -572,11 +526,7 @@ namespace heart
             if (branches.branches[b].is_pointer())
                f(branches.branches[b].as_pointer());
       }
-      template <typename Session>
-      void destroy(const Session& s) const
-      {
-         for_each_child([&](sal::ptr_address c) { s->release(c); });
-      }
+      // alloc_size / head_bytes / head_size / free_heap / destroy: inherited from radix_impl.
    };
 
    static_assert(sizeof(suffix_value_node) == 128);

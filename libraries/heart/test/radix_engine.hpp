@@ -36,7 +36,9 @@ namespace heart::radix
    using bytes      = std::span<const uint8_t>;
    using key_view   = std::string_view;
    using value_view = std::string_view;
-   using setlist_u8 = setlist_node<uint8_t>;
+   using setlist_u8  = setlist_node<uint8_t>;
+   using setlist_u16 = setlist_node<uint16_t>;
+   using setlist_u32 = setlist_node<uint32_t>;
 
    inline bytes as_bytes(std::string_view s) noexcept
    {
@@ -59,6 +61,8 @@ namespace heart::radix
       {
          _alloc->register_type_ops<leaf_node>();
          _alloc->register_type_ops<setlist_u8>();
+         _alloc->register_type_ops<setlist_u16>();
+         _alloc->register_type_ops<setlist_u32>();
          _alloc->register_type_ops<bitset_r2_node>();
          _alloc->register_type_ops<bitset_r4_node>();
          _alloc->register_type_ops<full_radix_node>();
@@ -130,6 +134,10 @@ namespace heart::radix
             bool cont;
             if (t == setlist_u8::type_id)
                cont = route_r1(_ses->get_ref<setlist_u8>(addr).obj(), kb, depth, out, addr);
+            else if (t == setlist_u16::type_id)
+               cont = route_r1(_ses->get_ref<setlist_u16>(addr).obj(), kb, depth, out, addr);
+            else if (t == setlist_u32::type_id)
+               cont = route_r1(_ses->get_ref<setlist_u32>(addr).obj(), kb, depth, out, addr);
             else if (t == bitset_r2_node::type_id)
                cont = route_r1(_ses->get_ref<bitset_r2_node>(addr).obj(), kb, depth, out, addr);
             else if (t == bitset_r4_node::type_id)
@@ -139,6 +147,27 @@ namespace heart::radix
             if (!cont)
                return _route_found;
          }
+      }
+
+      // ── ordered queries (this is a SORTED container, not a hash map) ────────────
+      // lower_bound: smallest key >= `key`; upper_bound: smallest key strictly > `key`.
+      // On a hit, out_key holds the matched key (materialized) and out_val views its
+      // value in node memory (valid like find()'s result). Returns false if none.
+      bool lower_bound(key_view key, std::string& out_key, value_view& out_val)
+      {
+         return ordered_seek(key, false, out_key, out_val);
+      }
+      bool upper_bound(key_view key, std::string& out_key, value_view& out_val)
+      {
+         return ordered_seek(key, true, out_key, out_val);
+      }
+      // Visit every (key, value) in ascending key order: cb(key_view, value_view).
+      template <class Cb>
+      void for_each_inorder(Cb&& cb)
+      {
+         auto lock = _ses->lock();
+         KB   kb;
+         inorder_walk(_root, kb, cb);
       }
 
       void commit()
@@ -153,9 +182,36 @@ namespace heart::radix
 
       uint64_t object_count() const { return _alloc->total_allocated_objects(); }
 
+      // ── gated wide-stem feature ────────────────────────────────────────────────
+      // When off (default), the growth algorithm only builds setlist_u8 → the engine is
+      // the libart-conformant byte radix. When on, the growth algorithm may pick
+      // setlist_u16/u32 at the existing build points (fewer hops → fewer CB indirections).
+      // Routing is already stride-aware; nothing else in the engine changes.
+      void set_wide_stems(bool on) { _wide_stems = on; }
+      bool wide_stems() const { return _wide_stems; }
+
+      // ── introspection (for the tree-structure dump / stats tool) ───────────────
+      // COW/alloc accounting: how mutation actually played out over the run. `clones`
+      // and `grows` are the COW-to-root cost (a clone forced by sharing or a full heap);
+      // `in_place` is the cheap path (unique node, room to spare).
+      struct cow_counters
+      {
+         uint64_t node_allocs = 0;     // routers built
+         uint64_t leaf_allocs = 0;     // >60 SAL value-holders
+         uint64_t inline_values = 0;   // tail (local) terminal values
+         uint64_t clones = 0;          // COW clones (shared OR heap-full)
+         uint64_t grows = 0;           // subset of clones forced by a full tail heap
+         uint64_t in_place = 0;        // unique + room: mutated in place (no copy)
+         uint64_t restrides = 0;       // wide-node splits (re_stride to a narrower stride)
+      };
+      const cow_counters&        counters() const { return _cc; }
+      sal::allocator_session_ptr session() const { return _ses; }
+      ptr_address                root_addr() const { return _root; }
+
       struct tier_counts
       {
-         uint64_t leaf = 0, setlist = 0, bitset_r2 = 0, bitset_r4 = 0, full = 0;
+         uint64_t leaf = 0, setlist = 0, setlist_w16 = 0, setlist_w32 = 0;
+         uint64_t bitset_r2 = 0, bitset_r4 = 0, full = 0;
       };
       tier_counts count_tiers()
       {
@@ -184,6 +240,16 @@ namespace heart::radix
          {
             ++tc.setlist;
             walk_kids<setlist_u8>(a, tc);
+         }
+         else if (t == setlist_u16::type_id)
+         {
+            ++tc.setlist_w16;
+            walk_kids<setlist_u16>(a, tc);
+         }
+         else if (t == setlist_u32::type_id)
+         {
+            ++tc.setlist_w32;
+            walk_kids<setlist_u32>(a, tc);
          }
          else if (t == bitset_r2_node::type_id)
          {
@@ -231,10 +297,12 @@ namespace heart::radix
          ptr_address a = _ses->alloc<N>(hint, pfx);
          _ses->get_ref<N>(a).modify().get()->alloc_tail(tail_reserve);  // tail offsets >=16
          stamp<N>(a);
+         ++_cc.node_allocs;
          return a;
       }
       ptr_address make_leaf(bytes suffix, bytes val, sal::alloc_hint hint = {})
       {
+         ++_cc.leaf_allocs;
          return _ses->alloc<leaf_node>(hint, suffix, val);
       }
 
@@ -244,9 +312,11 @@ namespace heart::radix
       template <class N>
       static void blit(N* dst, const N* src) noexcept
       {
+         // copy [alloc_header, head_size()) — the fixed header + the live index region
+         // (head_size() == sizeof for the fixed tiers; variable only for a wide setlist).
          constexpr uint32_t hdr = uint32_t(sizeof(sal::alloc_header));
          std::memcpy(reinterpret_cast<char*>(dst) + hdr,
-                     reinterpret_cast<const char*>(src) + hdr, N::head_bytes() - hdr);
+                     reinterpret_cast<const char*>(src) + hdr, src->head_size() - hdr);
          uint16_t hu = src->tail_used();
          std::memcpy(dst->tail() - hu, src->tail() - hu, hu);
       }
@@ -256,12 +326,13 @@ namespace heart::radix
          auto     ref  = _ses->get_ref<N>(a);
          const N* src  = ref.obj();
          uint32_t need = ucc::round_up_multiple<sal::cacheline_size>(
-             N::head_bytes() + src->tail_used() + extra + N::headroom);
+             src->head_size() + src->tail_used() + extra + N::headroom);
          ptr_address na = _ses->alloc<N>(need, sal::alloc_hint{}, src->prefix());
          N*          nn = mut<N>(na);
          blit<N>(nn, src);
          nn->for_each_child([&](ptr_address c) { _ses->retain(c); });
          stamp<N>(na);
+         ++_cc.clones;
          return na;
       }
       // Make `addr` writable for a mutation needing `extra` tail bytes. Shared → COW;
@@ -278,7 +349,11 @@ namespace heart::radix
             return mut<N>(addr);
          }
          if (ref->free_heap() >= extra)
+         {
+            ++_cc.in_place;
             return ref.modify().get();
+         }
+         ++_cc.grows;
          addr = clone<N>(addr, extra);
          return mut<N>(addr);
       }
@@ -308,6 +383,7 @@ namespace heart::radix
             iv->value_type = 0;
             std::memcpy(iv->data, suffix.data(), suffix.size());
             std::memcpy(iv->data + suffix.size(), value.data(), value.size());
+            ++_cc.inline_values;
             return smart_address::from_tail(n->tail_used());
          }
          return smart_address::from_pointer(make_leaf(suffix, value, hint));
@@ -367,6 +443,362 @@ namespace heart::radix
          return make_leaf(ln->suffix(), val);
       }
 
+      // ── ordered-seek machinery (lower_bound / upper_bound / in-order walk) ──────
+      // Stems are stored sorted (set_branch inserts at the lower-bound position) and the
+      // bitset/full tiers iterate in byte order, so every node enumerates entries in key
+      // order. A seek descends the matching path; when the query diverges it takes the
+      // smallest sibling strictly greater than the query and descends to that subtree's
+      // minimum (descend_min), backtracking to the parent when a subtree is all-less.
+
+      // Reconstructed-key buffer (keys are materialized as we descend; values are viewed
+      // directly in node memory). 1 KB covers any realistic key; asserts if exceeded.
+      struct KB
+      {
+         uint8_t  buf[1024];
+         uint32_t len = 0;
+         void     append(const uint8_t* p, size_t n) noexcept
+         {
+            assert(len + n <= sizeof(buf));
+            std::memcpy(buf + len, p, n);
+            len += uint32_t(n);
+         }
+         void truncate(uint32_t l) noexcept { len = l; }
+      };
+
+      bool is_terminal_branch(smart_address sa) const
+      {
+         if (sa.is_tail())
+            return true;
+         return _ses->get_ref<sal::alloc_header>(sa.as_pointer())->type() == leaf_node::type_id;
+      }
+      // Suffix bytes + value of a terminal, both viewing node memory (no copy).
+      void term_view(const sal::alloc_header* node, smart_address sa, bytes& suf,
+                     value_view& val) const
+      {
+         const inline_value* iv =
+             sa.is_tail() ? inline_of(node, sa)
+                          : &_ses->get_ref<leaf_node>(sa.as_pointer()).obj()->value;
+         suf = bytes{iv->data, size_t(iv->suffix_len)};
+         val = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len), iv->value_len);
+      }
+      // Append a terminal's suffix to kb and return its value (both view node memory).
+      value_view append_terminal(const sal::alloc_header* node, smart_address sa, KB& kb)
+      {
+         bytes      suf;
+         value_view v;
+         term_view(node, sa, suf, v);
+         kb.append(suf.data(), suf.size());
+         return v;
+      }
+      // The `cw` actual key bytes a stem cell represents (big-endian, top cw of stem_width).
+      static int stem_bytes(uint32_t cell, int stem_width, int cw, uint8_t* o) noexcept
+      {
+         for (int k = 0; k < cw; ++k)
+            o[k] = uint8_t(cell >> (8 * (stem_width - 1 - k)));
+         return cw;
+      }
+      static int key_cmp(const KB& kb, bytes q) noexcept
+      {
+         const size_t m = kb.len < q.size() ? kb.len : q.size();
+         const int    c = m ? std::memcmp(kb.buf, q.data(), m) : 0;
+         if (c)
+            return c < 0 ? -1 : 1;
+         if (kb.len == q.size())
+            return 0;
+         return kb.len < q.size() ? -1 : 1;
+      }
+
+      // ---- per-tier adaptors: a uniform ordered cursor over a node's entries ----
+      template <class N>
+      struct SLAd  // setlist (u8 / u16 / u24 / u32): cursor = entry index
+      {
+         const N*                 p;
+         const sal::alloc_header* node() const { return reinterpret_cast<const sal::alloc_header*>(p); }
+         bytes         prefix() const { return p->prefix(); }
+         smart_address term() const { return p->term_value(); }
+         int           cw() const { return p->consume_width(); }
+         int           stem_width() const { return N::stem_width; }
+         int           first() const { return 0; }
+         bool          valid(int c) const { return c < p->nstems(); }
+         int           next(int c) const { return c + 1; }
+         uint32_t      cell(int c) const { return uint32_t(p->stem_at(c)); }
+         smart_address branch(int c) const { return p->branch_at(c); }
+         int           lower(bytes r, bool& full, uint32_t& floorcell) const
+         {
+            const int m = int(r.size()) < cw() ? int(r.size()) : cw();
+            full        = int(r.size()) >= cw();
+            uint32_t v  = 0;
+            for (int i = 0; i < m; ++i)
+               v = (v << 8) | r[i];
+            v <<= 8 * (N::stem_width - m);
+            floorcell = v;
+            return p->lower_bound_index(typename N::stem_type(v));
+         }
+      };
+      template <class N, int SegBits>
+      struct BSAd  // bitset_r2 / bitset_r4: cursor = present byte (or 256 = end)
+      {
+         const N*                 p;
+         const sal::alloc_header* node() const { return reinterpret_cast<const sal::alloc_header*>(p); }
+         int                      np(int b) const  // smallest present byte >= b, else 256
+         {
+            if (b < 0)
+               b = 0;
+            for (int s = b >> SegBits; s < (256 >> SegBits); ++s)
+            {
+               const int lo = (s == (b >> SegBits)) ? (b & ((1 << SegBits) - 1)) : 0;
+               const int nx = p->seg(s).present.next_set(lo);
+               if (nx >= 0)
+                  return (s << SegBits) + nx;
+            }
+            return 256;
+         }
+         bytes         prefix() const { return p->prefix(); }
+         smart_address term() const { return p->term_value(); }
+         int           cw() const { return 1; }
+         int           stem_width() const { return 1; }
+         int           first() const { return np(0); }
+         bool          valid(int c) const { return c < 256; }
+         int           next(int c) const { return np(c + 1); }
+         uint32_t      cell(int c) const { return uint32_t(c); }
+         smart_address branch(int c) const { return p->find(uint8_t(c)); }
+         int           lower(bytes r, bool& full, uint32_t& floorcell) const
+         {
+            full      = !r.empty();
+            floorcell = r.empty() ? 0u : uint32_t(r[0]);
+            return np(int(floorcell));
+         }
+      };
+      struct FullAd  // full_radix: cursor = present byte (or 256 = end)
+      {
+         const full_radix_node*   p;
+         const sal::alloc_header* node() const { return reinterpret_cast<const sal::alloc_header*>(p); }
+         int                      np(int b) const
+         {
+            if (b >= 256)
+               return 256;
+            const int nx = p->branches.next_present(b);
+            return nx < 0 ? 256 : nx;
+         }
+         bytes         prefix() const { return p->prefix(); }
+         smart_address term() const { return p->term_value(); }
+         int           cw() const { return 1; }
+         int           stem_width() const { return 1; }
+         int           first() const { return np(0); }
+         bool          valid(int c) const { return c < 256; }
+         int           next(int c) const { return np(c + 1); }
+         uint32_t      cell(int c) const { return uint32_t(c); }
+         smart_address branch(int c) const { return p->find(uint8_t(c)); }
+         int           lower(bytes r, bool& full, uint32_t& floorcell) const
+         {
+            full      = !r.empty();
+            floorcell = r.empty() ? 0u : uint32_t(r[0]);
+            return np(int(floorcell));
+         }
+      };
+      // Dispatch `addr` to the right adaptor and invoke f(adaptor). f returns bool/void.
+      template <class F>
+      auto dispatch(ptr_address addr, F&& f)
+      {
+         const auto t = _ses->get_ref<sal::alloc_header>(addr)->type();
+         if (t == setlist_u8::type_id)
+            return f(SLAd<setlist_u8>{_ses->get_ref<setlist_u8>(addr).obj()});
+         if (t == setlist_u16::type_id)
+            return f(SLAd<setlist_u16>{_ses->get_ref<setlist_u16>(addr).obj()});
+         if (t == setlist_u32::type_id)
+            return f(SLAd<setlist_u32>{_ses->get_ref<setlist_u32>(addr).obj()});
+         if (t == bitset_r2_node::type_id)
+            return f(BSAd<bitset_r2_node, 7>{_ses->get_ref<bitset_r2_node>(addr).obj()});
+         if (t == bitset_r4_node::type_id)
+            return f(BSAd<bitset_r4_node, 6>{_ses->get_ref<bitset_r4_node>(addr).obj()});
+         return f(FullAd{_ses->get_ref<full_radix_node>(addr).obj()});
+      }
+
+      // Append an entry's stem bytes (+ inline suffix if terminal) and either yield its
+      // value (terminal) or descend into its child to that subtree's minimum.
+      template <class Ad>
+      void take_entry_min(Ad ad, int c, KB& kb, value_view& out)
+      {
+         uint8_t       sb[4];
+         const int     nb = stem_bytes(ad.cell(c), ad.stem_width(), ad.cw(), sb);
+         kb.append(sb, size_t(nb));
+         const smart_address br = ad.branch(c);
+         if (is_terminal_branch(br))
+         {
+            out = append_terminal(ad.node(), br, kb);
+            return;
+         }
+         descend_min(br.as_pointer(), kb, out);
+      }
+      // Minimum key of this node's subtree, with the node's prefix ALREADY in kb.
+      template <class Ad>
+      void take_min_here(Ad ad, KB& kb, value_view& out)
+      {
+         if (!ad.term().is_null())  // a key ends here → EOF sorts before any byte
+         {
+            out = append_terminal(ad.node(), ad.term(), kb);
+            return;
+         }
+         take_entry_min(ad, ad.first(), kb, out);  // else the smallest stem
+      }
+      void descend_min(ptr_address addr, KB& kb, value_view& out)
+      {
+         dispatch(addr, [&](auto ad) {
+            bytes pfx = ad.prefix();
+            kb.append(pfx.data(), pfx.size());
+            take_min_here(ad, kb, out);
+         });
+      }
+
+      template <class Ad>
+      bool seek_in(Ad ad, bytes q, uint32_t depth, bool strict, KB& kb, value_view& out)
+      {
+         const uint32_t save  = kb.len;
+         bytes          pfx   = ad.prefix();
+         int            avail = int(q.size()) - int(depth);
+         if (avail < 0)
+            avail = 0;
+         const int m = int(pfx.size()) < avail ? int(pfx.size()) : avail;
+         int       cmp = 0, j = 0;
+         for (; j < m; ++j)
+            if (q[depth + j] != pfx[j])
+            {
+               cmp = q[depth + j] < pfx[j] ? -1 : 1;
+               break;
+            }
+         if (j < m && cmp < 0)  // q < this path → whole subtree > q → its minimum
+         {
+            kb.append(pfx.data(), pfx.size());
+            take_min_here(ad, kb, out);
+            return true;
+         }
+         if (j < m && cmp > 0)  // q > this path → every key here < q
+            return false;
+         kb.append(pfx.data(), pfx.size());
+         if (avail <= int(pfx.size()))
+         {
+            if (avail < int(pfx.size()))  // q is a strict prefix of the path → all > q
+            {
+               take_min_here(ad, kb, out);
+               return true;
+            }
+            // q == path exactly
+            if (!strict && !ad.term().is_null())
+            {
+               out = append_terminal(ad.node(), ad.term(), kb);
+               return true;
+            }
+            if (!ad.valid(ad.first()))  // nothing greater (term-only & strict)
+            {
+               kb.truncate(save);
+               return false;
+            }
+            take_entry_min(ad, ad.first(), kb, out);
+            return true;
+         }
+         // q continues past the prefix; the node term (== path) is < q, so skip it.
+         const uint32_t d2 = depth + uint32_t(pfx.size());
+         bytes          r  = q.subspan(d2);
+         bool           full;
+         uint32_t       fc;
+         for (int c = ad.lower(r, full, fc); ad.valid(c); c = ad.next(c))
+         {
+            const uint32_t      cl    = ad.cell(c);
+            const bool          exact = full && cl == fc;
+            const smart_address br    = ad.branch(c);
+            uint8_t             sb[4];
+            const int           nb = stem_bytes(cl, ad.stem_width(), ad.cw(), sb);
+            const uint32_t      s2 = kb.len;
+            kb.append(sb, size_t(nb));
+            if (exact)  // stem equals q's stem → q may continue into this branch
+            {
+               if (is_terminal_branch(br))
+               {
+                  const value_view v  = append_terminal(ad.node(), br, kb);
+                  const int        kc = key_cmp(kb, q);
+                  if (kc > 0 || (kc == 0 && !strict))
+                  {
+                     out = v;
+                     return true;
+                  }
+                  kb.truncate(s2);  // this key <= q (or == q & strict) → try the next stem
+               }
+               else if (seek(br.as_pointer(), q, d2 + uint32_t(ad.cw()), strict, kb, out))
+                  return true;
+               else
+                  kb.truncate(s2);  // child held nothing >= q → next stem
+            }
+            else  // strictly greater stem → whole branch > q → its minimum
+            {
+               if (is_terminal_branch(br))
+               {
+                  out = append_terminal(ad.node(), br, kb);
+                  return true;
+               }
+               descend_min(br.as_pointer(), kb, out);
+               return true;
+            }
+         }
+         kb.truncate(save);
+         return false;
+      }
+      bool seek(ptr_address addr, bytes q, uint32_t depth, bool strict, KB& kb, value_view& out)
+      {
+         return dispatch(addr,
+                         [&](auto ad) { return seek_in(ad, q, depth, strict, kb, out); });
+      }
+      bool ordered_seek(key_view key, bool strict, std::string& out_key, value_view& out_val)
+      {
+         auto       lock = _ses->lock();
+         bytes      q    = as_bytes(key);
+         KB         kb;
+         value_view v;
+         if (!seek(_root, q, 0, strict, kb, v))
+            return false;
+         out_key.assign(reinterpret_cast<const char*>(kb.buf), kb.len);
+         out_val = v;
+         return true;
+      }
+
+      template <class Ad, class Cb>
+      void inorder_in(Ad ad, KB& kb, Cb& cb)
+      {
+         const uint32_t save = kb.len;
+         bytes          pfx  = ad.prefix();
+         kb.append(pfx.data(), pfx.size());
+         if (!ad.term().is_null())
+         {
+            const uint32_t   s = kb.len;
+            const value_view v = append_terminal(ad.node(), ad.term(), kb);
+            cb(key_view(reinterpret_cast<const char*>(kb.buf), kb.len), v);
+            kb.truncate(s);
+         }
+         for (int c = ad.first(); ad.valid(c); c = ad.next(c))
+         {
+            const uint32_t s = kb.len;
+            uint8_t        sb[4];
+            const int      nb = stem_bytes(ad.cell(c), ad.stem_width(), ad.cw(), sb);
+            kb.append(sb, size_t(nb));
+            const smart_address br = ad.branch(c);
+            if (is_terminal_branch(br))
+            {
+               const uint32_t   s3 = kb.len;
+               const value_view v  = append_terminal(ad.node(), br, kb);
+               cb(key_view(reinterpret_cast<const char*>(kb.buf), kb.len), v);
+               kb.truncate(s3);
+            }
+            else
+               inorder_walk(br.as_pointer(), kb, cb);
+            kb.truncate(s);
+         }
+         kb.truncate(save);
+      }
+      template <class Cb>
+      void inorder_walk(ptr_address addr, KB& kb, Cb& cb)
+      {
+         dispatch(addr, [&](auto ad) { inorder_in(ad, kb, cb); });
+      }
+
       // ── descent helper for r1 nodes (prefixed routers) ─────────────────────────
       template <class N>
       bool route_r1(const N* n, bytes key, uint32_t& depth, value_view& out, ptr_address& addr)
@@ -384,7 +816,25 @@ namespace heart::radix
             _route_found = term_lookup(n, n->term_value(), key, depth, out);
             return false;
          }
-         smart_address sa = n->find(key[depth]);
+         // Route by the node's consume-width key bytes. For setlist_u8 (stem_width==1)
+         // the if-constexpr keeps the verbatim single-byte path → no change for u8.
+         uint32_t      W;
+         smart_address sa;
+         if constexpr (N::stem_width == 1)
+         {
+            W  = 1;
+            sa = n->find(key[depth]);
+         }
+         else
+         {
+            W = uint32_t(n->consume_width());  // 2 (u16) or 3/4 (u32 cell)
+            if (key.size() - depth < W)        // key ends inside this node's stride -> miss
+            {
+               _route_found = false;
+               return false;
+            }
+            sa = n->find(read_stem<N>(key, depth, W));
+         }
          if (sa.is_null())
          {
             _route_found = false;
@@ -392,12 +842,24 @@ namespace heart::radix
          }
          if (sa.is_tail())
          {
-            _route_found = inline_at(n, sa, key.subspan(depth + 1), out);
+            _route_found = inline_at(n, sa, key.subspan(depth + W), out);
             return false;
          }
          addr = sa.as_pointer();
-         ++depth;
+         depth += W;
          return true;
+      }
+
+      // Read `cw` key bytes at depth big-endian and left-justify into N's cell (stem_width
+      // bytes) — so a u32-cell node consuming 3 bytes zero-pads the low byte, and an
+      // integer compare on the cell == lexicographic compare on the consumed bytes.
+      template <class N>
+      static uint32_t read_stem(bytes key, uint32_t depth, uint32_t cw) noexcept
+      {
+         uint32_t v = 0;
+         for (uint32_t i = 0; i < cw; ++i)
+            v = (v << 8) | key[depth + i];
+         return v << (8 * (uint32_t(N::stem_width) - cw));
       }
 
       // ── insert (tier dispatch is the ONLY place type matters) ───────────────────
@@ -407,6 +869,10 @@ namespace heart::radix
          auto t = _ses->get_ref<sal::alloc_header>(addr)->type();
          if (t == setlist_u8::type_id)
             return router_insert<setlist_u8>(addr, key, depth, val, peer_hint);
+         if (t == setlist_u16::type_id)
+            return router_insert_wide<setlist_u16>(addr, key, depth, val, peer_hint);
+         if (t == setlist_u32::type_id)
+            return router_insert_wide<setlist_u32>(addr, key, depth, val, peer_hint);
          if (t == bitset_r2_node::type_id)
             return router_insert<bitset_r2_node>(addr, key, depth, val, peer_hint);
          if (t == bitset_r4_node::type_id)
@@ -461,10 +927,7 @@ namespace heart::radix
          }
 
          // Is this branch a TERMINAL (an inline tail, or a pointer to a leaf_node)?
-         bool is_term = sa.is_tail();
-         if (sa.is_pointer())
-            is_term = _ses->get_ref<sal::alloc_header>(sa.as_pointer())->type() == leaf_node::type_id;
-         if (is_term)
+         if (is_terminal_branch(sa))
          {
             uint8_t tbuf[512];
             bytes   esuf, eval;
@@ -486,12 +949,11 @@ namespace heart::radix
                }
                return addr;
             }
-            // diverge → child setlist holding both continuations (inline if small)
+            // diverge → child holding both continuations (a wide setlist_u32 when the gate
+            // is on and both suffixes have ≥4 bytes past the common prefix; else u8)
             int           cp    = common_prefix_len(esuf, suf);
-            ptr_address   child = make_node<setlist_u8>(esuf.subspan(0, size_t(cp)), chint);
-            add_continuation(child, esuf.subspan(size_t(cp)), eval, chint);
-            add_continuation(child, suf.subspan(size_t(cp)), val, chint);
-            smart_address csa = smart_address::from_pointer(child);
+            ptr_address   child = make_collision_child(esuf, eval, suf, val, cp, chint);
+            smart_address csa   = smart_address::from_pointer(child);
             N*            n   = cow<N>(addr);
             if (n->set_branch(b, csa))
             {
@@ -534,6 +996,307 @@ namespace heart::radix
             _ses->release(child);  // normal in-tier replace
          }
          return addr;
+      }
+
+      // ── wide-stem (gated) ───────────────────────────────────────────────────────
+      // Build the child for a terminal collision: a wide setlist_u32 when the gate is on
+      // AND both diverging suffixes have ≥4 bytes past the common prefix (so each forms a
+      // full 4-byte stem); otherwise the byte-radix setlist_u8 (unchanged behavior).
+      ptr_address make_collision_child(bytes esuf, bytes eval, bytes suf, bytes val, int cp,
+                                       sal::alloc_hint hint)
+      {
+         if (_wide_stems && int(esuf.size()) - cp >= 4 && int(suf.size()) - cp >= 4)
+         {
+            ptr_address child = make_node<setlist_u32>(esuf.subspan(0, size_t(cp)), hint);
+            add_wide_entry(child, esuf.subspan(size_t(cp)), eval, hint);
+            add_wide_entry(child, suf.subspan(size_t(cp)), val, hint);
+            return child;
+         }
+         ptr_address child = make_node<setlist_u8>(esuf.subspan(0, size_t(cp)), hint);
+         add_continuation(child, esuf.subspan(size_t(cp)), eval, hint);
+         add_continuation(child, suf.subspan(size_t(cp)), val, hint);
+         return child;
+      }
+      // Add one entry to a fresh wide (u32, consume-4) node: 4-byte stem + inline remainder.
+      // Precondition: suffix.size() >= 4 (the create gate guarantees it).
+      void add_wide_entry(ptr_address& child, bytes suffix, bytes value, sal::alloc_hint hint)
+      {
+         uint32_t      q   = read_stem<setlist_u32>(suffix, 0, 4);
+         smart_address sv  = make_value<setlist_u32>(child, suffix.subspan(4), value, hint);
+         setlist_u32*  w   = cow<setlist_u32>(child, uint32_t(setlist_u32::stem_width) + 4);
+         [[maybe_unused]] bool ok = w->set_branch(q, sv);
+         assert(ok && "fresh wide node always has room for an entry");
+      }
+
+      // Insert into a wide setlist (u16/u32). Stride = consume_width; new stems GROW the
+      // node (clone bigger). Mid-stem / 4 KB split is step 4 (asserted unreachable here).
+      template <class N>
+      ptr_address router_insert_wide(ptr_address addr, bytes key, uint32_t depth, bytes val,
+                                     sal::alloc_hint peer_hint)
+      {
+         const uint32_t depth0 = depth;
+         const N*       cn     = _ses->get_ref<N>(addr).obj();
+         bytes          pfx    = cn->prefix();
+         int            avail  = int(key.size() - depth);
+         int            maxp   = std::min(int(pfx.size()), avail);
+         int p = common_prefix_len(key.subspan(depth, size_t(maxp)), pfx.subspan(0, size_t(maxp)));
+         if (p < int(pfx.size()))
+            return prefix_split<N>(addr, key, depth, p, val, peer_hint);
+
+         depth += uint32_t(pfx.size());
+         int rem = int(key.size() - depth);
+         if (rem == 0)  // key ends here → term
+         {
+            set_term<N>(addr, val, peer_hint);
+            return addr;
+         }
+         int cw = cn->consume_width();
+         if (rem < cw)  // key ends inside the stride → split to a stride that fits it
+         {
+            ptr_address na = re_stride_wide<N>(addr, rem, peer_hint);
+            return insert_node(na, key, depth0, val, peer_hint);
+         }
+         uint32_t        q     = read_stem<N>(key, depth, uint32_t(cw));
+         sal::alloc_hint chint = cn->branch_hint();
+         smart_address   sa    = cn->find(q);
+         bytes           suf   = key.subspan(depth + uint32_t(cw));
+
+         if (sa.is_null())  // new stem
+         {
+            if (!cn->room_for_one() && cn->size() >= max_node)  // at 4 KB → split narrower
+            {
+               int         Wp = cw >= 3 ? 2 : 1;  // u32/u24 → u16; u16 → u8
+               ptr_address na = re_stride_wide<N>(addr, Wp, peer_hint);
+               return insert_node(na, key, depth0, val, peer_hint);
+            }
+            smart_address sv = make_value<N>(addr, suf, val, chint);  // else grow + append
+            N*            w  = cow<N>(addr, uint32_t(N::stem_width) + 4);
+            [[maybe_unused]] bool ok = w->set_branch(q, sv);
+            assert(ok && "wide node grows → set_branch must succeed");
+            return addr;
+         }
+
+         if (is_terminal_branch(sa))
+         {
+            uint8_t tbuf[512];
+            bytes   esuf, eval;
+            term_get(_ses->get_ref<N>(addr).obj(), sa, tbuf, esuf, eval);
+            if (esuf.size() == suf.size() &&
+                std::memcmp(esuf.data(), suf.data(), esuf.size()) == 0)  // same key → update
+            {
+               _old_value_size = int(eval.size());
+               smart_address nsa =
+                   sa.is_pointer()
+                       ? smart_address::from_pointer(update_leaf_value(sa.as_pointer(), val))
+                       : make_value<N>(addr, suf, val, chint);
+               if (nsa != sa)
+               {
+                  N* w = cow<N>(addr);
+                  if (sa.is_pointer())
+                     _ses->release(sa.as_pointer());
+                  w->set_branch(q, nsa);
+               }
+               return addr;
+            }
+            int           cp    = common_prefix_len(esuf, suf);
+            ptr_address   child = make_collision_child(esuf, eval, suf, val, cp, chint);
+            N*            w     = cow<N>(addr);
+            if (sa.is_pointer())
+               _ses->release(sa.as_pointer());
+            w->set_branch(q, smart_address::from_pointer(child));
+            return addr;
+         }
+
+         // pointer to an inner node → recurse
+         ptr_address child = sa.as_pointer();
+         ptr_address nc    = insert_node(child, key, depth + uint32_t(cw), val, chint);
+         if (nc != child)
+         {
+            N* w = cow<N>(addr);
+            w->set_branch(q, smart_address::from_pointer(nc));
+            _ses->release(child);
+         }
+         return addr;
+      }
+
+      // ── re_stride (the wide-node split) ─────────────────────────────────────────
+      // Allocate a router that consumes `cw` key bytes: cw=1 → byte router (setlist_u8,
+      // widens by density); cw=2 → setlist_u16; cw=3 → setlist_u32 in consume-3 mode
+      // (rtype setlist_u24); cw=4 → setlist_u32. `extra` sizes the growable variants.
+      ptr_address make_wide_node(int cw, bytes pfx, sal::alloc_hint hint, uint32_t extra)
+      {
+         if (cw == 1)  // byte router: full_radix (direct 256 array, never widens during build)
+            return make_sized<full_radix_node>(pfx, hint, extra);
+         ptr_address a;
+         if (cw == 2)
+            a = make_sized<setlist_u16>(pfx, hint, extra);
+         else
+         {
+            a = make_sized<setlist_u32>(pfx, hint, extra);
+            if (cw == 3)
+               mut<setlist_u32>(a)->set_rtype(radix_node_type::setlist_u24);
+         }
+         return a;
+      }
+      template <class N>
+      ptr_address make_sized(bytes pfx, sal::alloc_hint hint, uint32_t extra)
+      {
+         uint32_t sz = ucc::round_up_multiple<sal::cacheline_size>(uint32_t(sizeof(N)) +
+                                                                   uint32_t(pfx.size()) + extra +
+                                                                   N::headroom);
+         ptr_address a = _ses->alloc<N>(sz, hint, pfx);
+         mut<N>(a)->alloc_tail(tail_reserve);
+         stamp<N>(a);
+         ++_cc.node_allocs;
+         return a;
+      }
+      // `consume` key bytes (already isolated in b[0..consume)) → a left-justified cell
+      // value for a node whose cell is `cell_width` bytes wide.
+      static uint32_t encode_cell(const uint8_t* b, int consume, int cell_width) noexcept
+      {
+         uint32_t v = 0;
+         for (int i = 0; i < consume; ++i)
+            v = (v << 8) | b[i];
+         return v << (8 * (cell_width - consume));
+      }
+      static int cell_width_for(int cw) noexcept { return cw == 1 ? 1 : cw == 2 ? 2 : 4; }
+
+      // Move a branch slot of `src` into `dst` (a fresh node): inline/leaf → copy the
+      // value into dst; node pointer → retain and reuse as-is (suffix unchanged).
+      smart_address carry_value(ptr_address& dst, sal::header_type dtype, ptr_address src,
+                                smart_address sa, sal::alloc_hint hint)
+      {
+         if (!is_terminal_branch(sa))
+         {
+            _ses->retain(sa.as_pointer());
+            return sa;
+         }
+         uint8_t buf[512];
+         bytes   suf, val;
+         term_get(_ses->get_ref<sal::alloc_header>(src).obj(), sa, buf, suf, val);
+         return mv_into(dst, dtype, suf, val, hint);
+      }
+      // re_stride routers are only ever full_radix (cw=1), setlist_u16 (cw=2), or
+      // setlist_u32/u24 (cw=3/4) — never u8/bitset — so none of these widen by density.
+      smart_address mv_into(ptr_address& node, sal::header_type t, bytes suf, bytes val,
+                            sal::alloc_hint hint)
+      {
+         if (t == setlist_u16::type_id)
+            return make_value<setlist_u16>(node, suf, val, hint);
+         if (t == setlist_u32::type_id)
+            return make_value<setlist_u32>(node, suf, val, hint);  // u32 / u24
+         return make_value<full_radix_node>(node, suf, val, hint);
+      }
+      void add_ptr(ptr_address& node, sal::header_type t, uint32_t q, smart_address ptr,
+                   sal::alloc_hint)
+      {
+         if (t == setlist_u16::type_id)
+            cow<setlist_u16>(node, 8)->set_branch(uint16_t(q), ptr);
+         else if (t == setlist_u32::type_id)
+            cow<setlist_u32>(node, 8)->set_branch(q, ptr);
+         else
+            cow<full_radix_node>(node)->set_branch(uint8_t(q), ptr);  // direct, no grow/widen
+      }
+      void add_inline(ptr_address& node, sal::header_type t, uint32_t q, bytes suf, bytes val,
+                      sal::alloc_hint hint)
+      {
+         smart_address sv = mv_into(node, t, suf, val, hint);
+         add_existing(node, t, q, sv, hint);
+      }
+
+      // Split a wide node (always a u32 cell, consume W) into a router that consumes Wp<W,
+      // pushing the leftover W-Wp tail bytes into each entry (inline → suffix; pointer →
+      // a group child keyed by the tail). Returns the new subtree; caller releases `addr`.
+      template <class Src>
+      ptr_address re_stride_wide(ptr_address addr, int Wp, sal::alloc_hint hint)
+      {
+         ++_cc.restrides;
+         const Src* old = _ses->get_ref<Src>(addr).obj();
+         int        W   = old->consume_width();
+         int        tw  = W - Wp;
+         int        n   = old->nstems();
+
+         struct E { uint8_t b[4]; smart_address br; };
+         E es[768];  // max entries in a 4 KB node (u16: ~680 at 6 B/entry)
+         assert(n <= 768);
+         for (int i = 0; i < n; ++i)
+         {
+            uint32_t c = old->stem_at(i);  // left-justified in Src's cell
+            for (int k = 0; k < W; ++k)
+               es[i].b[k] = uint8_t((c >> (8 * (Src::stem_width - 1 - k))) & 0xFF);
+            es[i].br = old->branch_at(i);
+         }
+         std::sort(es, es + n, [W](const E& x, const E& y) { return std::memcmp(x.b, y.b, W) < 0; });
+
+         ptr_address      na = make_wide_node(Wp, old->prefix(), hint,
+                                              old->head_size() + old->tail_used() + 64);
+         sal::header_type nt = _ses->get_ref<sal::alloc_header>(na)->type();
+         int              pcell = cell_width_for(Wp);
+
+         smart_address term = _ses->get_ref<Src>(addr).obj()->term_value();
+         if (!term.is_null())
+         {
+            smart_address t = carry_value(na, nt, addr, term, hint);
+            set_term_of(na, nt, t);  // term carries (it's before the stride)
+         }
+
+         int i = 0;
+         while (i < n)
+         {
+            int j = i + 1;
+            while (j < n && std::memcmp(es[i].b, es[j].b, size_t(Wp)) == 0)
+               ++j;
+            uint32_t pq = encode_cell(es[i].b, Wp, pcell);
+            bool single_inline = (j - i == 1) && is_terminal_branch(es[i].br);
+            if (single_inline)  // inline singleton: tail bytes ride into its suffix
+            {
+               uint8_t buf[512];
+               bytes   suf, val;
+               term_get(_ses->get_ref<sal::alloc_header>(addr).obj(), es[i].br, buf, suf, val);
+               uint8_t kb[540];
+               std::memcpy(kb, es[i].b + Wp, size_t(tw));
+               std::memcpy(kb + tw, suf.data(), suf.size());
+               add_inline(na, nt, pq, bytes{kb, size_t(tw) + suf.size()}, val, hint);
+            }
+            else  // group child (consumes the tw tail bytes)
+            {
+               int              ccell = cell_width_for(tw);
+               ptr_address      child = make_wide_node(tw, bytes{}, hint, uint32_t(j - i) * 16 + 64);
+               sal::header_type ct    = _ses->get_ref<sal::alloc_header>(child)->type();
+               for (int k = i; k < j; ++k)
+               {
+                  uint32_t      cq = encode_cell(es[k].b + Wp, tw, ccell);
+                  smart_address cs = carry_value(child, ct, addr, es[k].br, hint);
+                  if (!is_terminal_branch(cs))  // a node pointer (carry_value retained it)
+                     add_ptr(child, ct, cq, cs, hint);
+                  else  // inline value already copied into child by carry_value → just set it
+                     add_existing(child, ct, cq, cs, hint);
+               }
+               add_ptr(na, nt, pq, smart_address::from_pointer(child), hint);
+            }
+            i = j;
+         }
+         return na;
+      }
+      // Set a slot to an already-resident smart_address (no value creation, no widen).
+      void add_existing(ptr_address& node, sal::header_type t, uint32_t q, smart_address sa,
+                        sal::alloc_hint)
+      {
+         if (t == setlist_u16::type_id)
+            cow<setlist_u16>(node, 8)->set_branch(uint16_t(q), sa);
+         else if (t == setlist_u32::type_id)
+            cow<setlist_u32>(node, 8)->set_branch(q, sa);
+         else
+            cow<full_radix_node>(node)->set_branch(uint8_t(q), sa);
+      }
+      void set_term_of(ptr_address node, sal::header_type t, smart_address sv)
+      {
+         if (t == setlist_u16::type_id)
+            mut<setlist_u16>(node)->set_term_value(sv);
+         else if (t == setlist_u32::type_id)
+            mut<setlist_u32>(node)->set_term_value(sv);
+         else
+            mut<full_radix_node>(node)->set_term_value(sv);
       }
 
       // Add a (suffix→value) continuation under a fresh setlist `node` (inline if it
@@ -618,7 +1381,12 @@ namespace heart::radix
       template <class N>
       void reprefix(N* n, bytes p)
       {
-         if constexpr (std::is_same_v<N, setlist_u8>)
+         // Every setlist width stores stems+branches at a prefix-relative offset, so a
+         // prefix change must relocate that block — the node's own reprefix() (wide-aware
+         // for u16/u32, end-anchored for u8). bitset/full keep branches in separate
+         // cachelines, so the cheap base set_prefix() is correct for them.
+         if constexpr (std::is_same_v<N, setlist_u8> || std::is_same_v<N, setlist_u16> ||
+                       std::is_same_v<N, setlist_u32>)
             n->reprefix(p);
          else
             n->set_prefix(p);
@@ -719,5 +1487,7 @@ namespace heart::radix
       bool                            _snap_valid     = false;
       int                             _old_value_size = -1;
       bool                            _route_found    = false;
+      bool                            _wide_stems     = false;  // gate: off = byte radix
+      cow_counters                    _cc;
    };
 }  // namespace heart::radix

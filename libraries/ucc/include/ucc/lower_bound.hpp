@@ -543,4 +543,87 @@ namespace ucc
       return find_u32x16_scalar_unrolled(arr, size, value);
 #endif
    }
+
+   /**
+    * lower_bound / upper_bound over a SORTED u32 / u16 array = the count of elements
+    * strictly < value (lower) or <= value (upper) — i.e. the STL insertion index.
+    *
+    * Branch-light: a NEON accumulate (compare → +1 per match, one horizontal reduce) over
+    * full SIMD chunks, then a scalar tail. Microbenchmarked as the fastest option for the
+    * small (2..32-element) sorted arrays that radix setlist stems use — binary search's
+    * branch mispredicts dominate there (2-3x slower at N>=12). Reads only full chunks plus
+    * a scalar tail, so it never over-reads past `n` (safe on unpadded node memory).
+    */
+   inline int lower_bound_u32(const uint32_t* a, int n, uint32_t v) noexcept
+   {
+#if defined(__ARM_NEON)
+      uint32x4_t vv = vdupq_n_u32(v), acc = vdupq_n_u32(0);
+      int        i  = 0;
+      for (; i + 4 <= n; i += 4)
+         acc = vsubq_u32(acc, vcltq_u32(vld1q_u32(a + i), vv));  // lt lane = 0xFFFFFFFF (-1) → +1
+      int c = int(vaddvq_u32(acc));
+      for (; i < n; ++i)
+         c += (a[i] < v);
+      return c;
+#else
+      int c = 0;
+      for (int i = 0; i < n; ++i)
+         c += (a[i] < v);
+      return c;
+#endif
+   }
+   inline int upper_bound_u32(const uint32_t* a, int n, uint32_t v) noexcept
+   {
+#if defined(__ARM_NEON)
+      uint32x4_t vv = vdupq_n_u32(v), acc = vdupq_n_u32(0);
+      int        i  = 0;
+      for (; i + 4 <= n; i += 4)
+         acc = vsubq_u32(acc, vcleq_u32(vld1q_u32(a + i), vv));
+      int c = int(vaddvq_u32(acc));
+      for (; i < n; ++i)
+         c += (a[i] <= v);
+      return c;
+#else
+      int c = 0;
+      for (int i = 0; i < n; ++i)
+         c += (a[i] <= v);
+      return c;
+#endif
+   }
+   inline int lower_bound_u16(const uint16_t* a, int n, uint16_t v) noexcept
+   {
+#if defined(__ARM_NEON)
+      uint16x8_t vv = vdupq_n_u16(v), acc = vdupq_n_u16(0);
+      int        i  = 0;
+      for (; i + 8 <= n; i += 8)
+         acc = vsubq_u16(acc, vcltq_u16(vld1q_u16(a + i), vv));
+      int c = int(vaddvq_u16(acc));
+      for (; i < n; ++i)
+         c += (a[i] < v);
+      return c;
+#else
+      int c = 0;
+      for (int i = 0; i < n; ++i)
+         c += (a[i] < v);
+      return c;
+#endif
+   }
+   inline int upper_bound_u16(const uint16_t* a, int n, uint16_t v) noexcept
+   {
+#if defined(__ARM_NEON)
+      uint16x8_t vv = vdupq_n_u16(v), acc = vdupq_n_u16(0);
+      int        i  = 0;
+      for (; i + 8 <= n; i += 8)
+         acc = vsubq_u16(acc, vcleq_u16(vld1q_u16(a + i), vv));
+      int c = int(vaddvq_u16(acc));
+      for (; i < n; ++i)
+         c += (a[i] <= v);
+      return c;
+#else
+      int c = 0;
+      for (int i = 0; i < n; ++i)
+         c += (a[i] <= v);
+      return c;
+#endif
+   }
 }  // namespace ucc

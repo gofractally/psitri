@@ -54,8 +54,11 @@ namespace heart
       }
 
       // ---- classification --------------------------------------------------
+      // Partition is exact: pointer (< tail_base) | tail (tail_base..0xFFFFFFFE,
+      // i.e. offset 1..65535) | null (0xFFFFFFFF, == tail offset 0, which is reserved
+      // to mean null). null must NOT classify as a tail (offset 0 is never a live tail).
       bool is_null() const noexcept { return raw == 0xFFFFFFFFu; }
-      bool is_tail() const noexcept { return raw >= tail_base; }
+      bool is_tail() const noexcept { return raw >= tail_base && raw != 0xFFFFFFFFu; }
       bool is_pointer() const noexcept { return raw < tail_base; }
 
       // ---- decode ----------------------------------------------------------

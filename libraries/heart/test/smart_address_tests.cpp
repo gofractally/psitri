@@ -19,7 +19,8 @@ TEST_CASE("smart_address null is null in both interpretations", "[smart_address]
 {
    auto sa = smart_address::null();
    REQUIRE(sa.is_null());
-   REQUIRE(sa.is_tail());          // 0xFFFFFFFF is in the tail range
+   REQUIRE_FALSE(sa.is_tail());      // null is NOT a tail: offset 0 is reserved as null,
+                                     // a live tail is offset 1..65535 (raw < 0xFFFFFFFF)
    REQUIRE_FALSE(sa.is_pointer());
    REQUIRE(sa.tail_offset() == 0);  // offset 0 == null sentinel
    REQUIRE(sa.as_tail().is_null());

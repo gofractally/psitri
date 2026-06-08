@@ -457,6 +457,27 @@ target_include_directories(dict-query-bench PRIVATE ${CMAKE_SOURCE_DIR}/librarie
 target_compile_definitions(dict-query-bench PRIVATE XXH_INLINE_ALL)
 set_target_properties(dict-query-bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+# Tree-structure diagnostic: dump the heart engine tree (indented text + stats)
+add_executable(dict-tree-dump programs/dict_tree_dump.cpp)
+target_link_libraries(dict-tree-dump PRIVATE psitri heart)
+target_include_directories(dict-tree-dump PRIVATE ${CMAKE_SOURCE_DIR}/libraries/heart/test)
+target_compile_definitions(dict-tree-dump PRIVATE XXH_INLINE_ALL)
+set_target_properties(dict-tree-dump PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# Reference ART structure dump (libart) — target for stem-engine prefix/depth conformance
+add_executable(art-ref-dump programs/art_ref_dump.cpp third_party/libart/art.c)
+target_include_directories(art-ref-dump PRIVATE ${CMAKE_SOURCE_DIR}/third_party/libart)
+set_target_properties(art-ref-dump PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    INTERPROCEDURAL_OPTIMIZATION OFF)
+
+# heart radix_engine vs libart head-to-head (dict + random)
+add_executable(art-vs-heart-bench programs/art_vs_heart_bench.cpp third_party/libart/art.c)
+target_link_libraries(art-vs-heart-bench PRIVATE psitri heart)
+target_include_directories(art-vs-heart-bench PRIVATE ${CMAKE_SOURCE_DIR}/libraries/heart/test ${CMAKE_SOURCE_DIR}/third_party/libart)
+target_compile_definitions(art-vs-heart-bench PRIVATE XXH_INLINE_ALL)
+set_target_properties(art-vs-heart-bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    INTERPROCEDURAL_OPTIMIZATION OFF)
+
 # u64-key head-to-head (random + sequential big-endian): heart vs psitri
 add_executable(kv-u64-bench programs/kv_u64_bench.cpp)
 target_link_libraries(kv-u64-bench PRIVATE psitri heart)

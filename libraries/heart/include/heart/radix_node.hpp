@@ -20,6 +20,7 @@ namespace heart
       prefix_next,   // shared prefix + a single next pointer
       setlist_u8,
       setlist_u16,
+      setlist_u24,  // u32 cell, but consumes/compares only 3 key bytes (low byte ignored)
       setlist_u32,
       bitset256,
       bitset128,

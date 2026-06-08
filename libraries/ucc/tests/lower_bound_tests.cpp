@@ -738,3 +738,51 @@ TEST_CASE("Lower Bound Fixed Size Unaligned Performance (255)",
    };
 #endif
 }
+// Correctness for the u32/u16 sorted-array lower_bound / upper_bound (count of < / <=).
+// These back the radix setlist node's ordered insert + range queries; the NEON-accumulate
+// path must agree with std::lower_bound / std::upper_bound for every size and query.
+TEST_CASE("u32/u16 lower_bound & upper_bound vs std", "[lower_bound][u32][u16]")
+{
+   std::mt19937 gen(20240607);
+
+   SECTION("u32")
+   {
+      std::uniform_int_distribution<uint32_t> dist(0, 0xFFFFFFFFu);
+      for (int n = 0; n <= 40; ++n)
+      {
+         std::vector<uint32_t> a(n);
+         for (auto& x : a) x = dist(gen);
+         std::sort(a.begin(), a.end());
+         auto probe = [&](uint32_t v) {
+            int lb = int(std::lower_bound(a.begin(), a.end(), v) - a.begin());
+            int ub = int(std::upper_bound(a.begin(), a.end(), v) - a.begin());
+            REQUIRE(ucc::lower_bound_u32(a.data(), n, v) == lb);
+            REQUIRE(ucc::upper_bound_u32(a.data(), n, v) == ub);
+         };
+         for (auto x : a) probe(x);          // present values (exercises <=)
+         for (int k = 0; k < 64; ++k) probe(dist(gen));
+         probe(0);
+         probe(0xFFFFFFFFu);
+      }
+   }
+   SECTION("u16")
+   {
+      std::uniform_int_distribution<int> dist(0, 0xFFFF);
+      for (int n = 0; n <= 40; ++n)
+      {
+         std::vector<uint16_t> a(n);
+         for (auto& x : a) x = uint16_t(dist(gen));
+         std::sort(a.begin(), a.end());
+         auto probe = [&](uint16_t v) {
+            int lb = int(std::lower_bound(a.begin(), a.end(), v) - a.begin());
+            int ub = int(std::upper_bound(a.begin(), a.end(), v) - a.begin());
+            REQUIRE(ucc::lower_bound_u16(a.data(), n, v) == lb);
+            REQUIRE(ucc::upper_bound_u16(a.data(), n, v) == ub);
+         };
+         for (auto x : a) probe(x);
+         for (int k = 0; k < 64; ++k) probe(uint16_t(dist(gen)));
+         probe(0);
+         probe(0xFFFF);
+      }
+   }
+}

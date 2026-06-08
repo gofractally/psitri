@@ -81,6 +81,7 @@ namespace heart
    struct setlist_node : radix_impl<setlist_node<StemType>, setlist_fixed>
    {
       using base = radix_impl<setlist_node<StemType>, setlist_fixed>;
+      using stem_type                              = StemType;
       static constexpr dispatch_shape tier         = dispatch_shape::r1;
       static constexpr int            stem_width   = sizeof(StemType);
       static constexpr int            var_capacity = base::prefix_capacity;
@@ -98,6 +99,39 @@ namespace heart
       int  nstems() const noexcept { return this->fixed.nstems; }
       void set_nstems(int n) noexcept { this->fixed.nstems = uint16_t(n); }
 
+      // Key bytes consumed/compared per hop. u8->1, u16->2; the u32 cell consumes 4 or,
+      // when re-strided to the 3-byte variant (rtype setlist_u24), 3 (low byte ignored).
+      int consume_width() const noexcept
+      {
+         if constexpr (stem_width != 4)
+            return stem_width;
+         else
+            return this->_rtype == radix_node_type::setlist_u24 ? 3 : 4;
+      }
+
+      // ---- index region (prefix + stems + branches) ----
+      // u8 (stem_width==1): the fixed 1-CL block; branches END-anchored at var_capacity so
+      // prefix edits never move them. wide (stem_width>1): forward parallel arrays — stems
+      // then branches — that GROW across cachelines, bounded below by the tail heap, with
+      // capacity derived from the allocation size (up to ~4 KB). All wide-only code is
+      // if-constexpr'd so the u8 type is byte-identical to before.
+      uint32_t index_cap() const noexcept  // bytes available for prefix+stems+branches
+      {
+         if constexpr (stem_width == 1)
+            return uint32_t(var_capacity);
+         else
+            return uint32_t((this->tail() - this->tail_used()) -
+                            reinterpret_cast<const char*>(this->prefix_data));
+      }
+      const uint8_t* branch_base() const noexcept  // wide: branches follow the stems
+      {
+         return this->prefix_data + this->_prefix_length + size_t(nstems()) * stem_width;
+      }
+      uint8_t* branch_base() noexcept
+      {
+         return this->prefix_data + this->_prefix_length + size_t(nstems()) * stem_width;
+      }
+
       StemType stem_at(int i) const noexcept
       {
          StemType s;
@@ -111,25 +145,53 @@ namespace heart
       smart_address branch_at(int i) const noexcept
       {
          smart_address sa;
-         std::memcpy(&sa, this->prefix_data + var_capacity - (i + 1) * 4, 4);
+         if constexpr (stem_width == 1)
+            std::memcpy(&sa, this->prefix_data + var_capacity - (i + 1) * 4, 4);
+         else
+            std::memcpy(&sa, branch_base() + size_t(i) * 4, 4);
          return sa;
       }
       void set_branch_slot(int i, smart_address sa) noexcept
       {
-         std::memcpy(this->prefix_data + var_capacity - (i + 1) * 4, &sa, 4);
+         if constexpr (stem_width == 1)
+            std::memcpy(this->prefix_data + var_capacity - (i + 1) * 4, &sa, 4);
+         else
+            std::memcpy(branch_base() + size_t(i) * 4, &sa, 4);
       }
 
       bool room_for_one() const noexcept
       {
-         return int(this->_prefix_length) + (nstems() + 1) * (stem_width + 4) <= var_capacity;
+         return int(this->_prefix_length) + (nstems() + 1) * (stem_width + 4) <= int(index_cap());
       }
       smart_address find(StemType s) const noexcept
       {
          const int n = nstems();
-         for (int i = 0; i < n; ++i)
-            if (stem_at(i) == s)
-               return branch_at(i);
-         return smart_address::null();
+         if constexpr (stem_width == 4)
+         {
+            // u32/u24 cells are contiguous 4-byte values right after the prefix, so a
+            // point lookup is an exact-match SIMD scan (ucc::find_u32x16, 16 lanes /
+            // instruction on NEON/AVX512/SSE2). find_u32x16 reads a full 16-lane (64 B)
+            // block; the bytes past the stems are this node's own branch/tail region
+            // (always >=64 B of slack from headroom), and any coincidental match there
+            // lands at index >= chunk and is discarded by the `< chunk` guard.
+            const uint32_t* stems =
+                reinterpret_cast<const uint32_t*>(this->prefix_data + this->_prefix_length);
+            for (int base = 0; base < n; base += 16)
+            {
+               const int chunk = n - base < 16 ? n - base : 16;
+               const int idx   = ucc::find_u32x16(stems + base, size_t(chunk), uint32_t(s));
+               if (idx < chunk)
+                  return branch_at(base + idx);
+            }
+            return smart_address::null();
+         }
+         else
+         {
+            for (int i = 0; i < n; ++i)
+               if (stem_at(i) == s)
+                  return branch_at(i);
+            return smart_address::null();
+         }
       }
       bool branch_has_room(StemType s) const noexcept
       {
@@ -142,39 +204,133 @@ namespace heart
       std::span<const sal::ptr_address> branch_hint(uint8_t = 0) const noexcept
       {
          const int n = nstems();
-         return {reinterpret_cast<const sal::ptr_address*>(this->prefix_data + var_capacity - n * 4),
-                 size_t(n)};
+         if constexpr (stem_width == 1)
+            return {reinterpret_cast<const sal::ptr_address*>(this->prefix_data + var_capacity - n * 4),
+                    size_t(n)};
+         else
+            return {reinterpret_cast<const sal::ptr_address*>(branch_base()), size_t(n)};
       }
-      // Update-or-append; false (no change) if a new stem won't fit.
+      // Stems are kept in ascending key order. Cells are big-endian, left-justified, so
+      // an unsigned integer compare on the cell is exact lexicographic key order (u24's
+      // zero low byte is constant across stems, so it sorts on its 3 consumed bytes).
+      // First index whose stem is >= s; nstems() if every stem is < s. Stems are a
+      // contiguous cell array right after the prefix, so this is a SIMD count-of-less
+      // (ucc::lower_bound_uN) for the wide widths — faster than binary search on the
+      // small arrays radix nodes hold. u8 keeps the branchless binary search.
+      int lower_bound_index(StemType s) const noexcept
+      {
+         const int      n = nstems();
+         const uint8_t* p = this->prefix_data + this->_prefix_length;
+         if constexpr (stem_width == 4)
+            return ucc::lower_bound_u32(reinterpret_cast<const uint32_t*>(p), n, uint32_t(s));
+         else if constexpr (stem_width == 2)
+            return ucc::lower_bound_u16(reinterpret_cast<const uint16_t*>(p), n, uint16_t(s));
+         else
+         {
+            int lo = 0, hi = n;
+            while (lo < hi)
+            {
+               const int mid = (lo + hi) >> 1;
+               if (stem_at(mid) < s)
+                  lo = mid + 1;
+               else
+                  hi = mid;
+            }
+            return lo;
+         }
+      }
+      // First index whose stem is > s; nstems() if every stem is <= s.
+      int upper_bound_index(StemType s) const noexcept
+      {
+         const int      n = nstems();
+         const uint8_t* p = this->prefix_data + this->_prefix_length;
+         if constexpr (stem_width == 4)
+            return ucc::upper_bound_u32(reinterpret_cast<const uint32_t*>(p), n, uint32_t(s));
+         else if constexpr (stem_width == 2)
+            return ucc::upper_bound_u16(reinterpret_cast<const uint16_t*>(p), n, uint16_t(s));
+         else
+         {
+            int lo = 0, hi = n;
+            while (lo < hi)
+            {
+               const int mid = (lo + hi) >> 1;
+               if (stem_at(mid) <= s)
+                  lo = mid + 1;
+               else
+                  hi = mid;
+            }
+            return lo;
+         }
+      }
+
+      // Sorted update-or-insert; false (no change) if a new stem won't fit. Inserting at
+      // the lower-bound position keeps the stems (and the rank-aligned branches) ordered.
       bool set_branch(StemType s, smart_address sa) noexcept
       {
          const int n = nstems();
-         for (int i = 0; i < n; ++i)
-            if (stem_at(i) == s)
-            {
-               set_branch_slot(i, sa);
-               return true;
-            }
+         const int p = lower_bound_index(s);
+         if (p < n && stem_at(p) == s)
+         {
+            set_branch_slot(p, sa);  // update in place
+            return true;
+         }
          if (!room_for_one())
             return false;
-         set_stem(n, s);          // stems grow forward (after the prefix)
-         set_branch_slot(n, sa);  // branches grow backward (from the region end)
+         if constexpr (stem_width == 1)
+         {
+            // stems forward (open a gap at p); branches end-anchored (shift [p,n) one slot
+            // toward the head). The two regions never overlap (room_for_one guarantees it).
+            uint8_t* st   = this->prefix_data + this->_prefix_length;
+            uint8_t* base = this->prefix_data;
+            std::memmove(st + p + 1, st + p, size_t(n - p));
+            st[p] = uint8_t(s);
+            std::memmove(base + var_capacity - (n + 1) * 4, base + var_capacity - n * 4,
+                         size_t(n - p) * 4);
+            std::memcpy(base + var_capacity - (p + 1) * 4, &sa, 4);
+         }
+         else
+         {
+            // forward parallel arrays: the stem array grows by one cell (branch base moves
+            // right by stem_width) and both arrays open a gap at p. Move highest addresses
+            // first (branches upper, branches lower, then stems upper) so nothing clobbers.
+            uint8_t*  pe     = this->prefix_data + this->_prefix_length;
+            const int sw     = stem_width;
+            uint8_t*  old_bb = pe + size_t(n) * sw;      // current branch base
+            uint8_t*  new_bb = pe + size_t(n + 1) * sw;  // base once the stem array grows
+            std::memmove(new_bb + size_t(p + 1) * 4, old_bb + size_t(p) * 4, size_t(n - p) * 4);
+            std::memmove(new_bb, old_bb, size_t(p) * 4);
+            std::memmove(pe + size_t(p + 1) * sw, pe + size_t(p) * sw, size_t(n - p) * sw);
+            std::memcpy(pe + size_t(p) * sw, &s, sw);
+            std::memcpy(new_bb + size_t(p) * 4, &sa, 4);
+         }
          set_nstems(n + 1);
          return true;
       }
 
-      // Replace the prefix, preserving stems+branches. Branches are end-anchored so
-      // they stay put; only the stems (which follow the prefix) are restowed.
+      // Replace the prefix, preserving stems+branches.
       void reprefix(std::span<const uint8_t> p) noexcept
       {
          const int n = nstems();
-         StemType  tmp[64];
-         for (int i = 0; i < n; ++i)
-            tmp[i] = stem_at(i);
-         std::memcpy(this->prefix_data, p.data(), p.size());
-         this->_prefix_length = uint16_t(p.size());
-         for (int i = 0; i < n; ++i)
-            set_stem(i, tmp[i]);
+         if constexpr (stem_width == 1)
+         {
+            // u8: branches are end-anchored (stay put); only the stems are restowed.
+            StemType tmp[64];
+            for (int i = 0; i < n; ++i)
+               tmp[i] = stem_at(i);
+            std::memcpy(this->prefix_data, p.data(), p.size());
+            this->_prefix_length = uint16_t(p.size());
+            for (int i = 0; i < n; ++i)
+               set_stem(i, tmp[i]);
+         }
+         else
+         {
+            // wide: stems+branches are one contiguous forward block; shift it to the new
+            // prefix end (no fixed buffer — n can be large).
+            uint8_t* old_block = this->prefix_data + this->_prefix_length;
+            std::memcpy(this->prefix_data, p.data(), p.size());
+            this->_prefix_length = uint16_t(p.size());
+            std::memmove(this->prefix_data + p.size(), old_block, size_t(n) * (stem_width + 4));
+         }
       }
 
       template <typename F>
@@ -205,9 +361,24 @@ namespace heart
       // ---- tail heap for inline terminals ----
       static constexpr uint32_t headroom  = radix_node_headroom;
       static constexpr uint32_t head_bytes() noexcept { return uint32_t(sizeof(setlist_node)); }
+      // Bytes from the start of the node up to the end of the live index region. u8: the
+      // index lives in CL0 so this is just sizeof. wide: prefix+stems+branches grow past
+      // CL0, so the head is variable (used by the engine's clone/grow + free_heap).
+      uint32_t head_size() const noexcept
+      {
+         if constexpr (stem_width == 1)
+            return uint32_t(sizeof(setlist_node));
+         else
+            return uint32_t((reinterpret_cast<const char*>(this->prefix_data) -
+                             reinterpret_cast<const char*>(this)) +
+                            this->_prefix_length + size_t(nstems()) * (stem_width + 4));
+      }
       uint32_t free_heap() const noexcept
       {
-         return this->free_bytes(reinterpret_cast<const char*>(this) + sizeof(setlist_node));
+         if constexpr (stem_width == 1)
+            return this->free_bytes(reinterpret_cast<const char*>(this) + sizeof(setlist_node));
+         else
+            return this->free_bytes(reinterpret_cast<const char*>(this) + head_size());
       }
       // ---- SAL construction contract ----
       static uint32_t alloc_size(std::span<const uint8_t> prefix) noexcept
@@ -234,45 +405,53 @@ namespace heart
       static constexpr dispatch_shape tier = dispatch_shape::r1;
    };
 
-   /// 3 cachelines: CL0 header, then 2 sub-range cachelines [0,128)/[128,256),
-   /// each a self-contained radix_bitset<128> reached directly by `byte >> 7`.
-   /// Skip-header descent reads segment (base + 128 + (byte>>7)*128) and never CL0.
-   struct bitset_r2_node : large_radix<bitset_r2_node, 2>
+   /// The segmented bitset tier, parameterized by `SegShift` (key bits per segment):
+   ///   SegShift=7 → r2 (2 × radix_bitset<128>, byte>>7), 3 cachelines;
+   ///   SegShift=6 → r4 (4 × radix_bitset<64>,  byte>>6), 5 cachelines.
+   /// CL0 is the header (large_radix fills it to exactly 128 B), then `nseg` self-
+   /// contained segment cachelines at CL1+. Skip-header descent reads segment
+   /// (base + 128 + (byte>>SegShift)*128) and never touches CL0. nseg = 256>>SegShift
+   /// (also the refcount-root count K), seg_width = 1<<SegShift, seg_mask = width-1.
+   template <int SegShift, sal::header_type TypeId, dispatch_shape Tier, radix_node_type RType>
+   struct bitset_rN_node : large_radix<bitset_rN_node<SegShift, TypeId, Tier, RType>, (256 >> SegShift)>
    {
-      static constexpr dispatch_shape   tier          = dispatch_shape::r2;
-      static constexpr sal::header_type type_id       = radix_type_ids::bitset_r2;
+      static constexpr dispatch_shape   tier          = Tier;
+      static constexpr int              stem_width    = 1;  // byte-indexed (1 key byte / hop)
+      static constexpr sal::header_type type_id       = TypeId;
       static constexpr uint32_t         branch_offset = 128;  // segment cachelines at CL1
-      static constexpr int              nseg          = 2;
-      static constexpr int              seg_shift     = 7;
-      static constexpr int              seg_mask      = 127;
-      using segment                                   = radix_bitset<128, 128>;
+      static constexpr int              nseg          = 256 >> SegShift;
+      static constexpr int              seg_shift     = SegShift;
+      static constexpr int              seg_width     = 1 << SegShift;
+      static constexpr int              seg_mask      = seg_width - 1;
+      using segment                                   = radix_bitset<seg_width, 128>;
 
-      segment half[2];  // @128 (CL1), @256 (CL2)
+      segment segs[nseg];  // @128, @256, ... one cacheline each
 
-      bitset_r2_node() noexcept = default;
+      bitset_rN_node() noexcept = default;
 
-      smart_address find(uint8_t b) const noexcept { return half[b >> 7].find(b & 127); }
-      bool          can_set(uint8_t b, smart_address sa) const noexcept
+      const segment& seg(int s) const noexcept { return segs[s]; }  // uniform ordered-walk access
+      smart_address  find(uint8_t b) const noexcept { return segs[b >> seg_shift].find(b & seg_mask); }
+      bool           can_set(uint8_t b, smart_address sa) const noexcept
       {
-         const segment& h = half[b >> 7];
-         return h.contains(b & 127) || h.can_insert(sa);
+         const segment& h = segs[b >> seg_shift];
+         return h.contains(b & seg_mask) || h.can_insert(sa);
       }
       bool set_branch(uint8_t b, smart_address sa) noexcept
       {
-         return half[b >> 7].set_branch(b & 127, sa);
+         return segs[b >> seg_shift].set_branch(b & seg_mask, sa);
       }
       // Alloc-hint: the cacheline bases of the segment this byte routes to, so a new
       // child clusters with its segment-mates (keeps compact_addresses bases <= 16).
       std::span<const sal::ptr_address> branch_hint(uint8_t b) const noexcept
       {
-         return half[b >> 7].get_hint();
+         return segs[b >> seg_shift].get_hint();
       }
       template <typename F>
       void for_each_entry(F&& f) const
       {
-         for (int s = 0; s < 2; ++s)
-            for (int lb = half[s].present.first_set(); lb >= 0; lb = half[s].present.next_set(lb + 1))
-               f(uint8_t(s * 128 + lb), half[s].find(lb));
+         for (int s = 0; s < nseg; ++s)
+            for (int lb = segs[s].present.first_set(); lb >= 0; lb = segs[s].present.next_set(lb + 1))
+               f(uint8_t(s * seg_width + lb), segs[s].find(lb));
       }
       template <typename F>
       void for_each_child(F&& f) const
@@ -293,110 +472,40 @@ namespace heart
       static uint32_t alloc_size(std::span<const uint8_t> prefix) noexcept
       {
          (void)prefix;
-         return ucc::round_up_multiple<sal::cacheline_size>(uint32_t(sizeof(bitset_r2_node)) +
+         return ucc::round_up_multiple<sal::cacheline_size>(uint32_t(sizeof(bitset_rN_node)) +
                                                             headroom);
       }
       static constexpr uint32_t headroom  = radix_node_headroom;
-      static constexpr uint32_t head_bytes() noexcept { return uint32_t(sizeof(bitset_r2_node)); }
+      static constexpr uint32_t head_bytes() noexcept { return uint32_t(sizeof(bitset_rN_node)); }
+      uint32_t head_size() const noexcept { return uint32_t(sizeof(bitset_rN_node)); }
       uint32_t free_heap() const noexcept
       {
-         return this->free_bytes(reinterpret_cast<const char*>(this) + sizeof(bitset_r2_node));
+         return this->free_bytes(reinterpret_cast<const char*>(this) + sizeof(bitset_rN_node));
       }
-      bitset_r2_node(uint32_t asize, sal::ptr_address_seq seq, std::span<const uint8_t> prefix) noexcept
+      bitset_rN_node(uint32_t asize, sal::ptr_address_seq seq, std::span<const uint8_t> prefix) noexcept
       {
          this->init_page(asize, type_id, seq);
-         this->_rtype         = radix_node_type::bitset128;
+         this->_rtype         = RType;
          this->_term_value    = smart_address::null();
          this->_prefix_length = 0;
-         half[0].init();
-         half[1].init();
+         for (auto& s : segs)
+            s.init();
          this->set_prefix(prefix);
       }
    };
 
-   /// 5 cachelines: CL0 header, then 4 sub-range cachelines (64 each), reached by
-   /// `byte >> 6`.
-   struct bitset_r4_node : large_radix<bitset_r4_node, 4>
-   {
-      static constexpr dispatch_shape   tier          = dispatch_shape::r4;
-      static constexpr sal::header_type type_id       = radix_type_ids::bitset_r4;
-      static constexpr uint32_t         branch_offset = 128;
-      static constexpr int              nseg          = 4;
-      static constexpr int              seg_shift     = 6;
-      static constexpr int              seg_mask      = 63;
-      using segment                                   = radix_bitset<64, 128>;
-
-      segment quad[4];  // @128, @256, @384, @512
-
-      bitset_r4_node() noexcept = default;
-
-      smart_address find(uint8_t b) const noexcept { return quad[b >> 6].find(b & 63); }
-      bool          can_set(uint8_t b, smart_address sa) const noexcept
-      {
-         const segment& q = quad[b >> 6];
-         return q.contains(b & 63) || q.can_insert(sa);
-      }
-      bool set_branch(uint8_t b, smart_address sa) noexcept
-      {
-         return quad[b >> 6].set_branch(b & 63, sa);
-      }
-      std::span<const sal::ptr_address> branch_hint(uint8_t b) const noexcept
-      {
-         return quad[b >> 6].get_hint();
-      }
-      template <typename F>
-      void for_each_entry(F&& f) const
-      {
-         for (int s = 0; s < 4; ++s)
-            for (int lb = quad[s].present.first_set(); lb >= 0; lb = quad[s].present.next_set(lb + 1))
-               f(uint8_t(s * 64 + lb), quad[s].find(lb));
-      }
-      template <typename F>
-      void for_each_child(F&& f) const
-      {
-         if (this->_term_value.is_pointer())
-            f(this->_term_value.as_pointer());
-         for_each_entry([&](uint8_t, smart_address br) {
-            if (br.is_pointer())
-               f(br.as_pointer());
-         });
-      }
-      template <typename Session>
-      void destroy(const Session& s) const
-      {
-         for_each_child([&](sal::ptr_address c) { s->release(c); });
-      }
-
-      static uint32_t alloc_size(std::span<const uint8_t> prefix) noexcept
-      {
-         (void)prefix;
-         return ucc::round_up_multiple<sal::cacheline_size>(uint32_t(sizeof(bitset_r4_node)) +
-                                                            headroom);
-      }
-      static constexpr uint32_t headroom  = radix_node_headroom;
-      static constexpr uint32_t head_bytes() noexcept { return uint32_t(sizeof(bitset_r4_node)); }
-      uint32_t free_heap() const noexcept
-      {
-         return this->free_bytes(reinterpret_cast<const char*>(this) + sizeof(bitset_r4_node));
-      }
-      bitset_r4_node(uint32_t asize, sal::ptr_address_seq seq, std::span<const uint8_t> prefix) noexcept
-      {
-         this->init_page(asize, type_id, seq);
-         this->_rtype         = radix_node_type::bitset64;
-         this->_term_value    = smart_address::null();
-         this->_prefix_length = 0;
-         for (auto& q : quad)
-            q.init();
-         this->set_prefix(prefix);
-      }
-   };
+   using bitset_r2_node =
+       bitset_rN_node<7, radix_type_ids::bitset_r2, dispatch_shape::r2, radix_node_type::bitset128>;
+   using bitset_r4_node =
+       bitset_rN_node<6, radix_type_ids::bitset_r4, dispatch_shape::r4, radix_node_type::bitset64>;
 
    /// 9 cachelines: CL0 header, then radix_full<256> direct index in CL1–CL8,
    /// reached by `byte >> 5`. The dense R8 fallback.
    struct full_radix_node : large_radix<full_radix_node, 4>
    {
-      static constexpr dispatch_shape   tier    = dispatch_shape::r8;
-      static constexpr sal::header_type type_id = radix_type_ids::full_radix;
+      static constexpr dispatch_shape   tier       = dispatch_shape::r8;
+      static constexpr int              stem_width = 1;  // byte-indexed (1 key byte / hop)
+      static constexpr sal::header_type type_id    = radix_type_ids::full_radix;
 
       radix_full<256> branches;  // @128 (CL1..8): 32 ptr_addresses per cacheline
 
@@ -417,6 +526,7 @@ namespace heart
       }
       static constexpr uint32_t headroom  = radix_node_headroom;
       static constexpr uint32_t head_bytes() noexcept { return uint32_t(sizeof(full_radix_node)); }
+      uint32_t head_size() const noexcept { return uint32_t(sizeof(full_radix_node)); }
       uint32_t free_heap() const noexcept
       {
          return this->free_bytes(reinterpret_cast<const char*>(this) + sizeof(full_radix_node));
@@ -446,6 +556,13 @@ namespace heart
          return {reinterpret_cast<const sal::ptr_address*>(&branches.branches[0]), 256};
       }
 
+      template <typename F>
+      void for_each_entry(F&& f) const
+      {
+         for (int b = 0; b < 256; ++b)
+            if (!branches.branches[b].is_null())
+               f(uint8_t(b), branches.branches[b]);
+      }
       template <typename F>
       void for_each_child(F&& f) const
       {

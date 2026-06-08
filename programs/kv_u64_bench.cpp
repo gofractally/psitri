@@ -180,10 +180,12 @@ namespace
                      tc.setlist ? double(tc.sl_tail_used) / double(tc.setlist) : 0.0,
                      (unsigned long long)tc.setlist);
       }
-      // REMOVE: delete every key (random order) → drains the tree back to empty.
+      // REMOVE: delete every key in keyfn order → empties the tree. For the seq keyfn this
+      // is an ASCENDING (true sequential) delete that drains the tree front-to-back; for the
+      // random keyfn the keys are scattered, so it's effectively a random delete.
       auto d0 = now();
       for (uint64_t i = 0; i < N; ++i)
-         t.remove(kspan(keyfn(order[i])));
+         t.remove(kspan(keyfn(i)));
       r.del          = ns(d0, now(), N);
       uint64_t still = 0;
       for (uint64_t i = 0; i < N; ++i)
@@ -255,13 +257,14 @@ namespace
       }
       r.miss                = ns(m0, now(), N);
       const uint64_t expect = N * (N - 1) / 2;
-      // REMOVE: one transaction deletes every key (random order), then commit.
+      // REMOVE: one transaction deletes every key in keyfn order (ascending for the seq
+      // keyfn = true sequential delete; scattered for random), then commit.
       auto d0 = now();
       {
          auto tx = ses->start_transaction(0);
          for (uint64_t i = 0; i < N; ++i)
          {
-            uint64_t k = keyfn(order[i]);
+            uint64_t k = keyfn(i);
             tx.remove(psitri::key_view(reinterpret_cast<const char*>(&k), sizeof(k)));
          }
          tx.commit();

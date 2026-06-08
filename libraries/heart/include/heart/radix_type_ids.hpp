@@ -28,5 +28,30 @@ namespace heart
       inline constexpr sal::header_type bitset_c1_32  = sal::header_type(base + 9);
       inline constexpr sal::header_type bitset_c1_64  = sal::header_type(base + 10);
       inline constexpr sal::header_type bitset_c1_128 = sal::header_type(base + 11);
+
+      // The same taxonomy as a STRONG enum (enumerator order == the header_type offsets above).
+      // Engine dispatch switches on this — never on a raw int — so -Wswitch flags any switch that
+      // forgets a case when a node type is added here. Add a kind → the compiler points at every
+      // dispatch that must handle it.
+      enum class radix_kind : uint8_t
+      {
+         leaf = 0,
+         setlist_u8,
+         setlist_u16,
+         setlist_u32,
+         bitset1,
+         bitset_r2,
+         bitset_r4,
+         full,
+         bucket,
+         c1_32,
+         c1_64,
+         c1_128,
+      };
+      // A node's kind from its SAL header type (the radix tier ids are a contiguous block at base).
+      inline constexpr radix_kind kind_of(sal::header_type t) noexcept
+      {
+         return radix_kind(unsigned(t) - base);
+      }
    }  // namespace radix_type_ids
 }  // namespace heart

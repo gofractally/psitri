@@ -34,6 +34,8 @@
 namespace heart::radix
 {
    using sal::ptr_address;
+   using radix_type_ids::kind_of;
+   using radix_type_ids::radix_kind;
    using bytes      = std::span<const uint8_t>;
    using key_view   = std::string_view;
    using value_view = std::string_view;
@@ -167,12 +169,12 @@ namespace heart::radix
             // R1: read CL0, dispatch by format. The SAL type ids are contiguous, so this
             // switch lowers to a JUMP TABLE (one indirect jump) rather than a compare chain
             // — the data-dependent, mispredict-prone branch the per-hop dispatch turns on.
-            bool cont;
-            switch (unsigned(_ses->get_ref<sal::alloc_header>(addr)->type()))
+            bool cont = false;
+            switch (kind_of(_ses->get_ref<sal::alloc_header>(addr)->type()))
             {
-               case unsigned(leaf_node::type_id):
+               case radix_kind::leaf:
                   return leaf_read(addr, kb, depth, out);
-               case unsigned(bucket_node::type_id):  // a bucket LEAF: search its key suffix
+               case radix_kind::bucket:  // a bucket LEAF: search its key suffix
                {
                   const inline_value* iv = _ses->get_ref<bucket_node>(addr).obj()->find(
                       kb.data() + depth, int(kb.size() - depth));
@@ -182,33 +184,35 @@ namespace heart::radix
                                    iv->value_len);
                   return true;
                }
-               case unsigned(setlist_u8::type_id):
+               case radix_kind::setlist_u8:
                   cont = route_r1(_ses->get_ref<setlist_u8>(addr).obj(), kb, depth, out, addr);
                   break;
-               case unsigned(setlist_u16::type_id):
+               case radix_kind::setlist_u16:
                   cont = route_r1(_ses->get_ref<setlist_u16>(addr).obj(), kb, depth, out, addr);
                   break;
-               case unsigned(setlist_u32::type_id):
+               case radix_kind::setlist_u32:
                   cont = route_r1(_ses->get_ref<setlist_u32>(addr).obj(), kb, depth, out, addr);
                   break;
-               case unsigned(bitset_c1_32::type_id):
+               case radix_kind::c1_32:
                   cont = route_r1(_ses->get_ref<bitset_c1_32>(addr).obj(), kb, depth, out, addr);
                   break;
-               case unsigned(bitset_c1_64::type_id):
+               case radix_kind::c1_64:
                   cont = route_r1(_ses->get_ref<bitset_c1_64>(addr).obj(), kb, depth, out, addr);
                   break;
-               case unsigned(bitset_c1_128::type_id):
+               case radix_kind::c1_128:
                   cont = route_r1(_ses->get_ref<bitset_c1_128>(addr).obj(), kb, depth, out, addr);
                   break;
-               case unsigned(bitset_r2_node::type_id):
+               case radix_kind::bitset_r2:
                   cont = route_r1(_ses->get_ref<bitset_r2_node>(addr).obj(), kb, depth, out, addr);
                   break;
-               case unsigned(bitset_r4_node::type_id):
+               case radix_kind::bitset_r4:
                   cont = route_r1(_ses->get_ref<bitset_r4_node>(addr).obj(), kb, depth, out, addr);
                   break;
-               default:  // full_radix
+               case radix_kind::full:
                   cont = route_r1(_ses->get_ref<full_radix_node>(addr).obj(), kb, depth, out, addr);
                   break;
+               case radix_kind::bitset1:
+                  __builtin_unreachable();  // not produced by the engine
             }
             if (!cont)
                return _route_found;
@@ -424,47 +428,47 @@ namespace heart::radix
       }
       void walk(ptr_address a, tier_counts& tc)
       {
-         switch (unsigned(_ses->get_ref<sal::alloc_header>(a)->type()))
+         switch (kind_of(_ses->get_ref<sal::alloc_header>(a)->type()))
          {
-            case unsigned(leaf_node::type_id):
+            case radix_kind::leaf:
                ++tc.leaf;
                break;
-            case unsigned(setlist_u8::type_id):
+            case radix_kind::setlist_u8:
                ++tc.setlist;
                accum_setlist<setlist_u8>(a, tc);
                walk_kids<setlist_u8>(a, tc);
                break;
-            case unsigned(setlist_u16::type_id):
+            case radix_kind::setlist_u16:
                ++tc.setlist_w16;
                walk_kids<setlist_u16>(a, tc);
                break;
-            case unsigned(setlist_u32::type_id):
+            case radix_kind::setlist_u32:
                ++tc.setlist_w32;
                walk_kids<setlist_u32>(a, tc);
                break;
-            case unsigned(bitset_c1_32::type_id):
+            case radix_kind::c1_32:
                ++tc.bitset_c1;
                walk_kids<bitset_c1_32>(a, tc);
                break;
-            case unsigned(bitset_c1_64::type_id):
+            case radix_kind::c1_64:
                ++tc.bitset_c1;
                walk_kids<bitset_c1_64>(a, tc);
                break;
-            case unsigned(bitset_c1_128::type_id):
+            case radix_kind::c1_128:
                ++tc.bitset_c1;
                walk_kids<bitset_c1_128>(a, tc);
                break;
-            case unsigned(bitset_r2_node::type_id):
+            case radix_kind::bitset_r2:
                ++tc.bitset_r2;
                accum_compact<bitset_r2_node>(a, tc);
                walk_kids<bitset_r2_node>(a, tc);
                break;
-            case unsigned(bitset_r4_node::type_id):
+            case radix_kind::bitset_r4:
                ++tc.bitset_r4;
                accum_compact<bitset_r4_node>(a, tc);
                walk_kids<bitset_r4_node>(a, tc);
                break;
-            default:  // full_radix
+            case radix_kind::full:
             {
                ++tc.full;
                uint8_t q = 0;  // which 64-wide quarters have any branch
@@ -474,6 +478,9 @@ namespace heart::radix
                walk_kids<full_radix_node>(a, tc);
                break;
             }
+            case radix_kind::bitset1:  // not produced; count_tiers assumes a non-bucket tree
+            case radix_kind::bucket:
+               break;
          }
       }
 
@@ -847,27 +854,32 @@ namespace heart::radix
       auto dispatch(ptr_address addr, F&& f)
       {
          const sal::alloc_header* b = _ses->get_ref<sal::alloc_header>(addr).obj();
-         switch (unsigned(b->type()))
+         switch (kind_of(b->type()))
          {
-            case unsigned(setlist_u8::type_id):
+            case radix_kind::setlist_u8:
                return f(SLAd<setlist_u8>{reinterpret_cast<const setlist_u8*>(b)});
-            case unsigned(setlist_u16::type_id):
+            case radix_kind::setlist_u16:
                return f(SLAd<setlist_u16>{reinterpret_cast<const setlist_u16*>(b)});
-            case unsigned(setlist_u32::type_id):
+            case radix_kind::setlist_u32:
                return f(SLAd<setlist_u32>{reinterpret_cast<const setlist_u32*>(b)});
-            case unsigned(bitset_c1_32::type_id):
+            case radix_kind::c1_32:
                return f(C1Ad<bitset_c1_32>{reinterpret_cast<const bitset_c1_32*>(b)});
-            case unsigned(bitset_c1_64::type_id):
+            case radix_kind::c1_64:
                return f(C1Ad<bitset_c1_64>{reinterpret_cast<const bitset_c1_64*>(b)});
-            case unsigned(bitset_c1_128::type_id):
+            case radix_kind::c1_128:
                return f(C1Ad<bitset_c1_128>{reinterpret_cast<const bitset_c1_128*>(b)});
-            case unsigned(bitset_r2_node::type_id):
+            case radix_kind::bitset_r2:
                return f(BSAd<bitset_r2_node, 7>{reinterpret_cast<const bitset_r2_node*>(b)});
-            case unsigned(bitset_r4_node::type_id):
+            case radix_kind::bitset_r4:
                return f(BSAd<bitset_r4_node, 6>{reinterpret_cast<const bitset_r4_node*>(b)});
-            default:  // full_radix
+            case radix_kind::full:
                return f(FullAd{reinterpret_cast<const full_radix_node*>(b)});
+            case radix_kind::leaf:     // not ordered routers — dispatch() is never called on these
+            case radix_kind::bitset1:
+            case radix_kind::bucket:
+               break;
          }
+         __builtin_unreachable();
       }
 
       // Append an entry's stem bytes (+ inline suffix if terminal) and either yield its
@@ -1375,38 +1387,42 @@ namespace heart::radix
       ptr_address insert_node(ptr_address addr, bytes key, uint32_t depth, bytes val,
                               sal::alloc_hint peer_hint)
       {
-         switch (unsigned(_ses->get_ref<sal::alloc_header>(addr)->type()))
+         switch (kind_of(_ses->get_ref<sal::alloc_header>(addr)->type()))
          {
-            case unsigned(bucket_node::type_id):  // bucket LEAF: insert (split on overflow)
+            case radix_kind::bucket:  // bucket LEAF: insert (split on overflow)
                return bucket_leaf_insert(addr, key, depth, val);
-            case unsigned(setlist_u8::type_id):
+            case radix_kind::setlist_u8:
                return router_insert<setlist_u8>(addr, key, depth, val, peer_hint);
-            case unsigned(setlist_u16::type_id):
+            case radix_kind::setlist_u16:
                return router_insert_wide<setlist_u16>(addr, key, depth, val, peer_hint);
-            case unsigned(setlist_u32::type_id):
+            case radix_kind::setlist_u32:
                return router_insert_wide<setlist_u32>(addr, key, depth, val, peer_hint);
-            case unsigned(bitset_c1_32::type_id):
+            case radix_kind::c1_32:
                return router_insert<bitset_c1_32>(addr, key, depth, val, peer_hint);
-            case unsigned(bitset_c1_64::type_id):
+            case radix_kind::c1_64:
                return router_insert<bitset_c1_64>(addr, key, depth, val, peer_hint);
-            case unsigned(bitset_c1_128::type_id):
+            case radix_kind::c1_128:
                return router_insert<bitset_c1_128>(addr, key, depth, val, peer_hint);
-            case unsigned(bitset_r2_node::type_id):
+            case radix_kind::bitset_r2:
                return router_insert<bitset_r2_node>(addr, key, depth, val, peer_hint);
-            case unsigned(bitset_r4_node::type_id):
+            case radix_kind::bitset_r4:
                return router_insert<bitset_r4_node>(addr, key, depth, val, peer_hint);
-            default:  // full_radix
+            case radix_kind::full:
                return router_insert<full_radix_node>(addr, key, depth, val, peer_hint);
+            case radix_kind::leaf:     // a terminal value — never inserted into directly
+            case radix_kind::bitset1:  // not produced by the engine
+               break;
          }
+         __builtin_unreachable();
       }
 
       // ── remove descent (mirrors insert_node dispatch; routers only — a terminal value
       // is handled in-place by the parent via is_terminal_branch, never recursed into) ──
       ptr_address remove_node(ptr_address addr, bytes key, uint32_t depth)
       {
-         switch (unsigned(_ses->get_ref<sal::alloc_header>(addr)->type()))
+         switch (kind_of(_ses->get_ref<sal::alloc_header>(addr)->type()))
          {
-            case unsigned(bucket_node::type_id):  // adaptive bucket LEAF: in-place remove
+            case radix_kind::bucket:  // adaptive bucket LEAF: in-place remove
             {
                const uint8_t* s  = key.data() + depth;
                const int      sn = int(key.size() - depth);
@@ -1420,25 +1436,29 @@ namespace heart::radix
                _emptied = (_ses->get_ref<bucket_node>(addr).obj()->nent == 0);
                return addr;
             }
-            case unsigned(setlist_u8::type_id):
+            case radix_kind::setlist_u8:
                return remove_router<setlist_u8>(addr, key, depth);
-            case unsigned(setlist_u16::type_id):
+            case radix_kind::setlist_u16:
                return remove_router<setlist_u16>(addr, key, depth);
-            case unsigned(setlist_u32::type_id):
+            case radix_kind::setlist_u32:
                return remove_router<setlist_u32>(addr, key, depth);
-            case unsigned(bitset_c1_32::type_id):
+            case radix_kind::c1_32:
                return remove_router<bitset_c1_32>(addr, key, depth);
-            case unsigned(bitset_c1_64::type_id):
+            case radix_kind::c1_64:
                return remove_router<bitset_c1_64>(addr, key, depth);
-            case unsigned(bitset_c1_128::type_id):
+            case radix_kind::c1_128:
                return remove_router<bitset_c1_128>(addr, key, depth);
-            case unsigned(bitset_r2_node::type_id):
+            case radix_kind::bitset_r2:
                return remove_router<bitset_r2_node>(addr, key, depth);
-            case unsigned(bitset_r4_node::type_id):
+            case radix_kind::bitset_r4:
                return remove_router<bitset_r4_node>(addr, key, depth);
-            default:  // full_radix
+            case radix_kind::full:
                return remove_router<full_radix_node>(addr, key, depth);
+            case radix_kind::leaf:     // a terminal value — never recursed into
+            case radix_kind::bitset1:  // not produced by the engine
+               break;
          }
+         __builtin_unreachable();
       }
 
       // Remove `key` from the subtree rooted at `addr`. Sets _removed (was it found) and,

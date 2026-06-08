@@ -1054,39 +1054,44 @@ namespace heart::radix
 
      public:
       // ── the engine's NATIVE ordered cursor (heart::kv::cursor IS this type by alias) ──────
-      // A stateful path-stack iterator: positioning seeks once, then next() advances the
-      // retained descent path IN PLACE (no re-seek from the root per step). The current key is
-      // materialized in _kbuf; the value is a view into node memory, valid until the next
-      // navigation. Forward (seek_begin/lower_bound/upper_bound/find/next) implemented; reverse
-      // (prev/last/seek_end) is the symmetric path-walk, still TODO.
+      // A stateful path-stack iterator. It OWNS a smart_ptr to the root version, which pins that
+      // (immutable, COW-to-root) snapshot: every reachable node stays ref-alive and address-
+      // stable for the cursor's lifetime, so a concurrent writer/compactor can't reclaim or move
+      // nodes under it. Every navigation step takes the session read-lock. Positioning seeks
+      // once and builds the path; next() then advances that path IN PLACE (no re-seek from root).
+      // The key is materialized in _kbuf; the value is a view into the pinned node (valid until
+      // the next navigation). Reverse (prev/last/seek_end) is the symmetric walk, still TODO.
       class cursor
       {
         public:
-         explicit cursor(radix_tree* t) noexcept : _t(t) {}
+         explicit cursor(radix_tree* t) noexcept
+             : _t(t), _root(t->session(), t->root_addr(), /*retain=*/true)
+         {
+         }
 
          bool seek_begin()  // position at the first (smallest) key; returns is_end()
          {
+            auto lk = _t->_ses->lock();
             reset();
-            descend_min(_t->_root);
+            descend_min(_root.address());
             return !_valid;
          }
-         bool lower_bound(key_view k) { return position(k, false); }  // first key >= k
-         bool upper_bound(key_view k) { return position(k, true); }   // first key  > k
-         bool find(key_view k)                                        // exact; end on miss
+         bool lower_bound(key_view k) { return position(as_bytes(k), false); }  // first key >= k
+         bool upper_bound(key_view k) { return position(as_bytes(k), true); }   // first key  > k
+         bool find(key_view k)                                                  // exact; end on miss
          {
-            value_view v;
-            if (!_t->find(k, v))
-            {
-               reset();
-               return true;
-            }
-            build_to(as_bytes(k));
-            return !_valid;
+            if (lower_bound(k))
+               return true;  // nothing >= k
+            if (key() == k)
+               return false;  // exact hit
+            reset();
+            return true;  // first key >= k differs from k → absent
          }
          bool next()  // advance to the next key in order; returns is_end()
          {
             if (!_valid)
                return true;
+            auto lk = _t->_ses->lock();
             while (_depth > 0)
             {
                const int r = advance_top();
@@ -1225,16 +1230,19 @@ namespace heart::radix
             });
          }
 
-         bool position(key_view k, bool strict)
+         // Position at the first key >= q (strict → > q). Under the read-lock, on the PINNED
+         // root: a raw inner seek finds the key, then build_to lays down the descent path.
+         bool position(bytes q, bool strict)
          {
-            std::string kk;  // ordered_seek finds the first key >=/> k (locks internally)
-            value_view  v;
-            if (!_t->ordered_seek(k, strict, kk, v))
+            auto       lk = _t->_ses->lock();
+            KB         kb;
+            value_view v;
+            if (!_t->seek(_root.address(), q, 0, strict, kb, v))
             {
                reset();
                return true;
             }
-            build_to(as_bytes(kk));  // then build the path to that exact key
+            build_to(bytes{kb.buf, kb.len});
             return !_valid;
          }
 
@@ -1242,7 +1250,7 @@ namespace heart::radix
          void build_to(bytes key)
          {
             reset();
-            ptr_address addr  = _t->_root;
+            ptr_address addr  = _root.address();  // the pinned snapshot root
             uint32_t    depth = 0;
             for (;;)
             {
@@ -1285,9 +1293,10 @@ namespace heart::radix
             }
          }
 
-         radix_tree* _t;
-         frame       _fr[256];  // descent path (bounded by key depth; no heap)
-         uint8_t     _kbuf[1024];
+         radix_tree*                     _t;
+         sal::smart_ptr<sal::alloc_header> _root;  // pins the snapshot version (RAII refcount)
+         frame                           _fr[256];  // descent path (bounded by key depth; no heap)
+         uint8_t                         _kbuf[1024];
          uint32_t    _klen      = 0;
          value_view  _val;
          int         _depth     = 0;

@@ -45,7 +45,7 @@ namespace
 
    struct row
    {
-      double ins = 0, seq = 0, rnd = 0, miss = 0, del = 0;
+      double ins = 0, seq = 0, rnd = 0, miss = 0, iter = 0, del = 0;
       bool   ok = false;
    };
 
@@ -191,6 +191,22 @@ namespace
                      tc.setlist ? double(tc.sl_tail_used) / double(tc.setlist) : 0.0,
                      (unsigned long long)tc.setlist);
       }
+      // ITERATE: full forward scan via the engine's native cursor (skip in adaptive/bucket mode,
+      // whose bucket leaves the ordered cursor doesn't traverse). Sums the 8-byte values.
+      if (!bucket)
+      {
+         uint64_t isum = 0, icnt = 0;
+         auto     i0 = now();
+         heart::radix::radix_tree::cursor c(&t);
+         for (bool end = c.seek_begin(); !end; end = c.next())
+         {
+            isum += c.key().size();  // pure traversal: touch the key, no value access
+            ++icnt;
+         }
+         r.iter = ns(i0, now(), icnt ? icnt : 1);
+         r.ok   = r.ok && icnt == N;
+         (void)isum;
+      }
       // REMOVE: delete every key in keyfn order → empties the tree (ascending = true
       // sequential delete for the seq keyfn; scattered for random). Committed per batch.
       auto d0 = now();
@@ -274,6 +290,19 @@ namespace
       }
       r.miss                = ns(m0, now(), N);
       const uint64_t expect = N * (N - 1) / 2;
+      // ITERATE: full forward scan via psitri's snapshot cursor (sums the 8-byte values).
+      {
+         uint64_t isum = 0, icnt = 0;
+         auto     i0 = now();
+         auto     c  = ses->get_root(0).snapshot_cursor();
+         for (bool end = c.seek_begin(); !end; end = c.next())
+         {
+            isum += c.key().size();  // pure traversal: touch the key, no value access
+            ++icnt;
+         }
+         r.iter = ns(i0, now(), icnt ? icnt : 1);
+         (void)isum;
+      }
       // REMOVE: per-batch transactions delete every key in keyfn order (ascending for the seq
       // keyfn = true sequential delete; scattered for random) — same cadence as heart.
       auto d0 = now();
@@ -411,8 +440,9 @@ namespace
 
    void print_row(const char* name, row x)
    {
-      std::printf("    %-7s: insert %6.1f   seq %6.1f   rand %6.1f   MISS %6.1f   REMOVE %6.1f ns   [%s]\n",
-                  name, x.ins, x.seq, x.rnd, x.miss, x.del, x.ok ? "OK" : "BAD");
+      std::printf(
+          "    %-7s: insert %6.1f   seq %6.1f   rand %6.1f   MISS %6.1f   ITER %5.1f   REMOVE %6.1f ns   [%s]\n",
+          name, x.ins, x.seq, x.rnd, x.miss, x.iter, x.del, x.ok ? "OK" : "BAD");
    }
    void print_trio(const char* title, row e, row eb, row h, row p)
    {

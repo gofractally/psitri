@@ -30,7 +30,7 @@ namespace sal
        * up its reference to the ptr_address.
        */
       smart_ptr_base(allocator_session_ptr asession, ptr_address adr) noexcept
-          : _asession(asession), _adr(adr), _ver(null_ptr_address)
+          : _asession(asession), _adr(adr)
       {
       }
       /**
@@ -39,22 +39,16 @@ namespace sal
        * that the caller also retains ownership of the ptr_address.
        */
       smart_ptr_base(allocator_session_ptr asession, ptr_address adr, bool inc_ref) noexcept
-          : _asession(asession), _adr(adr), _ver(null_ptr_address)
+          : _asession(asession), _adr(adr)
       {
          if (inc_ref)
             retain();
       }
-      smart_ptr_base(allocator_session_ptr asession, tree_id tid, bool inc_ref) noexcept
-          : _asession(asession), _adr(tid.root), _ver(tid.ver)
-      {
-         if (inc_ref)
-            retain();
-      }
-      smart_ptr_base() noexcept : _asession(nullptr), _adr(null_ptr_address), _ver(null_ptr_address) {}
+      smart_ptr_base() noexcept : _asession(nullptr), _adr(null_ptr_address) {}
 
       ~smart_ptr_base() noexcept
       {
-         if (_adr != null_ptr_address || _ver != null_ptr_address)
+         if (_adr != null_ptr_address)
          {
             release();
          }
@@ -66,27 +60,25 @@ namespace sal
       bool        is_read_only() const noexcept;
 
       smart_ptr_base(const smart_ptr_base& other) noexcept
-          : _asession(other._asession), _adr(other._adr), _ver(other._ver)
+          : _asession(other._asession), _adr(other._adr)
       {
          retain();
       }
       smart_ptr_base(smart_ptr_base&& other) noexcept
-          : _asession(other._asession), _adr(other._adr), _ver(other._ver)
+          : _asession(other._asession), _adr(other._adr)
       {
          other._adr = null_ptr_address;
-         other._ver = null_ptr_address;
       }
 
       smart_ptr_base& operator=(const smart_ptr_base& other) noexcept
       {
          if (this == &other)
             return *this;
-         if (_adr == other._adr && _ver == other._ver)
+         if (_adr == other._adr)
             return *this;
          release();
          _asession = other._asession;
          _adr      = other._adr;
-         _ver      = other._ver;
          retain();
          return *this;
       }
@@ -97,9 +89,7 @@ namespace sal
          release();
          _asession  = std::move(other._asession);
          _adr       = other._adr;
-         _ver       = other._ver;
          other._adr = null_ptr_address;
-         other._ver = null_ptr_address;
          return *this;
       }
 
@@ -110,22 +100,8 @@ namespace sal
          return tmp;
       }
 
-      /// Take ownership of both root and ver, returning as tree_id.
-      /// Nulls both _adr and _ver so destructor won't release them.
-      tree_id take_tree_id() noexcept
-      {
-         tree_id tid{_adr, _ver};
-         _adr = null_ptr_address;
-         _ver = null_ptr_address;
-         return tid;
-      }
-
-      /// State-transition primitive: replace the underlying address while
-      /// keeping `_ver` attached. The (root, ver) pair is the smart_ptr's
-      /// invariant — mutating only the address preserves that pair across
-      /// COW operations on a tree's working root.
-      ///
-      /// Releases the prior `_adr` only. The caller hands in a +1 ref on
+      /// State-transition primitive: replace the underlying root address.
+      /// Releases the prior `_adr`; the caller hands in a +1 ref on
       /// `given_adr` (typical: a freshly-allocated node returned by alloc).
       smart_ptr_base& give(ptr_address given_adr) noexcept
       {
@@ -141,8 +117,6 @@ namespace sal
       {
          if (_adr != null_ptr_address)
             _asession->retain(_adr);
-         if (_ver != null_ptr_address)
-            _asession->retain(_ver);
       }
 
       void release() noexcept
@@ -152,22 +126,12 @@ namespace sal
             _asession->release(_adr);
             _adr = null_ptr_address;
          }
-         if (_ver != null_ptr_address)
-         {
-            _asession->release(_ver);
-            _ver = null_ptr_address;
-         }
       }
       const allocator_session_ptr& session() const noexcept { return _asession; }
-
-      ptr_address ver() const noexcept { return _ver; }
-      void        set_ver(ptr_address v) noexcept { _ver = v; }
-      tree_id     get_tree_id() const noexcept { return {_adr, _ver}; }
 
      protected:
       allocator_session_ptr _asession;
       ptr_address           _adr;
-      ptr_address           _ver = null_ptr_address;
    };
 
    /**
@@ -190,10 +154,6 @@ namespace sal
      public:
       smart_ptr(allocator_session_ptr asession, ptr_address adr, bool retain = false) noexcept
           : smart_ptr_base(asession, adr, retain)
-      {
-      }
-      smart_ptr(allocator_session_ptr asession, tree_id tid, bool inc_ref = false) noexcept
-          : smart_ptr_base(asession, tid, inc_ref)
       {
       }
       smart_ptr(const smart_ptr& other) noexcept : smart_ptr_base(other) {}
@@ -312,11 +272,7 @@ namespace sal
           : _internal(other._internal)
       {
          if (_internal)
-         {
             _internal->_allocator->retain(_internal->_ptr);
-            if (_internal->_ver != null_ptr_address)
-               _internal->_allocator->retain(_internal->_ver);
-         }
       }
       shared_smart_ptr_base(shared_smart_ptr_base&& other) noexcept
           : _internal(std::move(other._internal))
@@ -326,11 +282,7 @@ namespace sal
       ~shared_smart_ptr_base() noexcept
       {
          if (_internal)
-         {
             _internal->_allocator->release(_internal->_ptr);
-            if (_internal->_ver != null_ptr_address)
-               _internal->_allocator->release(_internal->_ver);
-         }
       }
       operator bool() const noexcept { return _internal != nullptr; }
       smart_ptr_base get() const noexcept;
@@ -344,29 +296,17 @@ namespace sal
          if (this != &other)
          {
             if (_internal)
-            {
                _internal->_allocator->release(_internal->_ptr);
-               if (_internal->_ver != null_ptr_address)
-                  _internal->_allocator->release(_internal->_ver);
-            }
             _internal = other._internal;
             if (_internal)
-            {
                _internal->_allocator->retain(_internal->_ptr);
-               if (_internal->_ver != null_ptr_address)
-                  _internal->_allocator->retain(_internal->_ver);
-            }
          }
          return *this;
       }
       shared_smart_ptr_base& operator=(shared_smart_ptr_base&& other) noexcept
       {
          if (_internal)
-         {
             _internal->_allocator->release(_internal->_ptr);
-            if (_internal->_ver != null_ptr_address)
-               _internal->_allocator->release(_internal->_ver);
-         }
          _internal = std::move(other._internal);
          return *this;
       }
@@ -375,7 +315,6 @@ namespace sal
       struct internal
       {
          ptr_address                _ptr;
-         ptr_address                _ver;
          std::shared_ptr<allocator> _allocator;
       };
       std::shared_ptr<internal> _internal;

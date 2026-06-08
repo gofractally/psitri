@@ -11,7 +11,9 @@ namespace sal
      public:
       transaction(allocator_session_ptr session, root_object_number ro) : _session(session), _ro(ro)
       {
-         _adr = smart_ptr<alloc_header>(session, session->get_allocator().start_transaction(ro), false);
+         auto tid = session->get_allocator().start_transaction(ro);
+         assert(tid.ver == null_ptr_address && "version removed: root slots must be version-free");
+         _adr = smart_ptr<alloc_header>(session, tid.root, false);
       }
       ~transaction() noexcept
       {

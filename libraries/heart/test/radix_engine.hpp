@@ -263,6 +263,7 @@ namespace heart::radix
       // never trips it. Off by default so the gated baseline stays libart-exact.
       void set_adaptive(bool on) { _adaptive = on; }
       bool adaptive() const { return _adaptive; }
+      void set_c1_promote(bool on) { _c1_promote_on = on; }
 
       // ── introspection (for the tree-structure dump / stats tool) ───────────────
       // COW/alloc accounting: how mutation actually played out over the run. `clones`
@@ -1139,7 +1140,10 @@ namespace heart::radix
             const ptr_address pre = addr;
             smart_address      sab = make_value<N>(addr, suf, val, chint);
             N*                 n   = cow<N>(addr);
-            if (n->set_branch(b, sab))
+            bool               to_c1 = false;
+            if constexpr (std::is_same_v<N, setlist_u8>)
+               to_c1 = want_c1_promote(n, b);  // opt-in; reuses the tested grow_and_set widen path
+            if (!to_c1 && n->set_branch(b, sab))
                return addr;
             if constexpr (!std::is_same_v<N, full_radix_node>)
             {
@@ -1700,13 +1704,23 @@ namespace heart::radix
          }
          return na;
       }
-      // (Proactive setlist→c1 promotion below the overflow threshold was measured net-neutral
-      // on dict — the random path is memory-bound, one miss per hop, and a c1 is the same node
-      // size as a setlist, so the popcount-vs-scan dispatch win is hidden under the miss and
-      // nothing changes except a small insert cost. c1 is created only on real overflow, where
-      // it collapses a narrow R2/R4 into one cacheline — a memory win. Re-evaluate proactive
-      // promotion on a bounded-field workload, where it should actually pay.)
-
+      // Proactive c1 promotion (opt-in, set_c1_promote): a setlist needn't OVERFLOW to be a c1.
+      // Once a prefix-less setlist reaches c1_promote stems AND its whole byte range (incl the
+      // new byte) fits a c1 window, force the (tested) grow_and_set path → smallest fitting c1.
+      // Stems are sorted, so the range is first..last — O(1). Range grows monotonically, so this
+      // fires at most once. Default OFF: on a memory-bound walk (dict) the dispatch win is hidden
+      // under the per-hop miss; it pays when the working set is cache-resident / bounded-field.
+      static constexpr int c1_promote = 8;
+      bool                 want_c1_promote(const setlist_u8* n, uint8_t b) const noexcept
+      {
+         const int cnt = n->nstems();
+         if (!_c1_promote_on || cnt < c1_promote || !n->prefix().empty())
+            return false;
+         int lo = n->stem_at(0), hi = n->stem_at(cnt - 1);
+         lo = b < lo ? b : lo;
+         hi = b > hi ? b : hi;
+         return (hi - lo) < bitset_c1_128::width;
+      }
       // Build a 1-CL narrow-window c1 node from `from`'s entries (+ setb) when they fit a
       // [base, base+To::width) window with <= To::cap branches. Returns 0 (ok=false) if the
       // key range is too wide or there are too many branches — the caller tries the next
@@ -2263,6 +2277,7 @@ namespace heart::radix
       bool                            _bucket_mode    = false;  // leaf=bucket, split to radix
       bool                            _adaptive       = false;  // gate: radix→bucket on deep-narrow
       bool                            _in_bucket      = false;  // re-entrancy: in a bucket subtree
+      bool                            _c1_promote_on  = false;  // opt-in: narrow setlist→c1 below overflow
       cow_counters                    _cc;
    };
 }  // namespace heart::radix

@@ -173,10 +173,11 @@ namespace heart
          const int n = nstems();
          if constexpr (stem_width == 1)
          {
-            for (int i = 0; i < n; ++i)
-               if (stem_at(i) == s)
-                  return branch_at(i);
-            return smart_address::null();
+            // u8: inline vectorized byte search (ucc::find_byte, 8-byte SWAR — no libc call,
+            // which matters for the tiny stem arrays radix nodes hold).
+            const uint8_t* stems = this->prefix_data + this->_prefix_length;
+            const int      idx   = ucc::find_byte(stems, size_t(n), uint8_t(s));
+            return idx < n ? branch_at(idx) : smart_address::null();
          }
          else
          {
@@ -205,32 +206,21 @@ namespace heart
       // an unsigned integer compare on the cell is exact lexicographic key order (u24's
       // zero low byte is constant across stems, so it sorts on its 3 consumed bytes).
       // First index whose stem is >= s; nstems() if every stem is < s. Stems are a
-      // contiguous cell array right after the prefix, so this is a SIMD count-of-less
-      // (ucc::lower_bound_uN) for the wide widths — faster than binary search on the
-      // small arrays radix nodes hold. u8 keeps the branchless binary search.
+      // contiguous cell array right after the prefix, so this is a SIMD count-of-less for
+      // EVERY width (NO binary search): ucc::lower_bound_uN for u16/u32, and the SIMD byte
+      // ucc::lower_bound_padded for u8. The _padded variants over-read the final partial
+      // chunk (safe: for u8 the end-anchored branches leave free space after the stems; for
+      // wide the branch array follows the stems — both in-node).
       int lower_bound_index(StemType s) const noexcept
       {
          const int      n = nstems();
          const uint8_t* p = this->prefix_data + this->_prefix_length;
-         // _padded over-reads the final partial chunk (safe: the branch array follows the
-         // stems in-node) to stay fully branchless — fastest for these small arrays.
          if constexpr (stem_width == 4)
             return ucc::lower_bound_u32_padded(reinterpret_cast<const uint32_t*>(p), n, uint32_t(s));
          else if constexpr (stem_width == 2)
             return ucc::lower_bound_u16_padded(reinterpret_cast<const uint16_t*>(p), n, uint16_t(s));
          else
-         {
-            int lo = 0, hi = n;
-            while (lo < hi)
-            {
-               const int mid = (lo + hi) >> 1;
-               if (stem_at(mid) < s)
-                  lo = mid + 1;
-               else
-                  hi = mid;
-            }
-            return lo;
-         }
+            return int(ucc::lower_bound_padded(p, size_t(n), uint8_t(s)));
       }
       // First index whose stem is > s; nstems() if every stem is <= s.
       int upper_bound_index(StemType s) const noexcept
@@ -241,19 +231,9 @@ namespace heart
             return ucc::upper_bound_u32_padded(reinterpret_cast<const uint32_t*>(p), n, uint32_t(s));
          else if constexpr (stem_width == 2)
             return ucc::upper_bound_u16_padded(reinterpret_cast<const uint16_t*>(p), n, uint16_t(s));
-         else
-         {
-            int lo = 0, hi = n;
-            while (lo < hi)
-            {
-               const int mid = (lo + hi) >> 1;
-               if (stem_at(mid) <= s)
-                  lo = mid + 1;
-               else
-                  hi = mid;
-            }
-            return lo;
-         }
+         else  // count of bytes <= s == count of bytes < s+1 (SIMD byte lower_bound, no binary)
+            return uint8_t(s) == 0xFF ? n
+                                      : int(ucc::lower_bound_padded(p, size_t(n), uint8_t(uint8_t(s) + 1)));
       }
 
       // Sorted update-or-insert; false (no change) if a new stem won't fit. Inserting at

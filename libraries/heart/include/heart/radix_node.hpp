@@ -118,9 +118,9 @@ namespace heart
       const Derived& self() const noexcept { return *static_cast<const Derived*>(this); }
 
       // ── default node lifecycle (a node is sizeof(Derived) + a trailing tail heap) ──
-      // A node knows how to size, measure, and free itself from sizeof(Derived) alone.
-      // setlist overrides head_size()/free_heap() (its wide variant grows the index past
-      // the struct); everyone else — and alloc_size/head_bytes/destroy — uses these.
+      // The leaf page (a concrete, non-template node) writes the same shape inline; only
+      // the radix node *template family* needs sizeof(Derived) via CRTP, so it lives here.
+      // setlist overrides head_size()/free_heap() (wide index past CL0).
       static constexpr uint32_t headroom = radix_node_headroom;
       static constexpr uint32_t head_bytes() noexcept { return uint32_t(sizeof(Derived)); }
       uint32_t                  head_size() const noexcept { return uint32_t(sizeof(Derived)); }

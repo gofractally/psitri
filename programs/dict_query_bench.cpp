@@ -182,6 +182,12 @@ int main(int argc, char** argv)
       std::printf("    tiers: %llu leaf, %llu setlist, %llu bitset, %llu full\n",
                   (unsigned long long)tc.leaf, (unsigned long long)tc.setlist,
                   (unsigned long long)tc.bitset, (unsigned long long)tc.full);
+      auto ds = t.measure_depth();
+      std::printf("    depth: avg %.2f max %llu hops;  keys/leaf avg %.1f max %llu (%llu leaves)\n",
+                  ds.nkeys ? double(ds.sum_depth) / double(ds.nkeys) : 0.0,
+                  (unsigned long long)ds.max_depth,
+                  ds.nleaves ? double(ds.leaf_key_sum) / double(ds.nleaves) : 0.0,
+                  (unsigned long long)ds.leaf_max, (unsigned long long)ds.nleaves);
    }
 
    // ───────────────────────────── psitri ────────────────────────────

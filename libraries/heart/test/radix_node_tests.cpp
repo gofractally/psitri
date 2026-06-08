@@ -1,9 +1,13 @@
 #include <catch2/catch_test_macros.hpp>
 #include <algorithm>
+#include <map>
 #include <new>
+#include <random>
 #include <set>
+#include <string>
 #include <vector>
 
+#include <heart/bucket_node.hpp>
 #include <heart/radix_nodes.hpp>
 #include <heart/inline_value.hpp>
 #include <heart/leaf_node.hpp>
@@ -274,5 +278,73 @@ TEST_CASE("bitset_rN_node template: routing + ordered enumeration (r2 and r4)", 
    {
       alignas(128) unsigned char buf[heart::bitset_r4_node::nseg * 128 + 128];
       exercise_bitset_node<heart::bitset_r4_node>(buf, sizeof(buf));
+   }
+}
+
+TEST_CASE("bucket_node: 2-3-4 leaf bucket — find/lower_bound/in-order vs std::map",
+          "[radix_node]")
+{
+   using heart::bucket_node;
+   using heart::inline_value;
+   alignas(128) static unsigned char buf[bucket_node::page_bytes];
+   auto* b = new (buf) bucket_node(bucket_node::page_bytes,
+                                   sal::ptr_address_seq{sal::ptr_address(1), 1});
+
+   std::map<std::string, std::string> oracle;
+   std::mt19937_64                    rng(99);
+   int                                inserted = 0;
+   for (;;)  // fill until the page overflows
+   {
+      std::string k(1 + int(rng() % 18), 0);
+      for (auto& c : k) c = char(uint8_t(rng()));
+      std::string v(1 + int(rng() % 20), char(uint8_t(rng())));
+      int r = b->insert(reinterpret_cast<const uint8_t*>(k.data()), int(k.size()),
+                        reinterpret_cast<const uint8_t*>(v.data()), int(v.size()));
+      if (r == 0) break;  // full -> caller would split to radix
+      oracle[k] = v;
+      ++inserted;
+   }
+   REQUIRE(inserted > 50);  // a 4 KB page holds many variable-length keys
+
+   for (auto& [k, v] : oracle)  // find every key
+   {
+      const inline_value* iv = b->find(reinterpret_cast<const uint8_t*>(k.data()), int(k.size()));
+      REQUIRE(iv != nullptr);
+      REQUIRE(std::string(reinterpret_cast<const char*>(iv->data) + iv->suffix_len, iv->value_len) == v);
+   }
+
+   auto it  = oracle.begin();  // in-order == oracle order
+   int  cnt = 0;
+   b->for_each([&](const inline_value& iv) {
+      REQUIRE(it != oracle.end());
+      REQUIRE(std::string(reinterpret_cast<const char*>(iv.data), iv.suffix_len) == it->first);
+      ++it;
+      ++cnt;
+   });
+   REQUIRE(cnt == int(oracle.size()));
+
+   auto lb = [&](const std::string& q) {  // lower_bound vs std::map
+      auto tp = b->lower_bound(reinterpret_cast<const uint8_t*>(q.data()), int(q.size()));
+      auto oi = oracle.lower_bound(q);
+      if (tp.is_null())
+      {
+         REQUIRE(oi == oracle.end());
+         return;
+      }
+      REQUIRE(oi != oracle.end());
+      const inline_value* iv = b->resolve(tp);
+      REQUIRE(std::string(reinterpret_cast<const char*>(iv->data), iv->suffix_len) == oi->first);
+   };
+   for (auto& [k, v] : oracle)
+   {
+      lb(k);
+      if (!k.empty()) lb(k.substr(0, k.size() - 1));
+      lb(k + char(uint8_t(rng())));
+   }
+   for (int i = 0; i < 500; ++i)
+   {
+      std::string q(int(rng() % 16), 0);
+      for (auto& c : q) c = char(uint8_t(rng()));
+      lb(q);
    }
 }

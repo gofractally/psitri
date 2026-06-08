@@ -22,5 +22,6 @@ namespace heart
       inline constexpr sal::header_type bitset_r2   = sal::header_type(base + 5);
       inline constexpr sal::header_type bitset_r4   = sal::header_type(base + 6);
       inline constexpr sal::header_type full_radix  = sal::header_type(base + 7);
+      inline constexpr sal::header_type bucket      = sal::header_type(base + 8);  // 2-3-4 leaf bucket
    }  // namespace radix_type_ids
 }  // namespace heart

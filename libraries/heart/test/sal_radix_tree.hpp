@@ -1482,6 +1482,55 @@ namespace heart::sal_proto
       }
 
       // ── walks ────────────────────────────────────────────────────────────────
+     public:
+      struct depth_stats
+      {
+         uint64_t nkeys = 0, sum_depth = 0, max_depth = 0;  // hops (nodes read) to a key
+         uint64_t nleaves = 0, leaf_key_sum = 0, leaf_max = 0;  // keys per multi-key leaf
+      };
+      depth_stats measure_depth()
+      {
+         auto        lock = _ses->lock();
+         depth_stats ds;
+         walk_depth(_root, 1, ds);
+         return ds;
+      }
+
+     private:
+      void walk_depth(ptr_address a, int depth, depth_stats& ds)
+      {
+         auto ref = _ses->get_ref<sal::alloc_header>(a);
+         auto t   = ref->type();
+         if (uint64_t(depth) > ds.max_depth)
+            ds.max_depth = uint64_t(depth);
+         auto rec = [&](ptr_address c) { walk_depth(c, depth + 1, ds); };
+         if (t == leaf_node::type_id)
+         {
+            const int c = ref.as<leaf_node>().obj()->count;  // all c keys live at this leaf
+            ds.nkeys += uint64_t(c);
+            ds.sum_depth += uint64_t(depth) * uint64_t(c);
+            ++ds.nleaves;
+            ds.leaf_key_sum += uint64_t(c);
+            if (uint64_t(c) > ds.leaf_max)
+               ds.leaf_max = uint64_t(c);
+            return;
+         }
+         // a router; its term_value (if any) is one key ending at this node's prefix
+         const smart_address tv = (t == setlist_node::type_id) ? ref.as<setlist_node>().obj()->term_value
+                                  : (t == bitset_node::type_id) ? ref.as<bitset_node>().obj()->term_value
+                                                                : ref.as<full_node>().obj()->term_value;
+         if (!tv.is_null())
+         {
+            ++ds.nkeys;
+            ds.sum_depth += uint64_t(depth);
+         }
+         if (t == setlist_node::type_id)
+            ref.as<setlist_node>().obj()->visit_children(rec);
+         else if (t == bitset_node::type_id)
+            ref.as<bitset_node>().obj()->visit_children(rec);
+         else
+            ref.as<full_node>().obj()->visit_children(rec);
+      }
       void walk_tiers(ptr_address a, tier_counts& tc)
       {
          auto ref = _ses->get_ref<sal::alloc_header>(a);

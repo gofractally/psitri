@@ -1519,8 +1519,9 @@ namespace heart::radix
       ptr_address remove_router(ptr_address addr, bytes key, uint32_t depth)
       {
          const ptr_address pre = addr;  // original (pre-COW) node, for clone-release on downgrade
-         const N* cn  = _ses->get_ref<N>(addr).obj();
-         bytes    pfx = cn->prefix();
+         sal::smart_ref<N> ref = _ses->get_ref<N>(addr);  // resolved once; threaded into cow()
+         const N*          cn  = ref.obj();
+         bytes             pfx = cn->prefix();
          if (pfx.size() > key.size() - depth ||
              (pfx.size() && std::memcmp(pfx.data(), key.data() + depth, pfx.size()) != 0))
          {
@@ -1536,7 +1537,7 @@ namespace heart::radix
                _removed = false;
                return addr;
             }
-            N* n = cow<N>(addr);
+            N* n = cow<N>(ref, addr);
             if (tv.is_pointer())
                _ses->release(tv.as_pointer());  // external leaf/subtree value
             n->set_term_value(smart_address::null());
@@ -1581,7 +1582,7 @@ namespace heart::radix
                _removed = false;  // same routing cell, different suffix → key absent
                return addr;
             }
-            N* n = cow<N>(addr);
+            N* n = cow<N>(ref, addr);
             if (sa.is_pointer())
                _ses->release(sa.as_pointer());  // external leaf value (inline tail just orphans)
             n->remove_branch(cell);
@@ -1596,7 +1597,7 @@ namespace heart::radix
             return addr;  // absent in subtree → nothing changed here
          if (_emptied)     // the child drained → drop its branch and free it
          {
-            N* n = cow<N>(addr);
+            N* n = cow<N>(ref, addr);  // ref valid: the recursion didn't COW this node
             n->remove_branch(cell);
             _ses->release(nc);  // the emptied child (in-place == child, or a clone)
             if (nc != child)
@@ -1606,7 +1607,7 @@ namespace heart::radix
          }
          if (nc != child)  // child was path-COW'd (shared) → repoint, release the original
          {
-            N* n = cow<N>(addr);
+            N* n = cow<N>(ref, addr);  // ref valid: the recursion didn't COW this node
             n->set_branch(cell, smart_address::from_pointer(nc));
             _ses->release(child);
          }

@@ -166,17 +166,18 @@ namespace heart::radix
                                              : ref.as<bitset_r4_node>().obj()->term_value());
                return term_lookup(ref.obj(), tv, kb, depth, out);
             }
-            // R1: read CL0, dispatch by format. The SAL type ids are contiguous, so this
-            // switch lowers to a JUMP TABLE (one indirect jump) rather than a compare chain
-            // — the data-dependent, mispredict-prone branch the per-hop dispatch turns on.
-            bool cont = false;
-            switch (kind_of(_ses->get_ref<sal::alloc_header>(addr)->type()))
+            // R1: read CL0, dispatch by format. ONE get_ref resolves the node; the switch
+            // (jump table) reinterprets that single resolved pointer per case (alloc_header is
+            // at offset 0 of every node) — no second per-case get_ref on the same address.
+            bool                     cont = false;
+            const sal::alloc_header* b    = _ses->get_ref<sal::alloc_header>(addr).obj();
+            switch (kind_of(b->type()))
             {
                case radix_kind::leaf:
                   return leaf_read(addr, kb, depth, out);
                case radix_kind::bucket:  // a bucket LEAF: search its key suffix
                {
-                  const inline_value* iv = _ses->get_ref<bucket_node>(addr).obj()->find(
+                  const inline_value* iv = reinterpret_cast<const bucket_node*>(b)->find(
                       kb.data() + depth, int(kb.size() - depth));
                   if (!iv)
                      return false;
@@ -185,31 +186,31 @@ namespace heart::radix
                   return true;
                }
                case radix_kind::setlist_u8:
-                  cont = route_r1(_ses->get_ref<setlist_u8>(addr).obj(), kb, depth, out, addr);
+                  cont = route_r1(reinterpret_cast<const setlist_u8*>(b), kb, depth, out, addr);
                   break;
                case radix_kind::setlist_u16:
-                  cont = route_r1(_ses->get_ref<setlist_u16>(addr).obj(), kb, depth, out, addr);
+                  cont = route_r1(reinterpret_cast<const setlist_u16*>(b), kb, depth, out, addr);
                   break;
                case radix_kind::setlist_u32:
-                  cont = route_r1(_ses->get_ref<setlist_u32>(addr).obj(), kb, depth, out, addr);
+                  cont = route_r1(reinterpret_cast<const setlist_u32*>(b), kb, depth, out, addr);
                   break;
                case radix_kind::c1_32:
-                  cont = route_r1(_ses->get_ref<bitset_c1_32>(addr).obj(), kb, depth, out, addr);
+                  cont = route_r1(reinterpret_cast<const bitset_c1_32*>(b), kb, depth, out, addr);
                   break;
                case radix_kind::c1_64:
-                  cont = route_r1(_ses->get_ref<bitset_c1_64>(addr).obj(), kb, depth, out, addr);
+                  cont = route_r1(reinterpret_cast<const bitset_c1_64*>(b), kb, depth, out, addr);
                   break;
                case radix_kind::c1_128:
-                  cont = route_r1(_ses->get_ref<bitset_c1_128>(addr).obj(), kb, depth, out, addr);
+                  cont = route_r1(reinterpret_cast<const bitset_c1_128*>(b), kb, depth, out, addr);
                   break;
                case radix_kind::bitset_r2:
-                  cont = route_r1(_ses->get_ref<bitset_r2_node>(addr).obj(), kb, depth, out, addr);
+                  cont = route_r1(reinterpret_cast<const bitset_r2_node*>(b), kb, depth, out, addr);
                   break;
                case radix_kind::bitset_r4:
-                  cont = route_r1(_ses->get_ref<bitset_r4_node>(addr).obj(), kb, depth, out, addr);
+                  cont = route_r1(reinterpret_cast<const bitset_r4_node*>(b), kb, depth, out, addr);
                   break;
                case radix_kind::full:
-                  cont = route_r1(_ses->get_ref<full_radix_node>(addr).obj(), kb, depth, out, addr);
+                  cont = route_r1(reinterpret_cast<const full_radix_node*>(b), kb, depth, out, addr);
                   break;
                case radix_kind::bitset1:
                   __builtin_unreachable();  // not produced by the engine

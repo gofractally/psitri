@@ -542,11 +542,11 @@ namespace heart::radix
          uint16_t hu = src->tail_used();
          std::memcpy(dst->tail() - hu, src->tail() - hu, hu);
       }
+      // Clone from an already-resolved source node (no get_ref — the caller, e.g. cow(), holds
+      // the ref pointing at exactly this node). `a` is unused for resolution but kept for symmetry.
       template <class N>
-      ptr_address clone(ptr_address a, uint32_t extra = 0)
+      ptr_address clone(ptr_address /*a*/, const N* src, uint32_t extra)
       {
-         auto     ref  = _ses->get_ref<N>(a);
-         const N* src  = ref.obj();
          uint32_t need = ucc::round_up_multiple<sal::cacheline_size>(
              src->head_size() + src->tail_used() + extra + N::headroom);
          ptr_address na = _ses->alloc<N>(need, sal::alloc_hint{}, src->prefix());
@@ -556,6 +556,12 @@ namespace heart::radix
          stamp<N>(na);
          ++_cc.clones;
          return na;
+      }
+      // Address-only overload: resolve then delegate. For callers not holding the node's ref.
+      template <class N>
+      ptr_address clone(ptr_address a, uint32_t extra = 0)
+      {
+         return clone<N>(a, _ses->get_ref<N>(a).obj(), extra);
       }
       // Make a node writable for a mutation needing `extra` tail bytes, with the node already
       // resolved ONCE into `ref` (threaded by reference — no per-call get_ref, and a smart_ref
@@ -575,7 +581,7 @@ namespace heart::radix
       {
          if (ref.ref() > 1)
          {
-            addr = clone<N>(addr, extra);
+            addr = clone<N>(addr, ref.obj(), extra);  // reuse the held ref — no second get_ref
             return mut<N>(addr);
          }
          if (ref->free_heap() >= extra)
@@ -584,7 +590,7 @@ namespace heart::radix
             return ref.modify().get();
          }
          ++_cc.grows;
-         addr = clone<N>(addr, extra);
+         addr = clone<N>(addr, ref.obj(), extra);  // reuse the held ref — no second get_ref
          return mut<N>(addr);
       }
       // Address-only overload: resolves once and delegates. Behavior-identical to threading a

@@ -1079,26 +1079,29 @@ namespace heart::radix
       ptr_address insert_node(ptr_address addr, bytes key, uint32_t depth, bytes val,
                               sal::alloc_hint peer_hint)
       {
-         auto t = _ses->get_ref<sal::alloc_header>(addr)->type();
-         if (t == bucket_node::type_id)  // a bucket LEAF: insert here (split to a router on overflow)
-            return bucket_leaf_insert(addr, key, depth, val);
-         if (t == setlist_u8::type_id)
-            return router_insert<setlist_u8>(addr, key, depth, val, peer_hint);
-         if (t == setlist_u16::type_id)
-            return router_insert_wide<setlist_u16>(addr, key, depth, val, peer_hint);
-         if (t == setlist_u32::type_id)
-            return router_insert_wide<setlist_u32>(addr, key, depth, val, peer_hint);
-         if (t == bitset_r2_node::type_id)
-            return router_insert<bitset_r2_node>(addr, key, depth, val, peer_hint);
-         if (t == bitset_r4_node::type_id)
-            return router_insert<bitset_r4_node>(addr, key, depth, val, peer_hint);
-         if (t == bitset_c1_32::type_id)
-            return router_insert<bitset_c1_32>(addr, key, depth, val, peer_hint);
-         if (t == bitset_c1_64::type_id)
-            return router_insert<bitset_c1_64>(addr, key, depth, val, peer_hint);
-         if (t == bitset_c1_128::type_id)
-            return router_insert<bitset_c1_128>(addr, key, depth, val, peer_hint);
-         return router_insert<full_radix_node>(addr, key, depth, val, peer_hint);
+         switch (unsigned(_ses->get_ref<sal::alloc_header>(addr)->type()))
+         {
+            case unsigned(bucket_node::type_id):  // bucket LEAF: insert (split on overflow)
+               return bucket_leaf_insert(addr, key, depth, val);
+            case unsigned(setlist_u8::type_id):
+               return router_insert<setlist_u8>(addr, key, depth, val, peer_hint);
+            case unsigned(setlist_u16::type_id):
+               return router_insert_wide<setlist_u16>(addr, key, depth, val, peer_hint);
+            case unsigned(setlist_u32::type_id):
+               return router_insert_wide<setlist_u32>(addr, key, depth, val, peer_hint);
+            case unsigned(bitset_c1_32::type_id):
+               return router_insert<bitset_c1_32>(addr, key, depth, val, peer_hint);
+            case unsigned(bitset_c1_64::type_id):
+               return router_insert<bitset_c1_64>(addr, key, depth, val, peer_hint);
+            case unsigned(bitset_c1_128::type_id):
+               return router_insert<bitset_c1_128>(addr, key, depth, val, peer_hint);
+            case unsigned(bitset_r2_node::type_id):
+               return router_insert<bitset_r2_node>(addr, key, depth, val, peer_hint);
+            case unsigned(bitset_r4_node::type_id):
+               return router_insert<bitset_r4_node>(addr, key, depth, val, peer_hint);
+            default:  // full_radix
+               return router_insert<full_radix_node>(addr, key, depth, val, peer_hint);
+         }
       }
 
       template <class N>

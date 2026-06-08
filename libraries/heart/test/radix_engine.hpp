@@ -1700,6 +1700,13 @@ namespace heart::radix
          }
          return na;
       }
+      // (Proactive setlist→c1 promotion below the overflow threshold was measured net-neutral
+      // on dict — the random path is memory-bound, one miss per hop, and a c1 is the same node
+      // size as a setlist, so the popcount-vs-scan dispatch win is hidden under the miss and
+      // nothing changes except a small insert cost. c1 is created only on real overflow, where
+      // it collapses a narrow R2/R4 into one cacheline — a memory win. Re-evaluate proactive
+      // promotion on a bounded-field workload, where it should actually pay.)
+
       // Build a 1-CL narrow-window c1 node from `from`'s entries (+ setb) when they fit a
       // [base, base+To::width) window with <= To::cap branches. Returns 0 (ok=false) if the
       // key range is too wide or there are too many branches — the caller tries the next
@@ -1713,12 +1720,16 @@ namespace heart::radix
          const From* cn = _ses->get_ref<From>(from).obj();
          if (!cn->prefix().empty())
             return ptr_address(0);  // c1 has no inline prefix
-         int lo = setb, hi = setb, n = 1;  // count the new branch being added
-         cn->for_each_entry([&](uint8_t byte, smart_address) {
-            lo = byte < lo ? byte : lo;
-            hi = byte > hi ? byte : hi;
-            ++n;
-         });
+         // From is a (sorted) setlist, so its byte range is first..last — O(1). Fold in setb.
+         const int en = cn->nstems();
+         int       lo = setb, hi = setb;
+         if (en)
+         {
+            const int slo = cn->stem_at(0), shi = cn->stem_at(en - 1);
+            lo = slo < lo ? slo : lo;
+            hi = shi > hi ? shi : hi;
+         }
+         const int n = en + 1;  // entries + the new branch being added
          if (hi - lo >= To::width || n > To::cap)
             return ptr_address(0);  // range too wide / too many branches → caller widens further
          uint32_t need = ucc::round_up_multiple<sal::cacheline_size>(

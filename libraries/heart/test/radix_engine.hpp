@@ -557,14 +557,22 @@ namespace heart::radix
          ++_cc.clones;
          return na;
       }
-      // Make `addr` writable for a mutation needing `extra` tail bytes. Shared → COW;
-      // unique with room → in place; unique heap-full → grow. The old node is released
-      // by the caller as the replaced child (nc != child) — clone pre-sizes for extra,
-      // so we never release here (that would double-free).
+      // Make a node writable for a mutation needing `extra` tail bytes, with the node already
+      // resolved ONCE into `ref` (threaded by reference — no per-call get_ref, and a smart_ref
+      // is borrowed so this avoids the by-value session-ptr refcount churn psitri warns about).
+      //   shared (ref>1, a snapshot holds it) → clone to a NEW address (children retained);
+      //   unique + room                       → mutate the held node IN PLACE via ref.modify()
+      //                                         (reuses the resolved ref — no get_ref);
+      //   unique + heap-full                  → grow (clone bigger, new address).
+      // On a clone `addr` is updated to the new node and `ref` is left pointing at the OLD one
+      // (the caller uses the returned writable pointer, not `ref`, after a COW, and releases the
+      // old node per the COW-to-root contract — clone pre-sizes for `extra`, so we never release
+      // here, which would double-free). modify()'s own SAL-COW is never reached: heart pre-clones
+      // whenever ref>1, so a node that reaches modify() is unique and (write_protect off)
+      // always can_modify → an in-place write.
       template <class N>
-      N* cow(ptr_address& addr, uint32_t extra = 0)
+      N* cow(sal::smart_ref<N>& ref, ptr_address& addr, uint32_t extra = 0)
       {
-         auto ref = _ses->get_ref<N>(addr);
          if (ref.ref() > 1)
          {
             addr = clone<N>(addr, extra);
@@ -578,6 +586,14 @@ namespace heart::radix
          ++_cc.grows;
          addr = clone<N>(addr, extra);
          return mut<N>(addr);
+      }
+      // Address-only overload: resolves once and delegates. Behavior-identical to threading a
+      // ref; used by call sites not (yet) holding a smart_ref.
+      template <class N>
+      N* cow(ptr_address& addr, uint32_t extra = 0)
+      {
+         sal::smart_ref<N> ref = _ses->get_ref<N>(addr);
+         return cow<N>(ref, addr, extra);
       }
 
       // ── terminal values: one size-gated rule ───────────────────────────────────

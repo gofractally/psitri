@@ -323,16 +323,16 @@ TEST_CASE("bucket_node: 2-3-4 leaf bucket — find/lower_bound/in-order vs std::
    });
    REQUIRE(cnt == int(oracle.size()));
 
-   auto lb = [&](const std::string& q) {  // lower_bound vs std::map
-      auto tp = b->lower_bound(reinterpret_cast<const uint8_t*>(q.data()), int(q.size()));
+   auto lb = [&](const std::string& q) {  // lower_bound vs std::map (returns entry index)
+      int  i  = b->lower_bound(reinterpret_cast<const uint8_t*>(q.data()), int(q.size()));
       auto oi = oracle.lower_bound(q);
-      if (tp.is_null())
+      if (i >= b->nent)
       {
          REQUIRE(oi == oracle.end());
          return;
       }
       REQUIRE(oi != oracle.end());
-      const inline_value* iv = b->resolve(tp);
+      const inline_value* iv = b->entry(i);
       REQUIRE(std::string(reinterpret_cast<const char*>(iv->data), iv->suffix_len) == oi->first);
    };
    for (auto& [k, v] : oracle)

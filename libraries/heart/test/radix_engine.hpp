@@ -844,27 +844,34 @@ namespace heart::radix
          }
       };
       // Dispatch `addr` to the right adaptor and invoke f(adaptor). f returns bool/void.
+      // ONE get_ref resolves the node; the type-switch lowers to a jump table; each case
+      // reinterprets that single resolved pointer (alloc_header is at offset 0 of every node)
+      // — no second per-case get_ref. This is the per-step cost of an ordered scan.
       template <class F>
       auto dispatch(ptr_address addr, F&& f)
       {
-         const auto t = _ses->get_ref<sal::alloc_header>(addr)->type();
-         if (t == bitset_c1_32::type_id)
-            return f(C1Ad<bitset_c1_32>{_ses->get_ref<bitset_c1_32>(addr).obj()});
-         if (t == bitset_c1_64::type_id)
-            return f(C1Ad<bitset_c1_64>{_ses->get_ref<bitset_c1_64>(addr).obj()});
-         if (t == bitset_c1_128::type_id)
-            return f(C1Ad<bitset_c1_128>{_ses->get_ref<bitset_c1_128>(addr).obj()});
-         if (t == setlist_u8::type_id)
-            return f(SLAd<setlist_u8>{_ses->get_ref<setlist_u8>(addr).obj()});
-         if (t == setlist_u16::type_id)
-            return f(SLAd<setlist_u16>{_ses->get_ref<setlist_u16>(addr).obj()});
-         if (t == setlist_u32::type_id)
-            return f(SLAd<setlist_u32>{_ses->get_ref<setlist_u32>(addr).obj()});
-         if (t == bitset_r2_node::type_id)
-            return f(BSAd<bitset_r2_node, 7>{_ses->get_ref<bitset_r2_node>(addr).obj()});
-         if (t == bitset_r4_node::type_id)
-            return f(BSAd<bitset_r4_node, 6>{_ses->get_ref<bitset_r4_node>(addr).obj()});
-         return f(FullAd{_ses->get_ref<full_radix_node>(addr).obj()});
+         const sal::alloc_header* b = _ses->get_ref<sal::alloc_header>(addr).obj();
+         switch (unsigned(b->type()))
+         {
+            case unsigned(setlist_u8::type_id):
+               return f(SLAd<setlist_u8>{reinterpret_cast<const setlist_u8*>(b)});
+            case unsigned(setlist_u16::type_id):
+               return f(SLAd<setlist_u16>{reinterpret_cast<const setlist_u16*>(b)});
+            case unsigned(setlist_u32::type_id):
+               return f(SLAd<setlist_u32>{reinterpret_cast<const setlist_u32*>(b)});
+            case unsigned(bitset_c1_32::type_id):
+               return f(C1Ad<bitset_c1_32>{reinterpret_cast<const bitset_c1_32*>(b)});
+            case unsigned(bitset_c1_64::type_id):
+               return f(C1Ad<bitset_c1_64>{reinterpret_cast<const bitset_c1_64*>(b)});
+            case unsigned(bitset_c1_128::type_id):
+               return f(C1Ad<bitset_c1_128>{reinterpret_cast<const bitset_c1_128*>(b)});
+            case unsigned(bitset_r2_node::type_id):
+               return f(BSAd<bitset_r2_node, 7>{reinterpret_cast<const bitset_r2_node*>(b)});
+            case unsigned(bitset_r4_node::type_id):
+               return f(BSAd<bitset_r4_node, 6>{reinterpret_cast<const bitset_r4_node*>(b)});
+            default:  // full_radix
+               return f(FullAd{reinterpret_cast<const full_radix_node*>(b)});
+         }
       }
 
       // Append an entry's stem bytes (+ inline suffix if terminal) and either yield its
@@ -1128,13 +1135,13 @@ namespace heart::radix
          }
 
         private:
-         struct frame
+         struct frame  // 8 bytes (lean push/pop); psitri-style
          {
             ptr_address addr;
-            int         pos;    // -1 = at this node's term value; else entry cursor
-            uint32_t    klen0;  // _klen before this node's prefix
-            uint32_t    klen1;  // _klen after the prefix (entries' stems append from here)
+            int16_t     pos;    // -1 = at this node's term value; else entry cursor (0..256)
+            uint16_t    klen1;  // _klen after this node's prefix (entry stems append from here)
          };
+         static_assert(sizeof(frame) == 8, "lean 8-byte cursor frame");
 
          void reset() noexcept
          {
@@ -1162,13 +1169,13 @@ namespace heart::radix
          {
             for (;;)
             {
-               const int r = _t->dispatch(addr, [&](auto ad) -> int {
+               const uint32_t k0 = _klen;  // key length before this node's prefix (local; not stored)
+               const int      r  = _t->dispatch(addr, [&](auto ad) -> int {
                   frame& f = _fr[_depth];
                   f.addr   = addr;
-                  f.klen0  = _klen;
                   bytes pfx = ad.prefix();
                   append(pfx.data(), pfx.size());
-                  f.klen1 = _klen;
+                  f.klen1 = uint16_t(_klen);
                   ++_depth;
                   if (!ad.term().is_null())  // term (key ends here) sorts before any entry
                   {
@@ -1180,10 +1187,10 @@ namespace heart::radix
                   if (!ad.valid(c))  // empty node (only the root can be empty)
                   {
                      --_depth;
-                     _klen = f.klen0;
+                     _klen = k0;
                      return 0;
                   }
-                  f.pos = c;
+                  f.pos = int16_t(c);
                   uint8_t   sb[4];
                   const int nb = stem_bytes(ad.cell(c), ad.stem_width(), ad.cw(), sb);
                   append(sb, size_t(nb));
@@ -1211,14 +1218,13 @@ namespace heart::radix
                _klen        = f.klen1;  // drop the previous entry's stem (+ any descent)
                if (!ad.valid(nc))
                {
-                  _klen = f.klen0;
-                  --_depth;
+                  --_depth;  // exhausted → pop; the parent's advance re-truncates to its klen1
                   return 0;
                }
                uint8_t   sb[4];
                const int nb = stem_bytes(ad.cell(nc), ad.stem_width(), ad.cw(), sb);
                append(sb, size_t(nb));
-               f.pos                  = nc;
+               f.pos                  = int16_t(nc);
                const smart_address br = ad.branch(nc);
                if (_t->is_terminal_branch(br))
                {
@@ -1257,10 +1263,9 @@ namespace heart::radix
                const int r = _t->dispatch(addr, [&](auto ad) -> int {
                   frame& f = _fr[_depth];
                   f.addr   = addr;
-                  f.klen0  = _klen;
                   bytes pfx = ad.prefix();
                   append(pfx.data(), pfx.size());
-                  f.klen1 = _klen;
+                  f.klen1 = uint16_t(_klen);
                   ++_depth;
                   const uint32_t d2 = depth + uint32_t(pfx.size());
                   if (d2 == key.size())  // the key ends here → this node's term
@@ -1273,7 +1278,7 @@ namespace heart::radix
                   bool      full;
                   uint32_t  fc;
                   const int c = ad.lower(r2, full, fc);  // exact cell position (key exists)
-                  f.pos       = c;
+                  f.pos       = int16_t(c);
                   uint8_t   sb[4];
                   const int nb = stem_bytes(ad.cell(c), ad.stem_width(), ad.cw(), sb);
                   append(sb, size_t(nb));

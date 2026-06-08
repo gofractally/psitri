@@ -32,93 +32,12 @@ namespace heart::kv
 
    using engine = heart::radix::radix_tree;
 
-   // A read view over the latest committed tree (psitri::cursor analogue). Constructed from a
-   // "root" handle (here, the engine pointer that get_root() returns).
-   class cursor
-   {
-     public:
-      explicit cursor(engine* t) noexcept : _t(t) {}
-      // psitri::cursor::get contract: >=0 (value size) on hit, <0 on miss; fills *buffer.
-      int32_t get(key_view k, std::string* buffer)
-      {
-         std::string_view v;
-         if (!_t->find(k, v))
-            return -1;
-         buffer->assign(v.data(), v.size());
-         return int32_t(v.size());
-      }
+   // The cursor IS the engine's native ordered cursor — not a wrapper around it. heart::kv just
+   // names it. (Stateful path-stack iterator: seek_begin/lower_bound/upper_bound/find/next/
+   // key/value<T>/get_value/get, implemented directly on the nodes in the engine.)
+   using cursor = engine::cursor;
 
-      // ── stateful ordered iteration (psitri::cursor analogue) ─────────────────────
-      // Positioning returns is_end() like psitri. Forward only for now (next); reverse
-      // (prev/last) needs a reverse ordered-seek in the engine — not yet wired.
-      bool seek_begin() { return seek_lb(key_view{}); }               // position at first key
-      bool first(key_view prefix = {}) { return seek_lb(prefix); }     // first key >= prefix
-      bool lower_bound(key_view k) { return seek_lb(k); }              // first key >= k
-      bool upper_bound(key_view k) { return seek_ub(k); }             // first key > k
-      bool find(key_view k)                                            // exact; end on miss
-      {
-         std::string_view v;
-         _valid = _t->find(k, v);
-         if (_valid)
-         {
-            _key.assign(k.data(), k.size());
-            _val.assign(v.data(), v.size());
-         }
-         return !_valid;
-      }
-      bool next()  // advance to the smallest key strictly greater than the current
-      {
-         if (!_valid)
-            return true;
-         std::string      nk;
-         std::string_view v;
-         _valid = _t->upper_bound(_key, nk, v);
-         if (_valid)
-         {
-            _key.swap(nk);
-            _val.assign(v.data(), v.size());
-         }
-         return !_valid;
-      }
-      bool     is_end() const noexcept { return !_valid; }
-      key_view key() const noexcept { return _key; }
-      template <class F>
-      void get_value(F&& fn) const
-      {
-         fn(value_view(_val));
-      }
-      // psitri::cursor::value<T>() analogue: the current value as an optional buffer.
-      template <class T = std::string>
-      std::optional<T> value() const
-      {
-         if (!_valid)
-            return std::nullopt;
-         return T(_val.begin(), _val.end());
-      }
-
-     private:
-      bool seek_lb(key_view k)
-      {
-         std::string_view v;
-         _valid = _t->lower_bound(k, _key, v);
-         if (_valid)
-            _val.assign(v.data(), v.size());
-         return !_valid;
-      }
-      bool seek_ub(key_view k)
-      {
-         std::string_view v;
-         _valid = _t->upper_bound(k, _key, v);
-         if (_valid)
-            _val.assign(v.data(), v.size());
-         return !_valid;
-      }
-      engine*     _t;
-      std::string _key, _val;
-      bool        _valid = false;
-   };
-
-   // A root handle (psitri::tree analogue) returned by get_root(); hands out read cursors.
+   // A root handle (psitri::tree analogue) returned by get_root(); hands out the engine cursor.
    class tree
    {
      public:

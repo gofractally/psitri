@@ -1052,6 +1052,252 @@ namespace heart::radix
          dispatch(addr, [&](auto ad) { inorder_in(ad, kb, cb); });
       }
 
+     public:
+      // ── the engine's NATIVE ordered cursor (heart::kv::cursor IS this type by alias) ──────
+      // A stateful path-stack iterator: positioning seeks once, then next() advances the
+      // retained descent path IN PLACE (no re-seek from the root per step). The current key is
+      // materialized in _kbuf; the value is a view into node memory, valid until the next
+      // navigation. Forward (seek_begin/lower_bound/upper_bound/find/next) implemented; reverse
+      // (prev/last/seek_end) is the symmetric path-walk, still TODO.
+      class cursor
+      {
+        public:
+         explicit cursor(radix_tree* t) noexcept : _t(t) {}
+
+         bool seek_begin()  // position at the first (smallest) key; returns is_end()
+         {
+            reset();
+            descend_min(_t->_root);
+            return !_valid;
+         }
+         bool lower_bound(key_view k) { return position(k, false); }  // first key >= k
+         bool upper_bound(key_view k) { return position(k, true); }   // first key  > k
+         bool find(key_view k)                                        // exact; end on miss
+         {
+            value_view v;
+            if (!_t->find(k, v))
+            {
+               reset();
+               return true;
+            }
+            build_to(as_bytes(k));
+            return !_valid;
+         }
+         bool next()  // advance to the next key in order; returns is_end()
+         {
+            if (!_valid)
+               return true;
+            while (_depth > 0)
+            {
+               const int r = advance_top();
+               if (r == 1)
+                  return false;  // landed on a terminal
+               if (r == 2)
+               {
+                  descend_min(_nextaddr);
+                  return !_valid;  // descended into a child subtree's minimum
+               }
+               // r == 0: this frame is exhausted, popped — keep advancing the parent
+            }
+            _valid = false;
+            return true;
+         }
+         bool       is_end() const noexcept { return !_valid; }
+         key_view   key() const noexcept { return key_view(reinterpret_cast<const char*>(_kbuf), _klen); }
+         template <class F>
+         void get_value(F&& fn) const { fn(_val); }
+         template <class T = std::string>
+         std::optional<T> value() const
+         {
+            if (!_valid)
+               return std::nullopt;
+            return T(_val.data(), _val.data() + _val.size());
+         }
+         int32_t get(key_view k, std::string* buf)  // point lookup (psitri::cursor::get)
+         {
+            value_view v;
+            if (!_t->find(k, v))
+               return -1;
+            buf->assign(v.data(), v.size());
+            return int32_t(v.size());
+         }
+
+        private:
+         struct frame
+         {
+            ptr_address addr;
+            int         pos;    // -1 = at this node's term value; else entry cursor
+            uint32_t    klen0;  // _klen before this node's prefix
+            uint32_t    klen1;  // _klen after the prefix (entries' stems append from here)
+         };
+
+         void reset() noexcept
+         {
+            _depth = 0;
+            _klen  = 0;
+            _valid = false;
+         }
+         void append(const uint8_t* p, size_t n) noexcept
+         {
+            std::memcpy(_kbuf + _klen, p, n);
+            _klen += uint32_t(n);
+         }
+         template <class Ad>
+         void take_terminal(Ad ad, smart_address br)  // append suffix, view the value
+         {
+            bytes      suf;
+            value_view v;
+            _t->term_view(ad.node(), br, suf, v);
+            append(suf.data(), suf.size());
+            _val = v;
+         }
+
+         // Push frames down to the minimum terminal of `addr`'s subtree; sets _valid/_val/_kbuf.
+         void descend_min(ptr_address addr)
+         {
+            for (;;)
+            {
+               const int r = _t->dispatch(addr, [&](auto ad) -> int {
+                  frame& f = _fr[_depth];
+                  f.addr   = addr;
+                  f.klen0  = _klen;
+                  bytes pfx = ad.prefix();
+                  append(pfx.data(), pfx.size());
+                  f.klen1 = _klen;
+                  ++_depth;
+                  if (!ad.term().is_null())  // term (key ends here) sorts before any entry
+                  {
+                     f.pos = -1;
+                     take_terminal(ad, ad.term());
+                     return 1;
+                  }
+                  const int c = ad.first();
+                  if (!ad.valid(c))  // empty node (only the root can be empty)
+                  {
+                     --_depth;
+                     _klen = f.klen0;
+                     return 0;
+                  }
+                  f.pos = c;
+                  uint8_t   sb[4];
+                  const int nb = stem_bytes(ad.cell(c), ad.stem_width(), ad.cw(), sb);
+                  append(sb, size_t(nb));
+                  const smart_address br = ad.branch(c);
+                  if (_t->is_terminal_branch(br))
+                  {
+                     take_terminal(ad, br);
+                     return 1;
+                  }
+                  _nextaddr = br.as_pointer();
+                  return 2;
+               });
+               if (r == 1) { _valid = true; return; }
+               if (r == 0) { _valid = false; return; }
+               addr = _nextaddr;
+            }
+         }
+
+         // Advance within the top frame: 0 popped (exhausted), 1 found terminal, 2 descend _nextaddr.
+         int advance_top()
+         {
+            frame& f = _fr[_depth - 1];
+            return _t->dispatch(f.addr, [&](auto ad) -> int {
+               const int nc = (f.pos < 0) ? ad.first() : ad.next(f.pos);
+               _klen        = f.klen1;  // drop the previous entry's stem (+ any descent)
+               if (!ad.valid(nc))
+               {
+                  _klen = f.klen0;
+                  --_depth;
+                  return 0;
+               }
+               uint8_t   sb[4];
+               const int nb = stem_bytes(ad.cell(nc), ad.stem_width(), ad.cw(), sb);
+               append(sb, size_t(nb));
+               f.pos                  = nc;
+               const smart_address br = ad.branch(nc);
+               if (_t->is_terminal_branch(br))
+               {
+                  take_terminal(ad, br);
+                  return 1;
+               }
+               _nextaddr = br.as_pointer();
+               return 2;
+            });
+         }
+
+         bool position(key_view k, bool strict)
+         {
+            std::string kk;  // ordered_seek finds the first key >=/> k (locks internally)
+            value_view  v;
+            if (!_t->ordered_seek(k, strict, kk, v))
+            {
+               reset();
+               return true;
+            }
+            build_to(as_bytes(kk));  // then build the path to that exact key
+            return !_valid;
+         }
+
+         // Position at an EXACT existing key, building the descent path along the way.
+         void build_to(bytes key)
+         {
+            reset();
+            ptr_address addr  = _t->_root;
+            uint32_t    depth = 0;
+            for (;;)
+            {
+               const int r = _t->dispatch(addr, [&](auto ad) -> int {
+                  frame& f = _fr[_depth];
+                  f.addr   = addr;
+                  f.klen0  = _klen;
+                  bytes pfx = ad.prefix();
+                  append(pfx.data(), pfx.size());
+                  f.klen1 = _klen;
+                  ++_depth;
+                  const uint32_t d2 = depth + uint32_t(pfx.size());
+                  if (d2 == key.size())  // the key ends here → this node's term
+                  {
+                     f.pos = -1;
+                     take_terminal(ad, ad.term());
+                     return 1;
+                  }
+                  bytes     r2 = key.subspan(d2);
+                  bool      full;
+                  uint32_t  fc;
+                  const int c = ad.lower(r2, full, fc);  // exact cell position (key exists)
+                  f.pos       = c;
+                  uint8_t   sb[4];
+                  const int nb = stem_bytes(ad.cell(c), ad.stem_width(), ad.cw(), sb);
+                  append(sb, size_t(nb));
+                  const smart_address br = ad.branch(c);
+                  if (_t->is_terminal_branch(br))
+                  {
+                     take_terminal(ad, br);
+                     return 1;
+                  }
+                  _nextaddr  = br.as_pointer();
+                  _nextdepth = d2 + uint32_t(ad.cw());
+                  return 2;
+               });
+               if (r == 1) { _valid = true; return; }
+               addr  = _nextaddr;
+               depth = _nextdepth;
+            }
+         }
+
+         radix_tree* _t;
+         frame       _fr[256];  // descent path (bounded by key depth; no heap)
+         uint8_t     _kbuf[1024];
+         uint32_t    _klen      = 0;
+         value_view  _val;
+         int         _depth     = 0;
+         bool        _valid     = false;
+         ptr_address _nextaddr{};
+         uint32_t    _nextdepth = 0;
+      };
+
+     private:
+
       // ── descent helper for r1 nodes (prefixed routers) ─────────────────────────
       template <class N>
       bool route_r1(const N* n, bytes key, uint32_t& depth, value_view& out, ptr_address& addr)

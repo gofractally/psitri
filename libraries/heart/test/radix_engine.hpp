@@ -15,6 +15,7 @@
 #pragma once
 #include <algorithm>
 #include <cassert>
+#include <stdexcept>  // std::runtime_error (ordered cursor hitting a bucket — see dispatch())
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -421,6 +422,8 @@ namespace heart::radix
          // full_radix (R8) occupancy: sum of occupied 64-wide quarters per full node (1-4).
          // avg = full_quarters / full → if < 4, presence could eliminate the empty quarters.
          uint64_t full_quarters = 0;
+         // adaptive/bucket-mode dense terminal leaves (sorted (suffix,value) pages) + entries.
+         uint64_t bucket = 0, bucket_entries = 0;
       };
       tier_counts count_tiers()
       {
@@ -554,8 +557,11 @@ namespace heart::radix
                walk_kids<full_radix_node>(a, tc);
                break;
             }
-            case radix_kind::bitset1:  // not produced; count_tiers assumes a non-bucket tree
-            case radix_kind::bucket:
+            case radix_kind::bucket:  // adaptive dense terminal leaf — a counted endpoint
+               ++tc.bucket;
+               tc.bucket_entries += _ses->get_ref<bucket_node>(a).obj()->nent;
+               break;
+            case radix_kind::bitset1:  // not produced
                break;
          }
       }
@@ -1145,9 +1151,15 @@ namespace heart::radix
                return f(BSAd<bitset_r4_node, 6>{reinterpret_cast<const bitset_r4_node*>(b)});
             case radix_kind::full:
                return f(FullAd{reinterpret_cast<const full_radix_node*>(b)});
+            case radix_kind::bucket:
+               // The ordered cursor / in-order walk has NO bucket adaptor yet: a bucket is a
+               // dense sorted terminal leaf, not a radix router. Descending into one is the
+               // known gap (step 2 adds a bucket frame). Throw rather than UB so the break is
+               // observable. find()/upsert have their own switch and handle buckets directly.
+               throw std::runtime_error(
+                   "heart ordered cursor: reached a bucket leaf — buckets are not traversed");
             case radix_kind::leaf:     // not ordered routers — dispatch() is never called on these
             case radix_kind::bitset1:
-            case radix_kind::bucket:
                break;
          }
          __builtin_unreachable();

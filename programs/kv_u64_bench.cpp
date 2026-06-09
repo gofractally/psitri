@@ -10,7 +10,10 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <exception>
 #include <random>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -832,6 +835,73 @@ int main(int argc, char** argv)
          std::fflush(stdout);
       }
       return 0;
+   }
+
+   if (mode == "dicttest")  // dictionary workload: buckets DO form here → cursor is broken on them.
+   {
+      const char* path = (argc > 3) ? argv[3] : "/usr/share/dict/words";
+      std::ifstream in(path);
+      if (!in) { std::fprintf(stderr, "cannot open %s\n", path); return 1; }
+      std::vector<std::string> words;
+      std::set<std::string>    truth;  // lexicographic = the tree's byte order
+      for (std::string w; std::getline(in, w);)
+         if (!w.empty()) { words.push_back(w); truth.insert(w); }
+      std::printf("loaded %zu words (%zu unique) from %s\n", words.size(), truth.size(), path);
+
+      auto dir = std::filesystem::temp_directory_path() / "heart_dicttest";
+      std::filesystem::remove_all(dir);
+      radix_engine_tree t(dir);
+      t.set_adaptive(true);  // radix→bucket collapse on deep-narrow subtrees (dict is prefix-dense)
+      auto vlen = [](const std::string& w) { return std::string_view(w.data(), w.size()); };
+      uint64_t vi = 0;
+      for (const auto& w : words)
+      {
+         uint64_t id = vi++;
+         t.upsert(vlen(w), std::string_view(reinterpret_cast<const char*>(&id), sizeof(id)));
+      }
+      t.commit();
+
+      // (1) data correctness: every word is findable via point lookup.
+      uint64_t found = 0;
+      for (const auto& w : truth)
+      { std::string_view v; if (t.find(vlen(w), v)) ++found; }
+      std::printf("point-lookup: %llu/%zu found  -> %s\n", (unsigned long long)found, truth.size(),
+                  found == truth.size() ? "OK" : "FAIL");
+
+      // (2) buckets were actually created.
+      auto tc = t.count_tiers();
+      std::printf("tiers: setlist=%llu r2=%llu r4=%llu full=%llu  BUCKETS=%llu (entries=%llu)\n",
+                  (unsigned long long)(tc.setlist + tc.setlist_w16 + tc.setlist_w32),
+                  (unsigned long long)tc.bitset_r2, (unsigned long long)tc.bitset_r4,
+                  (unsigned long long)tc.full, (unsigned long long)tc.bucket,
+                  (unsigned long long)tc.bucket_entries);
+      std::printf("buckets created -> %s\n", tc.bucket > 0 ? "YES" : "NO");
+
+      // (3) the cursor is broken on this tree: an in-order forward walk should visit all
+      // `truth.size()` keys in sorted order, but it cannot traverse buckets.
+      radix_engine_tree::cursor c(&t);
+      uint64_t                  visited = 0;
+      bool                      order_ok = true, threw = false;
+      std::string               prev;
+      try
+      {
+         for (bool e = c.seek_begin(); !e; e = c.next())
+         {
+            auto kv = c.key();
+            std::string cur(reinterpret_cast<const char*>(kv.data()), kv.size());
+            if (visited && !(prev < cur)) order_ok = false;
+            prev = std::move(cur);
+            ++visited;
+         }
+      }
+      catch (const std::exception& ex) { threw = true; std::printf("cursor threw: %s\n", ex.what()); }
+      std::printf("cursor walk: visited=%llu / %zu keys%s, order=%s\n",
+                  (unsigned long long)visited, truth.size(), threw ? " (ABORTED)" : "",
+                  order_ok ? "sorted" : "OUT-OF-ORDER");
+      const bool broken = threw || visited != truth.size() || !order_ok;
+      std::printf("CURSOR BROKEN ON BUCKETS -> %s (missed %lld keys)\n", broken ? "CONFIRMED" : "no",
+                  (long long)truth.size() - (long long)visited);
+      return broken ? 0 : 2;  // 0 = brokenness confirmed (expected for step 1)
    }
 
    if (mode == "curtest")  // cursor correctness: forward + reverse iteration vs sorted truth.

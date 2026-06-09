@@ -1715,8 +1715,12 @@ namespace heart::radix
          const ptr_address pre = addr;  // original (pre-COW) node, for clone-release on downgrade
          sal::smart_ref<N> ref = _ses->get_ref<N>(addr);  // resolved once; threaded into cow()
          const N*          cn  = ref.obj();
-         if (ref.ref() > 1 || children_shared<N>(cn))  // shared node OR co-owned big children → latch
-            _shared = true;
+         // must_clone = is THIS node reachable from a snapshot (clone me). NOT children_shared —
+         // that decides whether the CHILDREN clone (propagated per-descent below). A unique working
+         // node with co-owned children mutates IN-PLACE; only the shared child clones. This is what
+         // lets a batch converge toward an in-place (non-COW) tree as nodes become unique.
+         const bool        must_clone = _shared || ref.ref() > 1;
+         _shared                      = must_clone;  // N's own cow() decisions use this
          bytes             pfx = cn->prefix();
          if (pfx.size() > key.size() - depth ||
              (pfx.size() && std::memcmp(pfx.data(), key.data() + depth, pfx.size()) != 0))
@@ -1787,9 +1791,13 @@ namespace heart::radix
             _emptied = (n->branch_count() == 0 && !n->has_term_value());
             return finalize_remove<N>(addr, pre);
          }
-         // pointer to an inner node → recurse
+         // pointer to an inner node → recurse. The child is shared (must clone) if THIS node is
+         // shared OR its big-tier children are co-owned via shared counters; restore must_clone for
+         // N's own cow() after the recursion clobbers _shared.
          ptr_address child = sa.as_pointer();
+         _shared           = must_clone || children_shared<N>(cn);
          ptr_address nc    = remove_node(child, key, depth + W);
+         _shared           = must_clone;
          if (!_removed)
             return addr;  // absent in subtree → nothing changed here
          if (_emptied)     // the child drained → drop its branch and free it
@@ -1825,10 +1833,12 @@ namespace heart::radix
          // ref is stale (clone → new address), so the post-COW writable `n` is used instead.
          sal::smart_ref<N> ref = _ses->get_ref<N>(addr);
          const N*          cn  = ref.obj();
-         // Latch shared if THIS node is shared OR its big-tier children are co-owned via shared
-         // range counters (deferred counts hide that from cb.ref) — either way the subtree clones.
-         if (ref.ref() > 1 || children_shared<N>(cn))
-            _shared = true;
+         // must_clone = is THIS node reachable from a snapshot (clone me). children_shared decides
+         // whether the CHILDREN clone (propagated per-descent), NOT whether I do — so a unique
+         // working node with co-owned children mutates IN-PLACE; only the shared child clones. This
+         // is what lets a batch converge to an in-place (non-COW) tree as nodes become unique.
+         const bool        must_clone = _shared || ref.ref() > 1;
+         _shared                      = must_clone;  // N's own cow() decisions use this
          bytes             pfx = cn->prefix();
          int               avail     = int(key.size() - depth);
          int               maxp      = std::min(int(pfx.size()), avail);
@@ -1936,7 +1946,11 @@ namespace heart::radix
                   return bucket_leaf_insert(bp, key, depth0, val);  // caller releases old addr
             }
          }
+         // child is shared (must clone) if THIS node is shared OR its children are co-owned;
+         // restore must_clone for N's own cow() after the recursion clobbers _shared.
+         _shared        = must_clone || children_shared<N>(cn);
          ptr_address nc = insert_node(child, key, depth + 1, val, chint);
+         _shared        = must_clone;
          if (nc != child)
          {
             smart_address nsab = smart_address::from_pointer(nc);
@@ -1998,8 +2012,8 @@ namespace heart::radix
       {
          const uint32_t    depth0 = depth;
          sal::smart_ref<N> ref    = _ses->get_ref<N>(addr);  // resolved once (reads + safe cows)
-         if (ref.ref() > 1)  // shared node on descent → latch shared for the whole subtree
-            _shared = true;
+         const bool        must_clone = _shared || ref.ref() > 1;  // is THIS node snapshot-reachable
+         _shared                      = must_clone;
          const N*          cn     = ref.obj();
          bytes             pfx    = cn->prefix();
          int            avail  = int(key.size() - depth);
@@ -2071,9 +2085,12 @@ namespace heart::radix
             return addr;
          }
 
-         // pointer to an inner node → recurse
+         // pointer to an inner node → recurse (wide setlist children are direct-refcounted, so
+         // child_shared == must_clone here); restore must_clone for this node's cow() after.
          ptr_address child = sa.as_pointer();
+         _shared           = must_clone || children_shared<N>(cn);
          ptr_address nc    = insert_node(child, key, depth + uint32_t(cw), val, chint);
+         _shared           = must_clone;
          if (nc != child)
          {
             N* w = cow<N>(ref, addr);  // ref valid (insert_node recurses into child, not addr)

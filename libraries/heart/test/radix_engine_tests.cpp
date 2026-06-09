@@ -103,7 +103,7 @@ namespace
          bool            threw = false;
          try {
             radix_tree::cursor c(&t);
-            for (bool end = c.seek_begin(); !end; end = c.next())
+            for (bool ok = c.seek_begin(); ok; ok = c.next())
             {
                std::string vv;
                c.get_value([&](value_view v) { vv.assign(v.data(), v.size()); });
@@ -120,7 +120,7 @@ namespace
          bool                     threw = false;
          try {
             radix_tree::cursor c(&t);
-            for (bool r = c.seek_last(); !r; r = c.prev()) got.emplace_back(std::string(c.key()));
+            for (bool ok = c.seek_last(); ok; ok = c.prev()) got.emplace_back(std::string(c.key()));
          } catch (const std::exception& e) { threw = true; INFO("threw: " << e.what()); }
          INFO("surface: cursor reverse");
          CHECK_FALSE(threw);
@@ -136,10 +136,10 @@ namespace
                bool threw = false;
                try {
                   radix_tree::cursor c(&t);
-                  bool end = c.lower_bound(q);
+                  bool ok  = c.lower_bound(q);  // psitri convention: true = positioned on a key
                   auto oi  = oracle.lower_bound(q);
-                  CHECK(end == (oi == oracle.end()));
-                  if (!end && oi != oracle.end()) CHECK(std::string(c.key()) == oi->first);
+                  CHECK(ok == (oi != oracle.end()));
+                  if (ok && oi != oracle.end()) CHECK(std::string(c.key()) == oi->first);
                } catch (const std::exception& e) { threw = true; INFO("threw: " << e.what()); }
                INFO("surface: cursor lower_bound, q.size=" << q.size());
                CHECK_FALSE(threw);
@@ -761,7 +761,7 @@ TEST_CASE("radix_engine: first-class subtree values", "[radix_engine][cursor][su
    {
       radix_tree::cursor       c(&t);
       std::vector<std::string> order;
-      for (bool e = c.seek_begin(); !e; e = c.next())
+      for (bool ok = c.seek_begin(); ok; ok = c.next())
       {
          order.push_back(std::string(c.key()));
          if (c.key() == "mid")
@@ -778,11 +778,11 @@ TEST_CASE("radix_engine: first-class subtree values", "[radix_engine][cursor][su
    // (3) descend into the subtree via subtree_cursor and iterate it == subkeys.
    {
       radix_tree::cursor c(&t);
-      REQUIRE_FALSE(c.find("mid"));  // find returns is_end (false = found)
+      REQUIRE(c.find("mid"));  // psitri convention: find() returns true when positioned (subtree too)
       REQUIRE(c.is_subtree());
       auto                               sc = c.subtree_cursor();
       std::map<std::string, std::string> got;
-      for (bool e = sc.seek_begin(); !e; e = sc.next())
+      for (bool ok = sc.seek_begin(); ok; ok = sc.next())
       {
          std::string val;
          sc.get_value([&](value_view v) { val.assign(v.data(), v.size()); });
@@ -820,10 +820,10 @@ TEST_CASE("radix_engine: cursor value_ref / value<T> / get_value", "[radix_engin
    radix_tree t(tmp("heart_value_ref"));
    t.upsert("k", "hello-value");
    radix_tree::cursor c(&t);
-   REQUIRE_FALSE(c.seek_begin());
+   REQUIRE(c.seek_begin());  // psitri convention: true = positioned on the first key
    REQUIRE(c.key() == "k");
    {
-      auto v = c.value();  // value_ref: holds the read_lock for as long as `v` lives
+      auto v = c.pinned_value();  // value_ref: holds the read_lock for as long as `v` lives
       CHECK(v.view() == "hello-value");
       CHECK(std::string(value_view(v)) == "hello-value");  // implicit conversion
       CHECK(v.str() == "hello-value");

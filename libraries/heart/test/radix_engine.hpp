@@ -53,6 +53,12 @@ namespace heart::radix
    // are needed to dereference node memory. Returning this by value bundles the lock with the view
    // (vector<bool>::reference-style proxy): the caller extends the safe-read window simply by
    // holding it. Implicitly converts to value_view for transient in-place use.
+   //
+   // WARNING: the held read_lock BLOCKS the compactor from reclaiming/evicting memory. Hold a
+   // value_ref only for a SHORT, LOCAL scope. Keeping it alive across long spans — especially under
+   // heavy concurrent writes — stalls compaction and causes temporary memory bloat (freed/garbage
+   // memory can't be reclaimed while any read_lock is open). For longer-lived needs, copy the bytes
+   // out (value<T>()) and let the lock drop.
    class value_ref
    {
       sal::read_lock _lock;  // residency pin; copyable (retain/release the session read-lock counter)
@@ -1566,81 +1572,82 @@ namespace heart::radix
          {
          }
 
-         bool seek_begin()  // position at the first (smallest) key; returns is_end()
+         // Positioning methods follow psitri's convention: the bool return is `true` when the cursor
+         // is left ON a valid entry, `false` when it lands at end / the key is absent. (NOT is_end.)
+         bool seek_begin()  // position at the first (smallest) key; true if there is one
          {
             auto lk = _t->_ses->lock();
             reset();
             descend_min(_root.address());
-            return !_valid;
+            return _valid;
          }
-         bool lower_bound(key_view k) { return position(as_bytes(k), false); }  // first key >= k
-         bool upper_bound(key_view k) { return position(as_bytes(k), true); }   // first key  > k
-         bool find(key_view k)                                                  // exact; end on miss
+         bool lower_bound(key_view k) { position(as_bytes(k), false); return _valid; }  // first key >= k
+         bool upper_bound(key_view k) { position(as_bytes(k), true); return _valid; }   // first key  > k
+         bool find(key_view k)                                                          // exact lookup
          {
-            if (lower_bound(k))
-               return true;  // nothing >= k
-            if (key() == k)
-               return false;  // exact hit
-            reset();
-            return true;  // first key >= k differs from k → absent
+            position(as_bytes(k), false);
+            if (_valid && key() == k)
+               return true;  // exact hit
+            reset();          // miss → leave the cursor at end
+            return false;
          }
-         bool next()  // advance to the next key in order; returns is_end()
+         bool next()  // advance to the next key in order; true if it landed on one
          {
             if (!_valid)
-               return (_end < 0) ? seek_begin() : true;  // from rend → first key; from end → stay
+               return (_end < 0) ? seek_begin() : false;  // from rend → first key; from end → stay
             auto lk = _t->_ses->lock();
             while (_depth > 0)
             {
                const int r = advance_top();
                if (r == 1)
-                  return false;  // landed on a terminal
+                  return true;  // landed on a terminal
                if (r == 2)
                {
                   descend_min(_nextaddr);
-                  return !_valid;  // descended into a child subtree's minimum
+                  return _valid;  // descended into a child subtree's minimum
                }
                // r == 0: this frame is exhausted, popped — keep advancing the parent
             }
             _valid = false;
             _end   = 0;  // fell off the top → at end
-            return true;
+            return false;
          }
-         bool prev()  // retreat to the previous key in order; returns is_rend()
+         bool prev()  // retreat to the previous key in order; true if it landed on one
          {
             if (!_valid)
-               return (_end >= 0) ? seek_last() : true;  // from end → last key; from rend → stay
+               return (_end >= 0) ? seek_last() : false;  // from end → last key; from rend → stay
             auto lk = _t->_ses->lock();
             while (_depth > 0)
             {
                const int r = retreat_top();
                if (r == 1)
-                  return false;  // landed on a terminal
+                  return true;  // landed on a terminal
                if (r == 2)
                {
                   descend_max(_nextaddr);
-                  return !_valid;
+                  return _valid;
                }
                // r == 0: frame exhausted, popped — keep retreating the parent
             }
             _valid = false;
             _end   = -1;  // fell off the bottom → before begin (rend)
-            return true;
+            return false;
          }
-         bool seek_last()  // position at the last (largest) key; returns is_rend()
+         bool seek_last()  // position at the last (largest) key; true if there is one
          {
             auto lk = _t->_ses->lock();
             reset();
             descend_max(_root.address());
             if (!_valid) _end = -1;
-            return !_valid;
+            return _valid;
          }
          bool last(key_view prefix = {})  // last key; prefix-bounded last is seek_last for now
          {
             (void)prefix;
             return seek_last();
          }
-         bool seek_end()  noexcept { reset(); return is_end(); }             // after last key
-         bool seek_rend() noexcept { reset(); _end = -1; return is_rend(); }  // before first key
+         bool seek_end()  noexcept { reset(); return false; }            // after last key (invalid)
+         bool seek_rend() noexcept { reset(); _end = -1; return true; }  // before first key (matches psitri)
          bool       is_end() const noexcept { return !_valid && _end >= 0; }
          bool       is_rend() const noexcept { return !_valid && _end < 0; }
          key_view   key() const noexcept { return key_view(reinterpret_cast<const char*>(_kbuf), _klen); }
@@ -1648,9 +1655,13 @@ namespace heart::radix
          bool        is_subtree() const noexcept { return _valid && _is_subtree; }  // value is a subtree
          read_handle subtree() const;                                    // the nested tree (handle)
          cursor      subtree_cursor() const { return cursor(_t, _subtree); }  // iterate it
-         // Borrowed value VIEW, kept valid by a held read_lock bundled into the return (the caller
-         // extends the safe-read window by holding the value_ref). Empty if not positioned/subtree.
-         value_ref value() const
+         // Borrowed value VIEW, kept valid by a read_lock bundled into the return (the caller extends
+         // the safe-read window by holding the value_ref). Empty if not positioned/subtree. Symmetric
+         // with psitri::cursor::pinned_value() — the safe replacement for value(read_lock&).
+         // WARNING: hold the returned value_ref only briefly — its read_lock stalls the compactor;
+         // holding it during heavy writes causes temporary memory bloat. Copy via value<T>() if you
+         // need the bytes longer.
+         value_ref pinned_value() const
          {
             return value_ref{_t->_ses->lock(), (_valid && !_is_subtree) ? _val : value_view{}};
          }
@@ -1670,15 +1681,18 @@ namespace heart::radix
          }
          int32_t get(key_view k, std::string* buf)  // point lookup on THIS cursor's root
          {
-            if (find(k)) return value_not_found;  // find() positions on _root; true = not found
+            if (!find(k)) return value_not_found;  // find() positions on _root; false = absent
             if (_is_subtree) return value_subtree;
             auto lk = _t->_ses->lock();  // pin while copying
             buf->assign(_val.data(), _val.size());
             return int32_t(_val.size());
          }
          // ── psitri::cursor public-API parity (forward) ──
-         bool    seek(key_view k) { return lower_bound(k); }  // position at first key >= k
-         bool    first(key_view prefix = {})                  // first key (optionally with prefix)
+         // Deprecated exact-positioning alias (parity with psitri::cursor::seek): leaves the cursor at
+         // lower_bound(k) either way; @return true iff the exact key is present. Use find() for exact
+         // lookup and lower_bound() for ordered seek/range positioning.
+         bool    seek(key_view k) { return lower_bound(k) && key() == k; }
+         bool    first(key_view prefix = {})                  // first key (optionally the first >= prefix)
          {
             return prefix.empty() ? seek_begin() : lower_bound(prefix);
          }
@@ -1689,7 +1703,7 @@ namespace heart::radix
          template <class F>
          bool get(key_view k, F&& fn)  // point lookup on THIS cursor's root → lambda; true if found
          {
-            if (find(k) || _is_subtree) return false;
+            if (!find(k) || _is_subtree) return false;
             auto lk = _t->_ses->lock();  // pin while fn reads the view
             fn(_val);
             return true;
@@ -1697,7 +1711,7 @@ namespace heart::radix
          template <class T = std::string>
          std::optional<T> get(key_view k)  // point lookup on THIS cursor's root → optional buffer
          {
-            if (find(k) || _is_subtree) return std::nullopt;
+            if (!find(k) || _is_subtree) return std::nullopt;
             auto lk = _t->_ses->lock();  // pin while copying
             return T(_val.data(), _val.data() + _val.size());
          }
@@ -1714,7 +1728,7 @@ namespace heart::radix
          {
             cursor   c(*this);  // copy re-pins the same snapshot root (RAII)
             uint64_t n = 0;
-            for (bool end = lo.empty() ? c.seek_begin() : c.lower_bound(lo); !end; end = c.next())
+            for (bool ok = lo.empty() ? c.seek_begin() : c.lower_bound(lo); ok; ok = c.next())
             {
                if (!hi.empty() && !(c.key() < hi)) break;
                ++n;
@@ -2102,13 +2116,13 @@ namespace heart::radix
          {
             if (_root == sal::null_ptr_address) return false;
             cursor c(_t, _root);
-            return !c.find(k) && c.is_subtree();
+            return c.find(k) && c.is_subtree();  // find() true = positioned on the key
          }
          read_handle get_subtree(key_view k) const
          {
             if (_root == sal::null_ptr_address) return {_t, sal::null_ptr_address};
             cursor c(_t, _root);
-            if (c.find(k) || !c.is_subtree()) return {_t, sal::null_ptr_address};
+            if (!c.find(k) || !c.is_subtree()) return {_t, sal::null_ptr_address};
             return c.subtree();  // a handle, not an address
          }
          template <class T = std::string>
@@ -2149,13 +2163,13 @@ namespace heart::radix
          {
             if (!_root) return false;
             cursor c(_t, _root.address());
-            return !c.find(k) && c.is_subtree();
+            return c.find(k) && c.is_subtree();  // find() true = positioned on the key
          }
          tree get_subtree(key_view k) const
          {
             if (!_root) return {};
             cursor c(_t, _root.address());
-            if (c.find(k) || !c.is_subtree()) return {};
+            if (!c.find(k) || !c.is_subtree()) return {};
             return tree(_t, c._subtree, /*retain=*/true);
          }
          template <class T = std::string>
@@ -4152,12 +4166,12 @@ namespace heart::radix
    inline bool radix_tree::is_subtree(key_view key)
    {
       cursor c(this);
-      return !c.find(key) && c.is_subtree();  // find() returns is_end (true on miss)
+      return c.find(key) && c.is_subtree();  // find() true = positioned on the key
    }
    inline radix_tree::read_handle radix_tree::get_subtree(key_view key)
    {
       cursor c(this);
-      if (c.find(key) || !c.is_subtree())
+      if (!c.find(key) || !c.is_subtree())
          return {};  // empty handle
       return c.subtree();
    }

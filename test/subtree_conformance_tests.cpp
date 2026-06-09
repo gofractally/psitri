@@ -158,6 +158,116 @@ TEMPLATE_TEST_CASE("conformance: multiple subtrees", "[conformance]", psitri_pol
    }
 }
 
+// pinned_value(): the symmetric lock-bundling proxy returns a value view kept valid by a held
+// read_lock (same type/shape on both engines).
+TEMPLATE_TEST_CASE("conformance: pinned_value borrowed view", "[conformance]", psitri_policy, heart_policy)
+{
+   auto db  = TestType::database::open(conf_dir(TestType::nm));
+   auto ses = db->start_write_session();
+   {
+      auto tx  = ses->start_transaction(0);
+      auto sub = ses->start_write_transaction(ses->create_temporary_tree());
+      sub.upsert("k", "hello-value");
+      tx.upsert_subtree("w", sub.get_tree());
+      tx.commit();
+   }
+   auto wsub = ses->get_root(0).get_subtree("w");
+   REQUIRE(bool(wsub));
+   auto c = wsub.snapshot_cursor();
+   REQUIRE(c.find("k"));  // position at "k"; find() returns true when positioned on the key
+   CHECK(c.key() == "k");
+   auto v = c.pinned_value();  // value_ref on both engines; holds the read_lock while alive
+   CHECK(std::string_view(v) == "hello-value");  // value_ref → value_view (std::string_view)
+   CHECK(v.str() == "hello-value");
+}
+
+// cursor positioning convention parity: first/last/seek/lower_bound/upper_bound all follow the
+// "true = positioned on a valid entry" convention on BOTH engines (psitri is the reference).
+TEMPLATE_TEST_CASE("conformance: cursor positioning convention", "[conformance]", psitri_policy, heart_policy)
+{
+   auto db  = TestType::database::open(conf_dir(TestType::nm));
+   auto ses = db->start_write_session();
+   {
+      auto tx  = ses->start_transaction(0);
+      auto sub = ses->start_write_transaction(ses->create_temporary_tree());
+      for (const char* k : {"b", "d", "f"}) sub.upsert(k, "v");
+      tx.upsert_subtree("w", sub.get_tree());
+      tx.commit();
+   }
+   auto t = ses->get_root(0).get_subtree("w");
+   REQUIRE(bool(t));
+
+   auto c = t.snapshot_cursor();
+   CHECK(c.first());  // true = positioned
+   CHECK(c.key() == "b");
+   CHECK(c.last());
+   CHECK(c.key() == "f");
+
+   // lower_bound: >= ; upper_bound: strictly >
+   CHECK(c.lower_bound("d"));
+   CHECK(c.key() == "d");
+   CHECK(c.lower_bound("c"));
+   CHECK(c.key() == "d");
+   CHECK(c.upper_bound("d"));
+   CHECK(c.key() == "f");
+   CHECK_FALSE(c.lower_bound("z"));  // nothing >= z → at end, false
+   CHECK_FALSE(c.upper_bound("f"));  // nothing > f → at end, false
+
+   // seek: deprecated exact alias — true only on exact match
+   CHECK(c.seek("d"));         // exact present
+   CHECK_FALSE(c.seek("c"));   // absent (but positioned at lower_bound 'd')
+   CHECK(c.key() == "d");
+
+   // find: exact lookup, same convention
+   CHECK(c.find("f"));
+   CHECK_FALSE(c.find("e"));
+}
+
+// replace a subtree value with a different subtree — new content visible, no stale data.
+TEMPLATE_TEST_CASE("conformance: replace subtree value", "[conformance]", psitri_policy, heart_policy)
+{
+   auto db  = TestType::database::open(conf_dir(TestType::nm));
+   auto ses = db->start_write_session();
+   auto attach = [&](const char* k, int n, const char* prefix) {
+      auto tx  = ses->start_transaction(0);
+      auto sub = ses->start_write_transaction(ses->create_temporary_tree());
+      for (int i = 0; i < n; ++i) sub.upsert(std::string(prefix) + std::to_string(i), "v");
+      tx.upsert_subtree(k, sub.get_tree());
+      tx.commit();
+   };
+   attach("tree", 5, "first");
+   CHECK(ses->get_root(0).get_subtree("tree").snapshot_cursor().count_keys() == 5);
+   attach("tree", 9, "second");  // replace
+   auto sub = ses->get_root(0).get_subtree("tree");
+   REQUIRE(bool(sub));
+   CHECK(sub.snapshot_cursor().count_keys() == 9);            // new content
+   CHECK(sub.template get<std::string>("first0").has_value() == false);  // old gone
+   CHECK(sub.template get<std::string>("second0") == S("v"));
+}
+
+// removing a subtree key frees the whole subtree — allocation returns to baseline (no leak).
+TEMPLATE_TEST_CASE("conformance: subtree remove no leak", "[conformance][leak]", psitri_policy, heart_policy)
+{
+   auto db   = TestType::database::open(conf_dir(TestType::nm));
+   auto ses  = db->start_write_session();
+   const auto base = ses->get_total_allocated_objects();
+   {
+      auto tx  = ses->start_transaction(0);
+      auto sub = ses->start_write_transaction(ses->create_temporary_tree());
+      for (int i = 0; i < 50; ++i) sub.upsert("s" + std::to_string(i), "value");
+      tx.upsert_subtree("tree", sub.get_tree());
+      tx.commit();
+   }
+   CHECK(ses->get_total_allocated_objects() > base);  // it grew
+   {
+      auto tx = ses->start_transaction(0);
+      tx.remove("tree");
+      tx.commit();
+   }
+   REQUIRE(db->wait_for_compactor());
+   CHECK(ses->get_total_allocated_objects() == base);  // each engine back to its own baseline
+}
+
 // abort discards a stored subtree (its key never appears).
 TEMPLATE_TEST_CASE("conformance: abort discards subtree", "[conformance]", psitri_policy, heart_policy)
 {

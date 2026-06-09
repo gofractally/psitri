@@ -796,7 +796,7 @@ int main(int argc, char** argv)
          double rqns = 0, sqns = 0;
          if (base > 0)
          {
-            // 100k RANDOM-order queries of random existing keys (scattered, cold).
+            // 100k RANDOM point lookups of existing keys (scattered keys → cold, random tree paths).
             std::string_view v;
             uint64_t         hits = 0;
             auto             r0 = now();
@@ -806,13 +806,23 @@ int main(int argc, char** argv)
                if (t.find(kspan(rand_key(j)), v) && getv(v) == j) ++hits;
             }
             rqns = ns(r0, now(), sample);
-            // 100k SEQUENTIAL-index queries: keys rand_key(0..sample) in order (same set each chunk).
-            auto s0 = now();
-            for (uint64_t j = 0; j < sample; ++j)
-               if (t.find(kspan(rand_key(j)), v) && getv(v) == j) ++hits;
-            sqns = ns(s0, now(), sample);
-            if (hits != 2 * sample) std::printf("  [WARN] query hits=%llu/%llu\n",
-                                                (unsigned long long)hits, (unsigned long long)(2 * sample));
+            if (hits != sample) std::printf("  [WARN] rand hits=%llu/%llu\n",
+                                            (unsigned long long)hits, (unsigned long long)sample);
+            // 100k SEQUENTIAL in-order traversal from a random start (adjacent leaves, warm path) —
+            // the real sequential access pattern. NOTE: keys are hashes, so "sequential index" is
+            // NOT sequential in the tree; an in-order cursor walk is.
+            std::string      ck;
+            std::string_view sv;
+            uint64_t         startk = rand_key(qrng() % base);
+            auto             s0 = now();
+            bool             ok = t.lower_bound(kspan(startk), ck, sv);
+            uint64_t         steps = 0;
+            for (uint64_t i = 0; i < sample && ok; ++i)
+            {
+               ++steps;
+               ok = t.upper_bound(std::string_view(ck.data(), ck.size()), ck, sv);  // next key >
+            }
+            if (steps) sqns = ns(s0, now(), steps);
          }
          auto i0 = now();
          for (uint64_t i = base; i < base + batch && i < N; ++i)

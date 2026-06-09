@@ -628,12 +628,10 @@ TEST_CASE("radix_engine: first-class subtree values", "[radix_engine][cursor][su
    for (auto& [k, v] : parent) t.upsert(k, v);
 
    const std::map<std::string, std::string> subkeys = {{"one", "1"}, {"three", "3"}, {"two", "2"}};
-   sal::ptr_address subroot{};
    {
       auto sub = t.create_subtree();
       for (auto& [k, v] : subkeys) sub.upsert(k, v);
-      subroot = sub.root();
-      t.upsert_subtree("mid", sub.root());  // attach (retains); sub then releases its own ref
+      t.upsert_subtree("mid", std::move(sub));  // attach (consumes the handle)
    }
 
    // (1) discrimination: "mid" is a subtree, not a byte value; byte keys are not subtrees.
@@ -643,7 +641,12 @@ TEST_CASE("radix_engine: first-class subtree values", "[radix_engine][cursor][su
    CHECK_FALSE(t.find("mid", vv));  // a subtree is not a byte value
    CHECK(t.is_subtree("mid"));
    CHECK_FALSE(t.is_subtree("alpha"));
-   CHECK(t.get_subtree("mid") == subroot);
+   {
+      auto sh = t.get_subtree("mid");  // a handle, not a ptr_address
+      REQUIRE(bool(sh));
+      CHECK(sh.count_keys() == 3);
+      CHECK(sh.get<std::string>("two").value_or("") == "2");
+   }
 
    // (2) parent in-order walk: "mid" shows as a subtree, byte keys as bytes, all in key order.
    {
@@ -691,7 +694,7 @@ TEST_CASE("radix_engine: first-class subtree values", "[radix_engine][cursor][su
    {
       auto sub2 = t.create_subtree();
       sub2.upsert("x", "9");
-      t.upsert_subtree("alpha", sub2.root());  // alpha was a byte value
+      t.upsert_subtree("alpha", std::move(sub2));  // alpha was a byte value
    }
    CHECK(t.is_subtree("alpha"));
    const uint64_t before2 = t.object_count();

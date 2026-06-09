@@ -60,6 +60,11 @@ namespace heart::radix
    class radix_tree
    {
      public:
+      class read_handle;  // tree handle (psitri `tree`-equivalent); ptr_address stays internal
+      class cursor;
+      class transaction;
+      class frame;
+      class subtree;
       explicit radix_tree(const std::filesystem::path& dir)
           : _alloc(make_alloc(dir)), _ses(_alloc->get_session())
       {
@@ -117,17 +122,22 @@ namespace heart::radix
       // RAII builder for a detached subtree root. Owns one ref on its root; attaching with
       // upsert_subtree retains a second, so when the handle dies the parent terminal is the sole
       // owner. A handle never attached releases its root → the subtree is freed (no leak).
-      struct subtree
+      class subtree
       {
+         friend class radix_tree;
+         friend class transaction;
+         friend class frame;
          radix_tree*                       _t = nullptr;
          sal::smart_ptr<sal::alloc_header> _root;  // RAII: owns the detached root until attached
-         subtree() = default;
          subtree(radix_tree* t, ptr_address r) noexcept : _t(t), _root(t->session(), r) {}  // adopt
+         ptr_address root() const noexcept { return _root.address(); }       // internal
+         ptr_address consume() noexcept { return _root.take(); }             // give ref to a terminal
+
+        public:
+         subtree()                          = default;
          subtree(subtree&&)                 = default;  // smart_ptr move
          subtree(const subtree&)            = delete;
          subtree& operator=(const subtree&) = delete;
-         ptr_address root() const noexcept { return _root.address(); }
-         ptr_address consume() noexcept { return _root.take(); }  // give the ref to a terminal
          // Insert/update a key in the subtree (COW; the root may change → re-adopt it).
          int upsert(key_view k, value_view v)
          {
@@ -139,21 +149,22 @@ namespace heart::radix
             return _t->_old_value_size;
          }
       };
-      subtree create_subtree() { return subtree{this, make_node<setlist_u8>(bytes{})}; }
+      subtree create_subtree() { return subtree(this, make_node<setlist_u8>(bytes{})); }
 
-      int upsert_subtree(key_view key, ptr_address subtree_root)
+      // Attach a built subtree under `key` (consumes the handle's ref → the terminal owns it).
+      int upsert_subtree(key_view key, subtree&& s)
       {
-         _ses->retain(subtree_root);  // the stored terminal owns one ref on the root
          _ins_value_type = inline_value::vt_subtree;
-         uint32_t raw    = *subtree_root;  // value bytes = the 4-byte root address
+         ptr_address sr  = s.consume();
+         uint32_t    raw = *sr;  // value bytes = the 4-byte root address
          upsert_raw(_root, as_bytes(key),
                     bytes{reinterpret_cast<const uint8_t*>(&raw), sizeof(raw)});
          _ins_value_type = inline_value::vt_bytes;
          return _old_value_size;
       }
-      // Is the value at `key` a subtree?  get_subtree returns its root (null if absent/not subtree).
+      // Is the value at `key` a subtree?  get_subtree returns it as a handle (falsy if absent).
       bool        is_subtree(key_view key);   // defined out-of-line (needs cursor)
-      ptr_address get_subtree(key_view key);  // defined out-of-line (needs cursor)
+      read_handle get_subtree(key_view key);  // defined out-of-line (needs cursor)
 
      private:
       // Shared insert body for upsert/upsert_subtree/subtree::upsert (value-type already stashed).
@@ -1498,14 +1509,19 @@ namespace heart::radix
       // the next navigation). Reverse (prev/last/seek_end) is the symmetric walk, still TODO.
       class cursor
       {
+         friend class radix_tree;
+         friend class read_handle;
+         // Cursor rooted at an arbitrary node in the same allocator (a subtree root). Pins it.
+         // Private: callers reach it through a handle (get_root / subtree_cursor / snapshot_cursor),
+         // never by passing a raw ptr_address — ptr_address stays internal (psitri-shaped API).
+         cursor(radix_tree* t, ptr_address root) noexcept
+             : _t(t), _root(t->session(), root, /*retain=*/true)
+         {
+         }
+
         public:
          explicit cursor(radix_tree* t) noexcept
              : _t(t), _root(t->session(), t->root_addr(), /*retain=*/true)
-         {
-         }
-         // Cursor rooted at an arbitrary node in the same allocator (a subtree root). Pins it.
-         cursor(radix_tree* t, ptr_address root) noexcept
-             : _t(t), _root(t->session(), root, /*retain=*/true)
          {
          }
 
@@ -1587,14 +1603,10 @@ namespace heart::radix
          bool       is_end() const noexcept { return !_valid && _end >= 0; }
          bool       is_rend() const noexcept { return !_valid && _end < 0; }
          key_view   key() const noexcept { return key_view(reinterpret_cast<const char*>(_kbuf), _klen); }
-         // ── first-class subtree values ──
+         // ── first-class subtree values ── (handles only; ptr_address stays internal)
          bool        is_subtree() const noexcept { return _valid && _is_subtree; }  // value is a subtree
-         ptr_address subtree_addr() const noexcept { return _subtree; }             // its root (raw)
-         sal::smart_ptr<sal::alloc_header> subtree() const                          // pinned root
-         {
-            return sal::smart_ptr<sal::alloc_header>(_t->session(), _subtree, /*retain=*/true);
-         }
-         cursor subtree_cursor() const { return cursor(_t, _subtree); }  // iterate the nested tree
+         read_handle subtree() const;                                    // the nested tree (handle)
+         cursor      subtree_cursor() const { return cursor(_t, _subtree); }  // iterate it
          template <class F>
          void get_value(F&& fn) const { fn(_val); }
          template <class T = std::string>
@@ -2005,15 +2017,23 @@ namespace heart::radix
       // working root and restore it on abort.
       static constexpr uint32_t num_roots = 512;
 
-      // A read-only view of a root (or subtree root). Falsy if empty.
-      struct read_handle
+      // A read-only TREE HANDLE over a root (or subtree root) — the psitri `tree`-equivalent.
+      // Holds a ptr_address internally but never exposes it; reads go through cursors it makes.
+      class read_handle
       {
+         friend class radix_tree;
+         friend class cursor;
+         friend class transaction;
+         friend class frame;
          radix_tree* _t    = nullptr;
          ptr_address _root = sal::null_ptr_address;
-         explicit    operator bool() const noexcept { return _root != sal::null_ptr_address; }
-         ptr_address root() const noexcept { return _root; }
-         cursor      snapshot_cursor() const { return cursor(_t, _root); }
-         uint64_t    count_keys() const
+         read_handle(radix_tree* t, ptr_address r) noexcept : _t(t), _root(r) {}
+
+        public:
+         read_handle()                          = default;
+         explicit operator bool() const noexcept { return _root != sal::null_ptr_address; }
+         cursor   snapshot_cursor() const { return cursor(_t, _root); }
+         uint64_t count_keys() const
          {
             if (_root == sal::null_ptr_address) return 0;
             cursor c(_t, _root);
@@ -2030,7 +2050,7 @@ namespace heart::radix
             if (_root == sal::null_ptr_address) return {_t, sal::null_ptr_address};
             cursor c(_t, _root);
             if (c.find(k) || !c.is_subtree()) return {_t, sal::null_ptr_address};
-            return {_t, c.subtree_addr()};
+            return c.subtree();  // a handle, not an address
          }
          template <class T = std::string>
          std::optional<T> get(key_view k) const
@@ -2042,7 +2062,6 @@ namespace heart::radix
       };
       read_handle get_root(uint32_t idx) { return {this, root_slot(idx)}; }
 
-      class frame;
       class transaction
       {
          friend class radix_tree;
@@ -3837,12 +3856,16 @@ namespace heart::radix
       cursor c(this);
       return !c.find(key) && c.is_subtree();  // find() returns is_end (true on miss)
    }
-   inline ptr_address radix_tree::get_subtree(key_view key)
+   inline radix_tree::read_handle radix_tree::get_subtree(key_view key)
    {
       cursor c(this);
       if (c.find(key) || !c.is_subtree())
-         return sal::null_ptr_address;
-      return c.subtree_addr();
+         return {};  // empty handle
+      return c.subtree();
+   }
+   inline radix_tree::read_handle radix_tree::cursor::subtree() const
+   {
+      return read_handle(_t, _subtree);  // a handle, not a raw address (read_handle friends cursor)
    }
    inline radix_tree::frame radix_tree::transaction::sub_transaction()
    {

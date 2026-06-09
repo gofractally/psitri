@@ -621,6 +621,115 @@ TEST_CASE("radix_engine: transactions, savepoints, multi-root", "[radix_engine][
    CHECK(t.object_count() == before);  // aborted subtree fully released
 }
 
+// Regression gate for the collision-child subtree double-free: many prefix-sharing subtree keys
+// force the root through tier transitions / prefix-splits / collisions while it holds subtree
+// leaves — the path that re-created an existing subtree terminal from its value bytes without
+// retaining the root. Must be build-di clean (no double-free) and every subtree readable.
+TEST_CASE("radix_engine: many subtrees across tier transitions (no double-free)",
+          "[radix_engine][subtree]")
+{
+   radix_tree                 t(tmp("heart_subtree_scale"));
+   std::map<std::string, int> oracle;
+   std::mt19937_64            rng(0x5);
+   for (int i = 0; i < 1500; ++i)
+   {
+      std::string k;
+      for (int j = 0, len = 1 + int(rng() % 9); j < len; ++j) k.push_back(char('a' + int(rng() % 4)));
+      if (!oracle.emplace(k, i).second) continue;
+      auto s = t.create_subtree();
+      s.upsert("v", std::to_string(i));
+      t.upsert_subtree(k, std::move(s));
+   }
+   int ok = 0;
+   for (auto& [k, i] : oracle)
+   {
+      auto sh = t.get_subtree(k);
+      if (sh && sh.get<std::string>("v").value_or("") == std::to_string(i)) ++ok;
+   }
+   CHECK(ok == int(oracle.size()));
+   CHECK(t.get_root(0).count_keys() == oracle.size());
+}
+
+// tree_handle: in-place subtree editing (open_subtree/create_subtree) with bottom-up commit,
+// dedup, nesting, and multi-root — psitri's tree_handle model.
+TEST_CASE("radix_engine: tree_handle open/create subtree, nested, multi-root",
+          "[radix_engine][tree_handle]")
+{
+   radix_tree t(tmp("heart_tree_handle"));
+   {
+      auto  tx = t.start_transaction(0);
+      auto& s  = tx.create_subtree("child");
+      s.upsert("a", "1");
+      s.upsert("b", "2");
+      tx.upsert("data", "root");
+      tx.commit();
+   }
+   {
+      auto  tx = t.start_transaction(0);
+      auto& s  = tx.open_subtree("child");
+      CHECK(s.get<std::string>("a").value_or("") == "1");
+      s.upsert("c", "3");
+      s.remove("a");
+      tx.commit();
+   }
+   {
+      auto sh = t.get_root(0).get_subtree("child");
+      REQUIRE(bool(sh));
+      CHECK(sh.count_keys() == 2);  // b, c
+      CHECK(sh.get<std::string>("c").value_or("") == "3");
+      CHECK_FALSE(sh.get<std::string>("a").has_value());
+      CHECK(t.get_root(0).get<std::string>("data").value_or("") == "root");
+   }
+   {  // dedup: same key twice → same handle
+      auto  tx = t.start_transaction(0);
+      auto& s1 = tx.open_subtree("child");
+      s1.upsert("x", "mod");
+      auto& s2 = tx.open_subtree("child");
+      CHECK(s2.get<std::string>("x").value_or("") == "mod");
+      tx.commit();
+   }
+   CHECK(t.get_root(0).get_subtree("child").get<std::string>("x").value_or("") == "mod");
+   {  // nested: create inner within a created outer (bottom-up write-back)
+      auto  tx    = t.start_transaction(0);
+      auto& outer = tx.create_subtree("outer");
+      outer.upsert("od", "hi");
+      auto& inner = outer.create_subtree("inner");
+      inner.upsert("deep", "v");
+      tx.commit();
+   }
+   {
+      auto outer = t.get_root(0).get_subtree("outer");
+      REQUIRE(bool(outer));
+      CHECK(outer.get<std::string>("od").value_or("") == "hi");
+      auto inner = outer.get_subtree("inner");
+      REQUIRE(bool(inner));
+      CHECK(inner.get<std::string>("deep").value_or("") == "v");
+   }
+   {  // multiple subtrees in one txn
+      auto  tx = t.start_transaction(0);
+      auto& s1 = tx.create_subtree("m1");
+      s1.upsert("p", "10");
+      auto& s2 = tx.create_subtree("m2");
+      s2.upsert("q", "20");
+      tx.commit();
+   }
+   CHECK(t.get_root(0).get_subtree("m1").get<std::string>("p").value_or("") == "10");
+   CHECK(t.get_root(0).get_subtree("m2").get<std::string>("q").value_or("") == "20");
+   {  // multi-root: subtree in additional root 5, isolated from root 0
+      auto  tx = t.start_transaction(0);
+      tx.upsert("in0", "x");
+      auto& r5 = tx.open_root(5);
+      r5.upsert("top", "5data");
+      auto& nested = r5.create_subtree("nested");
+      nested.upsert("ik", "iv");
+      tx.commit();
+   }
+   CHECK(t.get_root(5).get<std::string>("top").value_or("") == "5data");
+   CHECK(t.get_root(5).get_subtree("nested").get<std::string>("ik").value_or("") == "iv");
+   CHECK(t.get_root(0).get<std::string>("in0").value_or("") == "x");
+   CHECK_FALSE(t.get_root(5).get<std::string>("in0").has_value());
+}
+
 TEST_CASE("radix_engine: first-class subtree values", "[radix_engine][cursor][subtree]")
 {
    radix_tree t(tmp("heart_subtree"));

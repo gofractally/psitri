@@ -20,9 +20,13 @@
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 #include <sal/allocator.hpp>
 #include <sal/allocator_session_impl.hpp>
@@ -60,7 +64,8 @@ namespace heart::radix
    class radix_tree
    {
      public:
-      class read_handle;  // tree handle (psitri `tree`-equivalent); ptr_address stays internal
+      class read_handle;  // read-only tree handle (psitri `tree`-equivalent); ptr_address internal
+      class tree_handle;  // mutable subtree editor (open_subtree/create_subtree, bottom-up commit)
       class cursor;
       class transaction;
       class frame;
@@ -2072,34 +2077,60 @@ namespace heart::radix
       };
       read_handle get_root(uint32_t idx) { return {this, root_slot(idx)}; }
 
-      class transaction
+      // A MUTABLE tree editor (psitri tree_handle): accumulates COW changes to a (sub)tree's working
+      // root and lazily opens child subtrees, which are written back BOTTOM-UP when the owning
+      // transaction commits. Reached via transaction::primary()/open_root() and
+      // open_subtree()/create_subtree(); never constructed with a raw ptr_address by users.
+      class tree_handle
       {
          friend class radix_tree;
+         friend class transaction;
          friend class frame;
          using root_ptr = sal::smart_ptr<sal::alloc_header>;
-         radix_tree* _t   = nullptr;
-         uint32_t    _idx = 0;
-         root_ptr    _working;  // RAII: owns the COW working root; dtor releases (auto-rollback)
-         bool        _open = false;
-         transaction(radix_tree* t, uint32_t idx)
-             : _t(t), _idx(idx), _working(t->session(), t->root_slot(idx), /*inc_ref=*/true), _open(true)
+         radix_tree* _t = nullptr;
+         root_ptr    _working;  // this (sub)tree's COW working root (empty = null)
+         struct open_child
+         {
+            std::string                  key;
+            std::unique_ptr<tree_handle> h;
+         };
+         std::vector<open_child> _children;  // opened subtrees (txn-level bookkeeping, not a hot path)
+
+         tree_handle(radix_tree* t, ptr_address base, bool retain)
+             : _t(t), _working(t->session(), base, retain)
          {
          }
-         // Take the working root out for an engine COW (engine releases old / assigns new), then
-         // re-adopt the result — no manual retain/release in the transaction body.
          ptr_address begin_write()
          {
             ptr_address w = _working.take();
             if (w == sal::null_ptr_address) w = _t->make_node<setlist_u8>(bytes{});
             return w;
          }
-         void end_write(ptr_address w) { _working = root_ptr(_t->session(), w); }  // re-adopt (no inc)
+         void end_write(ptr_address w) { _working = root_ptr(_t->session(), w); }
+         // Write every opened child back into _working (deepest first), then yield the final root.
+         root_ptr flush()
+         {
+            for (auto& c : _children)
+            {
+               root_ptr child = c.h->flush();   // recurse bottom-up
+               _t->_ins_value_type = inline_value::vt_subtree;
+               ptr_address sr  = child.take();  // consume the child's ref → the terminal owns it
+               uint32_t    raw = *sr;
+               ptr_address w   = begin_write();
+               _t->upsert_raw(w, as_bytes(c.key),
+                              bytes{reinterpret_cast<const uint8_t*>(&raw), sizeof(raw)});
+               _t->_ins_value_type = inline_value::vt_bytes;
+               end_write(w);
+            }
+            _children.clear();
+            return std::move(_working);
+         }
 
         public:
-         transaction(transaction&&) noexcept            = default;  // smart_ptr move
-         transaction(const transaction&)                = delete;
-         transaction& operator=(const transaction&)     = delete;
-         ~transaction() { if (_open) abort(); }
+         tree_handle()                              = default;
+         tree_handle(tree_handle&&) noexcept        = default;
+         tree_handle(const tree_handle&)            = delete;
+         tree_handle& operator=(const tree_handle&) = delete;
 
          void upsert(key_view k, value_view v)
          {
@@ -2108,17 +2139,7 @@ namespace heart::radix
             _t->upsert_raw(w, as_bytes(k), as_bytes(v));
             end_write(w);
          }
-         void upsert_subtree(key_view k, subtree&& s)
-         {
-            _t->_ins_value_type = inline_value::vt_subtree;
-            ptr_address sr      = s.consume();  // take the handle's ref → the terminal owns it
-            uint32_t    raw     = *sr;          // value bytes = the 4-byte root
-            ptr_address w       = begin_write();
-            _t->upsert_raw(w, as_bytes(k), bytes{reinterpret_cast<const uint8_t*>(&raw), sizeof(raw)});
-            _t->_ins_value_type = inline_value::vt_bytes;
-            end_write(w);
-         }
-         int remove(key_view k)  // psitri parity: >=0 removed, -1 absent
+         int remove(key_view k)
          {
             if (!_working) return -1;
             ptr_address w  = _working.take();
@@ -2126,56 +2147,161 @@ namespace heart::radix
             end_write(w);
             return ok ? 0 : -1;
          }
-         read_handle handle() { return {_t, _working.address()}; }  // non-owning view (null-safe reads)
-         cursor      snapshot_cursor() { return handle().snapshot_cursor(); }
-         bool        is_subtree(key_view k) { return handle().is_subtree(k); }
-         read_handle get_subtree(key_view k) { return handle().get_subtree(k); }
+         void upsert_subtree(key_view k, subtree&& s)  // attach an already-built detached subtree
+         {
+            _t->_ins_value_type = inline_value::vt_subtree;
+            ptr_address sr  = s.consume();
+            uint32_t    raw = *sr;
+            ptr_address w   = begin_write();
+            _t->upsert_raw(w, as_bytes(k), bytes{reinterpret_cast<const uint8_t*>(&raw), sizeof(raw)});
+            _t->_ins_value_type = inline_value::vt_bytes;
+            end_write(w);
+         }
+         // Open an existing subtree for in-place editing (deduped; written back on commit).
+         tree_handle& open_subtree(key_view k)
+         {
+            for (auto& c : _children)
+               if (c.key == k) return *c.h;
+            read_handle rh{_t, _working.address()};
+            read_handle sh   = rh.get_subtree(k);   // current child root (handle; empty if absent)
+            ptr_address base = sh._root;             // friend access; null if not a subtree
+            _children.push_back({std::string(k),
+                                 std::unique_ptr<tree_handle>(new tree_handle(_t, base, /*retain=*/true))});
+            return *_children.back().h;
+         }
+         tree_handle& create_subtree(key_view k)  // create a new empty subtree (deduped)
+         {
+            for (auto& c : _children)
+               if (c.key == k) return *c.h;
+            _children.push_back(
+                {std::string(k),
+                 std::unique_ptr<tree_handle>(new tree_handle(_t, sal::null_ptr_address, false))});
+            return *_children.back().h;
+         }
+         // Reads reflect this handle's working root (an opened child's edits are seen via the child
+         // handle, psitri-style — read its own working, not the parent's not-yet-flushed copy).
+         read_handle handle() const { return {_t, _working.address()}; }
+         cursor      snapshot_cursor() const { return handle().snapshot_cursor(); }
+         uint64_t    count_keys() const { return handle().count_keys(); }
+         bool        is_subtree(key_view k) const { return handle().is_subtree(k); }
+         read_handle get_subtree(key_view k) const { return handle().get_subtree(k); }
          template <class T = std::string>
-         std::optional<T> get(key_view k) { return handle().template get<T>(k); }
+         std::optional<T> get(key_view k) const { return handle().template get<T>(k); }
+      };
+
+      // An atomic transaction over one or more roots. Owns a primary tree_handle (the root at
+      // `idx`) plus any additionally opened roots; on commit each handle is flushed bottom-up
+      // (opened subtrees written back into their parents) and the roots published. Abort drops all
+      // working lineages (RAII). Only one writer at a time (engine state is shared under the lock).
+      class transaction
+      {
+         friend class radix_tree;
+         friend class frame;
+         using root_ptr = sal::smart_ptr<sal::alloc_header>;
+         radix_tree* _t           = nullptr;
+         uint32_t    _primary_idx = 0;
+         bool        _open        = false;
+         tree_handle _primary;                                              // the root at _primary_idx
+         std::vector<std::pair<uint32_t, std::unique_ptr<tree_handle>>> _extra;  // open_root(idx)
+         transaction(radix_tree* t, uint32_t idx)
+             : _t(t), _primary_idx(idx), _open(true), _primary(t, t->root_slot(idx), /*retain=*/true)
+         {
+         }
+         void publish(uint32_t idx, root_ptr w)  // swap a flushed working root into its slot
+         {
+            ptr_address& slot = _t->root_slot(idx);
+            root_ptr     old(_t->session(), slot);  // ADOPT the pre-image → released on scope exit
+            slot = w.take();
+         }
+
+        public:
+         transaction(transaction&&) noexcept            = default;
+         transaction(const transaction&)                = delete;
+         transaction& operator=(const transaction&)     = delete;
+         ~transaction() { if (_open) abort(); }
+
+         // ── primary-root mutations / reads (forward to the primary handle) ──
+         void upsert(key_view k, value_view v) { _primary.upsert(k, v); }
+         int  remove(key_view k) { return _primary.remove(k); }
+         void upsert_subtree(key_view k, subtree&& s) { _primary.upsert_subtree(k, std::move(s)); }
+         tree_handle& primary() { return _primary; }
+         tree_handle& open_subtree(key_view k) { return _primary.open_subtree(k); }
+         tree_handle& create_subtree(key_view k) { return _primary.create_subtree(k); }
+         read_handle  handle() { return _primary.handle(); }
+         cursor       snapshot_cursor() { return _primary.snapshot_cursor(); }
+         bool         is_subtree(key_view k) { return _primary.is_subtree(k); }
+         read_handle  get_subtree(key_view k) { return _primary.get_subtree(k); }
+         template <class T = std::string>
+         std::optional<T> get(key_view k) { return _primary.template get<T>(k); }
+
+         // ── additional roots (multi-root transaction) ──
+         tree_handle& open_root(uint32_t idx)
+         {
+            if (idx == _primary_idx) return _primary;
+            for (auto& [i, h] : _extra)
+               if (i == idx) return *h;
+            _extra.emplace_back(idx, std::unique_ptr<tree_handle>(
+                                         new tree_handle(_t, _t->root_slot(idx), /*retain=*/true)));
+            return *_extra.back().second;
+         }
 
          void commit()
          {
             if (!_open) return;
-            ptr_address& slot = _t->root_slot(_idx);
-            root_ptr     old(_t->session(), slot);  // ADOPT the pre-image → released when `old` dies
-            slot  = _working.take();                // publish the working root (transfer ref out)
+            publish(_primary_idx, _primary.flush());      // flush bottom-up + publish primary
+            for (auto& [i, h] : _extra) publish(i, h->flush());
+            _extra.clear();
             _open = false;
          }
          void abort() noexcept
          {
             if (!_open) return;
-            _working.release();  // RAII drop of the working lineage
+            _primary._working.release();  // drop the working lineage + opened children (RAII)
+            _primary._children.clear();
+            _extra.clear();
             _open = false;
          }
          frame sub_transaction();  // savepoint (defined after frame)
       };
       transaction start_transaction(uint32_t idx = 0) { return transaction(this, idx); }
 
-      // A savepoint over a transaction: holds a retained copy of the working root; commit drops it,
-      // abort restores the transaction's working root to the saved one (LIFO nesting). All RAII.
+      // A savepoint over a transaction's PRIMARY handle: snapshots its working root + open-child
+      // count; abort restores the working root and drops children opened during the frame (LIFO).
       class frame
       {
          friend class transaction;
          using root_ptr = sal::smart_ptr<sal::alloc_header>;
          transaction* _tx = nullptr;
-         root_ptr     _sp;  // retained copy of working at savepoint time
+         root_ptr     _sp;            // retained copy of primary working at savepoint
+         size_t       _nchild = 0;    // primary open-child count at savepoint
          bool         _active = false;
-         frame(transaction* tx, root_ptr sp) : _tx(tx), _sp(std::move(sp)), _active(true) {}
+         frame(transaction* tx, root_ptr sp, size_t nchild)
+             : _tx(tx), _sp(std::move(sp)), _nchild(nchild), _active(true)
+         {
+         }
 
         public:
-         frame(frame&&) noexcept            = default;
-         frame(const frame&)                = delete;
-         frame& operator=(const frame&)     = delete;
+         frame(frame&&) noexcept        = default;
+         frame(const frame&)            = delete;
+         frame& operator=(const frame&) = delete;
          ~frame() { if (_active) abort(); }
          void upsert(key_view k, value_view v) { _tx->upsert(k, v); }
          void upsert_subtree(key_view k, subtree&& s) { _tx->upsert_subtree(k, std::move(s)); }
          int  remove(key_view k) { return _tx->remove(k); }
-         bool is_subtree(key_view k) { return _tx->is_subtree(k); }
-         read_handle get_subtree(key_view k) { return _tx->get_subtree(k); }
+         tree_handle& open_subtree(key_view k) { return _tx->open_subtree(k); }
+         tree_handle& create_subtree(key_view k) { return _tx->create_subtree(k); }
+         bool         is_subtree(key_view k) { return _tx->is_subtree(k); }
+         read_handle  get_subtree(key_view k) { return _tx->get_subtree(k); }
          template <class T = std::string>
          std::optional<T> get(key_view k) { return _tx->template get<T>(k); }
-         void commit() noexcept { _sp.release(); _active = false; }              // keep working
-         void abort() noexcept { _tx->_working = std::move(_sp); _active = false; }  // restore working
+         void commit() noexcept { _sp.release(); _active = false; }  // keep working + children
+         void abort() noexcept
+         {
+            _tx->_primary._working = std::move(_sp);  // restore working
+            if (_tx->_primary._children.size() > _nchild)
+               _tx->_primary._children.resize(_nchild);  // drop children opened in the frame
+            _active = false;
+         }
       };
 
      private:
@@ -2522,8 +2648,10 @@ namespace heart::radix
          // Is this branch a TERMINAL (an inline tail, or a pointer to a leaf_node)?
          if (is_terminal_branch(sa))
          {
-            bytes esuf, eval;  // zero-copy views into the node (stable arena, consumed pre-COW)
-            term_view(cn, sa, esuf, eval);
+            const inline_value* eiv  = term_iv(cn, sa);  // existing terminal (suffix+value+type)
+            bytes               esuf = {eiv->data, size_t(eiv->suffix_len)};
+            bytes               eval = {eiv->data + eiv->suffix_len, size_t(eiv->value_len)};
+            const uint8_t       evt  = eiv->value_type;
             if (esuf.size() == suf.size() &&
                 std::memcmp(esuf.data(), suf.data(), esuf.size()) == 0)  // same key → update
             {
@@ -2545,7 +2673,7 @@ namespace heart::radix
             // diverge → child holding both continuations (a wide setlist_u32 when the gate
             // is on and both suffixes have ≥4 bytes past the common prefix; else u8)
             int           cp    = common_prefix_len(esuf, suf);
-            ptr_address   child = make_collision_child(esuf, eval, suf, val, cp, chint);
+            ptr_address   child = make_collision_child(esuf, eval, evt, suf, val, cp, chint);
             smart_address csa   = smart_address::from_pointer(child);
             N*            n   = cow<N>(ref, addr);  // ref valid: make_collision_child didn't COW addr
             rr_diverge<N>(n, range_of(b));  // big tier: privatize range before replace
@@ -2614,19 +2742,39 @@ namespace heart::radix
       // Build the child for a terminal collision: a wide setlist_u32 when the gate is on
       // AND both diverging suffixes have ≥4 bytes past the common prefix (so each forms a
       // full 4-byte stem); otherwise the byte-radix setlist_u8 (unchanged behavior).
-      ptr_address make_collision_child(bytes esuf, bytes eval, bytes suf, bytes val, int cp,
-                                       sal::alloc_hint hint)
+      // Build a child holding the EXISTING terminal (esuf,eval, value_type=evt) + the NEW key
+      // (suf,val, value_type = the caller's stashed _ins_value_type). The existing terminal is
+      // being MOVED here while its old leaf is about to be released; if it's a subtree, its value
+      // bytes are a shared root address — retain it once so the new copy keeps it alive (the old
+      // leaf's release then nets to the right count). Each entry is stamped with its OWN value_type.
+      ptr_address make_collision_child(bytes esuf, bytes eval, uint8_t evt, bytes suf, bytes val,
+                                       int cp, sal::alloc_hint hint)
       {
+         const uint8_t nvt = _ins_value_type;  // the NEW key's value-type (caller's stash)
+         if (evt == inline_value::vt_subtree)  // moved subtree keeps its root alive across the move
+         {
+            uint32_t raw = 0;
+            std::memcpy(&raw, eval.data(), sizeof(raw));
+            _ses->retain(sal::ptr_address(raw));
+         }
+         ptr_address child;
          if (_wide_stems && int(esuf.size()) - cp >= 4 && int(suf.size()) - cp >= 4)
          {
-            ptr_address child = make_node<setlist_u32>(esuf.subspan(0, size_t(cp)), hint);
+            child = make_node<setlist_u32>(esuf.subspan(0, size_t(cp)), hint);
+            _ins_value_type = evt;
             add_wide_entry(child, esuf.subspan(size_t(cp)), eval, hint);
+            _ins_value_type = nvt;
             add_wide_entry(child, suf.subspan(size_t(cp)), val, hint);
-            return child;
          }
-         ptr_address child = make_node<setlist_u8>(esuf.subspan(0, size_t(cp)), hint);
-         add_continuation(child, esuf.subspan(size_t(cp)), eval, hint);
-         add_continuation(child, suf.subspan(size_t(cp)), val, hint);
+         else
+         {
+            child = make_node<setlist_u8>(esuf.subspan(0, size_t(cp)), hint);
+            _ins_value_type = evt;
+            add_continuation(child, esuf.subspan(size_t(cp)), eval, hint);
+            _ins_value_type = nvt;
+            add_continuation(child, suf.subspan(size_t(cp)), val, hint);
+         }
+         _ins_value_type = nvt;  // restore the caller's stash
          return child;
       }
       // Add one entry to a fresh wide (u32, consume-4) node: 4-byte stem + inline remainder.
@@ -2693,8 +2841,10 @@ namespace heart::radix
 
          if (is_terminal_branch(sa))
          {
-            bytes esuf, eval;  // zero-copy views into the node (stable arena, consumed pre-COW)
-            term_view(cn, sa, esuf, eval);
+            const inline_value* eiv  = term_iv(cn, sa);  // existing terminal (suffix+value+type)
+            bytes               esuf = {eiv->data, size_t(eiv->suffix_len)};
+            bytes               eval = {eiv->data + eiv->suffix_len, size_t(eiv->value_len)};
+            const uint8_t       evt  = eiv->value_type;
             if (esuf.size() == suf.size() &&
                 std::memcmp(esuf.data(), suf.data(), esuf.size()) == 0)  // same key → update
             {
@@ -2713,7 +2863,7 @@ namespace heart::radix
                return addr;
             }
             int           cp    = common_prefix_len(esuf, suf);
-            ptr_address   child = make_collision_child(esuf, eval, suf, val, cp, chint);
+            ptr_address   child = make_collision_child(esuf, eval, evt, suf, val, cp, chint);
             N*            w     = cow<N>(ref, addr);  // ref valid (same-key make_value not taken here)
             if (sa.is_pointer())
                _ses->release(sa.as_pointer());
@@ -3879,6 +4029,7 @@ namespace heart::radix
    }
    inline radix_tree::frame radix_tree::transaction::sub_transaction()
    {
-      return frame(this, _working);  // copies the working smart_ptr → retains the savepoint
+      // snapshot the primary handle's working root (copy → retain) + its open-child count
+      return frame(this, _primary._working, _primary._children.size());
    }
 }  // namespace heart::radix

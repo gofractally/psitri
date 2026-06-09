@@ -38,6 +38,114 @@ namespace
    {
       return std::filesystem::temp_directory_path() / name;
    }
+
+   // GENERAL ordered-surface correctness: validates EVERY read surface of a tree against a
+   // std::map oracle — point find, for_each_inorder, the cursor (forward seek_begin/next,
+   // reverse seek_last/prev, lower_bound/upper_bound), and tree-level lower_bound/upper_bound.
+   // Each surface is guarded so an unhandled tier throws into a CHECK rather than aborting,
+   // and reports independently. This is what the suite lacked: the old ordered test drove only
+   // for_each_inorder + tree lower_bound, never the cursor, and never on a bucket tree.
+   void check_ordered_surfaces(radix_tree& t, const std::map<std::string, std::string>& oracle,
+                               const char* ctx)
+   {
+      using kv = std::pair<std::string, std::string>;
+      INFO("context = " << ctx);
+      std::vector<kv> expect(oracle.begin(), oracle.end());  // sorted ground truth
+
+      // (A) point find — distinguishes an INSERT bug from a read/ordering bug.
+      {
+         bool ok = true;
+         for (auto& [k, v] : oracle)
+         {
+            value_view g;
+            if (!t.find(k, g) || std::string(g) != v) { ok = false; break; }
+         }
+         INFO("surface: find");
+         CHECK(ok);
+      }
+      // (B) tree for_each_inorder == sorted oracle.
+      {
+         std::vector<kv> got;
+         bool            threw = false;
+         try { t.for_each_inorder([&](std::string_view k, std::string_view v)
+                                  { got.emplace_back(std::string(k), std::string(v)); }); }
+         catch (const std::exception& e) { threw = true; INFO("threw: " << e.what()); }
+         INFO("surface: for_each_inorder");
+         CHECK_FALSE(threw);
+         CHECK(got == expect);
+      }
+      // (C) cursor forward: seek_begin + next == oracle (keys AND values).
+      {
+         std::vector<kv> got;
+         bool            threw = false;
+         try {
+            radix_tree::cursor c(&t);
+            for (bool end = c.seek_begin(); !end; end = c.next())
+            {
+               std::string vv;
+               c.get_value([&](value_view v) { vv.assign(v.data(), v.size()); });
+               got.emplace_back(std::string(c.key()), vv);
+            }
+         } catch (const std::exception& e) { threw = true; INFO("threw: " << e.what()); }
+         INFO("surface: cursor forward");
+         CHECK_FALSE(threw);
+         CHECK(got == expect);
+      }
+      // (D) cursor reverse: seek_last + prev == reverse(oracle) (keys).
+      {
+         std::vector<std::string> got;
+         bool                     threw = false;
+         try {
+            radix_tree::cursor c(&t);
+            for (bool r = c.seek_last(); !r; r = c.prev()) got.emplace_back(std::string(c.key()));
+         } catch (const std::exception& e) { threw = true; INFO("threw: " << e.what()); }
+         INFO("surface: cursor reverse");
+         CHECK_FALSE(threw);
+         std::vector<std::string> rexpect;
+         for (auto it = expect.rbegin(); it != expect.rend(); ++it) rexpect.push_back(it->first);
+         CHECK(got == rexpect);
+      }
+      // (E) cursor lower_bound and (F) tree lower_bound vs std::map, sampled — incl. the
+      // key-is-a-prefix-of-another-key case (a query that is itself a terminal key).
+      {
+         auto check_q = [&](const std::string& q) {
+            { // cursor lower_bound
+               bool threw = false;
+               try {
+                  radix_tree::cursor c(&t);
+                  bool end = c.lower_bound(q);
+                  auto oi  = oracle.lower_bound(q);
+                  CHECK(end == (oi == oracle.end()));
+                  if (!end && oi != oracle.end()) CHECK(std::string(c.key()) == oi->first);
+               } catch (const std::exception& e) { threw = true; INFO("threw: " << e.what()); }
+               INFO("surface: cursor lower_bound, q.size=" << q.size());
+               CHECK_FALSE(threw);
+            }
+            { // tree lower_bound
+               bool threw = false;
+               try {
+                  std::string ck; value_view cv;
+                  bool got = t.lower_bound(q, ck, cv);
+                  auto oi  = oracle.lower_bound(q);
+                  CHECK(got == (oi != oracle.end()));
+                  if (got && oi != oracle.end()) { CHECK(ck == oi->first); CHECK(std::string(cv) == oi->second); }
+               } catch (const std::exception& e) { threw = true; INFO("threw: " << e.what()); }
+               INFO("surface: tree lower_bound, q.size=" << q.size());
+               CHECK_FALSE(threw);
+            }
+         };
+         int s = 0;
+         for (auto& [k, v] : oracle)
+         {
+            if (s++ % 11) continue;  // sample to keep it quick
+            check_q(k);                                          // present key
+            if (!k.empty()) check_q(k.substr(0, k.size() - 1));  // a PREFIX of a key
+            check_q(k + '\0');                                   // just past a key
+         }
+         check_q("");                                            // before everything
+         check_q(std::string(20, char(0xFF)));                   // past everything
+      }
+   }
 }  // namespace
 
 TEST_CASE("radix_engine: random u64 keys, variable-size values vs std::map", "[radix_engine]")
@@ -325,6 +433,78 @@ TEST_CASE("radix_engine: ordered container — in-order, lower_bound, upper_boun
       for (int b = 0; b < 256; ++b)
          check(std::string(1, char(uint8_t(b))));
    }
+}
+
+
+// Drives ALL ordered surfaces (find/inorder/cursor fwd+rev/lower_bound) against std::map on the
+// RADIX tiers, in plain and wide-stem mode, over data that DENSELY creates keys which are
+// prefixes of other keys (the "pre"/"predcb…" families) — the case the old ordered test under-
+// covered. Same data both modes; the only difference is set_wide_stems, so a mode-specific
+// failure is a wide-stem bug.
+TEST_CASE("radix_engine: ordered surfaces correct on radix tiers (plain + wide), prefix-dense",
+          "[radix_engine][cursor]")
+{
+   for (bool wide : {false, true})
+   {
+      radix_tree t(tmp(wide ? "heart_ord_surf_wide" : "heart_ord_surf_plain"));
+      t.set_wide_stems(wide);
+      std::map<std::string, std::string> oracle;
+      std::mt19937_64                    rng(0xBADC0FFEE0DDF00Dull);
+      const int                          N = 8000;
+      for (int i = 0; i < N; ++i)
+      {
+         std::string k;
+         switch (int(rng() % 3))
+         {
+            case 0:
+               for (int j = 0, len = 1 + int(rng() % 12); j < len; ++j)
+                  k.push_back(char(uint8_t(rng())));
+               break;
+            case 1:  // dense short keys → many are prefixes of longer ones in the same family
+               k = "pre";
+               for (int j = 0, len = 1 + int(rng() % 8); j < len; ++j) k.push_back(char('a' + int(rng() % 5)));
+               break;
+            default: k = u64key(hashed(uint64_t(i)));
+         }
+         std::string v = make_value(rng());
+         t.upsert(k, v);
+         oracle[k] = v;
+      }
+      check_ordered_surfaces(t, oracle, wide ? "radix wide" : "radix plain");
+   }
+}
+
+// Drives the SAME ordered surfaces on a BUCKET tree (set_bucket_mode → dense sorted bucket
+// leaves). The old suite never ran ordered ops on a bucket tree at all. ASSERTS buckets exist
+// so coverage can't silently lapse.
+TEST_CASE("radix_engine: ordered surfaces correct on a bucket tree", "[radix_engine][cursor]")
+{
+   radix_tree t(tmp("heart_ord_surf_bucket"));
+   t.set_bucket_mode(true);
+   std::map<std::string, std::string> oracle;
+   std::mt19937_64                    rng(20240608);
+   const int                          N = 20000;
+   for (int i = 0; i < N; ++i)
+   {
+      std::string k;
+      switch (int(rng() % 3))
+      {
+         case 0:
+            for (int j = 0, len = 1 + int(rng() % 12); j < len; ++j) k.push_back(char(uint8_t(rng())));
+            break;
+         case 1:
+            k = "pre";
+            for (int j = 0, len = 1 + int(rng() % 8); j < len; ++j) k.push_back(char('a' + int(rng() % 6)));
+            break;
+         default: k = "commonprefix/" + std::to_string(int(rng() % 4000));
+      }
+      std::string v = make_value(rng());
+      if (oracle.emplace(k, v).second) t.upsert(k, v);  // v1 bucket mode: unique-insert path
+   }
+   auto tc = t.count_tiers();
+   INFO("buckets = " << tc.bucket << " entries " << tc.bucket_entries);
+   REQUIRE(tc.bucket > 0);  // coverage guard: this test MUST exercise buckets
+   check_ordered_surfaces(t, oracle, "bucket mode");
 }
 
 TEST_CASE("radix_engine: overwrite returns prior size + COW commit cycle", "[radix_engine]")

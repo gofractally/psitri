@@ -1165,6 +1165,22 @@ namespace heart::radix
          __builtin_unreachable();
       }
 
+      // Resolve `a` to a bucket leaf, or nullptr if it is a radix node. Buckets are dense sorted
+      // (suffix,value) pages, not radix routers, so the ordered descent/seek/inorder paths handle
+      // them explicitly instead of through dispatch() (which has no bucket adaptor).
+      const bucket_node* bucket_at(ptr_address a)
+      {
+         const sal::alloc_header* b = _ses->get_ref<sal::alloc_header>(a).obj();
+         return b->type() == bucket_node::type_id ? reinterpret_cast<const bucket_node*>(b) : nullptr;
+      }
+      // Append a bucket entry's suffix to kb and view its value (entry order == key order).
+      static value_view bucket_entry(const bucket_node* bn, int i, KB& kb)
+      {
+         const inline_value* iv = bn->entry(i);
+         kb.append(iv->data, iv->suffix_len);
+         return value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len), iv->value_len);
+      }
+
       // Append an entry's stem bytes (+ inline suffix if terminal) and either yield its
       // value (terminal) or descend into its child to that subtree's minimum.
       template <class Ad>
@@ -1194,6 +1210,12 @@ namespace heart::radix
       }
       void descend_min(ptr_address addr, KB& kb, value_view& out)
       {
+         if (const bucket_node* bn = bucket_at(addr))  // bucket subtree → its smallest entry
+         {
+            assert(bn->nent > 0);
+            out = bucket_entry(bn, 0, kb);
+            return;
+         }
          dispatch(addr, [&](auto ad) {
             bytes pfx = ad.prefix();
             kb.append(pfx.data(), pfx.size());
@@ -1293,8 +1315,22 @@ namespace heart::radix
          kb.truncate(save);
          return false;
       }
+      // Seek inside a bucket: the smallest entry whose suffix >= q[depth:] (or > q if strict).
+      bool seek_bucket(const bucket_node* bn, bytes q, uint32_t depth, bool strict, KB& kb,
+                       value_view& out)
+      {
+         const int      avail = int(q.size()) > int(depth) ? int(q.size()) - int(depth) : 0;
+         const uint8_t* s     = q.data() + depth;  // not dereferenced when avail == 0
+         int            i     = bn->lower_bound(s, avail);                  // first suffix >= q
+         if (strict && i < int(bn->nent) && bn->cmp(i, s, avail) == 0) ++i;  // > q for upper_bound
+         if (i >= int(bn->nent)) return false;                             // nothing >= q here
+         out = bucket_entry(bn, i, kb);
+         return true;
+      }
       bool seek(ptr_address addr, bytes q, uint32_t depth, bool strict, KB& kb, value_view& out)
       {
+         if (const bucket_node* bn = bucket_at(addr))
+            return seek_bucket(bn, q, depth, strict, kb, out);
          return dispatch(addr,
                          [&](auto ad) { return seek_in(ad, q, depth, strict, kb, out); });
       }
@@ -1347,6 +1383,17 @@ namespace heart::radix
       template <class Cb>
       void inorder_walk(ptr_address addr, KB& kb, Cb& cb)
       {
+         if (const bucket_node* bn = bucket_at(addr))  // bucket leaf: emit entries in key order
+         {
+            const uint32_t save = kb.len;
+            for (int i = 0; i < int(bn->nent); ++i)
+            {
+               const value_view v = bucket_entry(bn, i, kb);
+               cb(key_view(reinterpret_cast<const char*>(kb.buf), kb.len), v);
+               kb.truncate(save);
+            }
+            return;
+         }
          dispatch(addr, [&](auto ad) { inorder_in(ad, kb, cb); });
       }
 
@@ -1741,6 +1788,20 @@ namespace heart::radix
             uint32_t    depth = 0;
             for (;;)
             {
+               if (const bucket_node* bn = as_bucket(addr))  // path ends in a bucket leaf
+               {
+                  frame& f = _fr[_depth];
+                  f.addr   = addr;
+                  f.klen1  = uint16_t(_klen);
+                  ++_depth;
+                  const int avail = int(key.size()) > int(depth) ? int(key.size()) - int(depth) : 0;
+                  const int i     = bn->lower_bound(key.data() + depth, avail);  // exact key exists
+                  if (i >= int(bn->nent)) { --_depth; _valid = false; return; }  // defensive
+                  f.pos = int16_t(i);
+                  take_bucket_entry(bn, i, f.klen1);
+                  _valid = true;
+                  return;
+               }
                const int r = _t->dispatch(addr, [&](auto ad) -> int {
                   frame& f = _fr[_depth];
                   f.addr   = addr;

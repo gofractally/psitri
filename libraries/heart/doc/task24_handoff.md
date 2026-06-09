@@ -1,5 +1,16 @@
 # Task 24 handoff — wire implicit_ref_pool into the heart radix engine
 
+## ✅ DONE + VALIDATED (working branch `heart-rr2`, off `heart`)
+Steps 1-4 complete (386fc55 / 9230214 / 4741a9b / 5506619). The range-refcount engine works, is
+snapshot-correct (incl. remove), and retires the packed-nibble overflow class.
+VALIDATION (fresh binaries): heart-tests 81/81 release+build-di (incl [remove]/[fuzz] = UAF gate);
+snaptest ISOLATED (update+remove) release+build-di; RELEASE 1M rand incl REMOVE [OK] no overflow
+(the packed-killer); build-di 100k rand [OK]; rrstress 0 MISMATCHES (release 4000 + build-di 1500
+rounds, no double-free/UAF). PERF: worst-case heart ~1509 ns/txn (correct) vs psitri 2939.
+NEXT (optional): a build-di 1M rand soak (slow; covered by release-1M + build-di fuzz+rrstress),
+then merge heart-rr2 → heart and retire the packed scheme (heart-rr-wip + range_refcount.hpp).
+The notes below are the build-it history.
+
 ## PROGRESS (working branch `heart-rr2`, off `heart`)
 - **Step 1 DONE** (`386fc55`): `sal::allocator` owns an `implicit_ref_pool` at `<db>/iref`;
   `allocator_session` forwards `rr_alloc_fresh / rr_alloc_in_region / rr_retain / rr_release /

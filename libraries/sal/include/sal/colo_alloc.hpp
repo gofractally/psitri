@@ -45,6 +45,39 @@ namespace sal
       T*              ptr;
    };
 
+   // ── compact addressing for dense per-node counter sets ────────────────────────────────────
+   // A 32-bit ptr_address splits into a 16-bit REGION (high half, 65536 contiguous slots) and a
+   // 16-bit OFFSET within it. A node that owns N counters stores ONE region + N offsets
+   // (`implicit_ref_addr`, 2 bytes each) instead of N full 4-byte ptr_addresses — the compact
+   // handle that fits the leftover header cacheline. "implicit" because the slot is a refcount
+   // whose pointee (a range's branch-set) is not stored, only counted.
+   using implicit_ref_region                          = uint16_t;
+   using implicit_ref_addr                            = ucc::typed_int<uint16_t, struct implicit_ref_addr_tag>;
+   inline constexpr uint32_t implicit_ref_region_slots = 1u << 16;  // 65536 slots / region
+
+   inline ptr_address combine(implicit_ref_region r, implicit_ref_addr o) noexcept
+   {
+      return ptr_address((uint32_t(r) << 16) | uint32_t(*o));
+   }
+   inline implicit_ref_region region_of(ptr_address a) noexcept
+   {
+      return implicit_ref_region(*a >> 16);
+   }
+   inline implicit_ref_addr offset_of(ptr_address a) noexcept
+   {
+      return implicit_ref_addr(uint16_t(*a));
+   }
+
+   // Hint for the compact path: a region + the sibling offsets already placed there. Unlike
+   // control_block_alloc's span<ptr_address> hint (cacheline-or-global), this prefers the
+   // siblings' CACHELINE, then falls back to anywhere in the SAME REGION (so a node's counters
+   // stay together for small-offset addressing); the caller re-homes only if the region fills.
+   struct implicit_ref_hint
+   {
+      implicit_ref_region                region;
+      std::span<const implicit_ref_addr> within;  // sibling offsets in `region`
+   };
+
    template <typename T>
    class colo_alloc
    {
@@ -192,6 +225,49 @@ namespace sal
                continue;
             if (auto r = try_alloc(a))
                return r;
+         }
+         return std::nullopt;
+      }
+
+      /// Compact-path alloc: co-locate within a region. Try the sibling offsets' cachelines
+      /// first (rotating start), then fall back to ANY free slot in the same region. Returns
+      /// nullopt only if the entire region is full — the caller then picks a new region and
+      /// re-homes its (still-unique, at birth) counters. Never spills outside the region.
+      std::optional<colo_allocation<T>> try_alloc(const implicit_ref_hint& h)
+      {
+         const uint32_t n = uint32_t(h.within.size());
+         if (n)
+         {
+            static thread_local uint32_t s_rot = 0;
+            uint32_t                     idx   = s_rot++ % n;
+            for (uint32_t k = 0; k < n; ++k)
+            {
+               const ptr_address full = combine(h.region, h.within[idx]);
+               if (++idx == n) idx = 0;
+               if (auto a = try_alloc(full))  // cacheline co-location off this sibling
+                  return a;
+            }
+         }
+         return try_alloc_in_region(h.region);  // fall back to anywhere in the region
+      }
+
+      /// Claim any free slot in `region` (65536 slots = 1024 free-list words). nullopt if full
+      /// or the region's backing zone isn't allocated yet.
+      std::optional<colo_allocation<T>> try_alloc_in_region(implicit_ref_region region)
+      {
+         const uint32_t base_slot = uint32_t(region) * implicit_ref_region_slots;
+         if (base_slot / detail::ptrs_per_zone >= num_allocated_zones())
+            return std::nullopt;  // region not backed by an allocated zone
+         const uint32_t w0 = base_slot / 64;
+         const uint32_t nw = implicit_ref_region_slots / 64;  // 1024 words
+         // rotating start within the region to spread fills / cut contention
+         static thread_local uint32_t s_rot = 0;
+         const uint32_t               start = s_rot++ % nw;
+         for (uint32_t i = 0; i < nw; ++i)
+         {
+            const uint32_t w = w0 + ((start + i) % nw);
+            if (auto a = try_claim_in_word(w, ~0ull))
+               return a;
          }
          return std::nullopt;
       }

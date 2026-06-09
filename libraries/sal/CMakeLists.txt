@@ -61,6 +61,7 @@ if(SAL_BUILD_TESTS)
         test/block_allocator_tests.cpp
         test/mapping_tests.cpp
         test/control_block_alloc_tests.cpp
+        test/colo_alloc_tests.cpp
         test/min_index_tests.cpp
         test/allocator_session_tests.cpp
         test/read_cache_tests.cpp

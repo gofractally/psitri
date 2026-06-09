@@ -813,6 +813,27 @@ TEST_CASE("radix_engine: first-class subtree values", "[radix_engine][cursor][su
    CHECK(t.object_count() < before2);  // removing the key freed the subtree
 }
 
+// value_ref bundles a read_lock with the value_view: holding it keeps the page resident (safe to
+// read). value<T>() copies (no lifetime concern); get_value runs the lambda under the lock.
+TEST_CASE("radix_engine: cursor value_ref / value<T> / get_value", "[radix_engine][cursor]")
+{
+   radix_tree t(tmp("heart_value_ref"));
+   t.upsert("k", "hello-value");
+   radix_tree::cursor c(&t);
+   REQUIRE_FALSE(c.seek_begin());
+   REQUIRE(c.key() == "k");
+   {
+      auto v = c.value();  // value_ref: holds the read_lock for as long as `v` lives
+      CHECK(v.view() == "hello-value");
+      CHECK(std::string(value_view(v)) == "hello-value");  // implicit conversion
+      CHECK(v.str() == "hello-value");
+   }
+   CHECK(c.value<std::string>() == std::optional<std::string>("hello-value"));  // owned copy
+   std::string via_lambda;
+   c.get_value([&](value_view vv) { via_lambda.assign(vv.data(), vv.size()); });
+   CHECK(via_lambda == "hello-value");
+}
+
 TEST_CASE("radix_engine: overwrite returns prior size + COW commit cycle", "[radix_engine]")
 {
    radix_tree t(tmp("heart_re_cow"));

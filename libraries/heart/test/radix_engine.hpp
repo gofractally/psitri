@@ -32,6 +32,7 @@
 
 #include <sal/allocator.hpp>
 #include <sal/allocator_session_impl.hpp>
+#include <sal/read_lock.hpp>
 #include <ucc/round.hpp>
 
 #include <heart/bucket_node.hpp>
@@ -46,6 +47,27 @@ namespace heart::radix
    using bytes      = std::span<const uint8_t>;
    using key_view   = std::string_view;
    using value_view = std::string_view;
+
+   // A value_view kept SAFE TO READ by a held read_lock. ref-count keeps the object logically
+   // alive; the read_lock pins its PAGE resident (the compactor can't evict/relocate it) — both
+   // are needed to dereference node memory. Returning this by value bundles the lock with the view
+   // (vector<bool>::reference-style proxy): the caller extends the safe-read window simply by
+   // holding it. Implicitly converts to value_view for transient in-place use.
+   class value_ref
+   {
+      sal::read_lock _lock;  // residency pin; copyable (retain/release the session read-lock counter)
+      value_view     _v;
+
+     public:
+      value_ref(sal::read_lock lk, value_view v) noexcept : _lock(lk), _v(v) {}
+      operator value_view() const noexcept { return _v; }
+      value_view  view() const noexcept { return _v; }
+      const char* data() const noexcept { return _v.data(); }
+      size_t      size() const noexcept { return _v.size(); }
+      bool        empty() const noexcept { return _v.empty(); }
+      std::string str() const { return std::string(_v); }
+   };
+
    using setlist_u8  = setlist_node<uint8_t>;
    using setlist_u16 = setlist_node<uint16_t>;
    using setlist_u32 = setlist_node<uint32_t>;
@@ -1626,19 +1648,31 @@ namespace heart::radix
          bool        is_subtree() const noexcept { return _valid && _is_subtree; }  // value is a subtree
          read_handle subtree() const;                                    // the nested tree (handle)
          cursor      subtree_cursor() const { return cursor(_t, _subtree); }  // iterate it
-         template <class F>
-         void get_value(F&& fn) const { fn(_val); }
+         // Borrowed value VIEW, kept valid by a held read_lock bundled into the return (the caller
+         // extends the safe-read window by holding the value_ref). Empty if not positioned/subtree.
+         value_ref value() const
+         {
+            return value_ref{_t->_ses->lock(), (_valid && !_is_subtree) ? _val : value_view{}};
+         }
+         // Owned COPY of the value (no lifetime concern). Holds the read_lock only across the copy.
          template <class T = std::string>
          std::optional<T> value() const
          {
-            if (!_valid)
-               return std::nullopt;
+            if (!_valid || _is_subtree) return std::nullopt;
+            auto lk = _t->_ses->lock();  // pin the page resident while we copy out
             return T(_val.data(), _val.data() + _val.size());
+         }
+         template <class F>
+         void get_value(F&& fn) const  // scoped: the view is valid only inside fn (lock held)
+         {
+            auto lk = _t->_ses->lock();
+            fn(_val);
          }
          int32_t get(key_view k, std::string* buf)  // point lookup on THIS cursor's root
          {
             if (find(k)) return value_not_found;  // find() positions on _root; true = not found
             if (_is_subtree) return value_subtree;
+            auto lk = _t->_ses->lock();  // pin while copying
             buf->assign(_val.data(), _val.size());
             return int32_t(_val.size());
          }
@@ -1656,6 +1690,7 @@ namespace heart::radix
          bool get(key_view k, F&& fn)  // point lookup on THIS cursor's root → lambda; true if found
          {
             if (find(k) || _is_subtree) return false;
+            auto lk = _t->_ses->lock();  // pin while fn reads the view
             fn(_val);
             return true;
          }
@@ -1663,12 +1698,17 @@ namespace heart::radix
          std::optional<T> get(key_view k)  // point lookup on THIS cursor's root → optional buffer
          {
             if (find(k) || _is_subtree) return std::nullopt;
+            auto lk = _t->_ses->lock();  // pin while copying
             return T(_val.data(), _val.data() + _val.size());
          }
-         // psitri pins values via a read_lock/value_pin; heart's cursor pins the whole snapshot
-         // root (RAII _root), so the value view is valid for the cursor's lifetime — the lock arg
-         // is accepted for signature parity and ignored.
-         value_view value(sal::read_lock&) const noexcept { return _val; }
+         // psitri-compatible borrowed view: valid while the CALLER's read_lock `rl` is held (it pins
+         // the page resident). The caller must keep `rl` alive for the view's use. (value() returns a
+         // value_ref that bundles the lock for you — prefer it.)
+         value_view value(sal::read_lock& rl) const noexcept
+         {
+            (void)rl;  // the caller's lock is the residency guarantee
+            return _val;
+         }
          // Count keys in [lo, hi) (empty bound = open). Walks a private copy so `this` is untouched.
          uint64_t count_keys(key_view lo = {}, key_view hi = {}) const
          {

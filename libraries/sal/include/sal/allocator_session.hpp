@@ -400,6 +400,13 @@ namespace sal
 
       void prepare_alloc(uint32_t size, msec_timestamp vage);
 
+      // Remaining inline-destroy node budget for the release cascade currently unwinding on THIS
+      // session (single-thread-owned, so a plain member is the right scope — no TLS/global).
+      // UINT32_MAX = not in a cascade; the recursive type_ops.destroy → release(child) chain seeds
+      // it on the top-level call, decrements per node, and spills the remainder to the background
+      // release thread once it hits 0 so one drop can't stall the writer unboundedly.
+      uint32_t _destroy_budget = UINT32_MAX;
+
       friend class allocator_session_ptr;
       friend class allocator;
       void end_session();

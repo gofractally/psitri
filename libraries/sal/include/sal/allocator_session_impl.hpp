@@ -360,14 +360,11 @@ namespace sal
    {
       get(adr).retain();
    }
-   // Inline-destroy node budget per top-level release before the cascade spills to the
-   // background queue (caps the worst-case writer latency of a single release). SIZE: a COW
-   // path is a handful of nodes, so the common drop is always fully inline.
+   // Inline-destroy node budget per top-level release before the cascade spills to the background
+   // queue (caps the worst-case writer latency of a single release — a big subtree/snapshot drop
+   // can't stall the writer unboundedly). A COW-to-root path is a handful of nodes, so the common
+   // drop is always fully inline; only a rare large drop spills the remainder.
    inline constexpr uint32_t inline_destroy_budget = 256;
-   // Remaining budget for the destroy currently unwinding on THIS thread; UINT32_MAX = not in
-   // one. The recursive type_ops.destroy → release(child) calls decrement it and, once spent,
-   // hand the rest of the subtree to the background release thread instead of recursing.
-   inline thread_local uint32_t tl_destroy_budget = UINT32_MAX;
 
    inline void allocator_session::release(ptr_address adr) noexcept
    {
@@ -388,25 +385,25 @@ namespace sal
       }
       // Mid-cascade and out of budget → spill: reclaim to ref 1 (safe, we own it) and hand to the
       // background release thread so a huge drop can't stall this thread unboundedly.
-      if (tl_destroy_budget == 0)
+      if (_destroy_budget == 0)
       {
          cb.set_ref(1);
          if (_release_queue.try_push(adr)) [[likely]]
             return;
          // queue full (rare): fall through and destroy inline anyway.
       }
-      const bool top = (tl_destroy_budget == UINT32_MAX);
+      const bool top = (_destroy_budget == UINT32_MAX);
       if (top)
       {
-         tl_destroy_budget = inline_destroy_budget;
+         _destroy_budget = inline_destroy_budget;
          retain_read_lock();  // block the compactor from recycling/relocating segments we read
       }
-      if (tl_destroy_budget != UINT32_MAX && tl_destroy_budget != 0)
-         --tl_destroy_budget;
+      if (_destroy_budget != UINT32_MAX && _destroy_budget != 0)
+         --_destroy_budget;
 
       // Destroy `adr` via the fast templated per-tier destroy (NOT the std::function vtable
       // visit_children) — it releases each child through release() above, so the cascade unwinds
-      // depth-first and bounds itself on tl_destroy_budget.
+      // depth-first and bounds itself on _destroy_budget.
       this->retain_session();
       allocator_session_ptr ses_ptr(this);
       const alloc_header*   node = get<alloc_header>(prev.loc());
@@ -416,7 +413,7 @@ namespace sal
 
       if (top)
       {
-         tl_destroy_budget = UINT32_MAX;
+         _destroy_budget = UINT32_MAX;
          release_read_lock();
       }
    }

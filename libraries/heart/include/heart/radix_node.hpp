@@ -156,8 +156,15 @@ namespace heart
    // The 256-branch space is split into RANGE_COUNT ranges (top 3 bits of the branch byte); each
    // range's branch-SET has one refcount in the SAL implicit_ref_pool (how many node-versions
    // share that set). 8 ranges × 32 branches.
-   inline constexpr int range_count = 8;
-   inline constexpr int range_of(unsigned byte) noexcept { return int((byte >> 5) & 7u); }
+   // Number of per-range branch-set refcounts a big node carries (over the 256-branch space).
+   // Tunable resolution knob: 8 ranges × 32 branches (header 18B) or 16 × 16 (header 34B). Higher
+   // resolution halves the per-divergence kept-children retain but doubles clone/destroy/birth
+   // counter ops — measure both. range_of is branch-uniform: byte / (256/range_count).
+   inline constexpr int range_count = 16;
+   inline constexpr int range_of(unsigned byte) noexcept
+   {
+      return int((byte * unsigned(range_count)) >> 8);
+   }
 
    /**
     * Per-range counter handles for the large_radix family: ONE region + RANGE_COUNT offsets

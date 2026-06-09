@@ -1,5 +1,54 @@
 # Task 24 handoff — wire implicit_ref_pool into the heart radix engine
 
+## PROGRESS (working branch `heart-rr2`, off `heart`)
+- **Step 1 DONE** (`386fc55`): `sal::allocator` owns an `implicit_ref_pool` at `<db>/iref`;
+  `allocator_session` forwards `rr_alloc_fresh / rr_alloc_in_region / rr_retain / rr_release /
+  rr_count` (decls in allocator_session.hpp, defs in allocator_session_impl.hpp). Builds, both
+  suites green, no behavior change (pool owned-but-unused).
+- **Step 2 DONE (WIP `9230214`)**: radix_node.hpp `large_radix` FixedHeader = `range_ctrs { region;
+  off[8]; }` (18B), counter-based `destroy` (release each of 8 `rc_ctr(r)`; on was_last release that
+  range's branches via `for_each_entry` filtered by `range_of(byte)=byte>>5`). Accessors:
+  `rc_region/rc_set_region/rc_ctr(r)/rc_set_off(r,off)/rc_has_ctrs`. **COMPILES but runtime-broken
+  until Step 3** (clone still per-child while destroy is counter-based). `heart` untouched.
+- **Step 3 = REMAINING** (radix_engine.hpp on heart-rr2). Refined algorithm worked out this session:
+  - `is_big<N> = requires { N::refcount_block_count; }` (large_radix has it). `range_of` is in
+    radix_node.hpp (`heart::range_of`, byte>>5); `sal::combine/region_of/offset_of` from colo_alloc.
+  - **clone<N>** (heart-rr2 line ~602, the `for_each_child(retain)+child_retains` line): branch —
+    big tier → after `blit` (copies range_ctrs), `for r in 0..7: _ses->rr_retain(nn->rc_ctr(r))` +
+    retain term_value if pointer; small tier → keep `for_each_child(retain)`.
+  - **rr_birth<N>(n)** helper + call at `make_node` (~566), the two widen/`grow_and_set` sites, and
+    `rebuild_to_full` (~2712 `for_each_child(retain)`): create 8 counters —
+    `auto a0=_ses->rr_alloc_fresh(); region=region_of(a0); rc_set_region(region); off[0]=offset_of(a0);`
+    then `for r in 1..7: auto a=_ses->rr_alloc_in_region({region, placed_offsets}); if(!a) RE-HOME
+    (re-pick region via rr_alloc_fresh, redo — birth counters are fresh/unique=1, safe to move);
+    off[r]=offset_of(*a)`. Each counter=1 (this version); the children placed at build keep cb.ref=1
+    (their range counter's base). NOTE make_node builds an EMPTY node — still give it the 8 counters
+    (=1) so clone/destroy are uniform; ranges with no children just have a counter no one frees a
+    branch for.
+  - **children_shared<N>(cn)** helper: `if constexpr(is_big<N>) for r: if(_ses->rr_count(cn->rc_ctr(r))>1)
+    return true; return false;`. ADD to the EXISTING `_shared` latch in router_insert + remove_router
+    (heart-rr2 already has `if(ref.ref()>1) _shared=true;` from 6dc426c/ba5514b): make it
+    `if(ref.ref()>1 || children_shared<N>(cn)) _shared=true;`. KEEP remove()'s `_shared=false` reset.
+  - **divergence** at the ~9 mutation sites (router_insert: new-terminal, same-key-replace,
+    collision-replace, descend-repoint; remove_router: drop×2, repoint; full_radix add_ptr/
+    add_existing). BEFORE set_branch/remove_branch on a cow'd big node `n` touching range r, if
+    `_ses->rr_count(n->rc_ctr(r)) > 1` (shared): (1) `for_each_entry` filtered to range r → for each
+    KEPT pointer-child (i.e. not the byte being changed) `_ses->retain(child)` [cb.ref++ so it
+    survives under both old+new counter — the inherent ~32]; (2) `(void)_ses->rr_release(n->rc_ctr(r))`
+    [drop this version from the old set]; (3) `auto nc=_ses->rr_alloc_in_region({n->rc_region(),offs})
+    (fallback rr_alloc_fresh+re-home); n->rc_set_off(r, offset_of(*nc))` [new counter=1]. If count==1,
+    in-place (no counter COW). The branch-level `_ses->release(old_child)` at repoint sites STAYS.
+    A `rr_diverge<N>(n, r)` helper wrapping (1)-(3) keeps the call sites clean.
+  - **validate**: bring `rrstress` + `adopt_root/sig_at/count_keys_at/take_snapshot/find_at` from
+    heart-rr-wip's kv_u64_bench.cpp + radix_engine.hpp; then the build-di gauntlet (Step 4 below).
+  - Open question to resolve while wiring: divergence's "kept children" retain must skip the byte
+    being mutated (added: no old child; dropped: release it, don't retain; repointed: release old,
+    new child gets its own cb.ref=1). Get the per-site add/drop/repoint accounting exactly right —
+    this is the bulk of the risk; validate each under build-di before moving on.
+
+---
+
+
 **Goal:** replace heart's broken packed-nibble range-refcount integration with the proven,
 TSan-clean `sal::implicit_ref_pool` (per-range self-freeing 1-byte counters). This is the final
 step that makes COW-to-root child retain/release O(#ranges)=8 instead of O(fan-out)=256, *and*

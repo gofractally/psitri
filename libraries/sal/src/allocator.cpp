@@ -258,6 +258,7 @@ namespace sal
 
    allocator::allocator(std::filesystem::path dir, runtime_config cfg, bool start_threads_now)
        : _ptr_alloc(dir / "ptrs"),
+         _iref(dir / "iref"),
          _block_alloc(dir / "segs", segment_size,
                       static_cast<uint32_t>(
                           cap_to_disk_space(dir,

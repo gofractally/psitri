@@ -360,6 +360,16 @@ namespace sal
    {
       get(adr).retain();
    }
+
+   // ── per-range branch-set refcounts: forward to the allocator's implicit_ref_pool ──
+   inline ptr_address allocator_session::rr_alloc_fresh() { return _sega.iref().alloc_fresh(); }
+   inline std::optional<ptr_address> allocator_session::rr_alloc_in_region(const implicit_ref_hint& h)
+   {
+      return _sega.iref().alloc_in_region(h);
+   }
+   inline void    allocator_session::rr_retain(ptr_address a) { _sega.iref().retain(a); }
+   inline bool    allocator_session::rr_release(ptr_address a) { return _sega.iref().release(a); }
+   inline uint8_t allocator_session::rr_count(ptr_address a) { return _sega.iref().count(a); }
    // Inline-destroy node budget per top-level release before the cascade spills to the background
    // queue (caps the worst-case writer latency of a single release — a big subtree/snapshot drop
    // can't stall the writer unboundedly). A COW-to-root path is a handful of nodes, so the common

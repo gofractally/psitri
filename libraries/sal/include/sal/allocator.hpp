@@ -9,6 +9,7 @@
 #include <sal/alloc_header.hpp>
 #include <sal/block_allocator.hpp>
 #include <sal/control_block_alloc.hpp>
+#include <sal/implicit_ref_pool.hpp>
 #include <sal/debug/free_range_tracker.hpp>
 #include <sal/mapped_memory/allocator_state.hpp>
 #include <sal/mapped_memory/session_op_stats.hpp>
@@ -243,6 +244,9 @@ namespace sal
       /// Mirrors `allocator_session::get_total_allocated_objects()` but at
       /// the database level so callers without a session can read it.
       uint64_t total_allocated_objects() const noexcept { return _ptr_alloc.used(); }
+
+      /// The per-range branch-set refcount pool (sessions forward rr_* here).
+      implicit_ref_pool& iref() noexcept { return _iref; }
 
 	      struct custom_control_block_audit
 	      {
@@ -527,6 +531,7 @@ namespace sal
 
       mapped_memory::allocator_state* _mapped_state;
       control_block_alloc             _ptr_alloc;
+      implicit_ref_pool               _iref;  // per-range branch-set refcounts (doc/micro_refcount.md)
       sal::block_allocator            _block_alloc;
       uint32_t                        _allocator_index;
       mapping                         _seg_alloc_state_file;

@@ -6,6 +6,7 @@
 #include <sal/config.hpp>
 #include <sal/control_block.hpp>
 #include <sal/control_block_alloc.hpp>
+#include <sal/colo_alloc.hpp>  // implicit_ref_addr / implicit_ref_hint (types for rr_* decls)
 #include <sal/debug.hpp>
 #include <sal/location.hpp>
 #include <sal/mapped_memory/read_lock_queue.hpp>
@@ -232,6 +233,16 @@ namespace sal
        * management.
        */
       void retain(ptr_address adr);
+
+      // ── per-range branch-set refcounts (forward to allocator's implicit_ref_pool) ──
+      // The engine batches a big node's child retain/release into 8 per-range counters; these
+      // forward to the shared pool. Defined in allocator_session_impl.hpp (allocator complete
+      // there). See doc/micro_refcount.md.
+      ptr_address                rr_alloc_fresh();
+      std::optional<ptr_address> rr_alloc_in_region(const implicit_ref_hint& h);
+      void                       rr_retain(ptr_address a);
+      [[nodiscard]] bool         rr_release(ptr_address a);
+      uint8_t                    rr_count(ptr_address a);
 
       template <typename T = alloc_header>
       [[nodiscard]] smart_ref<T> get_ref(ptr_address adr) noexcept;

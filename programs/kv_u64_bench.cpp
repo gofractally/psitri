@@ -487,6 +487,11 @@ int main(int argc, char** argv)
          }
          std::printf("    heart  : update %8.1f ns/txn   [%s]\n", ins,
                      s == N * (N - 1) / 2 ? "OK" : "BAD");
+         auto& c = t.counters();
+         std::printf("             clones %llu  in_place %llu  grows %llu  child_retains %llu  (%.2f retains/txn, %.1f/clone)\n",
+                     (unsigned long long)c.clones, (unsigned long long)c.in_place, (unsigned long long)c.grows,
+                     (unsigned long long)c.child_retains,
+                     double(c.child_retains) / double(N), double(c.child_retains) / double(c.clones ? c.clones : 1));
       }
 
       // ── psitri (single-version COW on SAL): one transaction per op ──
@@ -524,6 +529,133 @@ int main(int argc, char** argv)
 
       std::printf("WORST CASE: 1 committed txn per update (COW-to-root each op), random %llu keys\n",
                   (unsigned long long)N);
+      std::fflush(stdout);
+      return 0;
+   }
+
+   if (mode == "uniq")  // UNIQUE-MODE bulk: NO commit (no live snapshot) → must stay all in-place.
+   {
+      auto vview = [](const uint64_t& v)
+      { return std::string_view(reinterpret_cast<const char*>(&v), sizeof(v)); };
+      auto dir = std::filesystem::temp_directory_path() / "heart_uniq";
+      std::filesystem::remove_all(dir);
+      radix_engine_tree t(dir);
+      auto     t0 = now();
+      for (uint64_t i = 0; i < N; ++i) { uint64_t k = rand_key(i); t.upsert(kspan(k), vview(i)); }
+      double   ins = ns(t0, now(), N);
+      uint64_t s = 0; std::string_view v;
+      for (uint64_t i = 0; i < N; ++i)
+      { uint64_t k = rand_key(i); if (t.find(kspan(k), v)) { uint64_t g=0; std::memcpy(&g,v.data(),8); s+=g; } }
+      auto& c = t.counters();
+      std::printf("UNIQUE bulk (no commit), %llu keys: insert %.1f ns/op  [%s]\n",
+                  (unsigned long long)N, ins, s == N*(N-1)/2 ? "OK" : "BAD");
+      std::printf("  clones=%llu  in_place=%llu  grows=%llu  child_retains=%llu  (clones==grows => 0 shared-path clones)\n",
+                  (unsigned long long)c.clones, (unsigned long long)c.in_place, (unsigned long long)c.grows,
+                  (unsigned long long)c.child_retains);
+      std::fflush(stdout);
+      return 0;
+   }
+
+   if (mode == "cowtest")  // DIRECT COW verification: insert 1000, commit, insert 1; check child refs.
+   {
+      auto vview = [](const uint64_t& v)
+      { return std::string_view(reinterpret_cast<const char*>(&v), sizeof(v)); };
+      auto dir = std::filesystem::temp_directory_path() / "heart_cowtest";
+      std::filesystem::remove_all(dir);
+      radix_engine_tree t(dir);
+      for (uint64_t i = 0; i < 1000; ++i) { uint64_t k = rand_key(i); t.upsert(kspan(k), vview(i)); }
+      t.commit();
+      auto root_before = t.root_addr();
+      t.dump_root_child_refs("after commit, before the +1 insert");
+      // Insert ONE brand-new key → should COW-to-root: clone root (retain all children), clone path.
+      {
+         uint64_t rb = t.counters().child_retains;
+         uint64_t k = rand_key(1000);
+         t.upsert(kspan(k), vview(1000));
+         uint64_t ra = t.counters().child_retains;
+         auto root_after = t.root_addr();
+         std::printf("  root address changed (cloned)? %s   child-retains for this 1 insert = %llu\n",
+                     root_before != root_after ? "YES" : "NO", (unsigned long long)(ra - rb));
+         t.dump_root_child_refs("after the +1 insert (NEW root)");
+      }
+      // Now the EXACT worst-bench pattern: commit AFTER EVERY insert, many cycles, measure retains/txn.
+      std::printf("  --- now commit-every-insert (worst-bench pattern), measuring child-retains/txn ---\n");
+      for (uint64_t base : {2000ull, 50000ull})
+      {
+         uint64_t rb = t.counters().child_retains;
+         for (uint64_t i = base; i < base + 2000; ++i)
+         { uint64_t k = rand_key(i); t.upsert(kspan(k), vview(i)); t.commit(); }
+         uint64_t ra = t.counters().child_retains;
+         std::printf("    after %llu keys total: %.1f child-retains/txn over 2000 commit-per-insert txns\n",
+                     (unsigned long long)(base + 2000), double(ra - rb) / 2000.0);
+         t.dump_root_child_refs("  steady state");
+      }
+      std::fflush(stdout);
+      return 0;
+   }
+
+   if (mode == "snaptest")  // CORRECTNESS: does a committed snapshot survive later writes (true COW)?
+   {
+      auto vview = [](const uint64_t& v)
+      { return std::string_view(reinterpret_cast<const char*>(&v), sizeof(v)); };
+      auto getv  = [](std::string_view v) { uint64_t g = 0; std::memcpy(&g, v.data(), std::min<size_t>(8, v.size())); return g; };
+      auto dir = std::filesystem::temp_directory_path() / "heart_snaptest";
+      std::filesystem::remove_all(dir);
+      radix_engine_tree t(dir);
+      // Insert 1000 keys with value = i, commit, pin that snapshot.
+      for (uint64_t i = 0; i < 1000; ++i) { uint64_t k = rand_key(i); t.upsert(kspan(k), vview(i)); }
+      t.commit();
+      auto snap = t.take_snapshot();
+      // (a) UPDATE an existing key to a new value, commit.
+      uint64_t k7 = rand_key(7);
+      t.upsert(kspan(k7), vview(999999)); t.commit();
+      // (b) INSERT 1000 brand-new keys, commit.
+      for (uint64_t i = 1000; i < 2000; ++i) { uint64_t k = rand_key(i); t.upsert(kspan(k), vview(i)); }
+      t.commit();
+      // Now interrogate the PINNED snapshot. Correct COW → it must still show the old world.
+      std::string_view v;
+      bool got7   = t.find_at(snap, kspan(k7), v);
+      uint64_t v7 = got7 ? getv(v) : 0;
+      uint64_t snap_keys = t.count_keys_at(snap);   // unambiguous: COW-correct → still exactly 1000
+      uint64_t live_keys = t.count_keys_at(t.root_addr());
+      std::printf("SNAPSHOT ISOLATION TEST:\n");
+      std::printf("  key#7 in snapshot: value=%llu  (expect 7 if COW-correct, 999999 if mutated in place)  -> %s\n",
+                  (unsigned long long)v7, v7 == 7 ? "ISOLATED" : "CORRUPTED");
+      std::printf("  snapshot key count = %llu (expect 1000)  |  live key count = %llu (expect 2000)  -> %s\n",
+                  (unsigned long long)snap_keys, (unsigned long long)live_keys,
+                  (snap_keys == 1000 && live_keys == 2000) ? "ISOLATED" : "CORRUPTED");
+      (void)got7;
+      t.release_snapshot(snap);
+      std::fflush(stdout);
+      return 0;
+   }
+
+   if (mode == "drop")  // BIG-SUBTREE-DROP: build N keys uniquely-owned, then release the root ONCE
+   {                    // and time (a) the calling-thread latency and (b) the drain to quiescent.
+      auto vview = [](const uint64_t& v)
+      { return std::string_view(reinterpret_cast<const char*>(&v), sizeof(v)); };
+      auto dir = std::filesystem::temp_directory_path() / "heart_drop";
+      std::filesystem::remove_all(dir);
+      radix_engine_tree t(dir);
+      for (uint64_t i = 0; i < N; ++i)  // NO per-op commit → interior nodes uniquely owned
+      {
+         uint64_t k = rand_key(i);
+         t.upsert(kspan(k), vview(i));
+      }
+      uint64_t live_before = t.object_count();
+      auto     t0  = now();
+      t.drop_root();                                  // single release() → cascade
+      auto     t1  = now();                            // calling-thread latency ends here
+      while (t.pending_releases() != 0) { /* spin until bg drains spilled remainder */ }
+      auto     t2  = now();                            // all memory actually freed
+      double   caller_ns = std::chrono::duration<double, std::nano>(t1 - t0).count();
+      double   total_ns  = std::chrono::duration<double, std::nano>(t2 - t0).count();
+      std::printf("BIG DROP of %llu keys (%llu live objects):\n",
+                  (unsigned long long)N, (unsigned long long)live_before);
+      std::printf("    caller-thread latency : %10.1f us   (%6.1f ns/obj)\n",
+                  caller_ns / 1000.0, caller_ns / double(live_before ? live_before : 1));
+      std::printf("    total drain to quiet  : %10.1f us   (%6.1f ns/obj)\n",
+                  total_ns / 1000.0, total_ns / double(live_before ? live_before : 1));
       std::fflush(stdout);
       return 0;
    }

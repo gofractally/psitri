@@ -101,6 +101,7 @@ namespace heart::radix
       {
          auto  lock = _ses->lock();
          _old_value_size = -1;
+         _shared         = false;  // fresh unique→shared latch for this COW-to-root descent
          bytes kb   = as_bytes(key);
          if (_bucket_mode)
          {
@@ -276,6 +277,16 @@ namespace heart::radix
          KB   kb;
          inorder_walk(_root, kb, cb);
       }
+      // DEBUG: count keys reachable from an ARBITRARY (pinned) root — unambiguous snapshot check.
+      uint64_t count_keys_at(ptr_address root)
+      {
+         auto     lock = _ses->lock();
+         KB       kb;
+         uint64_t n  = 0;
+         auto     cb = [&](key_view, value_view) { ++n; };
+         inorder_walk(root, kb, cb);
+         return n;
+      }
 
       void commit()
       {
@@ -285,6 +296,23 @@ namespace heart::radix
          _snap = _root;
          _ses->retain(_root);
          _snap_valid = true;
+      }
+
+      // Release the ENTIRE tree in one cascade — test/bench hook for big-subtree-drop latency.
+      // Drops the snapshot pin first so the root is uniquely owned (ref==1) and the single
+      // release() cascades through every node. Resets to a fresh empty root so the tree stays
+      // usable. (Build the tree WITHOUT per-op commit() so interior nodes are uniquely owned and
+      // the cascade actually frees them rather than stopping at a shared snapshot.)
+      void drop_root()
+      {
+         auto lock = _ses->lock();
+         if (_snap_valid)
+         {
+            _ses->release(_snap);
+            _snap_valid = false;
+         }
+         _ses->release(_root);
+         _root = make_node<setlist_u8>(bytes{});
       }
 
       uint64_t object_count() const { return _alloc->total_allocated_objects(); }
@@ -308,6 +336,23 @@ namespace heart::radix
       void set_adaptive(bool on) { _adaptive = on; }
       bool adaptive() const { return _adaptive; }
       void set_c1_promote(bool on) { _c1_promote_on = on; }
+      // DEBUG probe: current refcount of the root node (is the snapshot pinning it?).
+      uint32_t root_use_count() { return _ses->get_ref<sal::alloc_header>(_root).ref(); }
+      // DEBUG: pin the current root as an independent snapshot (caller must release_snapshot()).
+      ptr_address take_snapshot() { _ses->retain(_root); return _root; }
+      void        release_snapshot(ptr_address s) { _ses->release(s); }
+      // DEBUG: read a key from an ARBITRARY (pinned) root — used to test snapshot isolation.
+      bool find_at(ptr_address root, key_view key, value_view& out)
+      {
+         auto  lk = _ses->lock();
+         KB    kb;
+         bytes q = as_bytes(key);
+         return seek(root, q, 0, /*strict=*/false, kb, out);  // first key >= q; q exists → lands on it
+      }
+      // DEBUG: enumerate the CURRENT root's immediate pointer-children and their refcounts.
+      // After (insert 1000; commit; insert 1) a correct COW-to-root clones the root and retains
+      // every child → all but the one on the modified path should read ref==2.
+      void dump_root_child_refs(const char* tag);
 
       // ── introspection (for the tree-structure dump / stats tool) ───────────────
       // COW/alloc accounting: how mutation actually played out over the run. `clones`
@@ -319,6 +364,7 @@ namespace heart::radix
          uint64_t leaf_allocs = 0;     // >60 SAL value-holders
          uint64_t inline_values = 0;   // tail (local) terminal values
          uint64_t clones = 0;          // COW clones (shared OR heap-full)
+         uint64_t child_retains = 0;   // per-child retains done by clone() (the dense-clone cost)
          uint64_t grows = 0;           // subset of clones forced by a full tail heap
          uint64_t in_place = 0;        // unique + room: mutated in place (no copy)
          uint64_t restrides = 0;       // wide-node splits (re_stride to a narrower stride)
@@ -552,7 +598,7 @@ namespace heart::radix
          ptr_address na = _ses->alloc<N>(need, sal::alloc_hint{}, src->prefix());
          N*          nn = mut<N>(na);
          blit<N>(nn, src);
-         nn->for_each_child([&](ptr_address c) { _ses->retain(c); });
+         nn->for_each_child([&](ptr_address c) { _ses->retain(c); ++_cc.child_retains; });
          stamp<N>(na);
          ++_cc.clones;
          return na;
@@ -579,7 +625,10 @@ namespace heart::radix
       template <class N>
       N* cow(sal::smart_ref<N>& ref, ptr_address& addr, uint32_t extra = 0)
       {
-         if (ref.ref() > 1)
+         // SHARED mode (snapshot reachable) OR a directly-shared node → must CLONE, never mutate in
+         // place. _shared forces the clone even at ref==1, because a ref==1 child of a shared parent
+         // is still reachable from the snapshot (the clone retains the siblings — the COW-to-root cost).
+         if (_shared || ref.ref() > 1)
          {
             addr = clone<N>(addr, ref.obj(), extra);  // reuse the held ref — no second get_ref
             return mut<N>(addr);
@@ -1631,6 +1680,8 @@ namespace heart::radix
          // cow(ref, …) reuses it for an in-place mutation (no second get_ref). After a COW the
          // ref is stale (clone → new address), so the post-COW writable `n` is used instead.
          sal::smart_ref<N> ref = _ses->get_ref<N>(addr);
+         if (ref.ref() > 1)  // descending through a shared node → latch shared for the whole subtree
+            _shared = true;
          const N*          cn  = ref.obj();
          bytes             pfx = cn->prefix();
          int               avail     = int(key.size() - depth);
@@ -1797,6 +1848,8 @@ namespace heart::radix
       {
          const uint32_t    depth0 = depth;
          sal::smart_ref<N> ref    = _ses->get_ref<N>(addr);  // resolved once (reads + safe cows)
+         if (ref.ref() > 1)  // shared node on descent → latch shared for the whole subtree
+            _shared = true;
          const N*          cn     = ref.obj();
          bytes             pfx    = cn->prefix();
          int            avail  = int(key.size() - depth);
@@ -2960,6 +3013,30 @@ namespace heart::radix
       bool                            _adaptive       = false;  // gate: radix→bucket on deep-narrow
       bool                            _in_bucket      = false;  // re-entrancy: in a bucket subtree
       bool                            _c1_promote_on  = false;  // opt-in: narrow setlist→c1 below overflow
+      // COW-to-root unique→shared MODE LATCH (mirrors psitri upsert_mode.make_shared()). Reset at
+      // the top of each upsert/remove; latched true the moment descent passes through a SHARED node
+      // (ref>1, e.g. a committed snapshot pins the root). Once shared it stays shared for the rest
+      // of this single depth-first path, forcing cow() to CLONE every node below — even ref==1 ones
+      // that are reachable from the snapshot — instead of mutating them in place (which would
+      // corrupt the snapshot). The recursion is a single path, so one member == a threaded mode.
+      bool                            _shared         = false;
       cow_counters                    _cc;
    };
+
+   // Out-of-line (uses dispatch(), whose deduced return type must be defined first).
+   inline void radix_tree::dump_root_child_refs(const char* tag)
+   {
+      int total = 0, shared = 0, unique = 0;
+      dispatch(_root, [&](auto ad)
+      {
+         ad.p->for_each_child([&](ptr_address c)
+         {
+            uint32_t rc = _ses->get_ref<sal::alloc_header>(c).ref();
+            ++total;
+            if (rc >= 2) ++shared; else ++unique;
+         });
+      });
+      std::printf("  [%s] root ref=%u, pointer-children=%d : ref>=2 (shared)=%d, ref==1 (unique)=%d\n",
+                  tag, root_use_count(), total, shared, unique);
+   }
 }  // namespace heart::radix

@@ -119,20 +119,23 @@ namespace heart::radix
       // owner. A handle never attached releases its root → the subtree is freed (no leak).
       struct subtree
       {
-         radix_tree* _t = nullptr;
-         ptr_address _root{};
+         radix_tree*                       _t = nullptr;
+         sal::smart_ptr<sal::alloc_header> _root;  // RAII: owns the detached root until attached
          subtree() = default;
-         subtree(radix_tree* t, ptr_address r) noexcept : _t(t), _root(r) {}
-         subtree(subtree&& o) noexcept : _t(o._t), _root(o._root) { o._t = nullptr; }
+         subtree(radix_tree* t, ptr_address r) noexcept : _t(t), _root(t->session(), r) {}  // adopt
+         subtree(subtree&&)                 = default;  // smart_ptr move
          subtree(const subtree&)            = delete;
          subtree& operator=(const subtree&) = delete;
-         ~subtree() { if (_t) _t->_ses->release(_root); }
-         ptr_address root() const noexcept { return _root; }
-         // Insert/update a key in the subtree (COW; the root may change → tracked here).
+         ptr_address root() const noexcept { return _root.address(); }
+         ptr_address consume() noexcept { return _root.take(); }  // give the ref to a terminal
+         // Insert/update a key in the subtree (COW; the root may change → re-adopt it).
          int upsert(key_view k, value_view v)
          {
             _t->_ins_value_type = inline_value::vt_bytes;
-            _t->upsert_raw(_root, as_bytes(k), as_bytes(v));  // updates _root by ref (COW)
+            ptr_address w       = _root.take();
+            if (w == sal::null_ptr_address) w = _t->make_node<setlist_u8>(bytes{});
+            _t->upsert_raw(w, as_bytes(k), as_bytes(v));  // engine COW: release(old)+assign(new)
+            _root = sal::smart_ptr<sal::alloc_header>(_t->session(), w);  // re-adopt (no inc)
             return _t->_old_value_size;
          }
       };
@@ -2044,57 +2047,57 @@ namespace heart::radix
       {
          friend class radix_tree;
          friend class frame;
-         radix_tree* _t       = nullptr;
-         uint32_t    _idx     = 0;
-         ptr_address _working = sal::null_ptr_address;  // owns one ref while open (null = empty)
-         bool        _open    = false;
-         transaction(radix_tree* t, uint32_t idx) : _t(t), _idx(idx), _open(true)
+         using root_ptr = sal::smart_ptr<sal::alloc_header>;
+         radix_tree* _t   = nullptr;
+         uint32_t    _idx = 0;
+         root_ptr    _working;  // RAII: owns the COW working root; dtor releases (auto-rollback)
+         bool        _open = false;
+         transaction(radix_tree* t, uint32_t idx)
+             : _t(t), _idx(idx), _working(t->session(), t->root_slot(idx), /*inc_ref=*/true), _open(true)
          {
-            _working = t->root_slot(idx);
-            if (_working != sal::null_ptr_address) t->_ses->retain(_working);
          }
-         void ensure()  // lazily materialize an empty working root before the first write/read
+         // Take the working root out for an engine COW (engine releases old / assigns new), then
+         // re-adopt the result — no manual retain/release in the transaction body.
+         ptr_address begin_write()
          {
-            if (_working == sal::null_ptr_address) _working = _t->make_node<setlist_u8>(bytes{});
+            ptr_address w = _working.take();
+            if (w == sal::null_ptr_address) w = _t->make_node<setlist_u8>(bytes{});
+            return w;
          }
+         void end_write(ptr_address w) { _working = root_ptr(_t->session(), w); }  // re-adopt (no inc)
 
         public:
-         transaction(transaction&& o) noexcept
-             : _t(o._t), _idx(o._idx), _working(o._working), _open(o._open)
-         {
-            o._open    = false;
-            o._working = sal::null_ptr_address;
-         }
-         transaction(const transaction&)            = delete;
-         transaction& operator=(const transaction&) = delete;
+         transaction(transaction&&) noexcept            = default;  // smart_ptr move
+         transaction(const transaction&)                = delete;
+         transaction& operator=(const transaction&)     = delete;
          ~transaction() { if (_open) abort(); }
 
          void upsert(key_view k, value_view v)
          {
-            ensure();
             _t->_ins_value_type = inline_value::vt_bytes;
-            _t->upsert_raw(_working, as_bytes(k), as_bytes(v));
+            ptr_address w       = begin_write();
+            _t->upsert_raw(w, as_bytes(k), as_bytes(v));
+            end_write(w);
          }
          void upsert_subtree(key_view k, subtree&& s)
          {
-            ensure();
             _t->_ins_value_type = inline_value::vt_subtree;
-            uint32_t raw        = *s.root();  // value bytes = the 4-byte root
-            _t->upsert_raw(_working, as_bytes(k),
-                           bytes{reinterpret_cast<const uint8_t*>(&raw), sizeof(raw)});
+            ptr_address sr      = s.consume();  // take the handle's ref → the terminal owns it
+            uint32_t    raw     = *sr;          // value bytes = the 4-byte root
+            ptr_address w       = begin_write();
+            _t->upsert_raw(w, as_bytes(k), bytes{reinterpret_cast<const uint8_t*>(&raw), sizeof(raw)});
             _t->_ins_value_type = inline_value::vt_bytes;
-            s._t                = nullptr;  // CONSUME the handle: its ref is now the terminal's
+            end_write(w);
          }
          int remove(key_view k)  // psitri parity: >=0 removed, -1 absent
          {
-            if (_working == sal::null_ptr_address) return -1;
-            return _t->remove_raw(_working, as_bytes(k)) ? 0 : -1;
+            if (!_working) return -1;
+            ptr_address w  = _working.take();
+            bool        ok = _t->remove_raw(w, as_bytes(k));
+            end_write(w);
+            return ok ? 0 : -1;
          }
-         read_handle handle()
-         {
-            ensure();
-            return {_t, _working};
-         }
+         read_handle handle() { return {_t, _working.address()}; }  // non-owning view (null-safe reads)
          cursor      snapshot_cursor() { return handle().snapshot_cursor(); }
          bool        is_subtree(key_view k) { return handle().is_subtree(k); }
          read_handle get_subtree(key_view k) { return handle().get_subtree(k); }
@@ -2105,36 +2108,35 @@ namespace heart::radix
          {
             if (!_open) return;
             ptr_address& slot = _t->root_slot(_idx);
-            if (slot != sal::null_ptr_address) _t->_ses->release(slot);  // drop the pre-image
-            slot     = _working;                                         // publish (transfer ref)
-            _working = sal::null_ptr_address;
-            _open    = false;
+            if (slot != sal::null_ptr_address) _t->_ses->release(slot);  // drop the published pre-image
+            slot  = _working.take();                                     // publish (transfer ref out)
+            _open = false;
          }
          void abort() noexcept
          {
             if (!_open) return;
-            if (_working != sal::null_ptr_address) _t->_ses->release(_working);
-            _working = sal::null_ptr_address;
-            _open    = false;
+            _working.release();  // RAII drop of the working lineage
+            _open = false;
          }
          frame sub_transaction();  // savepoint (defined after frame)
       };
       transaction start_transaction(uint32_t idx = 0) { return transaction(this, idx); }
 
-      // A savepoint over a transaction: retains the working root; commit drops the save, abort
-      // restores the transaction's working root to the saved one (LIFO nesting).
+      // A savepoint over a transaction: holds a retained copy of the working root; commit drops it,
+      // abort restores the transaction's working root to the saved one (LIFO nesting). All RAII.
       class frame
       {
          friend class transaction;
-         transaction* _tx     = nullptr;
-         ptr_address  _sp     = sal::null_ptr_address;  // saved working (retained)
+         using root_ptr = sal::smart_ptr<sal::alloc_header>;
+         transaction* _tx = nullptr;
+         root_ptr     _sp;  // retained copy of working at savepoint time
          bool         _active = false;
-         frame(transaction* tx, ptr_address sp) : _tx(tx), _sp(sp), _active(true) {}
+         frame(transaction* tx, root_ptr sp) : _tx(tx), _sp(std::move(sp)), _active(true) {}
 
         public:
-         frame(frame&& o) noexcept : _tx(o._tx), _sp(o._sp), _active(o._active) { o._active = false; }
-         frame(const frame&)            = delete;
-         frame& operator=(const frame&) = delete;
+         frame(frame&&) noexcept            = default;
+         frame(const frame&)                = delete;
+         frame& operator=(const frame&)     = delete;
          ~frame() { if (_active) abort(); }
          void upsert(key_view k, value_view v) { _tx->upsert(k, v); }
          void upsert_subtree(key_view k, subtree&& s) { _tx->upsert_subtree(k, std::move(s)); }
@@ -2143,19 +2145,8 @@ namespace heart::radix
          read_handle get_subtree(key_view k) { return _tx->get_subtree(k); }
          template <class T = std::string>
          std::optional<T> get(key_view k) { return _tx->template get<T>(k); }
-         void commit() noexcept
-         {
-            if (!_active) return;
-            if (_sp != sal::null_ptr_address) _tx->_t->_ses->release(_sp);  // drop the savepoint pin
-            _active = false;
-         }
-         void abort() noexcept
-         {
-            if (!_active) return;
-            if (_tx->_working != sal::null_ptr_address) _tx->_t->_ses->release(_tx->_working);
-            _tx->_working = _sp;  // restore (savepoint's retained ref becomes the working ref)
-            _active       = false;
-         }
+         void commit() noexcept { _sp.release(); _active = false; }              // keep working
+         void abort() noexcept { _tx->_working = std::move(_sp); _active = false; }  // restore working
       };
 
      private:
@@ -3855,7 +3846,6 @@ namespace heart::radix
    }
    inline radix_tree::frame radix_tree::transaction::sub_transaction()
    {
-      if (_working != sal::null_ptr_address) _t->_ses->retain(_working);
-      return frame(this, _working);
+      return frame(this, _working);  // copies the working smart_ptr → retains the savepoint
    }
 }  // namespace heart::radix

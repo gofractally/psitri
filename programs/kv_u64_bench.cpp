@@ -461,6 +461,73 @@ int main(int argc, char** argv)
 
    std::printf("N = %llu  (8-byte u64 keys, value=i)\n\n", (unsigned long long)N);
 
+   if (mode == "worst")  // WORST CASE: one committed transaction PER update → COW-to-root every op.
+   {                     // Head-to-head heart radix engine vs psitri (both on SAL), random keys.
+      auto vview = [](const uint64_t& v)
+      { return std::string_view(reinterpret_cast<const char*>(&v), sizeof(v)); };
+
+      // ── heart radix engine: upsert + commit per op ──
+      {
+         auto dir = std::filesystem::temp_directory_path() / "heart_worst";
+         std::filesystem::remove_all(dir);
+         radix_engine_tree t(dir);
+         auto              t0 = now();
+         for (uint64_t i = 0; i < N; ++i)
+         {
+            uint64_t k = rand_key(i);
+            t.upsert(kspan(k), vview(i));
+            t.commit();  // COW-to-root: the whole touched path is shared after the prior commit
+         }
+         double   ins = ns(t0, now(), N);
+         uint64_t s = 0;
+         for (uint64_t i = 0; i < N; ++i)
+         {
+            uint64_t k = rand_key(i); std::string_view v;
+            if (t.find(kspan(k), v)) { uint64_t g = 0; std::memcpy(&g, v.data(), 8); s += g; }
+         }
+         std::printf("    heart  : update %8.1f ns/txn   [%s]\n", ins,
+                     s == N * (N - 1) / 2 ? "OK" : "BAD");
+      }
+
+      // ── psitri (single-version COW on SAL): one transaction per op ──
+      {
+         auto dir = std::filesystem::temp_directory_path() / "psitri_worst";
+         std::filesystem::remove_all(dir);
+         psitri::runtime_config cfg;
+         cfg.sync_mode = sal::sync_type::none;
+         cfg.write_protect_on_commit = false;
+         cfg.checksum_on_commit = false;
+         auto db  = psitri::database::create(dir.string(), cfg);
+         auto ses = db->start_write_session();
+         auto t0  = now();
+         for (uint64_t i = 0; i < N; ++i)
+         {
+            uint64_t k  = rand_key(i);
+            auto     tx = ses->start_transaction(0);
+            tx.insert(psitri::key_view(reinterpret_cast<const char*>(&k), sizeof(k)),
+                      psitri::value_view(reinterpret_cast<const char*>(&i), sizeof(i)));
+            tx.commit();
+         }
+         double   ins = ns(t0, now(), N);
+         uint64_t s = 0;
+         auto     rootp = ses->get_root(0);
+         for (uint64_t i = 0; i < N; ++i)
+         {
+            uint64_t k = rand_key(i);
+            psitri::cursor cur(rootp);
+            if (cur.find(psitri::key_view(reinterpret_cast<const char*>(&k), sizeof(k))))
+               cur.get_value([&](psitri::value_view v) { uint64_t g = 0; std::memcpy(&g, v.data(), std::min<size_t>(8, v.size())); s += g; });
+         }
+         std::printf("    psitri : update %8.1f ns/txn   [%s]\n", ins,
+                     s == N * (N - 1) / 2 ? "OK" : "BAD");
+      }
+
+      std::printf("WORST CASE: 1 committed txn per update (COW-to-root each op), random %llu keys\n",
+                  (unsigned long long)N);
+      std::fflush(stdout);
+      return 0;
+   }
+
    if (mode == "prog")  // progressive random: 1M-insert chunks, 100k sampled queries, commit/chunk
    {
       std::printf("RANDOM keys, progressive (commit every chunk):\n");

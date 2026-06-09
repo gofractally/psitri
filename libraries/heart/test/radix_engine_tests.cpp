@@ -63,6 +63,29 @@ namespace
          INFO("surface: find");
          CHECK(ok);
       }
+      // (A2) cursor extras: get(key)->optional, full count_keys() == size, range count_keys.
+      {
+         radix_tree::cursor c(&t);
+         INFO("surface: cursor get(key)/count_keys");
+         CHECK(c.count_keys() == oracle.size());
+         bool getok = true;
+         int  s     = 0;
+         for (auto& [k, v] : oracle)
+         {
+            if (s++ % 13) continue;
+            auto got = c.template get<std::string>(k);
+            if (!got || *got != v) { getok = false; break; }
+         }
+         CHECK(getok);
+         if (oracle.size() > 2)  // range count vs oracle on a sampled [lo,hi)
+         {
+            auto lo = std::next(oracle.begin(), long(oracle.size() / 4))->first;
+            auto hi = std::next(oracle.begin(), long(3 * oracle.size() / 4))->first;
+            uint64_t want = 0;
+            for (auto& [k, v] : oracle) if (k >= lo && k < hi) ++want;
+            CHECK(c.count_keys(lo, hi) == want);
+         }
+      }
       // (B) tree for_each_inorder == sorted oracle.
       {
          std::vector<kv> got;

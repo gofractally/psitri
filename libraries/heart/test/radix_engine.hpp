@@ -1487,8 +1487,8 @@ namespace heart::radix
             (void)prefix;
             return seek_last();
          }
-         void seek_end()  noexcept { reset(); }            // after last key:  is_end()
-         void seek_rend() noexcept { reset(); _end = -1; }  // before first key: is_rend()
+         bool seek_end()  noexcept { reset(); return is_end(); }             // after last key
+         bool seek_rend() noexcept { reset(); _end = -1; return is_rend(); }  // before first key
          bool       is_end() const noexcept { return !_valid && _end >= 0; }
          bool       is_rend() const noexcept { return !_valid && _end < 0; }
          key_view   key() const noexcept { return key_view(reinterpret_cast<const char*>(_kbuf), _klen); }
@@ -1524,6 +1524,31 @@ namespace heart::radix
             fn(v);
             return true;
          }
+         template <class T = std::string>
+         std::optional<T> get(key_view k)  // point lookup → optional buffer (psitri parity)
+         {
+            value_view v;
+            if (!_t->find(k, v)) return std::nullopt;
+            return T(v.data(), v.data() + v.size());
+         }
+         // psitri pins values via a read_lock/value_pin; heart's cursor pins the whole snapshot
+         // root (RAII _root), so the value view is valid for the cursor's lifetime — the lock arg
+         // is accepted for signature parity and ignored.
+         value_view value(sal::read_lock&) const noexcept { return _val; }
+         // Count keys in [lo, hi) (empty bound = open). Walks a private copy so `this` is untouched.
+         uint64_t count_keys(key_view lo = {}, key_view hi = {}) const
+         {
+            cursor   c(*this);  // copy re-pins the same snapshot root (RAII)
+            uint64_t n = 0;
+            for (bool end = lo.empty() ? c.seek_begin() : c.lower_bound(lo); !end; end = c.next())
+            {
+               if (!hi.empty() && !(c.key() < hi)) break;
+               ++n;
+            }
+            return n;
+         }
+         static constexpr int32_t value_not_found = -1;  // get(key, buf) miss (psitri parity)
+         static constexpr int32_t value_subtree   = -2;  // value is a subtree, not bytes
 
         private:
          struct frame  // 8 bytes (lean push/pop); psitri-style

@@ -530,6 +530,89 @@ TEST_CASE("radix_engine: ordered surfaces correct on a bucket tree", "[radix_eng
    check_ordered_surfaces(t, oracle, "bucket mode");
 }
 
+// First-class subtree values: a value that IS a nested tree, not opaque bytes. Exercises the
+// discriminator, the cursor (is_subtree/subtree_cursor), write (create_subtree/upsert_subtree),
+// the transitions (bytes<->subtree, remove), and the ref-counted free cascade.
+TEST_CASE("radix_engine: first-class subtree values", "[radix_engine][cursor][subtree]")
+{
+   radix_tree t(tmp("heart_subtree"));
+   std::map<std::string, std::string> parent = {{"alpha", "A"}, {"beta", "B"}, {"zeta", "Z"}};
+   for (auto& [k, v] : parent) t.upsert(k, v);
+
+   const std::map<std::string, std::string> subkeys = {{"one", "1"}, {"three", "3"}, {"two", "2"}};
+   sal::ptr_address subroot{};
+   {
+      auto sub = t.create_subtree();
+      for (auto& [k, v] : subkeys) sub.upsert(k, v);
+      subroot = sub.root();
+      t.upsert_subtree("mid", sub.root());  // attach (retains); sub then releases its own ref
+   }
+
+   // (1) discrimination: "mid" is a subtree, not a byte value; byte keys are not subtrees.
+   value_view vv;
+   CHECK(t.find("alpha", vv));
+   CHECK(std::string(vv) == "A");
+   CHECK_FALSE(t.find("mid", vv));  // a subtree is not a byte value
+   CHECK(t.is_subtree("mid"));
+   CHECK_FALSE(t.is_subtree("alpha"));
+   CHECK(t.get_subtree("mid") == subroot);
+
+   // (2) parent in-order walk: "mid" shows as a subtree, byte keys as bytes, all in key order.
+   {
+      radix_tree::cursor       c(&t);
+      std::vector<std::string> order;
+      for (bool e = c.seek_begin(); !e; e = c.next())
+      {
+         order.push_back(std::string(c.key()));
+         if (c.key() == "mid")
+         {
+            CHECK(c.is_subtree());
+            CHECK(c.value_size() == radix_tree::cursor::value_subtree);
+         }
+         else
+            CHECK_FALSE(c.is_subtree());
+      }
+      CHECK(order == std::vector<std::string>{"alpha", "beta", "mid", "zeta"});
+   }
+
+   // (3) descend into the subtree via subtree_cursor and iterate it == subkeys.
+   {
+      radix_tree::cursor c(&t);
+      REQUIRE_FALSE(c.find("mid"));  // find returns is_end (false = found)
+      REQUIRE(c.is_subtree());
+      auto                               sc = c.subtree_cursor();
+      std::map<std::string, std::string> got;
+      for (bool e = sc.seek_begin(); !e; e = sc.next())
+      {
+         std::string val;
+         sc.get_value([&](value_view v) { val.assign(v.data(), v.size()); });
+         got[std::string(sc.key())] = val;
+      }
+      CHECK(got == subkeys);
+   }
+
+   // (4) overwrite the subtree with a byte value → old subtree must be freed (cascade).
+   const uint64_t before = t.object_count();
+   t.upsert("mid", "now-bytes");
+   CHECK_FALSE(t.is_subtree("mid"));
+   CHECK(t.find("mid", vv));
+   CHECK(std::string(vv) == "now-bytes");
+   CHECK(t.object_count() < before);  // subtree root + its leaves released
+
+   // (5) promote a byte key to a subtree, then remove it → frees the subtree too.
+   {
+      auto sub2 = t.create_subtree();
+      sub2.upsert("x", "9");
+      t.upsert_subtree("alpha", sub2.root());  // alpha was a byte value
+   }
+   CHECK(t.is_subtree("alpha"));
+   const uint64_t before2 = t.object_count();
+   CHECK(t.remove("alpha"));
+   CHECK_FALSE(t.is_subtree("alpha"));
+   CHECK_FALSE(t.find("alpha", vv));
+   CHECK(t.object_count() < before2);  // removing the key freed the subtree
+}
+
 TEST_CASE("radix_engine: overwrite returns prior size + COW commit cycle", "[radix_engine]")
 {
    radix_tree t(tmp("heart_re_cow"));

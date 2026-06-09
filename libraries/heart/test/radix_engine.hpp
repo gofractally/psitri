@@ -100,23 +100,78 @@ namespace heart::radix
       // ── public API (psitri key_view/value_view; values are arbitrary bytes) ───
       int upsert(key_view key, value_view val)
       {
-         auto  lock = _ses->lock();
-         _old_value_size = -1;
-         _shared         = false;  // fresh unique→shared latch for this COW-to-root descent
-         bytes kb   = as_bytes(key);
-         if (_bucket_mode)
-         {
-            _root = bkt_insert(_root, kb, 0, as_bytes(val));
-            return _old_value_size;
-         }
-         ptr_address nr = insert_node(_root, kb, 0, as_bytes(val), {});
-         if (nr != _root)
-         {
-            _ses->release(_root);
-            _root = nr;
-         }
+         _ins_value_type = inline_value::vt_bytes;
+         upsert_raw(_root, as_bytes(key), as_bytes(val));
          return _old_value_size;
       }
+
+      // ── first-class subtree values ──────────────────────────────────────────────────────
+      // A subtree value: the value stored at `key` IS a nested tree (root `subtree`), not bytes.
+      // Encoded as a vt_subtree terminal (value bytes = the 4-byte root); the terminal owns one
+      // ref on the root, released when the terminal dies (leaf_node::destroy → cascade).
+      //
+      // create_subtree() hands back an empty root you fill via a write handle, then attach with
+      // upsert_subtree(key, handle.root()). All subtree roots live in THIS tree's allocator.
+      // RAII builder for a detached subtree root. Owns one ref on its root; attaching with
+      // upsert_subtree retains a second, so when the handle dies the parent terminal is the sole
+      // owner. A handle never attached releases its root → the subtree is freed (no leak).
+      struct subtree
+      {
+         radix_tree* _t = nullptr;
+         ptr_address _root{};
+         subtree() = default;
+         subtree(radix_tree* t, ptr_address r) noexcept : _t(t), _root(r) {}
+         subtree(subtree&& o) noexcept : _t(o._t), _root(o._root) { o._t = nullptr; }
+         subtree(const subtree&)            = delete;
+         subtree& operator=(const subtree&) = delete;
+         ~subtree() { if (_t) _t->_ses->release(_root); }
+         ptr_address root() const noexcept { return _root; }
+         // Insert/update a key in the subtree (COW; the root may change → tracked here).
+         int upsert(key_view k, value_view v)
+         {
+            _t->_ins_value_type = inline_value::vt_bytes;
+            _t->upsert_raw(_root, as_bytes(k), as_bytes(v));  // updates _root by ref (COW)
+            return _t->_old_value_size;
+         }
+      };
+      subtree create_subtree() { return subtree{this, make_node<setlist_u8>(bytes{})}; }
+
+      int upsert_subtree(key_view key, ptr_address subtree_root)
+      {
+         _ses->retain(subtree_root);  // the stored terminal owns one ref on the root
+         _ins_value_type = inline_value::vt_subtree;
+         uint32_t raw    = *subtree_root;  // value bytes = the 4-byte root address
+         upsert_raw(_root, as_bytes(key),
+                    bytes{reinterpret_cast<const uint8_t*>(&raw), sizeof(raw)});
+         _ins_value_type = inline_value::vt_bytes;
+         return _old_value_size;
+      }
+      // Is the value at `key` a subtree?  get_subtree returns its root (null if absent/not subtree).
+      bool        is_subtree(key_view key);   // defined out-of-line (needs cursor)
+      ptr_address get_subtree(key_view key);  // defined out-of-line (needs cursor)
+
+     private:
+      // Shared insert body for upsert/upsert_subtree/subtree::upsert (value-type already stashed).
+      // Updates root_ref in place on a COW-to-root; sets _old_value_size.
+      void upsert_raw(ptr_address& root_ref, bytes kb, bytes val)
+      {
+         auto lock       = _ses->lock();
+         _old_value_size = -1;
+         _shared         = false;  // fresh unique→shared latch for this COW-to-root descent
+         if (_bucket_mode && &root_ref == &_root)
+         {
+            _root = bkt_insert(_root, kb, 0, val);
+            return;
+         }
+         ptr_address nr = insert_node(root_ref, kb, 0, val, {});
+         if (nr != root_ref)
+         {
+            _ses->release(root_ref);
+            root_ref = nr;
+         }
+      }
+
+     public:
 
       bool find(key_view key, value_view& out)
       {
@@ -608,7 +663,10 @@ namespace heart::radix
       ptr_address make_leaf(bytes suffix, bytes val, sal::alloc_hint hint = {})
       {
          ++_cc.leaf_allocs;
-         return _ses->alloc<leaf_node>(hint, suffix, val);
+         ptr_address a = _ses->alloc<leaf_node>(hint, suffix, val);
+         if (_ins_value_type != inline_value::vt_bytes)  // stamp the pending value-type (subtree)
+            _ses->get_ref<leaf_node>(a).modify().get()->value.value_type = _ins_value_type;
+         return a;
       }
 
       // Copy src's payload into dst (same N): head [alloc_header, head_bytes()) and the
@@ -833,7 +891,9 @@ namespace heart::radix
       template <class N>
       smart_address make_value_into(N* n, bytes suffix, bytes value, sal::alloc_hint hint)
       {
-         if (fits_inline(suffix, value))
+         // Subtree values (vt_subtree) are stored as a LEAF, never inline: the leaf's destroy owns
+         // the root-release cascade, so the hot node clone/destroy paths need no inline value-scan.
+         if (_ins_value_type == inline_value::vt_bytes && fits_inline(suffix, value))
          {
             uint32_t need = uint32_t(inline_value::byte_size(int(suffix.size()), int(value.size())));
             auto*    iv   = reinterpret_cast<inline_value*>(n->alloc_tail(uint16_t(need)));
@@ -868,12 +928,21 @@ namespace heart::radix
          suf = bytes{iv->data, size_t(iv->suffix_len)};
          val = bytes{iv->data + iv->suffix_len, size_t(iv->value_len)};
       }
+      // The terminal's inline_value (tail or leaf) — exposes value_type so callers can tell a
+      // byte value from a subtree value.
+      const inline_value* term_iv(const sal::alloc_header* node, smart_address sa) const
+      {
+         return sa.is_tail() ? inline_of(node, sa)
+                             : &_ses->get_ref<leaf_node>(sa.as_pointer()).obj()->value;
+      }
       // Resolve an inline tail on `node`: its suffix must equal `rem`.
       bool inline_at(const sal::alloc_header* node, smart_address sa, bytes rem, value_view& out) const
       {
          const inline_value* iv = inline_of(node, sa);
          if (iv->suffix_len != rem.size() ||
              (rem.size() && std::memcmp(iv->data, rem.data(), iv->suffix_len) != 0))
+            return false;
+         if (iv->is_subtree())  // a subtree value, not bytes — use is_subtree()/get_subtree()
             return false;
          out = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len), iv->value_len);
          return true;
@@ -895,6 +964,8 @@ namespace heart::radix
          if (suf.size() != rem.size() ||
              (suf.size() && std::memcmp(suf.data(), rem.data(), suf.size()) != 0))
             return false;
+         if (n->is_subtree())  // a subtree value, not bytes — use is_subtree()/get_subtree()
+            return false;
          bytes v = n->value_bytes();
          out     = value_view(reinterpret_cast<const char*>(v.data()), v.size());
          return true;
@@ -903,7 +974,11 @@ namespace heart::radix
       {
          auto             ref = _ses->get_ref<leaf_node>(addr);
          const leaf_node* ln  = ref.obj();
-         if (ref.ref() == 1 && ln->value.value_len == val.size())
+         // Never overwrite in place when a subtree is involved (old or new): route through
+         // make_leaf so the OLD leaf is released (its destroy frees the old subtree root) and the
+         // NEW leaf is stamped with the pending value_type.
+         if (_ins_value_type == inline_value::vt_bytes && !ln->is_subtree() &&
+             ref.ref() == 1 && ln->value.value_len == val.size())
          {
             leaf_node* w = ref.modify().get();
             std::memcpy(w->value.data + w->value.suffix_len, val.data(), val.size());
@@ -1413,6 +1488,11 @@ namespace heart::radix
              : _t(t), _root(t->session(), t->root_addr(), /*retain=*/true)
          {
          }
+         // Cursor rooted at an arbitrary node in the same allocator (a subtree root). Pins it.
+         cursor(radix_tree* t, ptr_address root) noexcept
+             : _t(t), _root(t->session(), root, /*retain=*/true)
+         {
+         }
 
          bool seek_begin()  // position at the first (smallest) key; returns is_end()
          {
@@ -1492,6 +1572,14 @@ namespace heart::radix
          bool       is_end() const noexcept { return !_valid && _end >= 0; }
          bool       is_rend() const noexcept { return !_valid && _end < 0; }
          key_view   key() const noexcept { return key_view(reinterpret_cast<const char*>(_kbuf), _klen); }
+         // ── first-class subtree values ──
+         bool        is_subtree() const noexcept { return _valid && _is_subtree; }  // value is a subtree
+         ptr_address subtree_addr() const noexcept { return _subtree; }             // its root (raw)
+         sal::smart_ptr<sal::alloc_header> subtree() const                          // pinned root
+         {
+            return sal::smart_ptr<sal::alloc_header>(_t->session(), _subtree, /*retain=*/true);
+         }
+         cursor subtree_cursor() const { return cursor(_t, _subtree); }  // iterate the nested tree
          template <class F>
          void get_value(F&& fn) const { fn(_val); }
          template <class T = std::string>
@@ -1515,7 +1603,10 @@ namespace heart::radix
          {
             return prefix.empty() ? seek_begin() : lower_bound(prefix);
          }
-         int32_t value_size() const noexcept { return _valid ? int32_t(_val.size()) : -1; }
+         int32_t value_size() const noexcept
+         {
+            return !_valid ? value_not_found : (_is_subtree ? value_subtree : int32_t(_val.size()));
+         }
          template <class F>
          bool get(key_view k, F&& fn)  // point lookup → lambda(value_view); true if found
          {
@@ -1561,10 +1652,11 @@ namespace heart::radix
 
          void reset() noexcept
          {
-            _depth = 0;
-            _klen  = 0;
-            _valid = false;
-            _end   = 0;
+            _depth      = 0;
+            _klen       = 0;
+            _valid      = false;
+            _end        = 0;
+            _is_subtree = false;
          }
          void append(const uint8_t* p, size_t n) noexcept
          {
@@ -1572,13 +1664,22 @@ namespace heart::radix
             _klen += uint32_t(n);
          }
          template <class Ad>
-         void take_terminal(Ad ad, smart_address br)  // append suffix, view the value
+         void take_terminal(Ad ad, smart_address br)  // append suffix, capture value or subtree
          {
-            bytes      suf;
-            value_view v;
-            _t->term_view(ad.node(), br, suf, v);
-            append(suf.data(), suf.size());
-            _val = v;
+            const inline_value* iv = _t->term_iv(ad.node(), br);
+            append(iv->data, iv->suffix_len);
+            if (iv->is_subtree())
+            {
+               _is_subtree = true;
+               _subtree    = iv->subtree_root();
+               _val        = {};
+            }
+            else
+            {
+               _is_subtree = false;
+               _val = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len),
+                                 iv->value_len);
+            }
          }
 
          // ── bucket leaves ────────────────────────────────────────────────────────────────
@@ -1597,8 +1698,11 @@ namespace heart::radix
             const inline_value* iv = bn->entry(i);
             _klen                  = klen1;
             append(iv->data, iv->suffix_len);
-            _val = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len),
-                              iv->value_len);
+            _is_subtree = iv->is_subtree();
+            _subtree    = _is_subtree ? iv->subtree_root() : ptr_address{};
+            _val        = _is_subtree ? value_view{}
+                                      : value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len),
+                                                   iv->value_len);
          }
 
          // Push frames down to the minimum terminal of `addr`'s subtree; sets _valid/_val/_kbuf.
@@ -1874,6 +1978,8 @@ namespace heart::radix
          int         _depth     = 0;
          bool        _valid     = false;
          int8_t      _end       = 0;  // when !_valid: +1 = at/after end, -1 = at/before begin (rend)
+         bool        _is_subtree = false;  // current terminal's value is a subtree (not bytes)
+         ptr_address _subtree{};           // that subtree's root (valid when _is_subtree)
          ptr_address _nextaddr{};
          uint32_t    _nextdepth = 0;
       };
@@ -3527,6 +3633,10 @@ namespace heart::radix
       bool                            _adaptive       = false;  // gate: radix→bucket on deep-narrow
       bool                            _in_bucket      = false;  // re-entrancy: in a bucket subtree
       bool                            _c1_promote_on  = false;  // opt-in: narrow setlist→c1 below overflow
+      // The value-type for the terminal the current upsert will create — STASHED on the tree (set
+      // at upsert/upsert_subtree, read at make_leaf/make_value_into), so the insert descent never
+      // threads it. vt_bytes for a normal upsert, vt_subtree for upsert_subtree.
+      uint8_t                         _ins_value_type = inline_value::vt_bytes;
       // COW-to-root unique→shared MODE LATCH (mirrors psitri upsert_mode.make_shared()). Reset at
       // the top of each upsert/remove; latched true the moment descent passes through a SHARED node
       // (ref>1, e.g. a committed snapshot pins the root). Once shared it stays shared for the rest
@@ -3552,5 +3662,19 @@ namespace heart::radix
       });
       std::printf("  [%s] root ref=%u, pointer-children=%d : ref>=2 (shared)=%d, ref==1 (unique)=%d\n",
                   tag, root_use_count(), total, shared, unique);
+   }
+
+   // Out-of-line: need the complete cursor type.
+   inline bool radix_tree::is_subtree(key_view key)
+   {
+      cursor c(this);
+      return !c.find(key) && c.is_subtree();  // find() returns is_end (true on miss)
+   }
+   inline ptr_address radix_tree::get_subtree(key_view key)
+   {
+      cursor c(this);
+      if (c.find(key) || !c.is_subtree())
+         return sal::null_ptr_address;
+      return c.subtree_addr();
    }
 }  // namespace heart::radix

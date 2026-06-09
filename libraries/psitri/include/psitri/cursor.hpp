@@ -72,6 +72,32 @@ namespace psitri
       uint64_t         version   = UINT64_MAX;  ///< 0=inline, VN latest, UINT64_MAX=missing
    };
 
+   // A value_view kept safe to read by a value_pin (read_lock) bundled into the return — the pin
+   // holds the page resident for as long as this object lives. Return-by-value bundles the pin with
+   // the view (vector<bool>::reference-style proxy): the caller extends the safe-read window simply
+   // by holding it, with no separate pin to manage (safer than value(read_lock&)). Converts to
+   // value_view for transient use. Symmetric with heart::radix::value_ref.
+   //
+   // WARNING: the held read_lock BLOCKS the compactor from reclaiming/evicting memory. Hold a
+   // value_ref only for a SHORT, LOCAL scope. Keeping it alive across long spans — especially under
+   // heavy concurrent writes — stalls compaction and causes temporary memory bloat (freed/garbage
+   // memory can't be reclaimed while any read_lock is open). For longer-lived needs, copy the bytes
+   // out (value<T>()) and let the lock drop.
+   class value_ref
+   {
+      value_pin  _pin;  // residency pin (move-only)
+      value_view _v;
+
+     public:
+      value_ref(value_pin pin, value_view v) noexcept : _pin(std::move(pin)), _v(v) {}
+      operator value_view() const noexcept { return _v; }
+      value_view  view() const noexcept { return _v; }
+      const char* data() const noexcept { return _v.data(); }
+      size_t      size() const noexcept { return _v.size(); }
+      bool        empty() const noexcept { return _v.empty(); }
+      std::string str() const { return std::string(_v); }
+   };
+
    class cursor
    {
      public:
@@ -150,26 +176,34 @@ namespace psitri
       bool is_end() const noexcept { return depth() == 0 and _path[0].branch == _root_end_branch; }
 
       /// seek to the first key that is greater than or equal to the given key
-      /// @return is_end()
+      /// @return true if positioned on a key, false if it ran off the end
       bool lower_bound(key_view key) noexcept;
+      /// seek to the first key strictly greater than the given key
+      /// @return true if positioned on a key, false if it ran off the end
       bool upper_bound(key_view key) noexcept;
 
       /// Deprecated exact-positioning alias. Use find() for exact lookup
       /// and lower_bound() for ordered seek/range positioning.
+      /// @return true iff the exact key is present (cursor is left at lower_bound either way)
       bool seek(key_view key) noexcept;
       /// Finds exactly the given key using the point-lookup path.
       /// On miss, positions the cursor at end.
+      /// @return true if found, false on miss
       bool find(key_view key) noexcept;
 
+      /// position at the first key (optionally the first key >= prefix)
+      /// @return true if positioned on a key, false if empty
       bool first(key_view prefix = {}) noexcept;
+      /// position at the last key (prefix bound not yet supported)
+      /// @return true if positioned on a key, false if empty
       bool last(key_view prefix = {}) noexcept;
 
-      /// seek to the next key
-      /// @return is_end()
+      /// advance to the next key in order
+      /// @return true if it landed on a key, false if it ran off the end
       bool next() noexcept;
 
-      /// seek to the previous key
-      /// @return is_rend()
+      /// retreat to the previous key in order
+      /// @return true if it landed on a key, false if it ran off the front (rend)
       bool prev() noexcept;
 
       key_view key() const noexcept { return key_view(_key_buf.data(), _key_len); }
@@ -179,6 +213,18 @@ namespace psitri
       value_view value(sal::read_lock& rl) const noexcept;
       value_view value(value_pin& pin) const noexcept { return value(pin.lock()); }
       value_pin  pin_values() const { return value_pin(_node.session()); }
+      // Borrowed value view bundled with the pin that keeps it valid (the safe replacement for
+      // value(read_lock&) / value(value_pin&) — the caller can't forget the lock). Symmetric with
+      // heart::radix::cursor::pinned_value(); empty if not positioned or the value is a subtree.
+      // WARNING: hold the returned value_ref only briefly — its read_lock stalls the compactor;
+      // holding it during heavy writes causes temporary memory bloat. Copy via value<T>() if you
+      // need the bytes longer.
+      value_ref pinned_value() const
+      {
+         value_pin  p = pin_values();
+         value_view v = value(p);
+         return value_ref{std::move(p), v};
+      }
 
       /// calls lambda with a view of the value for the current key, view is only valid for the lifetime of the lambda
       void get_value(std::invocable<value_view> auto&& lambda) const noexcept;
@@ -673,6 +719,15 @@ namespace psitri
          return seek_end();
       seek_end();
       return prev();
+   }
+   inline bool cursor::first(key_view prefix) noexcept
+   {
+      return prefix.empty() ? seek_begin() : lower_bound(prefix);
+   }
+   inline bool cursor::last(key_view prefix) noexcept
+   {
+      (void)prefix;  // prefix-bounded last not yet supported (parity with heart)
+      return seek_last();
    }
    inline bool cursor::seek(key_view key) noexcept
    {

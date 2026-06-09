@@ -2127,8 +2127,8 @@ namespace heart::radix
          {
             if (!_open) return;
             ptr_address& slot = _t->root_slot(_idx);
-            if (slot != sal::null_ptr_address) _t->_ses->release(slot);  // drop the published pre-image
-            slot  = _working.take();                                     // publish (transfer ref out)
+            root_ptr     old(_t->session(), slot);  // ADOPT the pre-image → released when `old` dies
+            slot  = _working.take();                // publish the working root (transfer ref out)
             _open = false;
          }
          void abort() noexcept

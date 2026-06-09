@@ -65,6 +65,21 @@ target_compile_definitions(psitri-tests PUBLIC XXH_INLINE_ALL)
 set_target_properties(psitri-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 add_test(NAME psitri-tests COMMAND psitri-tests)
 
+# Differential subtree conformance: the same templated tests run against BOTH heart and psitri.
+# Links psitri (→ sal/ucc/hash/art) and pulls in heart's header-only engine (include + test dir
+# for radix_engine.hpp). heart must not depend on psitri; this third-party target depends on both.
+add_executable(subtree-conformance-tests subtree_conformance_tests.cpp)
+target_link_libraries(subtree-conformance-tests PRIVATE psitri Catch2::Catch2WithMain)
+target_include_directories(subtree-conformance-tests PRIVATE
+    $<TARGET_PROPERTY:psitri,INTERFACE_INCLUDE_DIRECTORIES>
+    ${CMAKE_SOURCE_DIR}/libraries/heart/include
+    ${CMAKE_SOURCE_DIR}/libraries/heart/test
+)
+target_compile_features(subtree-conformance-tests PRIVATE cxx_std_23)
+target_compile_definitions(subtree-conformance-tests PRIVATE XXH_INLINE_ALL)
+set_target_properties(subtree-conformance-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_test(NAME subtree-conformance-tests COMMAND subtree-conformance-tests)
+
 # MDBX compatibility tests
 add_executable(mdbx-tests
     ../libraries/psitrimdbx/tests/mdbx_tests.cpp

@@ -465,7 +465,10 @@ int main(int argc, char** argv)
    if (mode == "worst")  // WORST CASE: commit every BATCH updates (default 1 → COW-to-root every op).
    {                     // Head-to-head heart radix engine vs psitri (both on SAL), random keys.
       const uint64_t batch = (argc > 3) ? std::strtoull(argv[3], nullptr, 10) : 1;
-      std::printf("  (commit every %llu updates)\n", (unsigned long long)batch);
+      uint64_t (*keyfn)(uint64_t) =
+          (argc > 4 && std::string_view(argv[4]) == "seq") ? +seq_key : +rand_key;
+      std::printf("  (commit every %llu updates, %s keys)\n", (unsigned long long)batch,
+                  (argc > 4 && std::string_view(argv[4]) == "seq") ? "SEQUENTIAL" : "random");
       auto vview = [](const uint64_t& v)
       { return std::string_view(reinterpret_cast<const char*>(&v), sizeof(v)); };
 
@@ -477,7 +480,7 @@ int main(int argc, char** argv)
          auto              t0 = now();
          for (uint64_t i = 0; i < N; ++i)
          {
-            uint64_t k = rand_key(i);
+            uint64_t k = keyfn(i);
             t.upsert(kspan(k), vview(i));
             if ((i + 1) % batch == 0) t.commit();
          }
@@ -486,7 +489,7 @@ int main(int argc, char** argv)
          uint64_t s   = 0;
          for (uint64_t i = 0; i < N; ++i)
          {
-            uint64_t k = rand_key(i); std::string_view v;
+            uint64_t k = keyfn(i); std::string_view v;
             if (t.find(kspan(k), v)) { uint64_t g = 0; std::memcpy(&g, v.data(), 8); s += g; }
          }
          std::printf("    heart  : update %8.1f ns/txn   [%s]  clones=%llu (%.2f/op)\n", ins,
@@ -517,7 +520,7 @@ int main(int argc, char** argv)
             uint64_t end = std::min(N, base + batch);
             for (uint64_t i = base; i < end; ++i)
             {
-               uint64_t k = rand_key(i);
+               uint64_t k = keyfn(i);
                tx.insert(psitri::key_view(reinterpret_cast<const char*>(&k), sizeof(k)),
                          psitri::value_view(reinterpret_cast<const char*>(&i), sizeof(i)));
             }
@@ -528,7 +531,7 @@ int main(int argc, char** argv)
          auto     rootp = ses->get_root(0);
          for (uint64_t i = 0; i < N; ++i)
          {
-            uint64_t k = rand_key(i);
+            uint64_t k = keyfn(i);
             psitri::cursor cur(rootp);
             if (cur.find(psitri::key_view(reinterpret_cast<const char*>(&k), sizeof(k))))
                cur.get_value([&](psitri::value_view v) { uint64_t g = 0; std::memcpy(&g, v.data(), std::min<size_t>(8, v.size())); s += g; });

@@ -94,11 +94,12 @@ TEST_CASE("node family: sizes and dispatch tiers", "[radix_node]")
    CHECK(bitset_r4_node::tier == dispatch_shape::r4);
    CHECK(full_radix_node::tier == dispatch_shape::r8);
 
-   // the bitset family carries the refcount-tree roots; sparse nodes do not
-   CHECK(bitset1_node::refcount_block_count == 1);
-   CHECK(bitset_r2_node::refcount_block_count == 2);
-   CHECK(bitset_r4_node::refcount_block_count == 4);
-   CHECK(full_radix_node::refcount_block_count == 4);
+   // the bitset family carries per-range refcounts (range_ctrs); sparse nodes do not. Every big
+   // tier now has RANGE_COUNT (8) per-range counters — refcount_block_count is the is_big marker.
+   CHECK(bitset1_node::refcount_block_count == heart::range_count);
+   CHECK(bitset_r2_node::refcount_block_count == heart::range_count);
+   CHECK(bitset_r4_node::refcount_block_count == heart::range_count);
+   CHECK(full_radix_node::refcount_block_count == heart::range_count);
 }
 
 TEST_CASE("full_radix_node is 9 cachelines with an r8 tier", "[radix_node]")

@@ -195,6 +195,7 @@ namespace heart
          return sal::combine(this->fixed.region, this->fixed.off[r]);
       }
       void rc_set_off(int r, sal::implicit_ref_addr o) noexcept { this->fixed.off[r] = o; }
+      const sal::implicit_ref_addr* rc_offs() const noexcept { return this->fixed.off; }  // 8 offsets
 
       /// Destroy: release each of the RANGE_COUNT per-range counters. The version that drives a
       /// range's counter to 0 is the range-set's last owner → it releases that range's branch

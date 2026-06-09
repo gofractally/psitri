@@ -564,7 +564,9 @@ namespace heart::radix
       ptr_address make_node(bytes pfx, sal::alloc_hint hint = {})
       {
          ptr_address a = _ses->alloc<N>(hint, pfx);
-         _ses->get_ref<N>(a).modify().get()->alloc_tail(tail_reserve);  // tail offsets >=16
+         N*          n = _ses->get_ref<N>(a).modify().get();
+         n->alloc_tail(tail_reserve);  // tail offsets >=16
+         rr_birth<N>(n);               // big tier → 8 per-range counters (empty node, =1 each)
          stamp<N>(a);
          ++_cc.node_allocs;
          return a;
@@ -589,6 +591,102 @@ namespace heart::radix
          uint16_t hu = src->tail_used();
          std::memcpy(dst->tail() - hu, src->tail() - hu, hu);
       }
+
+      // ── range-refcount engine layer (per-range branch-set counters; doc/micro_refcount.md) ──
+      // A big node batches its child retain/release into RANGE_COUNT per-range counters in the SAL
+      // implicit_ref_pool. clone/destroy branch on rc_has_ctrs(): countered nodes use the 8
+      // counters, un-countered nodes (a birth site not yet wired) fall back to per-child — so
+      // birth wiring is incrementally safe. is_big marks the tiers that have counters.
+      template <class N>
+      static constexpr bool is_big = requires { N::refcount_block_count; };
+
+      // Birth: give a fresh big node its 8 per-range counters (each = 1, this version), co-located
+      // in one region. The builder's per-child placement supplies each counter's base (cb.ref=1
+      // per child). Re-homes if a region fills mid-birth (counters are unique=1 here, safe).
+      template <class N>
+      void rr_birth(N* n)
+      {
+         if constexpr (is_big<N>)
+         {
+            for (;;)
+            {
+               sal::ptr_address       a0     = _ses->rr_alloc_fresh();
+               auto                   region = sal::region_of(a0);
+               sal::implicit_ref_addr placed[range_count];
+               placed[0] = sal::offset_of(a0);
+               int  r  = 1;
+               bool ok = true;
+               for (; r < range_count; ++r)
+               {
+                  auto a = _ses->rr_alloc_in_region(
+                      {region, std::span<const sal::implicit_ref_addr>(placed, size_t(r))});
+                  if (not a) { ok = false; break; }
+                  placed[r] = sal::offset_of(*a);
+               }
+               if (ok)
+               {
+                  n->rc_set_region(region);
+                  for (int i = 0; i < range_count; ++i) n->rc_set_off(i, placed[i]);
+                  return;
+               }
+               for (int j = 0; j < r; ++j)  // region filled mid-birth: undo the placed + retry
+                  (void)_ses->rr_release(sal::combine(region, placed[j]));
+            }
+         }
+      }
+
+      // A big node's children are co-owned by another version iff any range counter > 1 (deferred
+      // counts hide that from cb.ref, so the COW mode latch must consult this).
+      template <class N>
+      bool children_shared(const N* cn)
+      {
+         if constexpr (is_big<N>)
+         {
+            if (not cn->rc_has_ctrs()) return false;
+            for (int r = 0; r < range_count; ++r)
+               if (_ses->rr_count(cn->rc_ctr(r)) > 1) return true;
+         }
+         return false;
+      }
+
+      // Rare: a counter alloc found the node's region full. Fully privatize — retain ALL pointer
+      // children (O(F)), drop this version's hold on all 8 old counters, birth fresh ones in a new
+      // region. Every range becomes private (count 1).
+      template <class N>
+      void rr_rehome_full(N* n)
+      {
+         if constexpr (is_big<N>)
+         {
+            n->for_each_entry([&](uint8_t, smart_address sa)
+                              { if (sa.is_pointer()) _ses->retain(sa.as_pointer()); });
+            for (int r = 0; r < range_count; ++r) (void)_ses->rr_release(n->rc_ctr(r));
+            rr_birth<N>(n);
+         }
+      }
+
+      // Divergence: before mutating range r's branch set on a (cow'd) big node whose range-r
+      // counter is SHARED, give this version its own range-r counter. Retain every current
+      // pointer-child in range r (now co-owned by old set + this new one — the inherent ~32); the
+      // per-site release(old_child) at drop/repoint cancels the changed child's retain, and an
+      // add's new child is fresh. No-op for small tiers, un-countered nodes, already-private ranges.
+      template <class N>
+      void rr_diverge(N* n, int r)
+      {
+         if constexpr (is_big<N>)
+         {
+            if (not n->rc_has_ctrs() || _ses->rr_count(n->rc_ctr(r)) <= 1)
+               return;
+            auto a = _ses->rr_alloc_in_region(  // try a co-located new counter FIRST
+                {n->rc_region(), std::span<const sal::implicit_ref_addr>(n->rc_offs(), range_count)});
+            if (not a) { rr_rehome_full(n); return; }  // region full → privatize all (rare)
+            n->for_each_entry([&](uint8_t byte, smart_address sa) {
+               if (sa.is_pointer() && range_of(byte) == r) _ses->retain(sa.as_pointer());
+            });
+            (void)_ses->rr_release(n->rc_ctr(r));  // leave old shared set (count was >1, not last)
+            n->rc_set_off(r, sal::offset_of(*a));
+         }
+      }
+
       // Clone from an already-resolved source node (no get_ref — the caller, e.g. cow(), holds
       // the ref pointing at exactly this node). `a` is unused for resolution but kept for symmetry.
       template <class N>
@@ -599,7 +697,19 @@ namespace heart::radix
          ptr_address na = _ses->alloc<N>(need, sal::alloc_hint{}, src->prefix());
          N*          nn = mut<N>(na);
          blit<N>(nn, src);
-         nn->for_each_child([&](ptr_address c) { _ses->retain(c); ++_cc.child_retains; });
+         if constexpr (is_big<N>)
+         {
+            if (nn->rc_has_ctrs())  // share the 8 per-range counters (blit copied region+offsets)
+            {
+               for (int r = 0; r < range_count; ++r) _ses->rr_retain(nn->rc_ctr(r));
+               smart_address tv = nn->term_value();
+               if (tv.is_pointer()) _ses->retain(tv.as_pointer());  // term held directly
+            }
+            else  // un-countered big node (birth not wired) → per-child fallback (matches destroy)
+               nn->for_each_child([&](ptr_address c) { _ses->retain(c); });
+         }
+         else
+            nn->for_each_child([&](ptr_address c) { _ses->retain(c); ++_cc.child_retains; });
          stamp<N>(na);
          ++_cc.clones;
          return na;
@@ -1577,7 +1687,7 @@ namespace heart::radix
          const ptr_address pre = addr;  // original (pre-COW) node, for clone-release on downgrade
          sal::smart_ref<N> ref = _ses->get_ref<N>(addr);  // resolved once; threaded into cow()
          const N*          cn  = ref.obj();
-         if (ref.ref() > 1)  // descending through a shared node → latch shared for the whole subtree
+         if (ref.ref() > 1 || children_shared<N>(cn))  // shared node OR co-owned big children → latch
             _shared = true;
          bytes             pfx = cn->prefix();
          if (pfx.size() > key.size() - depth ||
@@ -1641,6 +1751,7 @@ namespace heart::radix
                return addr;
             }
             N* n = cow<N>(ref, addr);
+            rr_diverge<N>(n, range_of(cell));  // big tier: privatize range before dropping a branch
             if (sa.is_pointer())
                _ses->release(sa.as_pointer());  // external leaf value (inline tail just orphans)
             n->remove_branch(cell);
@@ -1656,6 +1767,7 @@ namespace heart::radix
          if (_emptied)     // the child drained → drop its branch and free it
          {
             N* n = cow<N>(ref, addr);  // ref valid: the recursion didn't COW this node
+            rr_diverge<N>(n, range_of(cell));  // big tier: privatize range before dropping a branch
             n->remove_branch(cell);
             _ses->release(nc);  // the emptied child (in-place == child, or a clone)
             if (nc != child)
@@ -1666,6 +1778,7 @@ namespace heart::radix
          if (nc != child)  // child was path-COW'd (shared) → repoint, release the original
          {
             N* n = cow<N>(ref, addr);  // ref valid: the recursion didn't COW this node
+            rr_diverge<N>(n, range_of(cell));  // big tier: privatize range before re-pointing
             n->set_branch(cell, smart_address::from_pointer(nc));
             _ses->release(child);
          }
@@ -1683,9 +1796,11 @@ namespace heart::radix
          // cow(ref, …) reuses it for an in-place mutation (no second get_ref). After a COW the
          // ref is stale (clone → new address), so the post-COW writable `n` is used instead.
          sal::smart_ref<N> ref = _ses->get_ref<N>(addr);
-         if (ref.ref() > 1)  // descending through a shared node → latch shared for the whole subtree
-            _shared = true;
          const N*          cn  = ref.obj();
+         // Latch shared if THIS node is shared OR its big-tier children are co-owned via shared
+         // range counters (deferred counts hide that from cb.ref) — either way the subtree clones.
+         if (ref.ref() > 1 || children_shared<N>(cn))
+            _shared = true;
          bytes             pfx = cn->prefix();
          int               avail     = int(key.size() - depth);
          int               maxp      = std::min(int(pfx.size()), avail);
@@ -1713,6 +1828,7 @@ namespace heart::radix
             // (the caller releases the original), else it orphans.
             const ptr_address pre = addr;
             N*                 n   = cow<N>(ref, addr, value_tail_need(suf, val));
+            rr_diverge<N>(n, range_of(b));  // big tier: privatize range before adding a branch
             smart_address      sab = make_value_into<N>(n, suf, val, chint);
             bool               to_c1 = false;
             if constexpr (std::is_same_v<N, setlist_u8>)
@@ -1745,6 +1861,7 @@ namespace heart::radix
                if (nsa != sa)
                {
                   N* n = cow<N>(addr);
+                  rr_diverge<N>(n, range_of(b));  // big tier: privatize range before replace
                   if (sa.is_pointer() && nsa != sa)
                      _ses->release(sa.as_pointer());
                   n->set_branch(b, nsa);
@@ -1757,6 +1874,7 @@ namespace heart::radix
             ptr_address   child = make_collision_child(esuf, eval, suf, val, cp, chint);
             smart_address csa   = smart_address::from_pointer(child);
             N*            n   = cow<N>(ref, addr);  // ref valid: make_collision_child didn't COW addr
+            rr_diverge<N>(n, range_of(b));  // big tier: privatize range before replace
             if (n->set_branch(b, csa))
             {
                if (sa.is_pointer())
@@ -1795,6 +1913,7 @@ namespace heart::radix
          {
             smart_address nsab = smart_address::from_pointer(nc);
             N*            n    = cow<N>(ref, addr);  // ref valid: the recursion didn't COW this node
+            rr_diverge<N>(n, range_of(b));  // big tier: privatize range before re-pointing
             if (!n->set_branch(b, nsab))  // compact re-home failed → widen with the pointer
             {
                if constexpr (!std::is_same_v<N, full_radix_node>)
@@ -2011,7 +2130,11 @@ namespace heart::radix
          else if (t == setlist_u32::type_id)
             cow<setlist_u32>(node, 8)->set_branch(q, ptr);
          else
-            cow<full_radix_node>(node)->set_branch(uint8_t(q), ptr);  // direct, no grow/widen
+         {
+            auto* w = cow<full_radix_node>(node);  // direct, no grow/widen
+            rr_diverge<full_radix_node>(w, range_of(uint8_t(q)));  // privatize range before set
+            w->set_branch(uint8_t(q), ptr);
+         }
       }
       void add_inline(ptr_address& node, sal::header_type t, uint32_t q, bytes suf, bytes val,
                       sal::alloc_hint hint)
@@ -2103,7 +2226,11 @@ namespace heart::radix
          else if (t == setlist_u32::type_id)
             cow<setlist_u32>(node, 8)->set_branch(q, sa);
          else
-            cow<full_radix_node>(node)->set_branch(uint8_t(q), sa);
+         {
+            auto* w = cow<full_radix_node>(node);
+            rr_diverge<full_radix_node>(w, range_of(uint8_t(q)));  // privatize range before set
+            w->set_branch(uint8_t(q), sa);
+         }
       }
       void set_term_of(ptr_address node, sal::header_type t, smart_address sv)
       {
@@ -2240,6 +2367,7 @@ namespace heart::radix
          ptr_address na = _ses->alloc<To>(need, hint, cn->prefix());
          To*         nn = mut<To>(na);
          nn->alloc_tail(tail_reserve);
+         rr_birth<To>(nn);  // big tier → 8 counters; the term+branch retains below are the base
          stamp<To>(na);
          ok = true;
          smart_address tv = cn->term_value();
@@ -2329,6 +2457,7 @@ namespace heart::radix
          ptr_address na = _ses->alloc<To>(need, hint, bytes{});
          To*         nn = mut<To>(na);
          nn->alloc_tail(tail_reserve);
+         rr_birth<To>(nn);  // big tier → 8 counters; the term+branch retains below are the base
          nn->set_window_base(uint8_t(lo));
          stamp<To>(na);
          ok               = true;
@@ -2430,6 +2559,7 @@ namespace heart::radix
          ptr_address na = _ses->alloc<To>(need, sal::alloc_hint{}, cn->prefix());
          To*         nn = mut<To>(na);
          nn->alloc_tail(tail_reserve);
+         rr_birth<To>(nn);  // big tier → 8 counters; the term+branch retains below are the base
          stamp<To>(na);
          ok               = true;
          smart_address tv = cn->term_value();
@@ -2709,6 +2839,7 @@ namespace heart::radix
                                                        bytes{pbuf, size_t(pl)});
          full_radix_node* nn = mut<full_radix_node>(np);
          _ses->get_ref<full_radix_node>(rp).obj()->copy_to(nn);  // re-resolve rp AFTER the alloc
+         rr_birth<full_radix_node>(nn);  // 8 counters; the for_each_child retains below are the base
          nn->for_each_child([&](ptr_address c) { _ses->retain(c); });
          stamp<full_radix_node>(np);  // dispatch shape (find reads cb_type) — copy_to didn't set it
          _ses->release(rp);  // drop old router (its destroy releases each child once → net no change)

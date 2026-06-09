@@ -360,7 +360,16 @@ namespace heart::radix
          KB   kb;
          inorder_walk(_root, kb, cb);
       }
-      // DEBUG: count keys reachable from an ARBITRARY (pinned) root — unambiguous snapshot check.
+      // ══ TESTING / DIAGNOSTIC HOOKS — NOT THE PUBLIC API; DO NOT USE IN PRODUCTION ══════════
+      // The hooks in this region (count_keys_at, sig_at, drop_root, take_snapshot/release_snapshot,
+      // adopt_root, working_root, find_at, root_use_count, dump_root_child_refs) deliberately
+      // traffic in raw sal::ptr_address — the IMPLEMENTATION-level currency — to drive the
+      // snapshot-isolation / refcount / leak stress harnesses (rrstress, snaptest, benches). They
+      // pin roots, mutate refcounts, and read arbitrary roots with NO safety rails. The public,
+      // end-user face (transaction / cursor / read_handle / subtree) never exposes a ptr_address;
+      // production code must use that instead.
+      // ════════════════════════════════════════════════════════════════════════════════════════
+      // [testing] count keys reachable from an ARBITRARY (pinned) root — unambiguous snapshot check.
       uint64_t count_keys_at(ptr_address root)
       {
          auto     lock = _ses->lock();
@@ -370,7 +379,7 @@ namespace heart::radix
          inorder_walk(root, kb, cb);
          return n;
       }
-      // DEBUG: order-independent (count, checksum) signature of the keyspace at a pinned root —
+      // [testing] order-independent (count, checksum) signature of the keyspace at a pinned root —
       // verifies a snapshot's exact contents (not just count) against the test model after churn.
       std::pair<uint64_t, uint64_t> sig_at(ptr_address root)
       {
@@ -398,7 +407,7 @@ namespace heart::radix
          _snap_valid = true;
       }
 
-      // Release the ENTIRE tree in one cascade — test/bench hook for big-subtree-drop latency.
+      // [testing] release the ENTIRE tree in one cascade — bench hook for big-subtree-drop latency.
       // Drops the snapshot pin first so the root is uniquely owned (ref==1) and the single
       // release() cascades through every node. Resets to a fresh empty root so the tree stays
       // usable. (Build the tree WITHOUT per-op commit() so interior nodes are uniquely owned and
@@ -436,12 +445,13 @@ namespace heart::radix
       void set_adaptive(bool on) { _adaptive = on; }
       bool adaptive() const { return _adaptive; }
       void set_c1_promote(bool on) { _c1_promote_on = on; }
-      // DEBUG probe: current refcount of the root node (is the snapshot pinning it?).
+      // ══ TESTING / DIAGNOSTIC HOOKS (cont.) — NOT THE PUBLIC API; raw ptr_address, no safety ══
+      // [testing] current refcount of the root node (is the snapshot pinning it?).
       uint32_t root_use_count() { return _ses->get_ref<sal::alloc_header>(_root).ref(); }
-      // DEBUG: pin the current root as an independent snapshot (caller must release_snapshot()).
+      // [testing] pin the current root as an independent snapshot (caller must release_snapshot()).
       ptr_address take_snapshot() { _ses->retain(_root); return _root; }
       void        release_snapshot(ptr_address s) { _ses->release(s); }
-      // DEBUG: adopt a pinned snapshot as the live working root → writes COW a DIVERGENT lineage
+      // [testing] adopt a pinned snapshot as the live working root → writes COW a DIVERGENT lineage
       // from it (the snapshot stays frozen). Used to stress two+ writers sharing a common ancestor.
       void adopt_root(ptr_address s)
       {
@@ -452,7 +462,7 @@ namespace heart::radix
          _root = s;
       }
       ptr_address working_root() const { return _root; }
-      // DEBUG: read a key from an ARBITRARY (pinned) root — used to test snapshot isolation.
+      // [testing] read a key from an ARBITRARY (pinned) root — used to test snapshot isolation.
       bool find_at(ptr_address root, key_view key, value_view& out)
       {
          auto  lk = _ses->lock();
@@ -460,7 +470,7 @@ namespace heart::radix
          bytes q = as_bytes(key);
          return seek(root, q, 0, /*strict=*/false, kb, out);  // first key >= q; q exists → lands on it
       }
-      // DEBUG: enumerate the CURRENT root's immediate pointer-children and their refcounts.
+      // [testing] enumerate the CURRENT root's immediate pointer-children and their refcounts.
       // After (insert 1000; commit; insert 1) a correct COW-to-root clones the root and retains
       // every child → all but the one on the modified path should read ref==2.
       void dump_root_child_refs(const char* tag);

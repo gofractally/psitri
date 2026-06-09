@@ -808,19 +808,17 @@ int main(int argc, char** argv)
             rqns = ns(r0, now(), sample);
             if (hits != sample) std::printf("  [WARN] rand hits=%llu/%llu\n",
                                             (unsigned long long)hits, (unsigned long long)sample);
-            // 100k SEQUENTIAL in-order traversal from a random start (adjacent leaves, warm path) —
-            // the real sequential access pattern. NOTE: keys are hashes, so "sequential index" is
-            // NOT sequential in the tree; an in-order cursor walk is.
-            std::string      ck;
-            std::string_view sv;
-            uint64_t         startk = rand_key(qrng() % base);
-            auto             s0 = now();
-            bool             ok = t.lower_bound(kspan(startk), ck, sv);
-            uint64_t         steps = 0;
-            for (uint64_t i = 0; i < sample && ok; ++i)
+            // 100k SEQUENTIAL in-order traversal via the STATEFUL cursor (lower_bound to position,
+            // then O(1) next() that advances the path in place — psitri parity). Adjacent leaves,
+            // warm path. (keys are hashes, so "sequential index" is NOT sequential in the tree.)
+            uint64_t                  startk = rand_key(qrng() % base);
+            auto                      s0     = now();
+            radix_engine_tree::cursor cur(&t);
+            uint64_t                  steps = 0;
+            if (!cur.lower_bound(kspan(startk)))  // false = positioned on first key >= start
             {
                ++steps;
-               ok = t.upper_bound(std::string_view(ck.data(), ck.size()), ck, sv);  // next key >
+               while (steps < sample && !cur.next()) ++steps;  // next() returns is_end()
             }
             if (steps) sqns = ns(s0, now(), steps);
          }

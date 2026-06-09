@@ -462,12 +462,14 @@ int main(int argc, char** argv)
 
    std::printf("N = %llu  (8-byte u64 keys, value=i)\n\n", (unsigned long long)N);
 
-   if (mode == "worst")  // WORST CASE: one committed transaction PER update → COW-to-root every op.
+   if (mode == "worst")  // WORST CASE: commit every BATCH updates (default 1 → COW-to-root every op).
    {                     // Head-to-head heart radix engine vs psitri (both on SAL), random keys.
+      const uint64_t batch = (argc > 3) ? std::strtoull(argv[3], nullptr, 10) : 1;
+      std::printf("  (commit every %llu updates)\n", (unsigned long long)batch);
       auto vview = [](const uint64_t& v)
       { return std::string_view(reinterpret_cast<const char*>(&v), sizeof(v)); };
 
-      // ── heart radix engine: upsert + commit per op (COW-to-root every op) ──
+      // ── heart radix engine: upsert + commit per BATCH (COW-to-root on the first op of a batch) ──
       {
          auto dir = std::filesystem::temp_directory_path() / "heart_worst";
          std::filesystem::remove_all(dir);
@@ -477,8 +479,9 @@ int main(int argc, char** argv)
          {
             uint64_t k = rand_key(i);
             t.upsert(kspan(k), vview(i));
-            t.commit();
+            if ((i + 1) % batch == 0) t.commit();
          }
+         if (N % batch) t.commit();
          double   ins = ns(t0, now(), N);
          uint64_t s   = 0;
          for (uint64_t i = 0; i < N; ++i)
@@ -486,8 +489,10 @@ int main(int argc, char** argv)
             uint64_t k = rand_key(i); std::string_view v;
             if (t.find(kspan(k), v)) { uint64_t g = 0; std::memcpy(&g, v.data(), 8); s += g; }
          }
-         std::printf("    heart  : update %8.1f ns/txn   [%s]\n", ins,
-                     s == N * (N - 1) / 2 ? "OK" : "BAD");
+         std::printf("    heart  : update %8.1f ns/txn   [%s]  clones=%llu (%.2f/op)\n", ins,
+                     s == N * (N - 1) / 2 ? "OK" : "BAD",
+                     (unsigned long long)t.counters().clones,
+                     double(t.counters().clones) / double(N));
          auto& c = t.counters();
          std::printf("             clones %llu  in_place %llu  grows %llu  child_retains %llu  (%.2f retains/txn, %.1f/clone)\n",
                      (unsigned long long)c.clones, (unsigned long long)c.in_place, (unsigned long long)c.grows,
@@ -506,12 +511,16 @@ int main(int argc, char** argv)
          auto db  = psitri::database::create(dir.string(), cfg);
          auto ses = db->start_write_session();
          auto t0  = now();
-         for (uint64_t i = 0; i < N; ++i)
+         for (uint64_t base = 0; base < N; base += batch)
          {
-            uint64_t k  = rand_key(i);
-            auto     tx = ses->start_transaction(0);
-            tx.insert(psitri::key_view(reinterpret_cast<const char*>(&k), sizeof(k)),
-                      psitri::value_view(reinterpret_cast<const char*>(&i), sizeof(i)));
+            auto tx  = ses->start_transaction(0);
+            uint64_t end = std::min(N, base + batch);
+            for (uint64_t i = base; i < end; ++i)
+            {
+               uint64_t k = rand_key(i);
+               tx.insert(psitri::key_view(reinterpret_cast<const char*>(&k), sizeof(k)),
+                         psitri::value_view(reinterpret_cast<const char*>(&i), sizeof(i)));
+            }
             tx.commit();
          }
          double   ins = ns(t0, now(), N);

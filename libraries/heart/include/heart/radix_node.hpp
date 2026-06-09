@@ -5,8 +5,9 @@
 
 #include <heart/paged.hpp>
 #include <heart/smart_address.hpp>
-#include <sal/config.hpp>  // cacheline_size
-#include <ucc/round.hpp>   // round_up_multiple (alloc_size default)
+#include <sal/colo_alloc.hpp>  // implicit_ref_addr / implicit_ref_region / combine (range counters)
+#include <sal/config.hpp>      // cacheline_size
+#include <ucc/round.hpp>       // round_up_multiple (alloc_size default)
 
 namespace heart
 {
@@ -152,35 +153,74 @@ namespace heart
       }
    } __attribute__((packed));
 
-   /**
-    * The refcount-tree roots for the large_radix family: K packed-count control
-    * blocks. Each block reinterprets its control_block's 41-bit location field
-    * (flagged "not a location" via the spare control-block type bit) as 10 x 4-bit
-    * deferred-share counters — an implicit B-tree over the 256 branch-numbers
-    * (fan-8 leaf + fan-4 upper). K = 1/2/4 by tier. The group-counter retain/release
-    * COW is impl-phase.
-    */
-   template <int K>
-   struct refcount_roots
-   {
-      sal::ptr_address blocks[K];
-   };
-   static_assert(sizeof(refcount_roots<1>) == 4);
-   static_assert(sizeof(refcount_roots<4>) == 16);
+   // The 256-branch space is split into RANGE_COUNT ranges (top 3 bits of the branch byte); each
+   // range's branch-SET has one refcount in the SAL implicit_ref_pool (how many node-versions
+   // share that set). 8 ranges × 32 branches.
+   inline constexpr int range_count = 8;
+   inline constexpr int range_of(unsigned byte) noexcept { return int((byte >> 5) & 7u); }
 
    /**
-    * Base for radix nodes dense enough to want group-counter COW (N >= ~16):
-    * bitset1 (K=1), bitset_r2 (K=2), bitset_r4 / full_radix (K=4). Its FixedHeader
-    * is the refcount roots; the branch storage is the Derived's trailing cachelines
-    * (or, for bitset1, the CL0 variable region). Sparse nodes (setlist*, single-
-    * child) skip this and retain their few branches directly.
+    * Per-range counter handles for the large_radix family: ONE region + RANGE_COUNT offsets
+    * (sal::implicit_ref_addr) — the compact form of 8 per-range counters living in the SAL
+    * implicit_ref_pool. Replaces the packed-nibble refcount_roots. 18 bytes. region == no_region
+    * means "no counters yet" (fresh/half-built node → destroy falls back to direct release).
+    * See doc/micro_refcount.md + doc/task24_handoff.md.
+    */
+   struct range_ctrs
+   {
+      static constexpr sal::implicit_ref_region no_region = 0xFFFF;
+      sal::implicit_ref_region region = no_region;
+      sal::implicit_ref_addr   off[range_count] = {};  // offset within `region`, one per range
+   };
+   static_assert(sizeof(range_ctrs) == 2 + 2 * range_count, "region(2) + 8 offsets(2 each) = 18");
+
+   /**
+    * Base for dense radix nodes (bitset1/r2/r4, full_radix) that batch child retain/release into
+    * RANGE_COUNT per-range refcounts. FixedHeader is the range_ctrs handle. K is vestigial (the
+    * old packed tier count) — kept only so existing `large_radix<Derived, K>` instantiations
+    * compile and `refcount_block_count` stays a marker for is_big. Sparse tiers (setlist*,
+    * single-child) skip this and retain their few branches directly.
     */
    template <typename Derived, int K>
-   struct large_radix : radix_impl<Derived, refcount_roots<K>>
+   struct large_radix : radix_impl<Derived, range_ctrs>
    {
-      static constexpr int refcount_block_count = K;
+      static constexpr int refcount_block_count = range_count;  // is_big marker (8 ranges)
 
-      sal::ptr_address*       refcount_blocks() noexcept { return this->fixed.blocks; }
-      const sal::ptr_address* refcount_blocks() const noexcept { return this->fixed.blocks; }
+      sal::implicit_ref_region rc_region() const noexcept { return this->fixed.region; }
+      void rc_set_region(sal::implicit_ref_region r) noexcept { this->fixed.region = r; }
+      bool rc_has_ctrs() const noexcept { return this->fixed.region != range_ctrs::no_region; }
+      /// Full ptr_address of range r's counter (region + offset).
+      sal::ptr_address rc_ctr(int r) const noexcept
+      {
+         return sal::combine(this->fixed.region, this->fixed.off[r]);
+      }
+      void rc_set_off(int r, sal::implicit_ref_addr o) noexcept { this->fixed.off[r] = o; }
+
+      /// Destroy: release each of the RANGE_COUNT per-range counters. The version that drives a
+      /// range's counter to 0 is the range-set's last owner → it releases that range's branch
+      /// pointers. No nibble math — each counter is its own self-freeing lifetime. term_value is
+      /// held directly (not part of a range).
+      template <typename Session>
+      void destroy(const Session& s) const
+      {
+         if (not rc_has_ctrs())  // never got counters (defensive) → direct per-child release
+         {
+            this->self().for_each_child([&](sal::ptr_address c) { s->release(c); });
+            return;
+         }
+         const smart_address tv = this->term_value();
+         if (tv.is_pointer())
+            s->release(tv.as_pointer());
+         for (int r = 0; r < range_count; ++r)
+         {
+            if (s->rr_release(rc_ctr(r)))  // last owner of this range's set → free its branches
+               this->self().for_each_entry(
+                   [&](uint8_t byte, smart_address sa)
+                   {
+                      if (sa.is_pointer() && range_of(byte) == r)
+                         s->release(sa.as_pointer());
+                   });
+         }
+      }
    } __attribute__((packed));
 }  // namespace heart

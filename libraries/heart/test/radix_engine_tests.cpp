@@ -533,6 +533,94 @@ TEST_CASE("radix_engine: ordered surfaces correct on a bucket tree", "[radix_eng
 // First-class subtree values: a value that IS a nested tree, not opaque bytes. Exercises the
 // discriminator, the cursor (is_subtree/subtree_cursor), write (create_subtree/upsert_subtree),
 // the transitions (bytes<->subtree, remove), and the ref-counted free cascade.
+// Transaction / sub-transaction / multi-root model (psitri-shaped). COW-to-root gives commit
+// (publish working) / abort (drop working) / savepoint (retain+restore) for free.
+TEST_CASE("radix_engine: transactions, savepoints, multi-root", "[radix_engine][txn]")
+{
+   radix_tree t(tmp("heart_txn"));
+
+   // commit publishes; abort discards.
+   {
+      auto tx = t.start_transaction(0);
+      tx.upsert("a", "1");
+      tx.upsert("b", "2");
+      tx.commit();
+   }
+   CHECK(t.get_root(0).get<std::string>("a").value_or("") == "1");
+   {
+      auto tx = t.start_transaction(0);
+      tx.upsert("c", "3");
+      tx.abort();  // discard
+   }
+   CHECK_FALSE(t.get_root(0).get<std::string>("c").has_value());
+   CHECK(t.get_root(0).count_keys() == 2);
+   {
+      auto tx = t.start_transaction(0);  // implicit abort on scope exit (never committed)
+      tx.upsert("d", "4");
+   }
+   CHECK_FALSE(t.get_root(0).get<std::string>("d").has_value());
+
+   // savepoint: abort the frame rolls back to the savepoint; outer commit keeps the rest.
+   {
+      auto tx = t.start_transaction(0);
+      tx.upsert("e", "5");
+      {
+         auto f = tx.sub_transaction();
+         f.upsert("f", "6");
+         f.abort();  // roll back "f"
+      }
+      {
+         auto f = tx.sub_transaction();
+         f.upsert("g", "7");
+         f.commit();  // keep "g"
+      }
+      tx.commit();
+   }
+   CHECK(t.get_root(0).get<std::string>("e").value_or("") == "5");
+   CHECK_FALSE(t.get_root(0).get<std::string>("f").has_value());  // rolled back
+   CHECK(t.get_root(0).get<std::string>("g").value_or("") == "7");
+
+   // multi-root: roots are independent; an untouched root is empty (falsy).
+   CHECK_FALSE(bool(t.get_root(5)));
+   {
+      auto tx = t.start_transaction(5);
+      tx.upsert("only-in-5", "x");
+      tx.commit();
+   }
+   CHECK(bool(t.get_root(5)));
+   CHECK(t.get_root(5).get<std::string>("only-in-5").value_or("") == "x");
+   CHECK_FALSE(t.get_root(0).get<std::string>("only-in-5").has_value());  // isolated from root 0
+   CHECK_FALSE(t.get_root(5).get<std::string>("a").has_value());
+
+   // subtree stored via a transaction; read back through the published root.
+   {
+      auto tx  = t.start_transaction(0);
+      auto sub = t.create_subtree();
+      sub.upsert("one", "1");
+      sub.upsert("two", "2");
+      tx.upsert_subtree("kids", std::move(sub));
+      tx.commit();
+   }
+   {
+      auto rh = t.get_root(0);
+      REQUIRE(rh.is_subtree("kids"));
+      CHECK(rh.get_subtree("kids").count_keys() == 2);
+      CHECK(rh.get_subtree("kids").get<std::string>("two").value_or("") == "2");
+   }
+
+   // abort discards a stored subtree with no leak (psitri's "abort discards subtree").
+   const uint64_t before = t.object_count();
+   {
+      auto tx  = t.start_transaction(2);
+      auto sub = t.create_subtree();
+      for (int i = 0; i < 200; ++i) sub.upsert("k" + std::to_string(i), "v");
+      tx.upsert_subtree("tree", std::move(sub));
+      tx.abort();  // must release the whole subtree
+   }
+   CHECK_FALSE(bool(t.get_root(2)));
+   CHECK(t.object_count() == before);  // aborted subtree fully released
+}
+
 TEST_CASE("radix_engine: first-class subtree values", "[radix_engine][cursor][subtree]")
 {
    radix_tree t(tmp("heart_subtree"));

@@ -75,6 +75,8 @@ namespace heart::radix
          _alloc->register_type_ops<full_radix_node>();
          _alloc->register_type_ops<bucket_node>();
          _root = make_node<setlist_u8>(bytes{});
+         for (uint32_t i = 0; i < num_roots; ++i)
+            _roots_ext[i] = sal::null_ptr_address;  // ptr_address(0) is VALID — null is 0xFFFFFFFF
          // Start SAL's background threads ONLY AFTER this (main) thread has its session and root
          // — exactly as psitri's database does. Constructing with start_threads_now=true spins
          // the threads up mid-construction; they race the thread-local session handout so this
@@ -289,27 +291,37 @@ namespace heart::radix
       // is reset to a fresh empty node (the tree always has a root).
       bool remove(key_view key)
       {
-         auto  lock = _ses->lock();
-         bytes kb   = as_bytes(key);
          if (_bucket_mode)
-            return bkt_remove(kb);
-         _removed = false;
-         _emptied = false;
-         _shared  = false;  // fresh unique→shared latch for this COW-to-root remove descent
-         ptr_address nr = remove_node(_root, kb, 0);
+         {
+            auto lock = _ses->lock();
+            return bkt_remove(as_bytes(key));
+         }
+         return remove_raw(_root, as_bytes(key));
+      }
+      // Root-parameterized COW-to-root remove (radix mode). Updates root_ref in place; on a fully
+      // drained tree installs a fresh empty root. Returns whether the key was found+removed.
+      bool remove_raw(ptr_address& root_ref, bytes kb)
+      {
+         auto lock = _ses->lock();
+         _removed  = false;
+         _emptied  = false;
+         _shared   = false;  // fresh unique→shared latch for this COW-to-root remove descent
+         if (root_ref == sal::null_ptr_address)
+            return false;
+         ptr_address nr = remove_node(root_ref, kb, 0);
          if (!_removed)
             return false;
          if (_emptied)  // whole tree drained → free it, install a fresh empty root
          {
-            if (nr != _root)
-               _ses->release(_root);  // shared: drop our ref to the original (snapshot keeps it)
-            _ses->release(nr);        // free the emptied (in-place or cloned) root
-            _root = make_node<setlist_u8>(bytes{});
+            if (nr != root_ref)
+               _ses->release(root_ref);  // shared: drop our ref (snapshot keeps it)
+            _ses->release(nr);           // free the emptied (in-place or cloned) root
+            root_ref = make_node<setlist_u8>(bytes{});
          }
-         else if (nr != _root)
+         else if (nr != root_ref)
          {
-            _ses->release(_root);
-            _root = nr;
+            _ses->release(root_ref);
+            root_ref = nr;
          }
          return true;
       }
@@ -1589,13 +1601,12 @@ namespace heart::radix
                return std::nullopt;
             return T(_val.data(), _val.data() + _val.size());
          }
-         int32_t get(key_view k, std::string* buf)  // point lookup (psitri::cursor::get)
+         int32_t get(key_view k, std::string* buf)  // point lookup on THIS cursor's root
          {
-            value_view v;
-            if (!_t->find(k, v))
-               return -1;
-            buf->assign(v.data(), v.size());
-            return int32_t(v.size());
+            if (find(k)) return value_not_found;  // find() positions on _root; true = not found
+            if (_is_subtree) return value_subtree;
+            buf->assign(_val.data(), _val.size());
+            return int32_t(_val.size());
          }
          // ── psitri::cursor public-API parity (forward) ──
          bool    seek(key_view k) { return lower_bound(k); }  // position at first key >= k
@@ -1608,19 +1619,17 @@ namespace heart::radix
             return !_valid ? value_not_found : (_is_subtree ? value_subtree : int32_t(_val.size()));
          }
          template <class F>
-         bool get(key_view k, F&& fn)  // point lookup → lambda(value_view); true if found
+         bool get(key_view k, F&& fn)  // point lookup on THIS cursor's root → lambda; true if found
          {
-            value_view v;
-            if (!_t->find(k, v)) return false;
-            fn(v);
+            if (find(k) || _is_subtree) return false;
+            fn(_val);
             return true;
          }
          template <class T = std::string>
-         std::optional<T> get(key_view k)  // point lookup → optional buffer (psitri parity)
+         std::optional<T> get(key_view k)  // point lookup on THIS cursor's root → optional buffer
          {
-            value_view v;
-            if (!_t->find(k, v)) return std::nullopt;
-            return T(v.data(), v.data() + v.size());
+            if (find(k) || _is_subtree) return std::nullopt;
+            return T(_val.data(), _val.data() + _val.size());
          }
          // psitri pins values via a read_lock/value_pin; heart's cursor pins the whole snapshot
          // root (RAII _root), so the value view is valid for the cursor's lifetime — the lock arg
@@ -1984,7 +1993,173 @@ namespace heart::radix
          uint32_t    _nextdepth = 0;
       };
 
+     public:
+      // ── multi-root + transactions (psitri-shaped) ──────────────────────────────────────
+      // Roots 0..num_roots-1; root 0 is the legacy _root, 1.. live in _roots_ext (null = empty).
+      // A transaction takes a COW working copy of a root; commit publishes it, abort drops it.
+      // COW-to-root makes this natural: retaining the base forces the first write to clone, so the
+      // published root is never mutated under a reader. Savepoints (sub_transaction) retain the
+      // working root and restore it on abort.
+      static constexpr uint32_t num_roots = 512;
+
+      // A read-only view of a root (or subtree root). Falsy if empty.
+      struct read_handle
+      {
+         radix_tree* _t    = nullptr;
+         ptr_address _root = sal::null_ptr_address;
+         explicit    operator bool() const noexcept { return _root != sal::null_ptr_address; }
+         ptr_address root() const noexcept { return _root; }
+         cursor      snapshot_cursor() const { return cursor(_t, _root); }
+         uint64_t    count_keys() const
+         {
+            if (_root == sal::null_ptr_address) return 0;
+            cursor c(_t, _root);
+            return c.count_keys();
+         }
+         bool is_subtree(key_view k) const
+         {
+            if (_root == sal::null_ptr_address) return false;
+            cursor c(_t, _root);
+            return !c.find(k) && c.is_subtree();
+         }
+         read_handle get_subtree(key_view k) const
+         {
+            if (_root == sal::null_ptr_address) return {_t, sal::null_ptr_address};
+            cursor c(_t, _root);
+            if (c.find(k) || !c.is_subtree()) return {_t, sal::null_ptr_address};
+            return {_t, c.subtree_addr()};
+         }
+         template <class T = std::string>
+         std::optional<T> get(key_view k) const
+         {
+            if (_root == sal::null_ptr_address) return std::nullopt;
+            cursor c(_t, _root);
+            return c.template get<T>(k);
+         }
+      };
+      read_handle get_root(uint32_t idx) { return {this, root_slot(idx)}; }
+
+      class frame;
+      class transaction
+      {
+         friend class radix_tree;
+         friend class frame;
+         radix_tree* _t       = nullptr;
+         uint32_t    _idx     = 0;
+         ptr_address _working = sal::null_ptr_address;  // owns one ref while open (null = empty)
+         bool        _open    = false;
+         transaction(radix_tree* t, uint32_t idx) : _t(t), _idx(idx), _open(true)
+         {
+            _working = t->root_slot(idx);
+            if (_working != sal::null_ptr_address) t->_ses->retain(_working);
+         }
+         void ensure()  // lazily materialize an empty working root before the first write/read
+         {
+            if (_working == sal::null_ptr_address) _working = _t->make_node<setlist_u8>(bytes{});
+         }
+
+        public:
+         transaction(transaction&& o) noexcept
+             : _t(o._t), _idx(o._idx), _working(o._working), _open(o._open)
+         {
+            o._open    = false;
+            o._working = sal::null_ptr_address;
+         }
+         transaction(const transaction&)            = delete;
+         transaction& operator=(const transaction&) = delete;
+         ~transaction() { if (_open) abort(); }
+
+         void upsert(key_view k, value_view v)
+         {
+            ensure();
+            _t->_ins_value_type = inline_value::vt_bytes;
+            _t->upsert_raw(_working, as_bytes(k), as_bytes(v));
+         }
+         void upsert_subtree(key_view k, subtree&& s)
+         {
+            ensure();
+            _t->_ins_value_type = inline_value::vt_subtree;
+            uint32_t raw        = *s.root();  // value bytes = the 4-byte root
+            _t->upsert_raw(_working, as_bytes(k),
+                           bytes{reinterpret_cast<const uint8_t*>(&raw), sizeof(raw)});
+            _t->_ins_value_type = inline_value::vt_bytes;
+            s._t                = nullptr;  // CONSUME the handle: its ref is now the terminal's
+         }
+         int remove(key_view k)  // psitri parity: >=0 removed, -1 absent
+         {
+            if (_working == sal::null_ptr_address) return -1;
+            return _t->remove_raw(_working, as_bytes(k)) ? 0 : -1;
+         }
+         read_handle handle()
+         {
+            ensure();
+            return {_t, _working};
+         }
+         cursor      snapshot_cursor() { return handle().snapshot_cursor(); }
+         bool        is_subtree(key_view k) { return handle().is_subtree(k); }
+         read_handle get_subtree(key_view k) { return handle().get_subtree(k); }
+         template <class T = std::string>
+         std::optional<T> get(key_view k) { return handle().template get<T>(k); }
+
+         void commit()
+         {
+            if (!_open) return;
+            ptr_address& slot = _t->root_slot(_idx);
+            if (slot != sal::null_ptr_address) _t->_ses->release(slot);  // drop the pre-image
+            slot     = _working;                                         // publish (transfer ref)
+            _working = sal::null_ptr_address;
+            _open    = false;
+         }
+         void abort() noexcept
+         {
+            if (!_open) return;
+            if (_working != sal::null_ptr_address) _t->_ses->release(_working);
+            _working = sal::null_ptr_address;
+            _open    = false;
+         }
+         frame sub_transaction();  // savepoint (defined after frame)
+      };
+      transaction start_transaction(uint32_t idx = 0) { return transaction(this, idx); }
+
+      // A savepoint over a transaction: retains the working root; commit drops the save, abort
+      // restores the transaction's working root to the saved one (LIFO nesting).
+      class frame
+      {
+         friend class transaction;
+         transaction* _tx     = nullptr;
+         ptr_address  _sp     = sal::null_ptr_address;  // saved working (retained)
+         bool         _active = false;
+         frame(transaction* tx, ptr_address sp) : _tx(tx), _sp(sp), _active(true) {}
+
+        public:
+         frame(frame&& o) noexcept : _tx(o._tx), _sp(o._sp), _active(o._active) { o._active = false; }
+         frame(const frame&)            = delete;
+         frame& operator=(const frame&) = delete;
+         ~frame() { if (_active) abort(); }
+         void upsert(key_view k, value_view v) { _tx->upsert(k, v); }
+         void upsert_subtree(key_view k, subtree&& s) { _tx->upsert_subtree(k, std::move(s)); }
+         int  remove(key_view k) { return _tx->remove(k); }
+         bool is_subtree(key_view k) { return _tx->is_subtree(k); }
+         read_handle get_subtree(key_view k) { return _tx->get_subtree(k); }
+         template <class T = std::string>
+         std::optional<T> get(key_view k) { return _tx->template get<T>(k); }
+         void commit() noexcept
+         {
+            if (!_active) return;
+            if (_sp != sal::null_ptr_address) _tx->_t->_ses->release(_sp);  // drop the savepoint pin
+            _active = false;
+         }
+         void abort() noexcept
+         {
+            if (!_active) return;
+            if (_tx->_working != sal::null_ptr_address) _tx->_t->_ses->release(_tx->_working);
+            _tx->_working = _sp;  // restore (savepoint's retained ref becomes the working ref)
+            _active       = false;
+         }
+      };
+
      private:
+      ptr_address& root_slot(uint32_t idx) { return idx == 0 ? _root : _roots_ext[idx]; }
 
       // ── descent helper for r1 nodes (prefixed routers) ─────────────────────────
       template <class N>
@@ -3622,6 +3797,7 @@ namespace heart::radix
       std::unique_ptr<sal::allocator> _alloc;
       sal::allocator_session_ptr      _ses;
       ptr_address                     _root;
+      ptr_address                     _roots_ext[num_roots];  // roots 1..N-1 ([0] unused = _root)
       ptr_address                     _snap{};
       bool                            _snap_valid     = false;
       int                             _old_value_size = -1;
@@ -3676,5 +3852,10 @@ namespace heart::radix
       if (c.find(key) || !c.is_subtree())
          return sal::null_ptr_address;
       return c.subtree_addr();
+   }
+   inline radix_tree::frame radix_tree::transaction::sub_transaction()
+   {
+      if (_working != sal::null_ptr_address) _t->_ses->retain(_working);
+      return frame(this, _working);
    }
 }  // namespace heart::radix

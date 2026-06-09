@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <random>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <hash/xxhash.h>
@@ -590,6 +591,103 @@ int main(int argc, char** argv)
                      (unsigned long long)(base + 2000), double(ra - rb) / 2000.0);
          t.dump_root_child_refs("  steady state");
       }
+      std::fflush(stdout);
+      return 0;
+   }
+
+   if (mode == "rrstress")  // ADVERSARIAL multi-version refcount stress (run under build-di).
+   {
+      // Many concurrent pinned snapshots, divergent write+remove lineages forked off shared
+      // ancestors, common-ancestor release, deep version stacking (forces nibble fork) — every
+      // pinned snapshot is model-checked (count+checksum) after arbitrary churn elsewhere, so any
+      // refcount over/under-count surfaces as a snapshot reading the wrong contents (and any
+      // UAF/double-free/leak is caught by free_range_tracker under build-di).
+      const uint64_t rounds = (N < 100000) ? N : 4000;
+      auto vview = [](const uint64_t& v)
+      { return std::string_view(reinterpret_cast<const char*>(&v), sizeof(v)); };
+      auto kspn  = [](const uint64_t& k)
+      { return std::string_view(reinterpret_cast<const char*>(&k), sizeof(k)); };
+      using model_t = std::unordered_map<uint64_t, uint64_t>;
+      auto model_sig = [](const model_t& m) -> std::pair<uint64_t, uint64_t> {
+         uint64_t sum = 0;
+         for (auto& [k, v] : m)
+         {
+            uint64_t h = 1469598103934665603ull;
+            for (int i = 0; i < 8; ++i) h = (h ^ uint8_t(k >> (8 * i))) * 1099511628211ull;
+            for (int i = 0; i < 8; ++i) h = (h ^ uint8_t(v >> (8 * i))) * 1099511628211ull;
+            sum += h;
+         }
+         return {m.size(), sum};
+      };
+      auto dir = std::filesystem::temp_directory_path() / "heart_rrstress";
+      std::filesystem::remove_all(dir);
+      radix_engine_tree t(dir);
+      std::mt19937_64   rng(0xC0FFEEull);
+
+      using paddr = decltype(t.take_snapshot());
+      struct Ver { paddr root; model_t model; };  // pinned snapshot + its frozen contents
+      std::vector<Ver> snaps;
+      model_t          live;
+      uint64_t         nextval = 1;
+      uint64_t         fails = 0, checks = 0;
+
+      auto do_write = [&](uint64_t target) {  // churn the live lineage toward ~target keys
+         for (int op = 0; op < 50; ++op)
+         {
+            bool rem = (!live.empty()) && (live.size() > target || (rng() & 1));
+            if (rem)
+            {
+               auto it = live.begin();
+               std::advance(it, rng() % live.size());
+               uint64_t k = it->first;
+               t.remove(kspn(k));
+               live.erase(k);
+            }
+            else
+            {
+               uint64_t k = rng(), v = nextval++;
+               t.upsert(kspn(k), vview(v));
+               live[k] = v;
+            }
+         }
+      };
+      auto verify = [&](const Ver& s) {
+         auto got = t.sig_at(s.root);
+         auto exp = model_sig(s.model);
+         ++checks;
+         if (got != exp) { ++fails; if (fails <= 5)
+            std::printf("  MISMATCH snap: got{n=%llu,sum=%llu} exp{n=%llu,sum=%llu}\n",
+               (unsigned long long)got.first,(unsigned long long)got.second,
+               (unsigned long long)exp.first,(unsigned long long)exp.second); }
+      };
+
+      for (int i = 0; i < 1500; ++i) { uint64_t k = rng(), v = nextval++; t.upsert(kspn(k), vview(v)); live[k] = v; }
+      t.commit();
+
+      for (uint64_t r = 0; r < rounds; ++r)
+      {
+         do_write(3000);
+         t.commit();
+         if ((rng() % 3) == 0 && snaps.size() < 40)            // pin a new snapshot
+            snaps.push_back({t.take_snapshot(), live});
+         if ((rng() % 6) == 0 && !snaps.empty())               // diverge a new lineage off an ancestor
+         {
+            auto& s = snaps[rng() % snaps.size()];
+            t.adopt_root(s.root);
+            live = s.model;
+         }
+         if ((rng() % 4) == 0 && snaps.size() > 6)             // release a snapshot (incl. ancestors)
+         {
+            size_t idx = rng() % snaps.size();
+            t.release_snapshot(snaps[idx].root);
+            snaps.erase(snaps.begin() + idx);
+         }
+         for (auto& s : snaps) verify(s);                      // ALL pinned snapshots stay isolated
+      }
+      for (auto& s : snaps) { verify(s); t.release_snapshot(s.root); }
+      std::printf("rrstress: %llu rounds, %llu checks, %llu MISMATCHES  -> %s\n",
+                  (unsigned long long)rounds, (unsigned long long)checks, (unsigned long long)fails,
+                  fails == 0 ? "OK" : "FAIL");
       std::fflush(stdout);
       return 0;
    }

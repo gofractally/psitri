@@ -288,6 +288,23 @@ namespace heart::radix
          inorder_walk(root, kb, cb);
          return n;
       }
+      // DEBUG: order-independent (count, checksum) signature of the keyspace at a pinned root —
+      // verifies a snapshot's exact contents (not just count) against the test model after churn.
+      std::pair<uint64_t, uint64_t> sig_at(ptr_address root)
+      {
+         auto     lock = _ses->lock();
+         KB       kb;
+         uint64_t n = 0, sum = 0;
+         auto     cb = [&](key_view k, value_view v) {
+            uint64_t h = 1469598103934665603ull;
+            for (char c : k) h = (h ^ uint8_t(c)) * 1099511628211ull;
+            for (char c : v) h = (h ^ uint8_t(c)) * 1099511628211ull;
+            sum += h;  // commutative accumulate → order-independent
+            ++n;
+         };
+         inorder_walk(root, kb, cb);
+         return {n, sum};
+      }
 
       void commit()
       {
@@ -342,6 +359,17 @@ namespace heart::radix
       // DEBUG: pin the current root as an independent snapshot (caller must release_snapshot()).
       ptr_address take_snapshot() { _ses->retain(_root); return _root; }
       void        release_snapshot(ptr_address s) { _ses->release(s); }
+      // DEBUG: adopt a pinned snapshot as the live working root → writes COW a DIVERGENT lineage
+      // from it (the snapshot stays frozen). Used to stress two+ writers sharing a common ancestor.
+      void adopt_root(ptr_address s)
+      {
+         auto lk = _ses->lock();
+         if (_snap_valid) { _ses->release(_snap); _snap_valid = false; }
+         _ses->retain(s);
+         _ses->release(_root);
+         _root = s;
+      }
+      ptr_address working_root() const { return _root; }
       // DEBUG: read a key from an ARBITRARY (pinned) root — used to test snapshot isolation.
       bool find_at(ptr_address root, key_view key, value_view& out)
       {

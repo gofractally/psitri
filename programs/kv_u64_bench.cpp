@@ -836,6 +836,67 @@ int main(int argc, char** argv)
       return 0;
    }
 
+   if (mode == "mixins")  // 1M inserts into a 10M-key tree: RANDOM order vs SORTED order.
+   {
+      const uint64_t base  = N;  // pre-loaded keys (argv[1], e.g. 10000000)
+      const uint64_t M     = (argc > 3) ? std::strtoull(argv[3], nullptr, 10) : 1000000;
+      const uint64_t batch = (argc > 4) ? std::strtoull(argv[4], nullptr, 10) : 1000;
+      auto           vview = [](const uint64_t& v)
+      { return std::string_view(reinterpret_cast<const char*>(&v), sizeof(v)); };
+
+      // The M keys to insert — disjoint from the base set rand_key(0..base). Generation order is
+      // random in key space; the sorted run sorts a copy by tree byte-order (memcmp of the bytes).
+      std::vector<uint64_t> insk(M);
+      for (uint64_t i = 0; i < M; ++i) insk[i] = rand_key(base + i);
+
+      // Build a fresh `base`-key tree, then time the M inserts (commit every `batch`). Returns
+      // {ns/op, clones/op} for the insert phase only; the base build is not timed.
+      auto run = [&](bool sorted) -> std::pair<double, double>
+      {
+         std::vector<uint64_t> keys = insk;
+         if (sorted)
+            std::sort(keys.begin(), keys.end(),
+                      [](uint64_t a, uint64_t b) { return std::memcmp(&a, &b, 8) < 0; });
+         auto dir = std::filesystem::temp_directory_path() / "heart_mixins";
+         std::filesystem::remove_all(dir);
+         radix_engine_tree t(dir);
+         for (uint64_t i = 0; i < base; ++i)  // pre-load (untimed), commit in bulk batches
+         {
+            uint64_t k = rand_key(i);
+            t.upsert(kspan(k), vview(i));
+            if ((i + 1) % 4096 == 0) t.commit();
+         }
+         t.commit();
+         const uint64_t c0 = t.counters().clones;
+         auto           t0 = now();
+         for (uint64_t i = 0; i < M; ++i)
+         {
+            uint64_t k = keys[i];
+            t.upsert(kspan(k), vview(base + i));
+            if ((i + 1) % batch == 0) t.commit();
+         }
+         if (M % batch) t.commit();
+         double nsop = ns(t0, now(), M);
+         double clop = double(t.counters().clones - c0) / double(M);
+         uint64_t hits = 0;  // spot-verify a sample landed
+         for (uint64_t i = 0; i < M; i += (M / 1000 + 1))
+         { std::string_view v; if (t.find(kspan(keys[i]), v)) ++hits; }
+         if (hits == 0) std::printf("    [WARN] no inserted keys found\n");
+         return {nsop, clop};
+      };
+
+      std::printf("mixins: base=%lluK pre-loaded, insert %lluK keys, commit every %llu\n",
+                  (unsigned long long)(base / 1000), (unsigned long long)(M / 1000),
+                  (unsigned long long)batch);
+      auto [rnd_ns, rnd_cl] = run(false);
+      std::printf("  RANDOM order : %8.1f ns/op   clones %.2f/op\n", rnd_ns, rnd_cl);
+      auto [srt_ns, srt_cl] = run(true);
+      std::printf("  SORTED order : %8.1f ns/op   clones %.2f/op\n", srt_ns, srt_cl);
+      std::printf("  -> sorted is %.2fx %s (%.1f vs %.1f ns/op)\n", rnd_ns / srt_ns,
+                  srt_ns < rnd_ns ? "FASTER" : "slower", srt_ns, rnd_ns);
+      return 0;
+   }
+
    if (mode == "dicttest")  // dictionary workload: buckets DO form here → cursor is broken on them.
    {
       const char* path = (argc > 3) ? argv[3] : "/usr/share/dict/words";

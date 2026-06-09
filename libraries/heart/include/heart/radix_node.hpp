@@ -179,7 +179,7 @@ namespace heart
       sal::implicit_ref_region region = no_region;
       sal::implicit_ref_addr   off[range_count] = {};  // offset within `region`, one per range
    };
-   static_assert(sizeof(range_ctrs) == 2 + 2 * range_count, "region(2) + 8 offsets(2 each) = 18");
+   static_assert(sizeof(range_ctrs) == 2 + 2 * range_count, "region(2) + range_count offsets(2 each)");
 
    /**
     * Base for dense radix nodes (bitset1/r2/r4, full_radix) that batch child retain/release into

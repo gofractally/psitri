@@ -836,6 +836,67 @@ int main(int argc, char** argv)
       return 0;
    }
 
+   if (mode == "scalep")  // psitri mirror of `scale` (separate process to avoid 2 live big trees).
+   {
+      const uint64_t batch  = (argc > 3) ? std::strtoull(argv[3], nullptr, 10) : 1'000'000;
+      const uint64_t sample = 100'000;
+      auto kview = [](const uint64_t& k)
+      { return psitri::key_view(reinterpret_cast<const char*>(&k), sizeof(k)); };
+      auto dir = std::filesystem::temp_directory_path() / "psitri_scale";
+      std::filesystem::remove_all(dir);
+      psitri::runtime_config cfg;
+      cfg.sync_mode = sal::sync_type::none;
+      cfg.write_protect_on_commit = false;
+      cfg.checksum_on_commit = false;
+      auto            db  = psitri::database::create(dir.string(), cfg);
+      auto            ses = db->start_write_session();
+      std::mt19937_64 qrng(123);
+      std::printf("psitri — %lluM random keys, commit every %lluK, %lluk rand+seq queries/chunk\n",
+                  (unsigned long long)(N / 1'000'000), (unsigned long long)(batch / 1000),
+                  (unsigned long long)(sample / 1000));
+      std::printf("  keys(M)   insert_ns  randQ_ns   seqQ_ns\n");
+      for (uint64_t base = 0; base < N; base += batch)
+      {
+         double rqns = 0, sqns = 0;
+         if (base > 0)
+         {
+            auto        rootp = ses->get_root(0);
+            std::string val;
+            auto        r0 = now();
+            for (uint64_t i = 0; i < sample; ++i)
+            {
+               uint64_t       j = qrng() % base, k = rand_key(j);
+               psitri::cursor cur(rootp);
+               val.clear();
+               cur.get(kview(k), &val);
+            }
+            rqns = ns(r0, now(), sample);
+            // in-order scan from a random start (adjacent leaves, warm path)
+            uint64_t       startk = rand_key(qrng() % base);
+            psitri::cursor cur(rootp);
+            auto           s0 = now();
+            bool           ok = cur.lower_bound(kview(startk));
+            uint64_t       steps = 0;
+            for (uint64_t i = 0; i < sample && ok; ++i) { ++steps; ok = cur.next(); }
+            if (steps) sqns = ns(s0, now(), steps);
+         }
+         auto i0 = now();
+         {
+            auto tx = ses->start_transaction(0);
+            for (uint64_t i = base; i < base + batch && i < N; ++i)
+            {
+               uint64_t k = rand_key(i);
+               tx.insert(kview(k), psitri::value_view(reinterpret_cast<const char*>(&i), sizeof(i)));
+            }
+            tx.commit();
+         }
+         double ins = ns(i0, now(), std::min(batch, N - base));
+         std::printf("  %7.1f  %9.1f  %9.1f  %9.1f\n", double(base + batch) / 1e6, ins, rqns, sqns);
+         std::fflush(stdout);
+      }
+      return 0;
+   }
+
    if (mode == "prog")  // progressive random: 1M-insert chunks, 100k sampled queries, commit/chunk
    {
       std::printf("RANDOM keys, progressive (commit every chunk):\n");

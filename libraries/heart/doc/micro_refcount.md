@@ -128,6 +128,25 @@ so only on real numbers, not speculatively.
    `control_block_alloc = colo_alloc<control_block>` and relegate the original to a
    differential-comparison harness. Not before.
 
+## Node header layout (STABLE / persistent — commit before wiring)
+A big-tier node stores its per-range counter set as **one region + 8 offsets**, at a fixed CL0
+location (the `large_radix` fixed header, immediately after `radix_base`), replacing
+`refcount_roots<K>`:
+
+```
+struct range_ctrs {                 // 18 bytes, all big tiers (full_radix, bitset_r2/r4)
+   sal::implicit_ref_region region;        // u16 — high 16 bits of the counters' ptr_address
+   sal::implicit_ref_addr   range_ctr[8];  // u16 each — offset within `region`, one per range
+};                                  // range_of(byte) = byte>>5  →  8 ranges × 32 branches
+```
+
+Cost accounting (accepted): packed gave **4 B → 8 counters**; this gives **18 B → 8 counters**
+(~2.25 B/counter). But it's ~the same as the `refcount_roots<4>` (16 B) the header already
+reserved, so net node growth is ~+2 B. The full counter address is `combine(region, range_ctr[r])`
+— so the counts are reconstructable from node data alone (region + offsets are persistent;
+the slot VALUES are ephemeral, re-tallied on recovery). 8 ranges for every big tier (r2/r4/full
+all cover the 256-branch space; the range is keyed off the branch byte, not the tier width).
+
 ## Build order (prove each layer before the next)
 1. **Standalone SAL micro-refcount pool** (no engine): `alloc()→handle`,
    `retain(handle)`, `release(handle)→bool was_last`, region co-location, self-free at 0,

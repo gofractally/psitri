@@ -335,6 +335,47 @@ namespace sal
                  (1ull << (*address % 64)));
       }
 
+      // ── recovery: counts/allocation are ephemeral, rebuilt from persistent node handles ──
+      // Reset to all-free, counters zeroed. Then a recovery walk replays each live handle through
+      // get_or_claim() to reconstruct the allocation set + (caller's) counts.
+      void clear_all()
+      {
+         auto nz = num_allocated_zones();
+         for (uint32_t z = 0; z < nz; ++z)
+         {
+            char* d = _zone_allocator->get(block_allocator::block_number(z));
+            char* f = _zone_free_list->get(block_allocator::block_number(z));
+            std::memset(d, 0x00, _zone_allocator->block_size());  // counters → 0
+            std::memset(f, 0xff, _zone_free_list->block_size());  // all bits set = all free
+         }
+         for (uint32_t z = 0; z < nz; ++z)
+            _header_ptr->zone_alloc_count[z].store(0, std::memory_order_relaxed);
+         _header_ptr->total_allocations.store(0, std::memory_order_relaxed);
+         _header_ptr->min_alloc_zone.store(0, std::memory_order_relaxed);
+         _header_ptr->alloc_seq.store(0, std::memory_order_relaxed);
+      }
+
+      // Recovery: get the slot at a SPECIFIC address, allocating (claiming its free bit) on first
+      // sight. Idempotent — a repeated handle just returns the already-claimed slot. The counter
+      // is left untouched (zeroed by clear_all); the caller increments per replayed reference.
+      T& get_or_claim(ptr_address address)
+      {
+         ensure_capacity(*address / detail::ptrs_per_zone + 1);
+         if (is_free(address))
+         {
+            auto& flb = _free_list_base[*address / 64];
+            auto  bit = (1ull << (*address % 64));
+            auto  cur = flb.load(std::memory_order_relaxed);
+            while (cur & bit)  // still free → claim it
+               if (flb.compare_exchange_weak(cur, cur ^ bit, std::memory_order_acquire))
+               {
+                  _header_ptr->inc_alloc_count(address);
+                  break;
+               }
+         }
+         return _ptr_base[*address];
+      }
+
      private:
       // Claim one free bit selected by `mask` within free-list word `word`; CAS to take it.
       std::optional<colo_allocation<T>> try_claim_in_word(uint32_t word, uint64_t mask)

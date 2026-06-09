@@ -776,6 +776,56 @@ int main(int argc, char** argv)
       return 0;
    }
 
+   if (mode == "scale")  // heart radix engine: N random keys, commit every BATCH, sampled queries.
+   {
+      const uint64_t batch  = (argc > 3) ? std::strtoull(argv[3], nullptr, 10) : 1'000'000;
+      const uint64_t sample = 100'000;
+      auto vview = [](const uint64_t& v)
+      { return std::string_view(reinterpret_cast<const char*>(&v), sizeof(v)); };
+      auto getv  = [](std::string_view v) { uint64_t g = 0; std::memcpy(&g, v.data(), 8); return g; };
+      auto dir = std::filesystem::temp_directory_path() / "heart_scale";
+      std::filesystem::remove_all(dir);
+      radix_engine_tree t(dir);
+      std::mt19937_64   qrng(123);
+      std::printf("heart radix engine — %lluM random keys, commit every %lluK, %lluk rand+seq queries/chunk\n",
+                  (unsigned long long)(N / 1'000'000), (unsigned long long)(batch / 1000),
+                  (unsigned long long)(sample / 1000));
+      std::printf("  keys(M)   insert_ns  randQ_ns   seqQ_ns   objects\n");
+      for (uint64_t base = 0; base < N; base += batch)
+      {
+         double rqns = 0, sqns = 0;
+         if (base > 0)
+         {
+            // 100k RANDOM-order queries of random existing keys (scattered, cold).
+            std::string_view v;
+            uint64_t         hits = 0;
+            auto             r0 = now();
+            for (uint64_t i = 0; i < sample; ++i)
+            {
+               uint64_t j = qrng() % base;
+               if (t.find(kspan(rand_key(j)), v) && getv(v) == j) ++hits;
+            }
+            rqns = ns(r0, now(), sample);
+            // 100k SEQUENTIAL-index queries: keys rand_key(0..sample) in order (same set each chunk).
+            auto s0 = now();
+            for (uint64_t j = 0; j < sample; ++j)
+               if (t.find(kspan(rand_key(j)), v) && getv(v) == j) ++hits;
+            sqns = ns(s0, now(), sample);
+            if (hits != 2 * sample) std::printf("  [WARN] query hits=%llu/%llu\n",
+                                                (unsigned long long)hits, (unsigned long long)(2 * sample));
+         }
+         auto i0 = now();
+         for (uint64_t i = base; i < base + batch && i < N; ++i)
+            t.upsert(kspan(rand_key(i)), vview(i));
+         t.commit();  // COW-to-root snapshot boundary
+         double ins = ns(i0, now(), std::min(batch, N - base));
+         std::printf("  %7.1f  %9.1f  %9.1f  %9.1f  %9llu\n", double(base + batch) / 1e6, ins, rqns,
+                     sqns, (unsigned long long)t.object_count());
+         std::fflush(stdout);
+      }
+      return 0;
+   }
+
    if (mode == "prog")  // progressive random: 1M-insert chunks, 100k sampled queries, commit/chunk
    {
       std::printf("RANDOM keys, progressive (commit every chunk):\n");

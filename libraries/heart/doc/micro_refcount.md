@@ -95,6 +95,22 @@ micro-refcount pool share one tested implementation; clone only if templating is
 invasive. The `retain`/`release`-to-0-frees semantics are the counter's own value (this
 doc's lifetime model), layered on top of the alloc/free slot management.
 
+### Migration strategy (zero risk to live code)
+1. **Clone** control_block_alloc → generic `colo_alloc<T>`; `sizeof(T)` derives
+   `slots_per_line = 128 / sizeof(T)` and the slot-within-line shift/mask (no magic 16).
+2. **Keep zones a fixed PTR-COUNT (4M), not fixed bytes** — so `ptr_address→(zone,offset)`
+   math is T-independent (handles resolve uniformly across restart) and only the per-zone
+   mmap bytes scale with `sizeof(T)` (32MB for control_block, 4MB for u8). `colo_alloc<u8>`
+   then spans the full 2^32 address space → ≥ the CB space (requirement #1, for free).
+3. **Differential test (the gate)**: drive the SAME alloc/retain/release/hint op-stream
+   through `colo_alloc<control_block>` and the original `control_block_alloc` side by side;
+   assert identical conservation, comparable co-location quality, no perf regression.
+4. Once proven, `colo_alloc<implicit_ref_count>` (1-byte atomic, retain/release→was_last)
+   is just the narrower case. Existing code untouched the whole time.
+5. **Only after colo_alloc is reliable for a long time**: redefine
+   `control_block_alloc = colo_alloc<control_block>` and relegate the original to a
+   differential-comparison harness. Not before.
+
 ## Build order (prove each layer before the next)
 1. **Standalone SAL micro-refcount pool** (no engine): `alloc()→handle`,
    `retain(handle)`, `release(handle)→bool was_last`, region co-location, self-free at 0,

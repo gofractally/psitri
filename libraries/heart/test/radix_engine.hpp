@@ -664,7 +664,7 @@ namespace heart::radix
       }
 
       // A big node's children are co-owned by another version iff any range counter > 1 (deferred
-      // counts hide that from cb.ref, so the COW mode latch must consult this).
+      // counts hide that from cb.ref).
       template <class N>
       bool children_shared(const N* cn)
       {
@@ -673,6 +673,21 @@ namespace heart::radix
             if (not cn->rc_has_ctrs()) return false;
             for (int r = 0; r < range_count; ++r)
                if (_ses->rr_count(cn->rc_ctr(r)) > 1) return true;
+         }
+         return false;
+      }
+
+      // Is the child in range r co-owned? PER-RANGE — used when descending into a specific child so
+      // we don't clone it just because some OTHER range is shared. After op1 diverges the path's
+      // range (count→1), op2..opN walking the same path see this false → in-place. (children_shared,
+      // the any-range form, would keep cloning until every range is private.)
+      template <class N>
+      bool range_shared(const N* cn, int r)
+      {
+         if constexpr (is_big<N>)
+         {
+            if (not cn->rc_has_ctrs()) return false;
+            return _ses->rr_count(cn->rc_ctr(r)) > 1;
          }
          return false;
       }
@@ -1795,7 +1810,7 @@ namespace heart::radix
          // shared OR its big-tier children are co-owned via shared counters; restore must_clone for
          // N's own cow() after the recursion clobbers _shared.
          ptr_address child = sa.as_pointer();
-         _shared           = must_clone || children_shared<N>(cn);
+         _shared           = must_clone || range_shared<N>(cn, range_of(cell));  // PER-RANGE
          ptr_address nc    = remove_node(child, key, depth + W);
          _shared           = must_clone;
          if (!_removed)
@@ -1948,8 +1963,8 @@ namespace heart::radix
          }
          // child is shared (must clone) if THIS node is shared OR its children are co-owned;
          // restore must_clone for N's own cow() after the recursion clobbers _shared.
-         _shared        = must_clone || children_shared<N>(cn);
-         ptr_address nc = insert_node(child, key, depth + 1, val, chint);
+         _shared        = must_clone || range_shared<N>(cn, range_of(b));  // PER-RANGE: only THIS
+         ptr_address nc = insert_node(child, key, depth + 1, val, chint);  // child's range matters
          _shared        = must_clone;
          if (nc != child)
          {

@@ -75,6 +75,26 @@ Race-clean:
 - **Deterministic addressing**: region layout must survive restart so persisted handles
   resolve — fixed region map, like CB indices.
 
+## Implementation vehicle: parameterize control_block_alloc
+This is NOT a new allocator — it is `sal::control_block_alloc` with `T = u8` (1-byte
+counter) and 128 slots per 128-byte line instead of 16. That allocator already provides
+everything requirement #1 needs: zones-as-regions (`ptrs_per_zone`), the per-zone free
+bitmap, least-filled-line placement, the `alloc_hint = span<ptr_address>` co-location
+path (its doc literally targets "update 256 refcounts touching 32 not 256 cachelines"),
+mlock pinning, and deterministic 32-bit indices that survive restart. Change-set:
+
+- **element size 8→1**: zone byte size + mmap shrink 8×.
+- **slot-within-line 4→7 bits**: affinity arithmetic `cacheline = ptr>>4 / slot = ptr&15`
+  → `>>7 / &127` (16→128 slots per 128B line).
+- **per-line occupancy counter width**: must hold 0..128 → 8 bits (was ≤16 → 4–5).
+- **hint fallback policy**: prefer the hint's shared line, then SAME ZONE (not global
+  least-filled), so a node's 8–16 counters stay co-located for small-offset handles.
+
+Prefer templating control_block_alloc on (element, slots_per_line) so the CB pool and the
+micro-refcount pool share one tested implementation; clone only if templating is too
+invasive. The `retain`/`release`-to-0-frees semantics are the counter's own value (this
+doc's lifetime model), layered on top of the alloc/free slot management.
+
 ## Build order (prove each layer before the next)
 1. **Standalone SAL micro-refcount pool** (no engine): `alloc()→handle`,
    `retain(handle)`, `release(handle)→bool was_last`, region co-location, self-free at 0,

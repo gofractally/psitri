@@ -834,6 +834,65 @@ int main(int argc, char** argv)
       return 0;
    }
 
+   if (mode == "curtest")  // cursor correctness: forward + reverse iteration vs sorted truth.
+   {
+      const uint64_t n = (N < 300000) ? N : 300000;
+      auto vview = [](const uint64_t& v)
+      { return std::string_view(reinterpret_cast<const char*>(&v), sizeof(v)); };
+      auto dir = std::filesystem::temp_directory_path() / "heart_curtest";
+      std::filesystem::remove_all(dir);
+      radix_engine_tree                 t(dir);
+      std::vector<std::array<uint8_t, 8>> keys;
+      keys.reserve(n);
+      for (uint64_t i = 0; i < n; ++i)
+      {
+         uint64_t k = rand_key(i);
+         t.upsert(kspan(k), vview(i));
+         std::array<uint8_t, 8> a;
+         std::memcpy(a.data(), &k, 8);
+         keys.push_back(a);
+      }
+      auto bytelt = [](const std::array<uint8_t, 8>& a, const std::array<uint8_t, 8>& b)
+      { return std::memcmp(a.data(), b.data(), 8) < 0; };
+      std::sort(keys.begin(), keys.end(), bytelt);
+      keys.erase(std::unique(keys.begin(), keys.end()), keys.end());  // tree holds unique keys
+
+      auto keq = [](const std::string_view kv, const std::array<uint8_t, 8>& a)
+      { return kv.size() == 8 && std::memcmp(kv.data(), a.data(), 8) == 0; };
+
+      radix_engine_tree::cursor c(&t);
+      // forward: seek_begin + next → ascending
+      size_t fi = 0; bool fwd_ok = true;
+      for (bool e = c.seek_begin(); !e; e = c.next())
+      { if (fi >= keys.size() || !keq(c.key(), keys[fi])) { fwd_ok = false; break; } ++fi; }
+      fwd_ok = fwd_ok && fi == keys.size();
+      // reverse: seek_last + prev → descending
+      size_t ri = keys.size(); bool rev_ok = true;
+      for (bool e = c.seek_last(); !e; e = c.prev())
+      { if (ri == 0 || !keq(c.key(), keys[--ri])) { rev_ok = false; break; } }
+      rev_ok = rev_ok && ri == 0;
+      // sentinels: seek_end+prev → last; seek_rend+next → first
+      c.seek_end();  bool end_ok  = !c.prev() && keq(c.key(), keys.back());
+      c.seek_rend(); bool rend_ok = !c.next() && keq(c.key(), keys.front());
+      // lower_bound / upper_bound spot checks on 1000 random existing keys
+      std::mt19937_64 rng(7); bool lb_ok = true, ub_ok = true;
+      for (int s = 0; s < 1000; ++s)
+      {
+         size_t idx = rng() % keys.size();
+         std::string_view kq(reinterpret_cast<const char*>(keys[idx].data()), 8);
+         if (c.lower_bound(kq) || !keq(c.key(), keys[idx])) lb_ok = false;          // lb(k)==k
+         bool ub_end = c.upper_bound(kq);                                            // first > k
+         if (idx + 1 < keys.size()) { if (ub_end || !keq(c.key(), keys[idx + 1])) ub_ok = false; }
+         else if (!ub_end) ub_ok = false;                                           // past last → end
+      }
+      std::printf("curtest n=%zu: forward=%s reverse=%s end+prev=%s rend+next=%s lower=%s upper=%s -> %s\n",
+                  keys.size(), fwd_ok ? "OK" : "FAIL", rev_ok ? "OK" : "FAIL", end_ok ? "OK" : "FAIL",
+                  rend_ok ? "OK" : "FAIL", lb_ok ? "OK" : "FAIL", ub_ok ? "OK" : "FAIL",
+                  (fwd_ok && rev_ok && end_ok && rend_ok && lb_ok && ub_ok) ? "OK" : "FAIL");
+      std::fflush(stdout);
+      return 0;
+   }
+
    if (mode == "scalep")  // psitri mirror of `scale` (separate process to avoid 2 live big trees).
    {
       const uint64_t batch  = (argc > 3) ? std::strtoull(argv[3], nullptr, 10) : 1'000'000;

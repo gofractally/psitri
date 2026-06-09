@@ -984,6 +984,8 @@ namespace heart::radix
          int           first() const { return 0; }
          bool          valid(int c) const { return c < p->nstems(); }
          int           next(int c) const { return c + 1; }
+         int           last() const { return p->nstems() - 1; }  // reverse: max entry (-1 if empty)
+         int           prev(int c) const { return c - 1; }       // reverse: previous (-1 = before first)
          uint32_t      cell(int c) const { return uint32_t(p->stem_at(c)); }
          smart_address branch(int c) const { return p->branch_at(c); }
          int           lower(bytes r, bool& full, uint32_t& floorcell) const
@@ -1016,6 +1018,18 @@ namespace heart::radix
             }
             return 256;
          }
+         int pp(int b) const  // largest present byte <= b, else -1 (reverse of np)
+         {
+            if (b < 0) return -1;
+            if (b > 255) b = 255;
+            for (int s = b >> SegBits; s >= 0; --s)
+            {
+               const int hi = (s == (b >> SegBits)) ? (b & ((1 << SegBits) - 1)) : ((1 << SegBits) - 1);
+               const int pv = p->seg(s).present.prev_set(hi);
+               if (pv >= 0) return (s << SegBits) + pv;
+            }
+            return -1;
+         }
          bytes         prefix() const { return p->prefix(); }
          smart_address term() const { return p->term_value(); }
          int           cw() const { return 1; }
@@ -1023,6 +1037,8 @@ namespace heart::radix
          int           first() const { return np(0); }
          bool          valid(int c) const { return c < 256; }
          int           next(int c) const { return np(c + 1); }
+         int           last() const { return pp(255); }      // reverse: highest present (-1 empty)
+         int           prev(int c) const { return pp(c - 1); }
          uint32_t      cell(int c) const { return uint32_t(c); }
          smart_address branch(int c) const { return p->find(uint8_t(c)); }
          int           lower(bytes r, bool& full, uint32_t& floorcell) const
@@ -1043,6 +1059,11 @@ namespace heart::radix
             const int nx = p->branches.next_present(b);
             return nx < 0 ? 256 : nx;
          }
+         int pp(int b) const  // largest present byte <= b, else -1
+         {
+            if (b < 0) return -1;
+            return p->branches.prev_present(b > 255 ? 255 : b);
+         }
          bytes         prefix() const { return p->prefix(); }
          smart_address term() const { return p->term_value(); }
          int           cw() const { return 1; }
@@ -1050,6 +1071,8 @@ namespace heart::radix
          int           first() const { return np(0); }
          bool          valid(int c) const { return c < 256; }
          int           next(int c) const { return np(c + 1); }
+         int           last() const { return pp(255); }
+         int           prev(int c) const { return pp(c - 1); }
          uint32_t      cell(int c) const { return uint32_t(c); }
          smart_address branch(int c) const { return p->find(uint8_t(c)); }
          int           lower(bytes r, bool& full, uint32_t& floorcell) const
@@ -1070,6 +1093,12 @@ namespace heart::radix
             const int nd  = p->next_present(b < bse ? 0 : b - bse);
             return nd < 0 ? 256 : bse + nd;
          }
+         int pp(int b) const  // largest present byte <= b, else -1 (c1 has no prev_present → scan up)
+         {
+            int best = -1;
+            for (int c = np(0); c >= 0 && c <= b; c = np(c + 1)) best = c;
+            return best;
+         }
          bytes         prefix() const { return p->prefix(); }
          smart_address term() const { return p->term_value(); }
          int           cw() const { return 1; }
@@ -1077,6 +1106,8 @@ namespace heart::radix
          int           first() const { return np(0); }
          bool          valid(int c) const { return c < 256; }
          int           next(int c) const { return np(c + 1); }
+         int           last() const { return pp(255); }
+         int           prev(int c) const { return pp(c - 1); }
          uint32_t      cell(int c) const { return uint32_t(c); }
          smart_address branch(int c) const { return p->find(uint8_t(c)); }
          int           lower(bytes r, bool& full, uint32_t& floorcell) const
@@ -1345,7 +1376,7 @@ namespace heart::radix
          bool next()  // advance to the next key in order; returns is_end()
          {
             if (!_valid)
-               return true;
+               return (_end < 0) ? seek_begin() : true;  // from rend → first key; from end → stay
             auto lk = _t->_ses->lock();
             while (_depth > 0)
             {
@@ -1360,9 +1391,47 @@ namespace heart::radix
                // r == 0: this frame is exhausted, popped — keep advancing the parent
             }
             _valid = false;
+            _end   = 0;  // fell off the top → at end
             return true;
          }
-         bool       is_end() const noexcept { return !_valid; }
+         bool prev()  // retreat to the previous key in order; returns is_rend()
+         {
+            if (!_valid)
+               return (_end >= 0) ? seek_last() : true;  // from end → last key; from rend → stay
+            auto lk = _t->_ses->lock();
+            while (_depth > 0)
+            {
+               const int r = retreat_top();
+               if (r == 1)
+                  return false;  // landed on a terminal
+               if (r == 2)
+               {
+                  descend_max(_nextaddr);
+                  return !_valid;
+               }
+               // r == 0: frame exhausted, popped — keep retreating the parent
+            }
+            _valid = false;
+            _end   = -1;  // fell off the bottom → before begin (rend)
+            return true;
+         }
+         bool seek_last()  // position at the last (largest) key; returns is_rend()
+         {
+            auto lk = _t->_ses->lock();
+            reset();
+            descend_max(_root.address());
+            if (!_valid) _end = -1;
+            return !_valid;
+         }
+         bool last(key_view prefix = {})  // last key; prefix-bounded last is seek_last for now
+         {
+            (void)prefix;
+            return seek_last();
+         }
+         void seek_end()  noexcept { reset(); }            // after last key:  is_end()
+         void seek_rend() noexcept { reset(); _end = -1; }  // before first key: is_rend()
+         bool       is_end() const noexcept { return !_valid && _end >= 0; }
+         bool       is_rend() const noexcept { return !_valid && _end < 0; }
          key_view   key() const noexcept { return key_view(reinterpret_cast<const char*>(_kbuf), _klen); }
          template <class F>
          void get_value(F&& fn) const { fn(_val); }
@@ -1381,6 +1450,21 @@ namespace heart::radix
             buf->assign(v.data(), v.size());
             return int32_t(v.size());
          }
+         // ── psitri::cursor public-API parity (forward) ──
+         bool    seek(key_view k) { return lower_bound(k); }  // position at first key >= k
+         bool    first(key_view prefix = {})                  // first key (optionally with prefix)
+         {
+            return prefix.empty() ? seek_begin() : lower_bound(prefix);
+         }
+         int32_t value_size() const noexcept { return _valid ? int32_t(_val.size()) : -1; }
+         template <class F>
+         bool get(key_view k, F&& fn)  // point lookup → lambda(value_view); true if found
+         {
+            value_view v;
+            if (!_t->find(k, v)) return false;
+            fn(v);
+            return true;
+         }
 
         private:
          struct frame  // 8 bytes (lean push/pop); psitri-style
@@ -1396,6 +1480,7 @@ namespace heart::radix
             _depth = 0;
             _klen  = 0;
             _valid = false;
+            _end   = 0;
          }
          void append(const uint8_t* p, size_t n) noexcept
          {
@@ -1484,6 +1569,83 @@ namespace heart::radix
             });
          }
 
+         // Reverse of descend_min: push frames to the MAXIMUM terminal of `addr`'s subtree. In a
+         // node, in-order is [term, entry0..entryN]; the max is entryN's subtree max, so we take
+         // the LAST entry (the term, smallest, is reached only when entries are exhausted).
+         void descend_max(ptr_address addr)
+         {
+            for (;;)
+            {
+               const uint32_t k0 = _klen;
+               const int      r  = _t->dispatch(addr, [&](auto ad) -> int {
+                  frame& f = _fr[_depth];
+                  f.addr   = addr;
+                  bytes pfx = ad.prefix();
+                  append(pfx.data(), pfx.size());
+                  f.klen1 = uint16_t(_klen);
+                  ++_depth;
+                  const int c = ad.last();
+                  if (c >= 0)  // has entries → descend the largest
+                  {
+                     f.pos = int16_t(c);
+                     uint8_t   sb[4];
+                     const int nb = stem_bytes(ad.cell(c), ad.stem_width(), ad.cw(), sb);
+                     append(sb, size_t(nb));
+                     const smart_address br = ad.branch(c);
+                     if (_t->is_terminal_branch(br)) { take_terminal(ad, br); return 1; }
+                     _nextaddr = br.as_pointer();
+                     return 2;
+                  }
+                  if (!ad.term().is_null())  // no entries → the term is the only/largest key
+                  {
+                     f.pos = -1;
+                     take_terminal(ad, ad.term());
+                     return 1;
+                  }
+                  --_depth;  // empty node (root only)
+                  _klen = k0;
+                  return 0;
+               });
+               if (r == 1) { _valid = true; _end = 0; return; }
+               if (r == 0) { _valid = false; return; }
+               addr = _nextaddr;
+            }
+         }
+
+         // Reverse of advance_top: 0 popped, 1 found terminal, 2 descend_max _nextaddr.
+         int retreat_top()
+         {
+            frame& f = _fr[_depth - 1];
+            return _t->dispatch(f.addr, [&](auto ad) -> int {
+               _klen = f.klen1;  // drop the previous entry's stem (+ any descent)
+               if (f.pos < 0)    // we were at this node's term (last in reverse) → pop
+               {
+                  --_depth;
+                  return 0;
+               }
+               const int pc = ad.prev(f.pos);
+               if (pc >= 0)  // previous (smaller) entry → descend its MAX
+               {
+                  f.pos = int16_t(pc);
+                  uint8_t   sb[4];
+                  const int nb = stem_bytes(ad.cell(pc), ad.stem_width(), ad.cw(), sb);
+                  append(sb, size_t(nb));
+                  const smart_address br = ad.branch(pc);
+                  if (_t->is_terminal_branch(br)) { take_terminal(ad, br); return 1; }
+                  _nextaddr = br.as_pointer();
+                  return 2;
+               }
+               if (!ad.term().is_null())  // entries exhausted → the term (smallest) is last in reverse
+               {
+                  f.pos = -1;
+                  take_terminal(ad, ad.term());
+                  return 1;
+               }
+               --_depth;
+               return 0;
+            });
+         }
+
          // Position at the first key >= q (strict → > q). Under the read-lock, on the PINNED
          // root: a raw inner seek finds the key, then build_to lays down the descent path.
          bool position(bytes q, bool strict)
@@ -1554,6 +1716,7 @@ namespace heart::radix
          value_view  _val;
          int         _depth     = 0;
          bool        _valid     = false;
+         int8_t      _end       = 0;  // when !_valid: +1 = at/after end, -1 = at/before begin (rend)
          ptr_address _nextaddr{};
          uint32_t    _nextdepth = 0;
       };

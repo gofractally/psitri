@@ -466,7 +466,7 @@ int main(int argc, char** argv)
       auto vview = [](const uint64_t& v)
       { return std::string_view(reinterpret_cast<const char*>(&v), sizeof(v)); };
 
-      // ── heart radix engine: upsert + commit per op ──
+      // ── heart radix engine: upsert + commit per op (COW-to-root every op) ──
       {
          auto dir = std::filesystem::temp_directory_path() / "heart_worst";
          std::filesystem::remove_all(dir);
@@ -476,10 +476,10 @@ int main(int argc, char** argv)
          {
             uint64_t k = rand_key(i);
             t.upsert(kspan(k), vview(i));
-            t.commit();  // COW-to-root: the whole touched path is shared after the prior commit
+            t.commit();
          }
          double   ins = ns(t0, now(), N);
-         uint64_t s = 0;
+         uint64_t s   = 0;
          for (uint64_t i = 0; i < N; ++i)
          {
             uint64_t k = rand_key(i); std::string_view v;

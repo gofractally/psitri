@@ -80,6 +80,7 @@ target_compile_definitions(subtree-conformance-tests PRIVATE XXH_INLINE_ALL)
 set_target_properties(subtree-conformance-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 add_test(NAME subtree-conformance-tests COMMAND subtree-conformance-tests)
 
+
 # MDBX compatibility tests
 add_executable(mdbx-tests
     ../libraries/psitrimdbx/tests/mdbx_tests.cpp

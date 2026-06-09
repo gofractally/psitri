@@ -19,11 +19,13 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -64,7 +66,8 @@ namespace heart::radix
    class radix_tree
    {
      public:
-      class read_handle;  // read-only tree handle (psitri `tree`-equivalent); ptr_address internal
+      class read_handle;  // internal non-owning view over a root
+      class tree;         // psitri-compatible OWNING tree handle (get_root/get_subtree/get_tree)
       class tree_handle;  // mutable subtree editor (open_subtree/create_subtree, bottom-up commit)
       class cursor;
       class transaction;
@@ -1526,6 +1529,7 @@ namespace heart::radix
       {
          friend class radix_tree;
          friend class read_handle;
+         friend class tree;
          // Cursor rooted at an arbitrary node in the same allocator (a subtree root). Pins it.
          // Private: callers reach it through a handle (get_root / subtree_cursor / snapshot_cursor),
          // never by passing a raw ptr_address — ptr_address stays internal (psitri-shaped API).
@@ -2075,7 +2079,55 @@ namespace heart::radix
             return c.template get<T>(k);
          }
       };
-      read_handle get_root(uint32_t idx) { return {this, root_slot(idx)}; }
+      // psitri-compatible OWNING tree handle: what get_root/get_subtree/get_tree return and what
+      // upsert_subtree accepts. Owns a ref on its root (RAII smart_ptr); copyable (retains) like
+      // psitri::tree. Exposes session()/address() (psitri does too) + the read surface.
+      class tree
+      {
+         friend class radix_tree;
+         friend class write_session;
+         friend class write_transaction;
+         friend class transaction;
+         friend class tree_handle;
+         friend class frame;
+         radix_tree*                       _t = nullptr;
+         sal::smart_ptr<sal::alloc_header> _root;  // owns a ref; empty = null/empty tree
+         tree(radix_tree* t, ptr_address r, bool retain) : _t(t), _root(t->session(), r, retain) {}
+
+        public:
+         tree()                       = default;
+         tree(const tree&)            = default;
+         tree(tree&&)                 = default;
+         tree& operator=(const tree&) = default;
+         tree& operator=(tree&&)      = default;
+         explicit operator bool() const noexcept { return bool(_root); }
+         const sal::allocator_session_ptr& session() const noexcept { return _root.session(); }
+         ptr_address                       address() const noexcept { return _root.address(); }
+         cursor snapshot_cursor() const { return cursor(_t, _root.address()); }
+         uint64_t count_keys() const { return _root ? snapshot_cursor().count_keys() : 0; }
+         bool     is_subtree(key_view k) const
+         {
+            if (!_root) return false;
+            cursor c(_t, _root.address());
+            return !c.find(k) && c.is_subtree();
+         }
+         tree get_subtree(key_view k) const
+         {
+            if (!_root) return {};
+            cursor c(_t, _root.address());
+            if (c.find(k) || !c.is_subtree()) return {};
+            return tree(_t, c._subtree, /*retain=*/true);
+         }
+         template <class T = std::string>
+         std::optional<T> get(key_view k) const
+         {
+            if (!_root) return std::nullopt;
+            cursor c(_t, _root.address());
+            return c.template get<T>(k);
+         }
+      };
+      read_handle get_root_internal(uint32_t idx) { return {this, root_slot(idx)}; }
+      tree        get_root(uint32_t idx) { return tree(this, root_slot(idx), /*retain=*/true); }
 
       // A MUTABLE tree editor (psitri tree_handle): accumulates COW changes to a (sub)tree's working
       // root and lazily opens child subtrees, which are written back BOTTOM-UP when the owning
@@ -2149,14 +2201,23 @@ namespace heart::radix
          }
          void upsert_subtree(key_view k, subtree&& s)  // attach an already-built detached subtree
          {
+            attach_subtree(k, s.consume());
+         }
+         void upsert_subtree(key_view k, tree t)  // psitri-compatible: attach an owning tree (consumes)
+         {
+            attach_subtree(k, t._root.take());
+         }
+       private:
+         void attach_subtree(key_view k, ptr_address root)  // store a vt_subtree terminal owning `root`
+         {
             _t->_ins_value_type = inline_value::vt_subtree;
-            ptr_address sr  = s.consume();
-            uint32_t    raw = *sr;
+            uint32_t    raw = *root;
             ptr_address w   = begin_write();
             _t->upsert_raw(w, as_bytes(k), bytes{reinterpret_cast<const uint8_t*>(&raw), sizeof(raw)});
             _t->_ins_value_type = inline_value::vt_bytes;
             end_write(w);
          }
+       public:
          // Open an existing subtree for in-place editing (deduped; written back on commit).
          tree_handle& open_subtree(key_view k)
          {
@@ -2224,13 +2285,16 @@ namespace heart::radix
          void upsert(key_view k, value_view v) { _primary.upsert(k, v); }
          int  remove(key_view k) { return _primary.remove(k); }
          void upsert_subtree(key_view k, subtree&& s) { _primary.upsert_subtree(k, std::move(s)); }
+         void upsert_subtree(key_view k, tree t) { _primary.upsert_subtree(k, std::move(t)); }  // psitri
          tree_handle& primary() { return _primary; }
          tree_handle& open_subtree(key_view k) { return _primary.open_subtree(k); }
          tree_handle& create_subtree(key_view k) { return _primary.create_subtree(k); }
-         read_handle  handle() { return _primary.handle(); }
          cursor       snapshot_cursor() { return _primary.snapshot_cursor(); }
          bool         is_subtree(key_view k) { return _primary.is_subtree(k); }
-         read_handle  get_subtree(key_view k) { return _primary.get_subtree(k); }
+         tree get_subtree(key_view k)  // psitri: owning tree (over the working root's child)
+         {
+            return tree(_t, _primary._working.address(), /*retain=*/true).get_subtree(k);
+         }
          template <class T = std::string>
          std::optional<T> get(key_view k) { return _primary.template get<T>(k); }
 
@@ -2291,7 +2355,7 @@ namespace heart::radix
          tree_handle& open_subtree(key_view k) { return _tx->open_subtree(k); }
          tree_handle& create_subtree(key_view k) { return _tx->create_subtree(k); }
          bool         is_subtree(key_view k) { return _tx->is_subtree(k); }
-         read_handle  get_subtree(key_view k) { return _tx->get_subtree(k); }
+         tree         get_subtree(key_view k) { return _tx->get_subtree(k); }
          template <class T = std::string>
          std::optional<T> get(key_view k) { return _tx->template get<T>(k); }
          void commit() noexcept { _sp.release(); _active = false; }  // keep working + children
@@ -2303,6 +2367,40 @@ namespace heart::radix
             _active = false;
          }
       };
+
+      // psitri-compatible builder for a DETACHED tree: start_write_transaction(create_temporary_tree())
+      // → upsert(...) → get_tree(). Owns a working tree; get_tree() hands it off (to upsert_subtree).
+      class write_transaction
+      {
+         radix_tree* _t = nullptr;
+         tree        _wt;
+        public:
+         write_transaction(radix_tree* t, tree base) : _t(t), _wt(std::move(base)) {}
+         void upsert(key_view k, value_view v)
+         {
+            _t->_ins_value_type = inline_value::vt_bytes;
+            ptr_address w       = _wt._root.take();
+            if (w == sal::null_ptr_address) w = _t->make_node<setlist_u8>(bytes{});
+            _t->upsert_raw(w, as_bytes(k), as_bytes(v));
+            _wt._root = sal::smart_ptr<sal::alloc_header>(_t->session(), w);  // re-adopt
+         }
+         tree get_tree() { return std::move(_wt); }  // hand off the built (owning) tree
+      };
+
+      // ── psitri-compatible engine entry points (database/write_session delegate here) ──
+      tree             create_temporary_tree() { return tree{}; }  // empty detached tree
+      write_transaction start_write_transaction(tree base)
+      {
+         return write_transaction(this, std::move(base));
+      }
+      void set_root(uint32_t idx, tree t)  // publish a tree into root slot idx (empty = clear)
+      {
+         ptr_address& slot = root_slot(idx);
+         if (slot != sal::null_ptr_address) _ses->release(slot);
+         slot = t._root.take();
+      }
+      uint64_t get_total_allocated_objects() const { return object_count(); }
+      uint64_t get_pending_release_count() const { return pending_releases(); }
 
      private:
       ptr_address& root_slot(uint32_t idx) { return idx == 0 ? _root : _roots_ext[idx]; }
@@ -4032,4 +4130,57 @@ namespace heart::radix
       // snapshot the primary handle's working root (copy → retain) + its open-child count
       return frame(this, _primary._working, _primary._children.size());
    }
+
+   // ── psitri-compatible public entry: database → write_session → transaction/tree/... ──────────
+   // These ARE heart's public API (not a facade): a database owns the engine (radix_tree); a
+   // write_session is a handle onto it. psitri's tests compile against heart by selecting these
+   // types (same names + signatures) — no adapter, no wrapper-translation layer.
+   class write_session
+   {
+      radix_tree* _t = nullptr;
+
+     public:
+      explicit write_session(radix_tree* t) noexcept : _t(t) {}
+      radix_tree::transaction start_transaction(uint32_t idx = 0) { return _t->start_transaction(idx); }
+      radix_tree::tree        create_temporary_tree() { return _t->create_temporary_tree(); }
+      radix_tree::write_transaction start_write_transaction(radix_tree::tree base)
+      {
+         return _t->start_write_transaction(std::move(base));
+      }
+      radix_tree::tree get_root(uint32_t idx) { return _t->get_root(idx); }
+      void             set_root(uint32_t idx, radix_tree::tree t,
+                                sal::sync_type = sal::sync_type::none)
+      {
+         _t->set_root(idx, std::move(t));
+      }
+      uint64_t get_total_allocated_objects() const { return _t->get_total_allocated_objects(); }
+      uint64_t get_pending_release_count() const { return _t->get_pending_release_count(); }
+   };
+
+   class database
+   {
+      radix_tree _engine;
+
+     public:
+      explicit database(const std::filesystem::path& dir) : _engine(dir) {}
+      static std::shared_ptr<database> open(const std::filesystem::path& dir)
+      {
+         return std::make_shared<database>(dir);
+      }
+      std::shared_ptr<write_session> start_write_session()
+      {
+         return std::make_shared<write_session>(&_engine);
+      }
+      // Drain the background releaser so a post-op object_count is exact (psitri parity).
+      bool wait_for_compactor(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000))
+      {
+         auto end = std::chrono::steady_clock::now() + timeout;
+         while (_engine.get_pending_release_count() > 0)
+         {
+            if (std::chrono::steady_clock::now() > end) return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+         }
+         return true;
+      }
+   };
 }  // namespace heart::radix

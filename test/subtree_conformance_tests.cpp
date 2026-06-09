@@ -1,21 +1,24 @@
-// Differential subtree conformance: the SAME templated tests run against BOTH engines (heart's
-// radix_tree and psitri), via thin adapters that expose a uniform surface. A divergence shows up
-// as one engine FAIL / the other PASS on the same assertion — porting psitri's battle-tested
-// subtree semantics onto heart as a hard gate.
+// Differential subtree conformance: the SAME test bodies (written in psitri's public API verbatim)
+// run against BOTH engines. The engine is selected by a PURE type-alias policy — `using database
+// = <ns>::database;` — and everything else is deduced with `auto`/`auto&&`. There is NO adapter and
+// NO facade: psitri is the identity (its own API), and heart provides the same surface natively
+// (heart::radix::database -> write_session -> transaction / tree / tree_handle / cursor). A
+// behavioral divergence shows up as one engine FAIL / the other PASS on the identical assertion.
+//
+// `auto&&` for handles bridges the one shape difference: psitri's tree_handle is a copyable
+// targeting scope (returned by value), heart's is a move-only owner (returned by reference).
 #include <catch2/catch_template_test_macros.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <filesystem>
-#include <map>
 #include <optional>
 #include <string>
-#include <string_view>
 
-#include <radix_engine.hpp>  // heart engine (header)
+#include <radix_engine.hpp>  // heart engine + its native psitri-shaped public API
 
+#include <psitri/cursor.hpp>
 #include <psitri/database.hpp>
 #include <psitri/transaction.hpp>
-#include <psitri/cursor.hpp>
 #include <psitri/write_session_impl.hpp>
 
 namespace
@@ -30,214 +33,142 @@ namespace
    using sopt = std::optional<std::string>;
    sopt S(std::string_view s) { return sopt(std::string(s)); }
 
-   // ── heart adapter ──────────────────────────────────────────────────────────────────────
-   struct heart_eng
+   // The ONLY engine-specific code: which namespace's `database` to use. Pure aliases — no logic.
+   struct psitri_policy
    {
-      static const char*               name() { return "heart"; }
-      heart::radix::radix_tree         t;
-      explicit heart_eng() : t(conf_dir("heart")) {}
-      using HT = heart::radix::radix_tree;
-
-      struct Sub
-      {
-         HT::tree_handle* h;
-         void             upsert(std::string_view k, std::string_view v) { h->upsert(k, v); }
-         sopt             get(std::string_view k) { return h->get<std::string>(k); }
-         uint64_t         count() { return h->count_keys(); }
-         Sub              create(std::string_view k) { return {&h->create_subtree(k)}; }
-         Sub              open(std::string_view k) { return {&h->open_subtree(k)}; }
-      };
-      struct Writer
-      {
-         HT::transaction tx;
-         void            upsert(std::string_view k, std::string_view v) { tx.upsert(k, v); }
-         int             remove(std::string_view k) { return tx.remove(k); }
-         bool            is_subtree(std::string_view k) { return tx.is_subtree(k); }
-         sopt            get(std::string_view k) { return tx.get<std::string>(k); }
-         Sub             create(std::string_view k) { return {&tx.create_subtree(k)}; }
-         Sub             open(std::string_view k) { return {&tx.open_subtree(k)}; }
-         void            commit() { tx.commit(); }
-         void            abort() { tx.abort(); }
-      };
-      Writer writer(uint32_t idx = 0) { return Writer{t.start_transaction(idx)}; }
-
-      struct Reader
-      {
-         HT::read_handle r;
-         explicit        operator bool() const { return bool(r); }
-         sopt            get(std::string_view k) { return r.get<std::string>(k); }
-         bool            is_subtree(std::string_view k) { return r.is_subtree(k); }
-         Reader          sub(std::string_view k) { return {r.get_subtree(k)}; }
-         uint64_t        count() { return r.count_keys(); }
-      };
-      Reader reader(uint32_t idx = 0) { return Reader{t.get_root(idx)}; }
+      static constexpr const char* nm = "psitri";
+      using database                  = psitri::database;
    };
-
-   // ── psitri adapter ─────────────────────────────────────────────────────────────────────
-   struct psitri_eng
+   struct heart_policy
    {
-      static const char*                     name() { return "psitri"; }
-      std::shared_ptr<psitri::database>      db;
-      std::shared_ptr<psitri::write_session> ses;
-      explicit psitri_eng()
-      {
-         db  = psitri::database::open(conf_dir("psitri").string());
-         ses = db->start_write_session();
-      }
-      struct Sub
-      {
-         psitri::tree_handle h;
-         void                upsert(std::string_view k, std::string_view v) { h.upsert(k, v); }
-         sopt                get(std::string_view k) { return h.get<std::string>(k); }
-         uint64_t            count() { return h.snapshot_cursor().count_keys(); }
-         Sub                 create(std::string_view k) { return {h.create_subtree(k)}; }
-         Sub                 open(std::string_view k) { return {h.open_subtree(k)}; }
-      };
-      struct Writer
-      {
-         psitri::transaction tx;
-         void                upsert(std::string_view k, std::string_view v) { tx.upsert(k, v); }
-         int                 remove(std::string_view k) { return tx.remove(k); }
-         bool                is_subtree(std::string_view k) { return tx.primary().is_subtree(k); }
-         sopt                get(std::string_view k) { return tx.get<std::string>(k); }
-         Sub                 create(std::string_view k) { return {tx.primary().create_subtree(k)}; }
-         Sub                 open(std::string_view k) { return {tx.primary().open_subtree(k)}; }
-         void                commit() { tx.commit(); }
-         void                abort() { tx.abort(); }
-      };
-      Writer writer(uint32_t idx = 0) { return Writer{ses->start_transaction(idx)}; }
-
-      struct Reader
-      {
-         psitri::tree r;
-         explicit     operator bool() const { return bool(r); }
-         sopt         get(std::string_view k) { return r.get<std::string>(k); }
-         bool         is_subtree(std::string_view k) { return bool(r.get_subtree(k)); }
-         Reader       sub(std::string_view k) { return {r.get_subtree(k)}; }
-         uint64_t count() { return r.cursor().count_keys(); }
-      };
-      Reader reader(uint32_t idx = 0) { return Reader{ses->get_root(idx)}; }
+      static constexpr const char* nm = "heart";
+      using database                  = heart::radix::database;
    };
 }  // namespace
 
-// store a subtree, read it back (count + values) + a sibling byte value.
-TEMPLATE_TEST_CASE("conformance: subtree store + retrieve", "[conformance]", heart_eng, psitri_eng)
+// Build a detached subtree, attach it, read it back (count + values) + a sibling byte value.
+TEMPLATE_TEST_CASE("conformance: subtree store + retrieve", "[conformance]", psitri_policy, heart_policy)
 {
-   TestType eng;
+   auto db  = TestType::database::open(conf_dir(TestType::nm));
+   auto ses = db->start_write_session();
    {
-      auto w = eng.writer();
-      auto s = w.create("child");
-      s.upsert("a", "1");
-      s.upsert("b", "2");
-      w.upsert("data", "root");
-      w.commit();
+      auto tx  = ses->start_transaction(0);
+      auto sub = ses->start_write_transaction(ses->create_temporary_tree());
+      sub.upsert("a", "1");
+      sub.upsert("b", "2");
+      tx.upsert_subtree("child", sub.get_tree());
+      tx.upsert("data", "root");
+      tx.commit();
    }
-   auto r = eng.reader();
-   CHECK(r.get("data") == S("root"));
-   auto sub = r.sub("child");
-   REQUIRE(bool(sub));
-   CHECK(sub.count() == 2);
-   CHECK(sub.get("a") == S("1"));
-   CHECK(sub.get("b") == S("2"));
+   auto root = ses->get_root(0);
+   CHECK(root.template get<std::string>("data") == S("root"));
+   auto child = root.get_subtree("child");
+   REQUIRE(bool(child));
+   CHECK(child.snapshot_cursor().count_keys() == 2);
+   CHECK(child.template get<std::string>("a") == S("1"));
+   CHECK(child.template get<std::string>("b") == S("2"));
 }
 
 // discrimination: a subtree key is a subtree; a byte key is not.
-TEMPLATE_TEST_CASE("conformance: subtree discrimination", "[conformance]", heart_eng, psitri_eng)
+TEMPLATE_TEST_CASE("conformance: subtree discrimination", "[conformance]", psitri_policy, heart_policy)
 {
-   TestType eng;
+   auto db  = TestType::database::open(conf_dir(TestType::nm));
+   auto ses = db->start_write_session();
    {
-      auto w = eng.writer();
-      w.upsert("plain", "v");
-      auto s = w.create("tree");
-      s.upsert("k", "1");
-      w.commit();
+      auto tx  = ses->start_transaction(0);
+      auto sub = ses->start_write_transaction(ses->create_temporary_tree());
+      sub.upsert("k", "1");
+      tx.upsert_subtree("tree", sub.get_tree());
+      tx.upsert("plain", "v");
+      tx.commit();
    }
    {
-      auto w = eng.writer();
-      CHECK(w.is_subtree("tree"));
-      CHECK_FALSE(w.is_subtree("plain"));
-      CHECK(w.get("plain") == S("v"));
-      w.abort();
+      auto tx = ses->start_transaction(0);
+      CHECK(tx.is_subtree("tree"));
+      CHECK_FALSE(tx.is_subtree("plain"));
+      CHECK(tx.template get<std::string>("plain") == S("v"));
+      tx.abort();
    }
-   CHECK(eng.reader().is_subtree("tree"));
-   CHECK_FALSE(eng.reader().is_subtree("plain"));
+   CHECK(bool(ses->get_root(0).get_subtree("tree")));
+   CHECK_FALSE(bool(ses->get_root(0).get_subtree("plain")));
 }
 
-// open an existing subtree, modify, persist.
-TEMPLATE_TEST_CASE("conformance: open_subtree modify persists", "[conformance]", heart_eng, psitri_eng)
+// in-place: create a subtree via the primary handle, populate, persist.
+TEMPLATE_TEST_CASE("conformance: create_subtree via primary handle", "[conformance]", psitri_policy, heart_policy)
 {
-   TestType eng;
+   auto db  = TestType::database::open(conf_dir(TestType::nm));
+   auto ses = db->start_write_session();
    {
-      auto w = eng.writer();
-      auto s = w.create("child");
-      s.upsert("a", "1");
-      s.upsert("b", "2");
-      w.commit();
+      auto   tx = ses->start_transaction(0);
+      auto&& h  = tx.primary();
+      auto&& s  = h.create_subtree("new_tree");
+      s.upsert("inner_a", "va");
+      s.upsert("inner_b", "vb");
+      tx.commit();
    }
-   {
-      auto w = eng.writer();
-      auto s = w.open("child");
-      CHECK(s.get("a") == S("1"));
-      s.upsert("c", "3");
-      w.commit();
-   }
-   auto sub = eng.reader().sub("child");
+   auto sub = ses->get_root(0).get_subtree("new_tree");
    REQUIRE(bool(sub));
-   CHECK(sub.get("c") == S("3"));
-   CHECK(sub.count() == 3);
+   CHECK(sub.snapshot_cursor().count_keys() == 2);
+   CHECK(sub.template get<std::string>("inner_a") == S("va"));
 }
 
-// nested subtrees (tree of trees) written back bottom-up.
-TEMPLATE_TEST_CASE("conformance: nested subtrees", "[conformance]", heart_eng, psitri_eng)
+// nested subtrees (tree of trees) created via handles, written back bottom-up.
+TEMPLATE_TEST_CASE("conformance: nested subtrees", "[conformance]", psitri_policy, heart_policy)
 {
-   TestType eng;
+   auto db  = TestType::database::open(conf_dir(TestType::nm));
+   auto ses = db->start_write_session();
    {
-      auto w     = eng.writer();
-      auto outer = w.create("outer");
+      auto   tx    = ses->start_transaction(0);
+      auto&& h     = tx.primary();
+      auto&& outer = h.create_subtree("outer");
       outer.upsert("od", "hi");
-      auto inner = outer.create("inner");
+      auto&& inner = outer.create_subtree("inner");
       inner.upsert("deep", "v");
-      w.commit();
+      tx.commit();
    }
-   auto outer = eng.reader().sub("outer");
+   auto outer = ses->get_root(0).get_subtree("outer");
    REQUIRE(bool(outer));
-   CHECK(outer.get("od") == S("hi"));
-   auto inner = outer.sub("inner");
+   CHECK(outer.template get<std::string>("od") == S("hi"));
+   auto inner = outer.get_subtree("inner");
    REQUIRE(bool(inner));
-   CHECK(inner.get("deep") == S("v"));
+   CHECK(inner.template get<std::string>("deep") == S("v"));
 }
 
 // multiple sibling subtrees in one transaction all persist.
-TEMPLATE_TEST_CASE("conformance: multiple subtrees", "[conformance]", heart_eng, psitri_eng)
+TEMPLATE_TEST_CASE("conformance: multiple subtrees", "[conformance]", psitri_policy, heart_policy)
 {
-   TestType eng;
+   auto db  = TestType::database::open(conf_dir(TestType::nm));
+   auto ses = db->start_write_session();
    {
-      auto w = eng.writer();
+      auto tx = ses->start_transaction(0);
       for (int i = 0; i < 6; ++i)
       {
-         auto s = w.create("t" + std::to_string(i));
-         s.upsert("v", std::to_string(i));
+         auto sub = ses->start_write_transaction(ses->create_temporary_tree());
+         sub.upsert("v", std::to_string(i));
+         tx.upsert_subtree("t" + std::to_string(i), sub.get_tree());
       }
-      w.commit();
+      tx.commit();
    }
-   auto r = eng.reader();
+   auto root = ses->get_root(0);
    for (int i = 0; i < 6; ++i)
    {
-      auto s = r.sub("t" + std::to_string(i));
+      auto s = root.get_subtree("t" + std::to_string(i));
       REQUIRE(bool(s));
-      CHECK(s.get("v") == S(std::to_string(i)));
+      CHECK(s.template get<std::string>("v") == S(std::to_string(i)));
    }
 }
 
-// abort discards a stored subtree (and its contents never appear).
-TEMPLATE_TEST_CASE("conformance: abort discards subtree", "[conformance]", heart_eng, psitri_eng)
+// abort discards a stored subtree (its key never appears).
+TEMPLATE_TEST_CASE("conformance: abort discards subtree", "[conformance]", psitri_policy, heart_policy)
 {
-   TestType eng;
+   auto db  = TestType::database::open(conf_dir(TestType::nm));
+   auto ses = db->start_write_session();
    {
-      auto w = eng.writer();
-      auto s = w.create("gone");
-      s.upsert("k", "v");
-      w.abort();
+      auto tx  = ses->start_transaction(0);
+      auto sub = ses->start_write_transaction(ses->create_temporary_tree());
+      sub.upsert("k", "v");
+      tx.upsert_subtree("gone", sub.get_tree());
+      tx.abort();
    }
-   CHECK_FALSE(bool(eng.reader().sub("gone")));
+   CHECK_FALSE(bool(ses->get_root(0).get_subtree("gone")));
 }

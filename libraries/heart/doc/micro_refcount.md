@@ -1,0 +1,102 @@
+# Micro-refcount pool — per-range branch-set refcounts for COW-to-root
+
+## Why
+COW-to-root clones every node on the update path. For a dense (≤256-wide) node, the
+canonical clone retains all ~256 children and destroy releases them — `O(fan-out)`
+atomics per clone/destroy, the dominant refcount traffic at high fan-out.
+
+The fix is a **second level of refcounting at RANGE granularity**: the 256 branches
+are split into N ranges (e.g. 8×32 or 16×16); each range has one refcount that counts
+**how many node-versions share that range's exact branch-set**. Then:
+
+- clone a node = `+1` to each range counter (N atomics, not 256),
+- destroy a node = `-1` to each range counter; the version that drives a counter to 0
+  releases that range's branch pointers (from its own node array) — `O(fan-out)` only
+  at the genuine last reference,
+- diverge one branch = that range's set changed → allocate a fresh counter for it
+  (retain the kept branches as that counter's base), release the old counter.
+
+A range counter is a **smart pointer whose pointee is implicit**: it does not store a
+pointer; it counts the branch ptr_addresses in its range, which live in the node array
+and are identical across every version that shares the counter.
+
+## The counter is its own lifetime (no separate free tracking)
+The counter VALUE is the allocation state:
+
+- `value 0` ⇒ slot is free.
+- `alloc()` = find a 0 slot, `CAS 0→1`, return handle.
+- clone node = `fetch_add(1)` each of the node's counters.
+- destroy node = `fetch_sub(1)` each; the thread whose `fetch_sub` returns 1 (slot now
+  0) releases that range's branch pointers AND the slot is thereby back in the pool.
+
+Race-clean:
+- alloc only claims 0 slots; clone only touches counters already ≥1 → never collide.
+- alloc-vs-alloc resolved by the CAS.
+- "was I the last?" is the `fetch_sub` RETURN value (atomic), and the branch release
+  reads the *node's* array (not the slot), so a slot freed-then-reused by another
+  node's `alloc` cannot cross-contaminate — the slot identity is implicit per node.
+
+## Storage: 1-byte atomics, co-located, addressed by region-base + small offset
+- A full `control_block` (8 B + its own allocation) is far too heavy for a counter.
+  A counter is **one byte** (`std::atomic<uint8_t>`; x86 `LOCK XADD`, ARMv8.1 `LDADDB`).
+  255 headroom ⇒ forks/overflow are astronomically rare (vs 15 for a 4-bit nibble).
+- A node needs N (8–16) counters. Storing N×4-byte ptr_addresses blows the header.
+  Instead the allocator **co-locates** a node's N counters in one region so the node
+  stores one region-base + N small offsets (1 B offset if region ≤256 slots → 4 + 16 =
+  20 B for 16 counters; fits the leftover header cacheline).
+- clone copies the base+offsets (shares the counters), `fetch_add` each — no alloc.
+- region full mid-divergence: spill the one new counter to a 2nd region (bigger handle)
+  or, fallback, re-home the node's counters to a fresh region. NOTE: only counters this
+  node UNIQUELY owns (value 1) can be moved; shared counters cannot (other versions hold
+  the handle) → co-location is best-effort, never a correctness constraint.
+
+## Two hard requirements (these set the architecture)
+1. **Capacity ≥ the control-block space.** 8–16 counters per big node ⇒ the pool is a
+   dedicated **pinned-RAM region**, sized at least like the CB space, deterministically
+   addressed (region id → fixed location) so a persisted handle resolves after restart.
+   This is a CB-sized SAL subsystem, parallel to `control_block_alloc`, not a slab.
+2. **Counts are reconstructed from node data alone.** The counter VALUES are ephemeral
+   (like CB refcounts and the node's `type`/presence hint): zeroed on open, re-tallied
+   by walking the live roots. Only the HANDLE (region-base + offsets) is persistent, in
+   the node. Recovery: zero the pool, walk every node reachable from the durable roots,
+   `fetch_add(1)` the slot each (node,range) handle names; afterwards every slot holds
+   its exact live share-count. Dead/unreachable versions are never walked, so a
+   freed-then-reused slot stays consistent within the live set.
+
+## Open problems (the real engineering)
+- **Co-location vs sharing**: a clone's counters are shared (value>1) and cannot be
+  moved, so a region that fills can't be compacted for live counters. Placement is
+  best-effort; need a region-selection policy that keeps a node's set together at birth.
+- **Cross-node fragmentation / recycle**: many nodes' counters interleave in a region;
+  it recycles only when all slots reach 0. Likely wants a clean-region recycler (same
+  shape as SAL's clean-page eviction, at slot granularity).
+- **Region-full-mid-divergence fallback**: spill-to-2nd-region (variable handle) vs
+  re-home vs fork. Pick one; measure.
+- **Deterministic addressing**: region layout must survive restart so persisted handles
+  resolve — fixed region map, like CB indices.
+
+## Build order (prove each layer before the next)
+1. **Standalone SAL micro-refcount pool** (no engine): `alloc()→handle`,
+   `retain(handle)`, `release(handle)→bool was_last`, region co-location, self-free at 0,
+   deterministic addressing. Concurrent conservation test: N threads
+   alloc/retain/release millions of slots; assert conservation, no slot double-handed,
+   no lost free. Earn trust exactly like the segment allocator did.
+2. **Recovery re-tally**: build pool from a set of "live roots" walks; assert the
+   rebuilt counts equal the live counts. Test independent of the engine.
+3. **Engine wiring** (replaces packed nibbles + settle + fork-on-overflow on
+   `heart-rr-wip`): node header = region-base + range offsets; birth allocs, clone
+   retains-each, destroy releases-each (last → release range branches), diverge allocs a
+   fresh slot. NO settle, NO materialized-vs-deferred ambiguity, async-safe by
+   construction.
+4. **Validate**: `rrstress` (concurrent pinned snapshots, divergent write+remove
+   lineages off shared ancestors, common-ancestor release, model-checked count+checksum)
+   + 1M `rand`, both under build-di (free_range_tracker). Then measure vs the 1690 ns
+   packed-insert number and psitri 2960.
+
+## ROI caveat (decide before step 1)
+After child-retain batching, the worst-case COW-to-root bottleneck is the node MEMMOVE
+(copying the dense children array), not counter atomics — and at `share==1` the counters
+barely move. So this subsystem's payoff is **correctness + clean async-safe construction
++ the heavy-multi-snapshot-divergence regime**, NOT throughput on the simple worst case
+(the lever there is shrinking the dense node, psitri-style packed pointers). Worth
+building for the architecture; don't expect it to beat 1690 ns on its own.

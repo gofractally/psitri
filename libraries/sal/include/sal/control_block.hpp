@@ -269,10 +269,32 @@ namespace sal
       }
 */
       /**
+       * Range-refcount block support: the cacheline_offset field doubles as an opaque
+       * user value (packed nibble counters) on a custom CB. Atomically replace it iff it
+       * still equals `expect_val`, preserving `ref` and every other field (which other
+       * threads — retain/release of the block's share count — may be changing). Returns
+       * false if the value moved under us (caller re-reads and retries).
+       */
+      bool cas_user_value(uint64_t expect_val, uint64_t desired_val) noexcept
+      {
+         uint64_t           expect = _data.load(std::memory_order_relaxed);
+         control_block_data prior;
+         do
+         {
+            prior.from_int(expect);
+            if (uint64_t(prior.cacheline_offset) != expect_val) [[unlikely]]
+               return false;
+            prior.cacheline_offset = desired_val;
+         } while (
+             not _data.compare_exchange_weak(expect, prior.to_int(), std::memory_order_seq_cst));
+         return true;
+      }
+
+      /**
        * Moves the location without regard to the prior location, but
        * without disrupting any other fields that may be updated by
        * other threads.
-       * 
+       *
        * @return the updated control_block_data
        */
       control_block_data move(location          loc,

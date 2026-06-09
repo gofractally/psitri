@@ -97,3 +97,50 @@ versions — bounded and tiny.
 | diverged range on the path | included in `O(F)` | `O(32)` settle (one range) |
 | fork / block death | — | `O(F)`, 1 per 16 stacked versions |
 | node footprint | — | +1 `ptr_address` in CL0 (big tiers only) |
+
+## Measured ceiling (why this is worth it)
+
+`kv-u64-bench … worst` with the per-child retain (clone) + release (reclaim) compiled
+out (`HEART_SKIP_CHILD_REFCOUNT`, leaks — measurement only):
+
+| N | baseline ns/txn | atomics removed | atomics' share |
+|---|---|---|---|
+| 300k | 3,121 | 128 | ~96% |
+| 1M | 1,802 | 155 | ~91% |
+
+Child-refcount atomics are **~90–96% of all COW-to-root latency**. Realistic capture
+with 8-ish nibbles is bounded by the divergence-settle (~6–8×) → COW-to-root ~1,800 →
+~300–500 ns. This is the single biggest remaining lever.
+
+## Substrate (DONE)
+
+- `control_block::cas_user_value(expect, desired)` — CAS the packed nibble word,
+  preserving the share count (`ref`). Composes with concurrent retain/release of the
+  block (those change `ref`; the CAS retries).
+- `allocator_session::custom_cb_share(adr)` / `custom_cb_cas_value(adr, expect, desired)`
+  + existing `alloc_custom_cb` / `read_custom_cb` / `retain` / `release`. A range block is
+  just a custom CB: `ref` = share, location bits = 8 nibbles.
+
+## Engine integration (TODO — the large piece)
+
+The block must *hold* the base child retains, so every site that takes/drops a ref on a
+big-tier **branch pointer** routes through the block. Surface (radix_engine.hpp unless
+noted):
+
+1. **Node birth that builds children** (make_node / promote setlist→bitset, re_stride,
+   prefix_split building a big node): alloc the block, `cb.retain` each child (base),
+   nibbles=0.
+2. **Clone** (`555`, `2656`): blit already copies `blocks[]` (clone shares the block) →
+   `retain(block)` + bump 8 nibbles, or **fork** on overflow. Replaces `for_each_child(retain)`.
+3. **Destroy** (`radix_node.hpp:151`): `release(block)`; on block death, `cb.release` each
+   covered child. Replaces `for_each_child(release)`.
+4. **Structural mutation of a big-tier branch set** — `set_branch` (add), `remove_branch`
+   (drop), re-point/replace, collapse/demote (`~1518–2809`): **settle the affected range**
+   first (`cb.retain += n[r] ∀c∈r; n[r]=0`), then the individual add/drop on `cb.ref`.
+5. Small/sparse tiers (setlist*, single-child, suffix_value) keep direct per-child refs —
+   no block.
+
+Validate every increment under `build-di` (free_range_tracker is the only thing that sees
+SAL-arena UAF/double-free/leak), plus `[remove]` fuzz and kv-compat, then measure `worst`.
+The correctness surface is item 4 (range-aware settle at each mutation site); that is the
+bulk of the risk and effort.

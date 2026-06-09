@@ -206,6 +206,13 @@ namespace sal
       /// The {active=0, pending_cache=1} bit pattern marks custom CBs.
       static bool is_custom_cb(control_block_data cbd) noexcept;
 
+      /// Range-refcount block helpers (a custom CB whose ref = share count and whose
+      /// user value packs nibble counters). share = the block's reference count.
+      uint32_t custom_cb_share(ptr_address adr) const noexcept;
+      /// CAS the packed user value (nibbles), preserving the share count. Returns false
+      /// if the value moved under us — caller re-reads via read_custom_cb and retries.
+      bool custom_cb_cas_value(ptr_address adr, uint64_t expect, uint64_t desired) noexcept;
+
       /**
        * This is to be used if and only if the user has taken ownership of the
        * ptr_address via smart_ptr<T>::take() and is now using manual memory

@@ -344,6 +344,18 @@ namespace sal
       return !cbd.active && cbd.pending_cache;
    }
 
+   inline uint32_t allocator_session::custom_cb_share(ptr_address adr) const noexcept
+   {
+      return const_cast<control_block_alloc&>(_ptr_alloc).get(adr).ref();
+   }
+
+   inline bool allocator_session::custom_cb_cas_value(ptr_address adr,
+                                                      uint64_t    expect,
+                                                      uint64_t    desired) noexcept
+   {
+      return get(adr).cas_user_value(expect, desired);
+   }
+
    inline void allocator_session::retain(ptr_address adr)
    {
       get(adr).retain();

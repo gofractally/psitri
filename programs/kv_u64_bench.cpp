@@ -612,18 +612,24 @@ int main(int argc, char** argv)
       // (b) INSERT 1000 brand-new keys, commit.
       for (uint64_t i = 1000; i < 2000; ++i) { uint64_t k = rand_key(i); t.upsert(kspan(k), vview(i)); }
       t.commit();
+      // (c) REMOVE 500 keys that EXIST in the snapshot (keys 0..499) from the LIVE lineage, commit.
+      //     A correct COW-to-root remove must clone the path — the snapshot keeps these keys.
+      for (uint64_t i = 0; i < 500; ++i) { uint64_t k = rand_key(i); t.remove(kspan(k)); }
+      t.commit();
       // Now interrogate the PINNED snapshot. Correct COW → it must still show the old world.
       std::string_view v;
       bool got7   = t.find_at(snap, kspan(k7), v);
       uint64_t v7 = got7 ? getv(v) : 0;
-      uint64_t snap_keys = t.count_keys_at(snap);   // unambiguous: COW-correct → still exactly 1000
-      uint64_t live_keys = t.count_keys_at(t.root_addr());
+      uint64_t snap_keys = t.count_keys_at(snap);          // COW-correct → still exactly 1000
+      uint64_t live_keys = t.count_keys_at(t.root_addr()); // 1000 + 1000 inserted - 500 removed = 1500
       std::printf("SNAPSHOT ISOLATION TEST:\n");
-      std::printf("  key#7 in snapshot: value=%llu  (expect 7 if COW-correct, 999999 if mutated in place)  -> %s\n",
+      std::printf("  key#7 update isolation: snapshot value=%llu (expect 7)  -> %s\n",
                   (unsigned long long)v7, v7 == 7 ? "ISOLATED" : "CORRUPTED");
-      std::printf("  snapshot key count = %llu (expect 1000)  |  live key count = %llu (expect 2000)  -> %s\n",
+      // count is the unambiguous signal: removes on the live lineage (incl. keys present in the
+      // snapshot) must NOT change the snapshot's count, while live drops by the 500 removed.
+      std::printf("  snapshot count = %llu (expect 1000)  |  live count = %llu (expect 1500)  -> %s\n",
                   (unsigned long long)snap_keys, (unsigned long long)live_keys,
-                  (snap_keys == 1000 && live_keys == 2000) ? "ISOLATED" : "CORRUPTED");
+                  (snap_keys == 1000 && live_keys == 1500) ? "ISOLATED" : "CORRUPTED");
       (void)got7;
       t.release_snapshot(snap);
       std::fflush(stdout);

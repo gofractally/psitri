@@ -239,6 +239,7 @@ namespace heart::radix
             return bkt_remove(kb);
          _removed = false;
          _emptied = false;
+         _shared  = false;  // fresh unique→shared latch for this COW-to-root remove descent
          ptr_address nr = remove_node(_root, kb, 0);
          if (!_removed)
             return false;
@@ -1576,6 +1577,8 @@ namespace heart::radix
          const ptr_address pre = addr;  // original (pre-COW) node, for clone-release on downgrade
          sal::smart_ref<N> ref = _ses->get_ref<N>(addr);  // resolved once; threaded into cow()
          const N*          cn  = ref.obj();
+         if (ref.ref() > 1)  // descending through a shared node → latch shared for the whole subtree
+            _shared = true;
          bytes             pfx = cn->prefix();
          if (pfx.size() > key.size() - depth ||
              (pfx.size() && std::memcmp(pfx.data(), key.data() + depth, pfx.size()) != 0))

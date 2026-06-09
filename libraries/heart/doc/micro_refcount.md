@@ -95,6 +95,23 @@ micro-refcount pool share one tested implementation; clone only if templating is
 invasive. The `retain`/`release`-to-0-frees semantics are the counter's own value (this
 doc's lifetime model), layered on top of the alloc/free slot management.
 
+### Free-slot tracking: atomic bitmap (DECIDED), not value-scan
+Keep control_block_alloc's **per-slot atomic free-bitmap** for ALL instantiations,
+including `colo_alloc<u8>`. The tempting "value 0 = free, SIMD-scan the counters" is a
+**data race**: a non-atomic vector load of bytes other threads are atomically RMW-ing is
+UB and **TSan flags it** (the build enables TSan). The bitmap keeps the scannable state
+in `atomic<uint64_t>` words — found via relaxed *atomic* word loads + ffs/popcount, claimed
+by CAS — so it's TSan-clean and the lazy-read→CAS race is benign (stale read → CAS fails →
+retry, exactly as today). Cost: 1 bit/slot = **~12% overhead on the u8 pool — accepted**,
+in exchange for TSan-cleanliness and keeping `colo_alloc<control_block>` byte-for-byte
+comparable to the baseline (honest differential gate). The counter `atomic<uint8_t>` is
+then touched ONLY by retain/release, never scanned.
+A later, measured-only alternative if the 12% ever matters: pack counters into
+`atomic<uint64_t>` words and free-find via the SWAR has-zero-byte trick
+`((w-0x0101010101010101) & ~w & 0x8080808080808080)` with word-CAS ops — TSan-clean and
+bitmap-free, but it reintroduces packed-word contention + can't-move-one-range divergence,
+so only on real numbers, not speculatively.
+
 ### Migration strategy (zero risk to live code)
 1. **Clone** control_block_alloc → generic `colo_alloc<T>`; `sizeof(T)` derives
    `slots_per_line = 128 / sizeof(T)` and the slot-within-line shift/mask (no magic 16).

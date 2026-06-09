@@ -48,8 +48,18 @@ namespace heart
 
       std::span<const uint8_t> suffix() const noexcept { return value.suffix(); }
       std::span<const uint8_t> value_bytes() const noexcept { return value.value(); }
-      // A leaf owns no node children; alloc_header's default destroy()/visit_children
-      // (no-ops) are correct.
+      bool                     is_subtree() const noexcept { return value.is_subtree(); }
+      sal::ptr_address         subtree_root() const noexcept { return value.subtree_root(); }
+
+      // A byte-valued leaf owns no node children (default no-op). A SUBTREE leaf holds one ref on
+      // its nested tree root (value_type == vt_subtree, value bytes = the root address) and must
+      // release it when the leaf dies — the cascade that frees a composed subtree.
+      template <typename Session>
+      void destroy(const Session& s) const
+      {
+         if (value.is_subtree())
+            s->release(value.subtree_root());
+      }
    } __attribute__((packed));
 
    static_assert(sizeof(leaf_node) == 23, "versioned(20) + inline_value header(3)");

@@ -11,7 +11,6 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <exception>
 #include <random>
 #include <set>
 #include <string>
@@ -877,31 +876,91 @@ int main(int argc, char** argv)
                   (unsigned long long)tc.bucket_entries);
       std::printf("buckets created -> %s\n", tc.bucket > 0 ? "YES" : "NO");
 
-      // (3) the cursor is broken on this tree: an in-order forward walk should visit all
-      // `truth.size()` keys in sorted order, but it cannot traverse buckets.
+      // (3) CORRECTNESS: forward + reverse in-order walk must match sorted truth element-wise
+      // (through buckets). A rolling key checksum lets us cross-check heart vs psitri later.
+      std::vector<std::string> sorted(truth.begin(), truth.end());  // lexicographic
+      auto ksum = [](uint64_t h, std::string_view k)  // order-sensitive rolling hash
+      { for (unsigned char ch : k) h = (h ^ ch) * 1099511628211ull; return h * 31 + k.size(); };
+
       radix_engine_tree::cursor c(&t);
-      uint64_t                  visited = 0;
-      bool                      order_ok = true, threw = false;
-      std::string               prev;
-      try
+      uint64_t fwd_i = 0, heart_sum = 0; bool fwd_ok = true;
+      for (bool e = c.seek_begin(); !e; e = c.next())
       {
-         for (bool e = c.seek_begin(); !e; e = c.next())
-         {
-            auto kv = c.key();
-            std::string cur(reinterpret_cast<const char*>(kv.data()), kv.size());
-            if (visited && !(prev < cur)) order_ok = false;
-            prev = std::move(cur);
-            ++visited;
-         }
+         auto k = c.key();
+         if (fwd_i >= sorted.size() || k.size() != sorted[fwd_i].size() ||
+             std::memcmp(k.data(), sorted[fwd_i].data(), k.size()) != 0) { fwd_ok = false; break; }
+         heart_sum = ksum(heart_sum, std::string_view(reinterpret_cast<const char*>(k.data()), k.size()));
+         ++fwd_i;
       }
-      catch (const std::exception& ex) { threw = true; std::printf("cursor threw: %s\n", ex.what()); }
-      std::printf("cursor walk: visited=%llu / %zu keys%s, order=%s\n",
-                  (unsigned long long)visited, truth.size(), threw ? " (ABORTED)" : "",
-                  order_ok ? "sorted" : "OUT-OF-ORDER");
-      const bool broken = threw || visited != truth.size() || !order_ok;
-      std::printf("CURSOR BROKEN ON BUCKETS -> %s (missed %lld keys)\n", broken ? "CONFIRMED" : "no",
-                  (long long)truth.size() - (long long)visited);
-      return broken ? 0 : 2;  // 0 = brokenness confirmed (expected for step 1)
+      fwd_ok = fwd_ok && fwd_i == sorted.size();
+      uint64_t rev_i = sorted.size(); bool rev_ok = true;
+      for (bool e = c.seek_last(); !e; e = c.prev())
+      {
+         auto k = c.key();
+         if (rev_i == 0 || k.size() != sorted[rev_i - 1].size() ||
+             std::memcmp(k.data(), sorted[rev_i - 1].data(), k.size()) != 0) { rev_ok = false; break; }
+         --rev_i;
+      }
+      rev_ok = rev_ok && rev_i == 0;
+      std::printf("cursor forward=%s reverse=%s vs sorted truth\n", fwd_ok ? "OK" : "FAIL",
+                  rev_ok ? "OK" : "FAIL");
+
+      // (4) HEART scan throughput: best of 3 full forward passes (key checksum prevents elision).
+      auto scan_heart = [&]() -> double
+      {
+         double best = 1e18;
+         for (int p = 0; p < 3; ++p)
+         {
+            radix_engine_tree::cursor cc(&t);
+            uint64_t                  n = 0, h = 0;
+            auto                      a0 = now();
+            for (bool e = cc.seek_begin(); !e; e = cc.next())
+            { auto k = cc.key(); h = ksum(h, std::string_view(reinterpret_cast<const char*>(k.data()), k.size())); ++n; }
+            double t1 = ns(a0, now(), n ? n : 1);
+            if (h != heart_sum || n != sorted.size()) { std::printf("  [heart scan inconsistent]\n"); }
+            best = t1 < best ? t1 : best;
+         }
+         return best;
+      };
+      double heart_ns = scan_heart();
+
+      // (5) PSITRI: build the same dictionary, scan it the same way, cross-check the checksum.
+      auto pdir = std::filesystem::temp_directory_path() / "psitri_dicttest";
+      std::filesystem::remove_all(pdir);
+      psitri::runtime_config pcfg;
+      pcfg.sync_mode = sal::sync_type::none;
+      pcfg.write_protect_on_commit = false;
+      pcfg.checksum_on_commit      = false;
+      auto pdb  = psitri::database::create(pdir.string(), pcfg);
+      auto pses = pdb->start_write_session();
+      for (size_t base = 0; base < words.size(); base += 4096)
+      {
+         auto tx = pses->start_transaction(0);
+         for (size_t i = base; i < std::min(words.size(), base + 4096); ++i)
+            tx.insert(psitri::key_view(words[i].data(), words[i].size()),
+                      psitri::value_view(words[i].data(), std::min<size_t>(8, words[i].size())));
+         tx.commit();
+      }
+      auto prootp = pses->get_root(0);
+      double psitri_ns = 1e18; uint64_t psitri_n = 0, psitri_sum = 0;
+      for (int p = 0; p < 3; ++p)
+      {
+         psitri::cursor cur(prootp);
+         uint64_t       n = 0, h = 0;
+         auto           a0 = now();
+         for (cur.seek_begin(); !cur.is_end(); cur.next())
+         { auto k = cur.key(); h = ksum(h, std::string_view(k.data(), k.size())); ++n; }
+         double t1 = ns(a0, now(), n ? n : 1);
+         psitri_n = n; psitri_sum = h;
+         psitri_ns = t1 < psitri_ns ? t1 : psitri_ns;
+      }
+      std::printf("cross-check: heart n=%zu sum=%llx | psitri n=%llu sum=%llx -> %s\n", sorted.size(),
+                  (unsigned long long)heart_sum, (unsigned long long)psitri_n,
+                  (unsigned long long)psitri_sum,
+                  (psitri_n == sorted.size() && psitri_sum == heart_sum) ? "MATCH" : "MISMATCH");
+      std::printf("\nDICTIONARY IN-ORDER SCAN (ns/key, best of 3): heart=%.1f  psitri=%.1f  (%.2fx)\n",
+                  heart_ns, psitri_ns, psitri_ns / heart_ns);
+      return (fwd_ok && rev_ok) ? 0 : 1;
    }
 
    if (mode == "curtest")  // cursor correctness: forward + reverse iteration vs sorted truth.

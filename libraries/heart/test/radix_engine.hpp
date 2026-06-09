@@ -1509,11 +1509,43 @@ namespace heart::radix
             _val = v;
          }
 
+         // ── bucket leaves ────────────────────────────────────────────────────────────────
+         // A bucket is a dense, lexicographically-sorted (suffix, value) page — NOT a radix
+         // router, so dispatch() has no adaptor for it. The cursor walks it as a flat entry
+         // array (entry 0 = smallest), resolving the page ONCE per frame and advancing pos in
+         // place. Entry i's full key = the path prefix [0, klen1) + the entry's stored suffix.
+         const bucket_node* as_bucket(ptr_address a) const
+         {
+            const sal::alloc_header* b = _t->_ses->get_ref<sal::alloc_header>(a).obj();
+            return b->type() == bucket_node::type_id ? reinterpret_cast<const bucket_node*>(b)
+                                                     : nullptr;
+         }
+         void take_bucket_entry(const bucket_node* bn, int i, uint16_t klen1)
+         {
+            const inline_value* iv = bn->entry(i);
+            _klen                  = klen1;
+            append(iv->data, iv->suffix_len);
+            _val = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len),
+                              iv->value_len);
+         }
+
          // Push frames down to the minimum terminal of `addr`'s subtree; sets _valid/_val/_kbuf.
          void descend_min(ptr_address addr)
          {
             for (;;)
             {
+               if (const bucket_node* bn = as_bucket(addr))  // leftmost path ends in a bucket
+               {
+                  frame& f = _fr[_depth];
+                  f.addr   = addr;
+                  f.klen1  = uint16_t(_klen);
+                  f.pos    = 0;
+                  ++_depth;
+                  if (bn->nent == 0) { --_depth; _valid = false; return; }  // defensive
+                  take_bucket_entry(bn, 0, f.klen1);  // smallest entry
+                  _valid = true;
+                  return;
+               }
                const uint32_t k0 = _klen;  // key length before this node's prefix (local; not stored)
                const int      r  = _t->dispatch(addr, [&](auto ad) -> int {
                   frame& f = _fr[_depth];
@@ -1558,6 +1590,13 @@ namespace heart::radix
          int advance_top()
          {
             frame& f = _fr[_depth - 1];
+            if (const bucket_node* bn = as_bucket(f.addr))  // advance within a bucket page
+            {
+               _klen = f.klen1;
+               if (++f.pos >= int(bn->nent)) { --_depth; return 0; }  // exhausted → pop
+               take_bucket_entry(bn, f.pos, f.klen1);
+               return 1;
+            }
             return _t->dispatch(f.addr, [&](auto ad) -> int {
                const int nc = (f.pos < 0) ? ad.first() : ad.next(f.pos);
                _klen        = f.klen1;  // drop the previous entry's stem (+ any descent)
@@ -1588,6 +1627,19 @@ namespace heart::radix
          {
             for (;;)
             {
+               if (const bucket_node* bn = as_bucket(addr))  // rightmost path ends in a bucket
+               {
+                  frame& f = _fr[_depth];
+                  f.addr   = addr;
+                  f.klen1  = uint16_t(_klen);
+                  ++_depth;
+                  if (bn->nent == 0) { --_depth; _valid = false; return; }  // defensive
+                  f.pos = int16_t(bn->nent - 1);
+                  take_bucket_entry(bn, f.pos, f.klen1);  // largest entry
+                  _valid = true;
+                  _end   = 0;
+                  return;
+               }
                const uint32_t k0 = _klen;
                const int      r  = _t->dispatch(addr, [&](auto ad) -> int {
                   frame& f = _fr[_depth];
@@ -1628,6 +1680,13 @@ namespace heart::radix
          int retreat_top()
          {
             frame& f = _fr[_depth - 1];
+            if (const bucket_node* bn = as_bucket(f.addr))  // retreat within a bucket page
+            {
+               _klen = f.klen1;
+               if (--f.pos < 0) { --_depth; return 0; }  // before first → pop
+               take_bucket_entry(bn, f.pos, f.klen1);
+               return 1;
+            }
             return _t->dispatch(f.addr, [&](auto ad) -> int {
                _klen = f.klen1;  // drop the previous entry's stem (+ any descent)
                if (f.pos < 0)    // we were at this node's term (last in reverse) → pop

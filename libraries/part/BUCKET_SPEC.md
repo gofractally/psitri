@@ -93,6 +93,16 @@ u16 lref = [big:1][spi:4][off:5][len:6]
 
 Payload cell (the design5 leaf, finally variable):
 `[klen u8][vlen u8][vtype u8][suffix klen][value vlen]`, padded to 8B.
+Shrunk cells stay self-describing (page-local walks step cell→cell by
+ALLOCATED extent, and re-grow-in-place needs the headroom): when a value
+shrinks below its allocation, vtype.has_cap is set and the byte at
+value[vlen] records the original byte capacity — the record lives inside
+the very gap it describes, so never-shrunk cells pay nothing. (Dan's
+sign-trick equivalent — vlen<0, capacity at abs(vlen)+1 — adopted with a
+vtype flag bit instead of the sign so shrink-to-empty has no -0 hole.)
+Invariant: lref.len == roundup8(3 + klen + capacity)/8; lref.len is
+authoritative for free_space accounting (remove has it in hand), the cell
+record for walks and in-place re-growth; debug asserts tie them.
 Sub-page header: `[free_space8 u8][rsv 7B]` then bump-packed cells.
 free_space is a DEAD-BYTE LEDGER, not an allocator: deleting a cell adds
 its allocated size; closing the page (the bump moved past it) adds the
@@ -123,11 +133,12 @@ bounded by pages × 248B, and COW churn regenerates buckets often enough
 in practice (the no-realloc rule keeps lrefs stable so clones never have
 to rewrite SP lines).
 
-**update value**: new_len <= allocated len AND line private this txn →
-write in place, update cell vlen (page already dirty; no amplification;
-free_space NOT credited — the cell stays live at its allocated size).
-Growing → bump-alloc a new cell in the open page (old cell's allocated
-size → free_space), rewrite lref in the (private) SP line.
+**update value**: new_len <= capacity AND line private this txn → write
+in place: set vlen, and if new_len < capacity set vtype.has_cap +
+value[new_len] = capacity (clear has_cap when re-grown back to exactly
+capacity). free_space NOT credited — the cell stays live at its allocated
+size. Growing past capacity → bump-alloc a new cell in the open page (old
+cell's allocated size → free_space), rewrite lref in the (private) SP line.
 
 ## 6. COW (the whole point)
 

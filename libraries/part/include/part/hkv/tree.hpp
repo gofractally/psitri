@@ -4669,7 +4669,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
       };
 #ifndef PART_CBUCKET
-#define PART_CBUCKET 0  // composed bucket: machinery compiled, creation gated.
+#define PART_CBUCKET 0  // composed bucket: unit-suite green; tree-level leak hunt in STATUS.md
                         // WIP: 3 oracle-found bugs fixed (run-spanning lookup,
                         // recursive split, burst capacity); a duplicate-update
                         // edge remains — needs the BUCKET_SPEC TDD pass before
@@ -4969,13 +4969,16 @@ namespace detail  // implementation types & node helpers — not part of the pub
             Ptr bp;
             if (hi - first == 1)
             {
-               T tmp = T::from_bytes(es[first].val);
-               bp    = make_value_at(std::string_view(es[first].sfx), 0, std::move(tmp));
                if (has_term)
-               {  // wrap: a 1-entry group with a term becomes a tiny bucket
-                  bp = cb_make2_(std::string_view{}, std::string_view{}, tval,
-                                 es[first].sfx, es[first].val);
+               {  // a 1-entry group with a term: ONE tiny bucket, no throwaway leaf
+                  bp       = cb_make2_(std::string_view{}, std::string_view{}, tval,
+                                       es[first].sfx, es[first].val);
                   has_term = false;
+               }
+               else
+               {
+                  T tmp = T::from_bytes(es[first].val);
+                  bp    = make_value_at(std::string_view(es[first].sfx), 0, std::move(tmp));
                }
             }
             else

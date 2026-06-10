@@ -64,7 +64,34 @@ variable):
 - then part::kv drops pval entirely: upsert takes value_view straight in,
   valuetype byte reserved next to vlen for future typed values.
 
-## Composed bucket (BUCKET_SPEC) — integration WIP, gated PART_CBUCKET=0
+## Composed bucket — correctness session 2 findings (gate still 0)
+
+Unit suite (test/cbucket_tests.cpp): GREEN — 20k-step oracle fuzz of the
+raw ops (insert/update/remove/find, shrink/regrow-in-place, page
+lifecycle, multi-line equal-stem runs incl. the duplicate-update shape).
+Tree-level single-txn: GREEN to 2048 keys (the earlier WRONGVAL was the
+REPRO's bug: oracle pre-filled from a 20k tape, verified after 2k).
+Three more integration bugs fixed this session:
+  - cb_build_ single-entry-with-term orphaned a leaf (alloc then
+    reassign without free)
+  - burst targets now scale setlist->node_full (ignored setlist_set
+    return silently dropped branches past CAP=16 groups)
+  - cb_split_ recursion never drops oversized groups
+REMAINING: a 2-line leak under GENERATIONS (commit + remove-all):
+deterministic repro = 1200 "acct/N" keys, one bulk txn+commit, remove-all
+txn+commit -> exactly 2 lines leak (a leaf + its prefix_node parent,
+threshold = the 64-entry split; /tmp/cbl.cpp pattern, PART_TRACE_LINE
+env hooks now in arena.hpp print a line's full refcount lifecycle).
+Forensic state: the leaked line's trace shows a clean death during the
+LAST remove, yet the ref byte reads 1 at dump with freeset agreeing —
+i.e. an untraced re-allocation/write inside the rm-1199/commit window;
+every arena ref-write site is hooked, so suspicion is on a path that
+bypasses finish_alloc_ or a bulk write (hardware watchpoint showed the
+granule going 0x0101010101010101). NEXT: software-watch ref(1) inside
+commit's sub-steps (flush_fcache_/flush_window_/cascade) to bisect the
+window, or instrument seg_freeset::alloc directly for the line.
+
+## (prior notes)
 
 All machinery is in tree.hpp and compiled (structures, lref, sub-page
 lifecycle, self-privatizing ops, recursive burst, iterator frames, COW

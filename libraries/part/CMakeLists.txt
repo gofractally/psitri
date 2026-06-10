@@ -25,6 +25,7 @@ if(PART_BUILD_TESTS)
             test/tree_tests.cpp
             test/cow_tests.cpp
             test/kv_tests.cpp
+            test/cbucket_tests.cpp
         )
         target_link_libraries(part-tests PRIVATE part Catch2::Catch2WithMain)
         target_compile_options(part-tests PRIVATE -O1 -g -UNDEBUG -Wall -Werror=switch)

@@ -45,3 +45,16 @@ if(PART_BUILD_TESTS)
         message(STATUS "part: Catch2 not found, tests disabled")
     endif()
 endif()
+
+# A/B perf gates: part vs hkv (verbatim-copied gold standard) vs upstream libart.
+add_library(part-libart-upstream STATIC
+    ${CMAKE_SOURCE_DIR}/third_party/libart/art.c)
+target_include_directories(part-libart-upstream PUBLIC
+    ${CMAKE_SOURCE_DIR}/third_party/libart)
+target_compile_options(part-libart-upstream PRIVATE -O3 -DNDEBUG -w)
+
+add_executable(part-ab-bench bench/part_ab_bench.cpp)
+target_link_libraries(part-ab-bench PRIVATE part part-libart-upstream)
+target_compile_options(part-ab-bench PRIVATE -O3 -DNDEBUG -Wall -Werror=switch)
+set_target_properties(part-ab-bench PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

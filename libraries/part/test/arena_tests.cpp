@@ -48,7 +48,11 @@ TEST_CASE("fresh arena grows on demand and fills bottom-up")
    REQUIRE(tx.alloc_lines(1) == 0);
    REQUIRE(a.num_segments() == 1);
    REQUIRE(tx.alloc_lines(1) == 1);
-   REQUIRE(tx.alloc_lines(8) == 8);  // aligned, ascending
+   // Ascending and word-confined; the session word-window serves multi-line
+   // runs from the first contiguous fit (contiguity, not class alignment).
+   const line_idx r8 = tx.alloc_lines(8);
+   REQUIRE(r8 == 2);
+   REQUIRE((r8 % 64) + 8 <= 64);
    REQUIRE(a.ref(0) == 1);
    REQUIRE(a.stats().segments_grown.load() == 1);
 }

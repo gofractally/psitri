@@ -34,10 +34,9 @@ TEST_CASE("kv_tree on part arena: insert/find/iterate vs std::map")
    arena_config c;
    c.dir = tmp_dir("smoke");
    arena a(c);
-   auto  ses = a.start_session();
-   auto  tx  = ses.start_transaction(0);
-
    {
+      auto   ses = a.start_session();
+      auto   tx  = ses.start_transaction(0);
       tree_t t{part_alloc<uint64_t>(&ses)};
 
       std::map<std::string, uint64_t> oracle;
@@ -103,7 +102,7 @@ TEST_CASE("kv_tree on part arena: insert/find/iterate vs std::map")
          REQUIRE((*it).second == oit->second);
       }
       REQUIRE(oit == oracle.end());
-   }  // tree dtor frees every node back to the arena
+   }  // tree dtor frees every node; session dtor returns its word window
 
    // Everything the tree allocated was released: the arena drains to empty.
    uint64_t free_total = 0;

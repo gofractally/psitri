@@ -84,12 +84,9 @@ namespace part
       }
       void deallocate(T* p, size_t n) noexcept
       {
-         arena&         a = ses->store();
-         const line_idx i =
-             line_idx((reinterpret_cast<const std::byte*>(p) - a.base()) / line_bytes);
-         const uint32_t nl = uint32_t(lines_(n * sizeof(T)));
-         for (uint32_t k = 0; k < nl; ++k)
-            a.release(i + k);
+         const line_idx i = line_idx(
+             (reinterpret_cast<const std::byte*>(p) - ses->store().base()) / line_bytes);
+         ses->release_run(i, uint32_t(lines_(n * sizeof(T))));
       }
 
       template <class U>

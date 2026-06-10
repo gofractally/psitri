@@ -114,6 +114,16 @@ namespace part
       // object only marks the floor/commit boundaries.
       line_idx alloc_lines(uint32_t n);
 
+      // Release a node's run through this session: per-line refcounts as
+      // arena::release_run, but runs that die entirely at/after the txn floor
+      // land in the session's hot-hole cache instead of the freeset.
+      template <typename Destroy>
+      void release_run(line_idx i, uint32_t n, Destroy&& destroy);
+      void release_run(line_idx i, uint32_t n)
+      {
+         release_run(i, n, [](line_idx) {});
+      }
+
       arena& store() noexcept { return *_a; }
 
      private:
@@ -124,9 +134,34 @@ namespace part
       arena*                _a;
       uint32_t              _segment      = UINT32_MAX;  // current claim
       line_idx              _floor        = 0;           // first-fit scan start (global line)
+      line_idx              _cursor       = 0;           // next-scan hint (global line)
       line_idx              _fill_end     = 0;           // one past the highest alloc this txn
+      uint64_t              _alloc_bytes  = 0;           // batched into arena stats at commit
       bool                  _txn_open     = false;
       std::vector<uint32_t> _touched;  // segments dirtied by the open txn
+
+      // Word window: the slow path reserves the remainder of the l0 word it
+      // allocated from (one CAS + one propagation per 64 lines); handouts then
+      // cost zero shared-memory traffic. low_water intrusion flushes the
+      // window so first-fit-from-floor placements stay exact.
+      uint64_t _wmask  = 0;           // private free bits, positions within the word
+      line_idx _wbase  = 0;           // global line of the window word's bit 0
+      uint32_t _wseg   = UINT32_MAX;  // segment the window belongs to
+
+      // Hot-hole cache (SPEC §7): exact-size LIFOs of runs freed AT/AFTER the
+      // txn floor — their pages are dirty anyway, so recycling them is free and
+      // skips the freeset round trip entirely. Flushed at commit: holes behind
+      // the next floor must wait for segment recycle (two-state page model).
+      static constexpr uint32_t fcache_max_size = 16;  // run length, in lines
+      std::vector<line_idx>     _fcache[fcache_max_size + 1];
+
+      bool     cache_freed_(line_idx i, uint32_t n) noexcept;
+      void     flush_fcache_() noexcept;
+      line_idx take_from_window_(uint32_t n) noexcept;
+      void     flush_window_() noexcept;
+      line_idx alloc_slow_(uint32_t n);
+      void     finish_alloc_(line_idx g, uint32_t n) noexcept;
+      void     flush_stats_() noexcept;
    };
 
    // First-class txn (harness-shaped): alloc_lines + commit/abort. The tree
@@ -298,6 +333,38 @@ namespace part
          return release(i, [](line_idx) {});
       }
 
+      // Release n contiguous lines (one allocation's run): per-line counts, but
+      // contiguous lines that die together are freed with ONE freeset op — the
+      // common exclusive-node free costs one CAS + one propagation, not n.
+      template <typename Destroy>
+      void release_run(line_idx i, uint32_t n, Destroy&& destroy) noexcept(noexcept(destroy(i)))
+      {
+         uint32_t run_start = 0, run_len = 0;
+         for (uint32_t k = 0; k < n; ++k)
+         {
+            const uint8_t prior = _ref_base[i + k].fetch_sub(1, std::memory_order_acq_rel);
+            assert(prior >= 1 && "release of a dead line");
+            if (prior == 1)
+            {
+               destroy(i + k);
+               if (run_len == 0)
+                  run_start = k;
+               ++run_len;
+            }
+            else if (run_len)
+            {
+               free_lines_now(i + run_start, run_len);
+               run_len = 0;
+            }
+         }
+         if (run_len)
+            free_lines_now(i + run_start, run_len);
+      }
+      void release_run(line_idx i, uint32_t n) noexcept
+      {
+         release_run(i, n, [](line_idx) {});
+      }
+
       // Free without refcount involvement (n contiguous lines whose counts are
       // already zero — e.g. the tail lines of a dying node, batched).
       void free_lines_now(line_idx i, uint32_t n) noexcept
@@ -417,6 +484,14 @@ namespace part
       std::atomic<uint8_t>* refs_of_(uint32_t s) noexcept
       {
          return _ref_base + size_t(s) * lines_per_segment;
+      }
+
+      bool all_refs_one_(line_idx i, uint32_t n) const noexcept
+      {
+         for (uint32_t k = 0; k < n; ++k)
+            if (_ref_base[i + k].load(std::memory_order_relaxed) != 1)
+               return false;
+         return true;
       }
 
       uint32_t thr8_() const noexcept
@@ -573,7 +648,12 @@ namespace part
    // ── session / transaction / read_session bodies ──────────────────────────
    inline session::~session()
    {
-      if (_a && _segment != UINT32_MAX)
+      if (!_a)
+         return;
+      flush_fcache_();
+      flush_window_();
+      flush_stats_();
+      if (_segment != UINT32_MAX)
          _a->release_claim_(_segment);
    }
 
@@ -601,38 +681,208 @@ namespace part
       return _s->alloc_lines(n);
    }
 
+   // bit i set iff `v` has n consecutive set bits starting at i (in-word).
+   inline constexpr uint64_t runs_in_word_(uint64_t v, uint32_t n) noexcept
+   {
+      uint64_t r   = v;
+      uint32_t got = 1;
+      while (got * 2 <= n)
+      {
+         r &= r >> got;
+         got *= 2;
+      }
+      if (got < n)
+         r &= r >> (n - got);
+      return r;
+   }
+
+   inline void session::finish_alloc_(line_idx g, uint32_t n) noexcept
+   {
+      arena& a = *_a;
+      for (uint32_t k = 0; k < n; ++k)
+         a._ref_base[g + k].store(1, std::memory_order_relaxed);
+      if (a._cfg.sync_mode != sync_type::none)
+      {
+         // derive the segment from g: cache hits can land in a previously
+         // claimed segment after a switch
+         const uint32_t seg   = g / lines_per_segment;
+         const uint32_t local = g % lines_per_segment;
+         a.mark_dirty_(seg, local, local + n - 1);
+         if (_touched.empty() || _touched.back() != seg)
+            _touched.push_back(seg);
+      }
+      if (g + n > _fill_end)
+         _fill_end = g + n;
+      _cursor = g + n;
+      _alloc_bytes += uint64_t(n) * line_bytes;
+   }
+
+   template <typename Destroy>
+   inline void session::release_run(line_idx i, uint32_t n, Destroy&& destroy)
+   {
+      if (n <= fcache_max_size && i >= _floor && _a->all_refs_one_(i, n))
+      {
+         for (uint32_t k = 0; k < n; ++k)
+         {
+            _a->_ref_base[i + k].store(0, std::memory_order_release);
+            destroy(i + k);
+         }
+         if (cache_freed_(i, n))
+            return;
+         _a->free_lines_now(i, n);
+         return;
+      }
+      _a->release_run(i, n, static_cast<Destroy&&>(destroy));
+   }
+
+   inline bool session::cache_freed_(line_idx i, uint32_t n) noexcept
+   {
+      auto& v = _fcache[n];
+      if (v.size() >= 4096)
+         return false;
+      v.push_back(i);
+      return true;
+   }
+
+   inline void session::flush_fcache_() noexcept
+   {
+      for (uint32_t n = 1; n <= fcache_max_size; ++n)
+      {
+         for (line_idx i : _fcache[n])
+            _a->free_lines_now(i, n);
+         _fcache[n].clear();
+      }
+   }
+
+   inline line_idx session::take_from_window_(uint32_t n) noexcept
+   {
+      const uint64_t r = n == 1 ? _wmask : runs_in_word_(_wmask, n);
+      if (!r)
+         return null_idx;
+      const uint32_t pos = uint32_t(std::countr_zero(r));
+      _wmask &= ~(((n >= 64 ? ~0ull : ((1ull << n) - 1))) << pos);
+      return _wbase + pos;
+   }
+
+   inline void session::flush_window_() noexcept
+   {
+      if (!_wmask)
+      {
+         _wseg = UINT32_MAX;
+         return;
+      }
+      // Return unused reserved lines to the freeset (one op).
+      seg_freeset&   fs    = _a->freeset_(_wseg);
+      const uint32_t local = uint32_t(_wbase % lines_per_segment);
+      const uint32_t w     = local / 64;
+      const uint64_t prior = fs.l0[w].fetch_or(_wmask, std::memory_order_release);
+      assert((prior & _wmask) == 0);
+      fs.apply_word_transition(w, prior, prior | _wmask);
+      auto lw = fs.low_water.load(std::memory_order_relaxed);
+      const uint32_t lo = local + uint32_t(std::countr_zero(_wmask));
+      while (lo < lw && !fs.low_water.compare_exchange_weak(lw, lo, std::memory_order_relaxed))
+         ;
+      _wmask = 0;
+      _wseg  = UINT32_MAX;
+   }
+
    inline line_idx session::alloc_lines(uint32_t n)
    {
       assert(n >= 1 && n <= max_alloc_lines);
+      // Hot-hole cache: exact-size recycle of this-txn frees (dirty pages).
+      if (n <= fcache_max_size && !_fcache[n].empty())
+      {
+         const line_idx g = _fcache[n].back();
+         _fcache[n].pop_back();
+         finish_alloc_(g, n);
+         return g;
+      }
+      // Window fast path: zero shared-memory traffic. A free announced below
+      // the window's next handout (or below the cursor) flushes back to the
+      // exact first-fit slow path.
+      if (_wmask && _wseg == _segment)
+      {
+         seg_freeset&   fs = _a->freeset_(_segment);
+         const uint32_t lw = fs.low_water.load(std::memory_order_relaxed);
+         const uint32_t next_local =
+             uint32_t(_wbase % lines_per_segment) + uint32_t(std::countr_zero(_wmask));
+         if (lw >= next_local)
+         {
+            const line_idx g = take_from_window_(n);
+            if (g != null_idx)
+            {
+               finish_alloc_(g, n);
+               return g;
+            }
+         }
+         else
+            flush_window_();
+      }
+      return alloc_slow_(n);
+   }
+
+   inline line_idx session::alloc_slow_(uint32_t n)
+   {
       session& s = *this;
       arena&   a = *s._a;
+      if (s._wmask)
+         s.flush_window_();
       for (int attempts = 0;; ++attempts)
       {
          if (s._segment == UINT32_MAX)
          {
             s._segment = a.claim_(UINT32_MAX);
-            s._floor   = std::max(s._floor, line_idx(s._segment) * lines_per_segment);
+            const line_idx base = line_idx(s._segment) * lines_per_segment;
+            s._floor            = std::max(s._floor, base);
+            s._cursor           = base;
          }
          const line_idx seg_base = line_idx(s._segment) * lines_per_segment;
-         uint32_t local_from = s._floor > seg_base ? uint32_t(s._floor - seg_base) : 0u;
-         if (local_from >= lines_per_segment)
-            local_from = lines_per_segment;  // floor past this segment: forces a switch
-         const uint32_t local = a.freeset_(s._segment).alloc(n, local_from);
+         seg_freeset&   fs       = a.freeset_(s._segment);
+         uint32_t local_floor = s._floor > seg_base ? uint32_t(s._floor - seg_base) : 0u;
+         if (local_floor >= lines_per_segment)
+            local_floor = lines_per_segment;  // floor past this segment: forces a switch
+         // First-fit-from-floor without the rescan: holes freed behind the
+         // cursor announce themselves via low_water, so the scan starts at
+         // min(cursor, low_water) — same placements, bump-like cost.
+         const uint32_t cur_local =
+             s._cursor > seg_base ? uint32_t(s._cursor - seg_base) : 0u;
+         const uint32_t lw = fs.low_water.exchange(UINT32_MAX, std::memory_order_relaxed);
+         const uint32_t local_from = std::max(local_floor, std::min(cur_local, lw));
+         const uint32_t local      = fs.alloc(n, local_from);
          if (local != UINT32_MAX)
          {
-            const line_idx g = seg_base + local;
-            for (uint32_t k = 0; k < n; ++k)
-               a._ref_base[g + k].store(1, std::memory_order_relaxed);
-            if (a._cfg.sync_mode != sync_type::none)
-            {
-               a.mark_dirty_(s._segment, local, local + n - 1);
-               if (s._touched.empty() || s._touched.back() != s._segment)
-                  s._touched.push_back(s._segment);
+            if (lw != UINT32_MAX && local > lw)
+            {  // didn't consume the announced hole — put the mark back
+               auto cur = fs.low_water.load(std::memory_order_relaxed);
+               while (lw < cur && !fs.low_water.compare_exchange_weak(
+                                      cur, lw, std::memory_order_relaxed))
+                  ;
             }
-            if (g + n > s._fill_end)
-               s._fill_end = g + n;
-            a._stats.bytes_allocated.fetch_add(uint64_t(n) * line_bytes,
-                                               std::memory_order_relaxed);
+            const line_idx g = seg_base + local;
+            // Reserve the remainder of this word into the private window: the
+            // bits ABOVE the allocation (bits below it were skipped by the
+            // first-fit scan for a reason and stay public).
+            {
+               const uint32_t w   = local / 64;
+               const uint32_t hi  = (local % 64) + n;
+               if (hi < 64)
+               {
+                  const uint64_t above = ~0ull << hi;
+                  uint64_t       cur   = fs.l0[w].load(std::memory_order_relaxed);
+                  uint64_t       want  = cur & above;
+                  if (want &&
+                      fs.l0[w].compare_exchange_strong(cur, cur & ~want,
+                                                       std::memory_order_acquire,
+                                                       std::memory_order_relaxed))
+                  {
+                     fs.apply_word_transition(w, cur, cur & ~want);
+                     _wmask = want;
+                     _wbase = seg_base + w * 64;
+                     _wseg  = s._segment;
+                  }
+               }
+            }
+            finish_alloc_(g, n);
             return g;
          }
          // This segment can't satisfy n ahead of the floor: switch (SPEC §8).
@@ -640,9 +890,19 @@ namespace part
          a.release_claim_(prev);
          s._segment = a.claim_(prev);
          s._floor   = line_idx(s._segment) * lines_per_segment;
+         s._cursor  = s._floor;
          a._stats.range_switches.fetch_add(1, std::memory_order_relaxed);
          if (attempts > 1024)
             throw std::runtime_error("part: allocation livelock");
+      }
+   }
+
+   inline void session::flush_stats_() noexcept
+   {
+      if (_alloc_bytes)
+      {
+         _a->_stats.bytes_allocated.fetch_add(_alloc_bytes, std::memory_order_relaxed);
+         _alloc_bytes = 0;
       }
    }
 
@@ -650,6 +910,11 @@ namespace part
    {
       session& s = *_s;
       arena&   a = *s._a;
+      // The window/cache may hold lines behind the post-commit floor; returning
+      // them keeps "writes never land behind the floor" exact for the next txn.
+      s.flush_fcache_();
+      s.flush_window_();
+      s.flush_stats_();
       if (a._cfg.sync_mode != sync_type::none)
       {
          for (uint32_t seg : s._touched)

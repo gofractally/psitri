@@ -98,6 +98,10 @@ namespace part
       std::atomic<uint64_t> meta[4][MW0 > 1 ? MW0 : 1];  // sized for the largest tier
       std::atomic<uint64_t> top[4];
       std::atomic<uint32_t> free_count[4];  // free lines / 2-groups / 4-groups / 8-groups
+      // Lowest line freed since the owner last consumed it: lets the owning
+      // session start its first-fit scan at min(cursor, low_water) instead of
+      // rescanning from the floor — exact first-fit placements, bump-like cost.
+      std::atomic<uint32_t> low_water{UINT32_MAX};
 
       static constexpr uint32_t words_of(uint32_t k) noexcept
       {
@@ -115,6 +119,7 @@ namespace part
       // ── init (single-threaded placement, plain stores) ─────────────────────
       void init(bool all_free) noexcept
       {
+         low_water.store(UINT32_MAX, std::memory_order_relaxed);
          for (auto& w : l0)
             w.store(all_free ? ~0ull : 0ull, std::memory_order_relaxed);
          for (auto& w : g2)
@@ -146,6 +151,7 @@ namespace part
       // Rebuild every derived tier from l0 (recovery / reopen). Single-threaded.
       void rebuild_from_l0() noexcept
       {
+         low_water.store(UINT32_MAX, std::memory_order_relaxed);
          uint32_t cnt[4] = {0, 0, 0, 0};
          for (uint32_t k = 1; k < 4; ++k)
             for (uint32_t w = 0; w < words_of(k); ++w)
@@ -214,6 +220,10 @@ namespace part
          const uint64_t prior = l0[w].fetch_or(mask, std::memory_order_release);
          assert((prior & mask) == 0 && "double free");
          propagate_(w, prior, prior | mask);
+         auto lw = low_water.load(std::memory_order_relaxed);
+         while (line < lw &&
+                !low_water.compare_exchange_weak(lw, line, std::memory_order_relaxed))
+            ;
       }
 
       bool     is_free(uint32_t line) const noexcept
@@ -227,6 +237,13 @@ namespace part
       uint32_t free_groups8() const noexcept
       {
          return free_count[3].load(std::memory_order_relaxed);
+      }
+
+      // For the session word-window (arena.hpp): the owner moved word `w` of l0
+      // prior->now itself and is the responsible toggler for the transition.
+      void apply_word_transition(uint32_t w, uint64_t prior, uint64_t now) noexcept
+      {
+         propagate_(w, prior, now);
       }
 
       // Claim specific lines during recovery (single-threaded; bits must be free).

@@ -64,7 +64,73 @@ variable):
 - then part::kv drops pval entirely: upsert takes value_view straight in,
   valuetype byte reserved next to vlen for future typed values.
 
-## Composed bucket — CORRECT and MEASURED (2026-06-10, gate=1 default)
+## Phase 1: no-bucket + occupancy dense ladder (2026-06-10, gate default 0)
+
+Dan's size directive, phase 1. The grow ladder is now
+setlist(16) -> {c2|cx1} -> {c4|cx2} -> {c8|cx3} -> {node_full|full_x},
+the form at each rung chosen by TARGET occupancy: implicit monolithic
+(skip-CL0 1-load descent) only when <=1 of its range lines would be
+empty, else the explicit per-line form where empty ranges are NULL lines
+(materialized on first insert, released the moment a remove empties
+them). COW demotion (implicit -> explicit on first shared touch) also
+nulls empty ranges now, so write-hot subtrees converge to the shareable
+explicit form and read-mostly ones keep the direct path.
+
+**Latent bug found by this work: cnode_t::cl0pad was a hardcoded 120**
+(= 128 - the 6-byte handle's 8-byte router_hdr). Under part's 4-byte
+handle the header is 6 bytes -> segs sat at offset 126 and ALL
+line-boundary machinery (demote from_off, line-wise destroy, per-line
+refcounts) was off by 2 bytes. Struct-relative readers masked it; the
+first line-granular clone read garbage. Pad is now derived from the
+handle width + per-instantiation layout asserts (node_full always had
+them — why the full tier never broke).
+
+Census (fresh loads, gate 0):
+- dict 236k: the 404 sparse fulls (10 lines, 20% occupancy) are now
+  403 implicit c2 (3 lines, 100%) + 1 cx. Sparse-full waste gone.
+- bank-shape 3M: 9.1k dense log routers = 1.3k implicit full + 7.8k
+  full_x (90,989/90,990 lines used). Totals unchanged (32MB / 300MB) —
+  leaves and 2.5-branch setlists dominate, as the census always said.
+
+Perf (same-session A/B vs pre-ladder, gate 0 both):
+| metric | pre | post |
+|---|---|---|
+| dict insert | 6.39M/s | **7.39M/s (+16%)** |
+| dict get | 20.4M/s | 17.5M/s (−14%) |
+| dict scan | 43.5M/s | 47.4M/s (+9%) |
+| bank write-only / w+r | 363.5k / 345.9k | 353.9k / 348.4k (noise) |
+| bank bulk load | 6.80M/s | 5.65M/s (−17%, ladder churn) |
+| bank scan | 13.24M/s | 12.56M/s (−5%, fx +1 load) |
+| bank file / live end | 2359 / 1837MB | 2391 / 1843MB |
+
+Levers noted: (a) re-promote full_x -> implicit node_full when it
+reaches near-256 (the 7.8k log fx pay +1 dependent load forever — the
+bank scan/load deltas); (b) cnode_step's bitmap rank-decode costs ALU vs
+full's direct index on hot top routers (the dict get −14%); a
+direct-when-dense top tier or offtab-style c2 would close it. (c) bulk
+load ladder churn: sequential fill walks every rung — could jump
+setlist -> full_x when the insert pattern is recognizably dense.
+
+## Phase 2 prep: heart's diver rule (studied 2026-06-10)
+
+Heart is btree-pages-with-a-radix-index, NOT radix-with-bucket-leaves:
+- bucket_node = a 4KB page of lex-sorted (suffix, value) SoA entries
+  with a SIMD u16 divider index; **keys terminate in a page; the page
+  FILLS UNTIL SPLIT** (so pages sit between half and full — avg ~60
+  entries) and the split is what creates radix structure above.
+- full_radix_node (bucket mode) stores single-key terminals INLINE in
+  its own tail heap — sequential/dense terminal bytes collapse into the
+  router page instead of exploding into per-key objects.
+- the compactor shrinks rarely-filled pages back (cow_size grows to the
+  working page, compact_size trims).
+part's cbucket inverted this: buckets formed at 2-key leaf collisions
+(cb_make2_) and averaged 6 entries over 5+ lines. Phase 2 = flip the
+formation rule: terminals land in a bucket page from the start, the
+bucket fills to its working capacity, and overflow bursts into a router
+OF buckets (cb_build_ already does the burst); plus dense-terminal
+inlining on full routers. The composed line-refcounted layout stays.
+
+## Composed bucket — CORRECT and MEASURED (2026-06-10, gate=1 default at the time; now 0)
 
 Full suite green with the gate on: 30 cases / 1.08M assertions + TSan.
 Two final husk-class bugs (keys stored unreachable) plus two iterator bugs:

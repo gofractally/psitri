@@ -1340,14 +1340,22 @@ class MdbxEngine : public BankEngine
       _sync_mode = sync_mode;
       std::filesystem::remove_all(path);
       MDBX_CHECK(mdbx_env_create(&_env));
-      MDBX_CHECK(mdbx_env_set_geometry(_env, 1024 * 1024,       // lower
-                                        1024 * 1024,              // initial
-                                        64ULL * 1024 * 1024 * 1024,  // upper (64 GB)
-                                        -1, -1, -1));
+      // Explicit growth step: with -1 libmdbx keeps a tiny default that exhausts
+      // (MDBX_MAP_FULL) under the 600k-tx log volume despite the generous upper bound.
+      MDBX_CHECK(mdbx_env_set_geometry(_env, 1024 * 1024,                // lower
+                                       256ULL * 1024 * 1024,             // initial (256 MB)
+                                       64ULL * 1024 * 1024 * 1024,       // upper (64 GB)
+                                       256ULL * 1024 * 1024,             // growth step (256 MB)
+                                       -1, -1));
       MDBX_CHECK(mdbx_env_set_maxreaders(_env, 8));
 
-      // All modes use SAFE_NOSYNC for commits — durability comes from periodic sync()
+      // sync_mode "none" must map to UTTERLY_NOSYNC: under SAFE_NOSYNC freed pages only
+      // recycle past a durable (steady) commit, and the bench never syncs in that mode —
+      // the file balloons (5 GB in phase 3a alone) until MDBX_MAP_FULL. UTTERLY_NOSYNC
+      // recycles freely, matching the other engines' "none" durability contract.
       unsigned sync_flags = MDBX_SAFE_NOSYNC;
+      if (_sync_mode == "none")
+         sync_flags = MDBX_UTTERLY_NOSYNC;
 
       unsigned flags = sync_flags | MDBX_LIFORECLAIM | MDBX_NOSUBDIR;
       MDBX_CHECK(mdbx_env_open(_env, path.c_str(), (MDBX_env_flags_t)flags, 0664));
@@ -1438,6 +1446,10 @@ class MdbxEngine : public BankEngine
    {
       MDBX_CHECK(mdbx_txn_commit(_txn));
       _txn = nullptr;
+      // NOTE (measured): under sustained batch=1 commits MDBX recycles essentially no
+      // freed pages in either NOSYNC flavor — even with explicit steady-points — growing
+      // ~85 KB/commit (51 GB by phase 3b at 600k tx) to MDBX_MAP_FULL at the 64 GB upper
+      // bound. Compare at tx counts that fit the geometry, or raise the upper bound.
    }
 
    void sync() override

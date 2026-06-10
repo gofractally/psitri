@@ -888,7 +888,7 @@ if(BUILD_ROCKSDB_BENCH)
     # MDBX bank bench (native libmdbx)
     add_executable(bank-bench-mdbx programs/bank_bench.cpp)
     target_compile_definitions(bank-bench-mdbx PRIVATE BANK_ENGINE_MDBX=1)
-    target_link_libraries(bank-bench-mdbx PRIVATE mdbx-static Boost::program_options)
+    target_link_libraries(bank-bench-mdbx PRIVATE mdbx-static Boost::program_options hash)
     set_target_properties(bank-bench-mdbx PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endif()
@@ -905,7 +905,7 @@ if(NOT BUILD_ROCKSDB_BENCH AND EXISTS "${CMAKE_BINARY_DIR}/_deps/libmdbx-src/CMa
     if(TARGET mdbx-static)
         add_executable(bank-bench-mdbx programs/bank_bench.cpp)
         target_compile_definitions(bank-bench-mdbx PRIVATE BANK_ENGINE_MDBX=1)
-        target_link_libraries(bank-bench-mdbx PRIVATE mdbx-static Boost::program_options)
+        target_link_libraries(bank-bench-mdbx PRIVATE mdbx-static Boost::program_options hash)
         set_target_properties(bank-bench-mdbx PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     endif()
@@ -920,7 +920,7 @@ if(BUILD_TIDESDB_BENCH AND TARGET tidesdb_lib)
         ${TIDESDB_INCLUDE_DIR} ${tidesdb_SOURCE_DIR}/external
         ${tidesdb_BINARY_DIR} ${CMAKE_SOURCE_DIR}/programs ${Boost_INCLUDE_DIRS})
     target_link_libraries(bank-bench-tidesdb PRIVATE
-        tidesdb_lib Boost::program_options Threads::Threads)
+        tidesdb_lib Boost::program_options Threads::Threads hash)
     set_target_properties(bank-bench-tidesdb PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endif()

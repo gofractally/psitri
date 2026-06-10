@@ -22,6 +22,7 @@ if(PART_BUILD_TESTS)
         add_executable(part-tests
             test/freeset_tests.cpp
             test/arena_tests.cpp
+            test/tree_tests.cpp
         )
         target_link_libraries(part-tests PRIVATE part Catch2::Catch2WithMain)
         target_compile_options(part-tests PRIVATE -O1 -g -Wall -Werror=switch)

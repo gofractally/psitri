@@ -108,6 +108,14 @@ namespace part
 
       transaction start_transaction(uint32_t root_slot = 0);
 
+      // The allocation entry point (1..64 word-confined lines, all refs = 1).
+      // Lives on the session (not the transaction) so a long-lived tree can
+      // hold one allocator handle across many transactions; the transaction
+      // object only marks the floor/commit boundaries.
+      line_idx alloc_lines(uint32_t n);
+
+      arena& store() noexcept { return *_a; }
+
      private:
       friend class arena;
       friend class transaction;
@@ -590,8 +598,13 @@ namespace part
 
    inline line_idx transaction::alloc_lines(uint32_t n)
    {
+      return _s->alloc_lines(n);
+   }
+
+   inline line_idx session::alloc_lines(uint32_t n)
+   {
       assert(n >= 1 && n <= max_alloc_lines);
-      session& s = *_s;
+      session& s = *this;
       arena&   a = *s._a;
       for (int attempts = 0;; ++attempts)
       {

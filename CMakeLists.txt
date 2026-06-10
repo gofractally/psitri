@@ -836,6 +836,18 @@ set_target_properties(bank-bench-art PROPERTIES
 
 # Part bank bench — the part engine via its native psitri-shaped API
 # (depends only on sal + ucc + part; must NOT link psitri)
+# part progressive scale bench: 1M-chunk random u64 inserts + per-chunk read/iter probes
+add_executable(part-scale-bench programs/part_scale_bench.cpp)
+target_link_libraries(part-scale-bench PRIVATE part)
+set_target_properties(part-scale-bench PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# 48-bit handle A/B (see the prerequisite note at the top of the source)
+add_executable(part-ptr48-bench programs/part_ptr48_bench.cpp)
+target_link_libraries(part-ptr48-bench PRIVATE part)
+set_target_properties(part-ptr48-bench PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 add_executable(bank-bench-part programs/bank_bench.cpp)
 target_compile_definitions(bank-bench-part PRIVATE BANK_ENGINE_PART=1)
 target_link_libraries(bank-bench-part PRIVATE part Boost::program_options hash)

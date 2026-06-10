@@ -1392,6 +1392,7 @@ namespace heart::radix
          int           next(int c) const { return c + 1; }
          int           last() const { return p->nstems() - 1; }  // reverse: max entry (-1 if empty)
          int           prev(int c) const { return c - 1; }       // reverse: previous (-1 = before first)
+         bool          has_below(int c) const { return c > 0; }  // any entry before c (O(1) here)
          uint32_t      cell(int c) const { return uint32_t(p->stem_at(c)); }
          smart_address branch(int c) const { return p->branch_at(c); }
          int           lower(bytes r, bool& full, uint32_t& floorcell) const
@@ -1445,6 +1446,7 @@ namespace heart::radix
          int           next(int c) const { return np(c + 1); }
          int           last() const { return pp(255); }      // reverse: highest present (-1 empty)
          int           prev(int c) const { return pp(c - 1); }
+         bool          has_below(int c) const { return pp(c - 1) >= 0; }
          uint32_t      cell(int c) const { return uint32_t(c); }
          smart_address branch(int c) const { return p->find(uint8_t(c)); }
          int           lower(bytes r, bool& full, uint32_t& floorcell) const
@@ -1479,6 +1481,7 @@ namespace heart::radix
          int           next(int c) const { return np(c + 1); }
          int           last() const { return pp(255); }
          int           prev(int c) const { return pp(c - 1); }
+         bool          has_below(int c) const { return pp(c - 1) >= 0; }
          uint32_t      cell(int c) const { return uint32_t(c); }
          smart_address branch(int c) const { return p->find(uint8_t(c)); }
          int           lower(bytes r, bool& full, uint32_t& floorcell) const
@@ -1514,6 +1517,7 @@ namespace heart::radix
          int           next(int c) const { return np(c + 1); }
          int           last() const { return pp(255); }
          int           prev(int c) const { return pp(c - 1); }
+         bool          has_below(int c) const { return pp(c - 1) >= 0; }
          uint32_t      cell(int c) const { return uint32_t(c); }
          smart_address branch(int c) const { return p->find(uint8_t(c)); }
          int           lower(bytes r, bool& full, uint32_t& floorcell) const
@@ -1542,7 +1546,13 @@ namespace heart::radix
       template <class F>
       static auto dispatch(sal::allocator_session& ses, ptr_address addr, F&& f)
       {
-         const sal::alloc_header* b = ses.get_ref<sal::alloc_header>(addr).obj();
+         return dispatch_hdr(ses.get_ref<sal::alloc_header>(addr).obj(), std::forward<F>(f));
+      }
+      // Same dispatch on an ALREADY-RESOLVED header — for loops that classify the node type
+      // themselves first (the page route), so each hop costs exactly one get_ref.
+      template <class F>
+      static auto dispatch_hdr(const sal::alloc_header* b, F&& f)
+      {
          switch (kind_of(b->type()))
          {
             case radix_kind::setlist_u8:
@@ -1638,16 +1648,17 @@ namespace heart::radix
       }
 
       // The rightmost page under `addr` (the page of the subtree's MAX divider). Appends the
-      // divider bytes it walks when `div` is non-null.
-      static ptr_address max_page(sal::allocator_session& ses, ptr_address addr, uint8_t* div,
-                                  uint32_t* dlen)
+      // divider bytes it walks when `div` is non-null. ONE get_ref per hop.
+      static const leaf_page* max_page(sal::allocator_session& ses, ptr_address addr, uint8_t* div,
+                                       uint32_t* dlen)
       {
          for (;;)
          {
-            if (is_page(ses, addr))
-               return addr;
+            const sal::alloc_header* h = ses.get_ref<sal::alloc_header>(addr).obj();
+            if (h->type() == leaf_page::type_id)
+               return reinterpret_cast<const leaf_page*>(h);
             ptr_address next{};
-            dispatch(ses, addr, [&](auto ad) {
+            dispatch_hdr(h, [&](auto ad) {
                bytes pfx = ad.prefix();
                div_append(div, dlen, pfx.data(), pfx.size());
                const int c = ad.last();
@@ -1670,22 +1681,29 @@ namespace heart::radix
 
       // Lower-bound route: the page owning `kb` (the largest divider <= kb). When `div` is
       // non-null the owning divider's bytes are captured there — the currency for the mutating
-      // descents and the cursor. `addr` must be a router (callers handle a root that IS a page).
-      static ptr_address route_to_page(sal::allocator_session& ses, ptr_address addr, bytes kb,
-                                       uint8_t* div, uint32_t* dlen)
+      // descents and the cursor. A root that IS a page returns immediately (divider = "").
+      // HOT-PATH SHAPE: one get_ref per hop (type classified from the same resolved header),
+      // and the fallback memo is LAZY — the exact path only records (node, li); the lesser
+      // sibling / term choice is computed once, IF a fallback is ever needed (a miss-below
+      // event), never per hop. has_below() is O(1) for setlists and short-circuited by the
+      // term check for the big tiers (the radix root always holds the "" term).
+      static const leaf_page* route_to_page(sal::allocator_session& ses, ptr_address addr,
+                                            bytes kb, uint8_t* div, uint32_t* dlen)
       {
          uint32_t depth = 0;
-         // remembered fallback: the nearest divider < kb seen on the exact-descent path
+         // remembered fallback: the deepest exact-path node with a divider < kb under it
          ptr_address fb_node = sal::null_ptr_address;
-         int         fb_pos  = -2;  // -1 = that node's term; >= 0 = entry cursor
+         int         fb_li   = -1;  // the lower-bound cursor at that node (resolve lazily)
          uint32_t    fb_dlen = 0;
+         bool        have_fb = false;
          for (;;)
          {
-            if (is_page(ses, addr))
-               return addr;
+            const sal::alloc_header* h = ses.get_ref<sal::alloc_header>(addr).obj();
+            if (h->type() == leaf_page::type_id)
+               return reinterpret_cast<const leaf_page*>(h);
             ptr_address next{};
-            int         action = 0;  // 0 descend, 1 done(next=page), 2 fallback, 3 max(addr), 4 max(next)
-            dispatch(ses, addr, [&](auto ad) {
+            int action = 0;  // 0 descend, 1 done(next=page), 2 fallback, 3 max(addr), 4 max(next)
+            dispatch_hdr(h, [&](auto ad) {
                bytes        pfx = ad.prefix();
                bytes        rem = kb.subspan(depth);
                const size_t m   = pfx.size() < rem.size() ? pfx.size() : rem.size();
@@ -1715,19 +1733,19 @@ namespace heart::radix
                      action = 2;
                   return;
                }
-               bytes     r2 = kb.subspan(d2);
-               bool      full;
-               uint32_t  fc;
-               const int li    = ad.lower(r2, full, fc);
+               bytes      r2 = kb.subspan(d2);
+               bool       full;
+               uint32_t   fc;
+               const int  li    = ad.lower(r2, full, fc);
                const bool exact = full && ad.valid(li) && ad.cell(li) == fc;
                if (exact)
                {
-                  const int less = ad.prev(li);
-                  if (less >= 0 || !ad.term().is_null())
+                  if (!ad.term().is_null() || ad.has_below(li))
                   {
                      fb_node = addr;
-                     fb_pos  = less >= 0 ? less : -1;
+                     fb_li   = li;
                      fb_dlen = dlen ? *dlen : 0;
+                     have_fb = true;
                   }
                   uint8_t   sb[4];
                   const int nb = stem_bytes(ad.cell(li), ad.stem_width(), ad.cw(), sb);
@@ -1761,31 +1779,37 @@ namespace heart::radix
                   addr = next;
                   break;
                case 1:
-                  return next;
+                  return reinterpret_cast<const leaf_page*>(
+                      ses.get_ref<sal::alloc_header>(next).obj());
                case 3:
                   return max_page(ses, addr, div, dlen);
                case 4:
                   return max_page(ses, next, div, dlen);
                case 2:
                {
-                  assert(fb_pos != -2 && "no fallback: the radix root must hold the \"\" divider");
+                  assert(have_fb && "no fallback: the radix root must hold the \"\" divider");
+                  (void)have_fb;
                   if (dlen)
                      *dlen = fb_dlen;
                   ptr_address fnext{};
                   bool        fpage = false;
                   dispatch(ses, fb_node, [&](auto ad) {
-                     if (fb_pos < 0)
+                     const int less = ad.prev(fb_li);  // resolved ONCE, only on fallback
+                     if (less < 0)
                      {
                         fnext = ad.term().as_pointer();
                         fpage = true;
                         return;
                      }
                      uint8_t   sb[4];
-                     const int nb = stem_bytes(ad.cell(fb_pos), ad.stem_width(), ad.cw(), sb);
+                     const int nb = stem_bytes(ad.cell(less), ad.stem_width(), ad.cw(), sb);
                      div_append(div, dlen, sb, size_t(nb));
-                     fnext = ad.branch(fb_pos).as_pointer();
+                     fnext = ad.branch(less).as_pointer();
                   });
-                  return fpage ? fnext : max_page(ses, fnext, div, dlen);
+                  if (fpage)
+                     return reinterpret_cast<const leaf_page*>(
+                         ses.get_ref<sal::alloc_header>(fnext).obj());
+                  return max_page(ses, fnext, div, dlen);
                }
             }
          }
@@ -1860,18 +1884,30 @@ namespace heart::radix
             }
             leaf_page::update_op upd{
                 .index = uint16_t(idx), .value = ins.value, .vtype = ins.vtype, .ext = ins.ext};
-            if (!shared && pg->can_apply(upd) == leaf_page::can_apply_mode::modify)
+            if (pg->can_apply(upd) == leaf_page::can_apply_mode::modify)
             {
-               ref.modify().get()->apply(upd);
-               if (old_child != sal::null_ptr_address)
-                  _ses->release(old_child);  // the replaced external/subtree child
-               return page;
+               if (!shared)
+               {
+                  ref.modify().get()->apply(upd);
+                  if (old_child != sal::null_ptr_address)
+                     _ses->release(old_child);  // the replaced external/subtree child
+                  return page;
+               }
+               // shared fast path: verbatim 2KB blit + the one mutation in place — never the
+               // per-record rebuild (the old child stays owned by the snapshot's page).
+               ptr_address np =
+                   _ses->alloc<leaf_page>(sal::alloc_hint{}, leaf_page::clone_op{pg});
+               mut<leaf_page>(np)->apply(upd);
+               retain_page_children(pg, idx);
+               return np;
             }
             if (pg->rebuilt_fits(upd))
             {
+               // The slot swap's release of `page` balances the retains — and (unique) destroys
+               // the old page, releasing every child including the replaced one.
                ptr_address np =
                    _ses->alloc<leaf_page>(sal::alloc_hint{}, leaf_page::clone_update_op{pg, upd});
-               retain_page_children(pg, idx);  // the slot swap's release of `page` balances this
+               retain_page_children(pg, idx);
                return np;
             }
             if (ins.ext != sal::null_ptr_address)
@@ -1880,10 +1916,17 @@ namespace heart::radix
             return page;
          }
          _old_value_size = -1;
-         if (!shared && pg->can_apply(ins) == leaf_page::can_apply_mode::modify)
+         if (pg->can_apply(ins) == leaf_page::can_apply_mode::modify)
          {
-            ref.modify().get()->apply(ins);
-            return page;
+            if (!shared)
+            {
+               ref.modify().get()->apply(ins);
+               return page;
+            }
+            ptr_address np = _ses->alloc<leaf_page>(sal::alloc_hint{}, leaf_page::clone_op{pg});
+            mut<leaf_page>(np)->apply(ins);
+            retain_page_children(pg, -1);
+            return np;
          }
          if (pg->rebuilt_fits(ins))
          {
@@ -1933,8 +1976,10 @@ namespace heart::radix
                _ses->release(old_child);
             return page;
          }
-         ptr_address np = _ses->alloc<leaf_page>(sal::alloc_hint{},
-                                                 leaf_page::clone_remove_op{pg, uint16_t(idx)});
+         // shared fast path: blit + in-place remove (always has room); the removed entry's
+         // child stays owned by the snapshot's page (not retained, not referenced by the clone).
+         ptr_address np = _ses->alloc<leaf_page>(sal::alloc_hint{}, leaf_page::clone_op{pg});
+         mut<leaf_page>(np)->apply(leaf_page::remove_op{uint16_t(idx)});
          retain_page_children(pg, idx);
          return np;
       }
@@ -2490,9 +2535,7 @@ namespace heart::radix
       static bool page_find_in(sal::allocator_session& ses, ptr_address root, bytes kb,
                                value_view& out)
       {
-         ptr_address pa = is_page(ses, root) ? root : route_to_page(ses, root, kb, nullptr, nullptr);
-         const leaf_page* pg =
-             reinterpret_cast<const leaf_page*>(ses.get_ref<sal::alloc_header>(pa).obj());
+         const leaf_page* pg = route_to_page(ses, root, kb, nullptr, nullptr);
          const int idx = pg->find(kb.data(), uint32_t(kb.size()));
          if (idx < 0)
             return false;
@@ -2705,8 +2748,44 @@ namespace heart::radix
             return false;
          if (_page_mode)
          {
-            // Cursor-backed: the cursor pins THE SAME working root (_root keeps the nodes
-            // resident after it dies), so the returned view has find()-equivalent lifetime.
+            // LEAN PATH: one lower-bound route + one in-page SIMD lower_bound — no cursor
+            // construction, no second descent. Falls back to the cursor only when the query
+            // lands past the routed page's last entry (a page-boundary seek, the rare case).
+            bytes            q  = as_bytes(key);
+            const leaf_page* pg = route_to_page(*_ses, _root.address(), q, nullptr, nullptr);
+            int              lb = pg->lower_bound(q.data(), uint32_t(q.size()));
+            if (strict)  // upper_bound: skip the (single possible) exact match
+            {
+               if (lb < int(pg->num_keys()))
+               {
+                  auto cp  = pg->common_prefix();
+                  auto sfx = pg->suffix(uint32_t(lb));
+                  if (cp.size() + sfx.size() == q.size() &&
+                      std::memcmp(cp.data(), q.data(), cp.size()) == 0 &&
+                      std::memcmp(sfx.data(), q.data() + cp.size(), sfx.size()) == 0)
+                     ++lb;
+               }
+            }
+            if (lb < int(pg->num_keys()))
+            {
+               auto cp  = pg->common_prefix();
+               auto sfx = pg->suffix(uint32_t(lb));
+               out_key.assign(reinterpret_cast<const char*>(cp.data()), cp.size());
+               out_key.append(reinterpret_cast<const char*>(sfx.data()), sfx.size());
+               const inline_value* iv = pg->record(uint32_t(lb));
+               if (iv->value_type == inline_value::vt_extern)
+               {
+                  bytes vb = _ses->get_ref<leaf_node>(pg->external_addr(uint32_t(lb)))
+                                 .obj()
+                                 ->value_bytes();
+                  out_val = value_view(reinterpret_cast<const char*>(vb.data()), vb.size());
+               }
+               else
+                  out_val = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len),
+                                       iv->value_len);
+               return true;
+            }
+            // Spill: the answer is the NEXT page's first entry — the cursor frame walk finds it.
             cursor c(this);
             if (!(strict ? c.upper_bound(key) : c.lower_bound(key)))
                return false;

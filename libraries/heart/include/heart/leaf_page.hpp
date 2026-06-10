@@ -88,6 +88,13 @@ namespace heart
       {
          uint16_t index;
       };
+      // verbatim-clone ticket: 2 SIMD copies (head + used tail), keeping src's layout/capacity/
+      // dead bytes. The fast COW path: blit, then apply() the one mutation in place — never the
+      // per-record rebuild — whenever can_apply() says the (copied) layout has room.
+      struct clone_op
+      {
+         const leaf_page* src;
+      };
       // rebuild-clone tickets (shared mode / reprefix / shrinking remove)
       struct clone_insert_op
       {
@@ -114,6 +121,7 @@ namespace heart
       static constexpr uint32_t head_bytes() noexcept { return uint32_t(sizeof(leaf_page)); }
       uint32_t head_size() const noexcept { return head_bytes() + 5u * _cap; }
       static uint32_t alloc_size() noexcept { return page_bytes; }
+      static uint32_t alloc_size(const clone_op&) noexcept { return page_bytes; }
       static uint32_t alloc_size(const clone_insert_op&) noexcept { return page_bytes; }
       static uint32_t alloc_size(const clone_update_op&) noexcept { return page_bytes; }
       static uint32_t alloc_size(const clone_remove_op&) noexcept { return page_bytes; }
@@ -166,6 +174,12 @@ namespace heart
       {
          this->init_page(asize, type_id, seq);
          init_empty();
+      }
+      leaf_page(uint32_t asize, sal::ptr_address_seq seq, const clone_op& op) noexcept
+      {
+         this->init_page(asize, type_id, seq);
+         assert(asize >= op.src->size());
+         op.src->blit_head_tail(this, op.src->head_size());  // verbatim: layout/cap/dead kept
       }
       leaf_page(uint32_t asize, sal::ptr_address_seq seq, const clone_insert_op& op) noexcept
       {

@@ -5211,6 +5211,143 @@ namespace detail  // implementation types & node helpers — not part of the pub
       }
 
      private:
+     public:
+      // ── debug census: walk the live tree, report every node (read-only) ──
+      // f(kind, inclusive_bytes, nbranch, lines_used, lines_alloc); inclusive
+      // means demoted kinds / cbucket count their riding lines, so Σbytes is
+      // the tree's true allocated footprint (shared lines counted once per
+      // reachable path — exact for a single-root snapshot).
+      struct census_row
+      {
+         K        kind;
+         uint32_t bytes;
+         uint16_t nbranch;
+         uint8_t  lines_used, lines_alloc;
+      };
+      template <class F>
+      void census(F&& f) const
+      {
+         census_(root_, f);
+      }
+      template <class F>
+      void census_(packed_ptr cur, F& f) const
+      {
+         if (cur.is_null())
+            return;
+         const K k = cur.tag();
+         switch (k)
+         {
+            case K::value_ptr:
+            {
+               const char*    L  = static_cast<const char*>(deref_(cur));
+               const uint32_t sz = uint32_t(leaf_alloc_size(const_cast<char*>(L)));
+               f(census_row{k, sz, 0, uint8_t((sz + 127) / 128), uint8_t((sz + 127) / 128)});
+               return;
+            }
+            case K::value_inline:
+               f(census_row{k, 0, 0, 0, 0});
+               return;
+            case K::prefix_node:
+            {
+               const char* P = static_cast<const char*>(deref_(cur));
+               f(census_row{k, uint32_t(pn_size<Ptr>(pn_plen(P))), 1, 1, 1});
+               census_(pn_next<Ptr>(const_cast<char*>(P)), f);
+               return;
+            }
+            case K::setlist_u8:
+            case K::setlist_u16:
+            case K::c2:
+            case K::c4:
+            case K::c8:
+            case K::node_full:
+            {
+               const router_hdr* rh = static_cast<const router_hdr*>(deref_(cur));
+               uint8_t           lu = 1, la = uint8_t(node_size(k) / 128);
+               if (k == K::node_full)
+               {
+                  const node_full* nf = static_cast<const node_full*>(deref_(cur));
+                  for (unsigned li = 0; li < full_lines_v<Ptr>; ++li)
+                     lu += nf->ranges[li].nset > 0;
+               }
+               else
+                  lu = la;
+               f(census_row{k, uint32_t(node_size(k)), rh->hdr.nbranch, lu, la});
+               census_(rh->term, f);
+               router_for_each(cur, [&](uint8_t, packed_ptr br) { census_(br, f); });
+               return;
+            }
+            case K::full_x:
+            {
+               if constexpr (cow_enabled)
+               {
+                  const node_fullx* x  = static_cast<const node_fullx*>(deref_(cur));
+                  uint8_t           lu = 1;
+                  for (unsigned li = 0; li < full_lines_v<Ptr>; ++li)
+                     lu += !x->lines[li].is_null() &&
+                           static_cast<const cline_direct*>(deref_(x->lines[li]))->nset > 0;
+                  f(census_row{k, uint32_t(128 + full_lines_v<Ptr> * 128), x->rh.hdr.nbranch, lu,
+                               uint8_t(1 + full_lines_v<Ptr>)});
+                  census_(x->rh.term, f);
+                  router_for_each(cur, [&](uint8_t, packed_ptr br) { census_(br, f); });
+               }
+               return;
+            }
+            case K::cx:
+            {
+               if constexpr (cow_enabled)
+               {
+                  const node_cx* x = static_cast<const node_cx*>(deref_(cur));
+                  const unsigned n = 1u << x->lg;
+                  f(census_row{k, uint32_t(128 + n * 128), x->rh.hdr.nbranch, uint8_t(1 + n),
+                               uint8_t(1 + n)});
+                  census_(x->rh.term, f);
+                  router_for_each(cur, [&](uint8_t, packed_ptr br) { census_(br, f); });
+               }
+               return;
+            }
+            case K::bucket:
+            {
+               const bucket* b = static_cast<const bucket*>(deref_(cur));
+               f(census_row{k, uint32_t(sizeof(bucket)), b->nent, uint8_t(sizeof(bucket) / 128),
+                            uint8_t(sizeof(bucket) / 128)});
+               return;
+            }
+            case K::cbucket:
+            {
+               if constexpr (cb_enabled)
+               {
+                  const cb_hdr* h  = static_cast<const cb_hdr*>(deref_(cur));
+                  uint32_t      ln = 2;  // CL0 + FP
+                  for (unsigned li = 0; li < 4; ++li)
+                     ln += !h->sp_line[li].is_null();
+                  bool big[CB_PAGES] = {};
+                  uint8_t blen[CB_PAGES] = {};
+                  for (unsigned li = 0; li < 4; ++li)
+                  {
+                     if (!h->cnt[li] || h->sp_line[li].is_null())
+                        continue;
+                     const cb_sp* sp = cb_spl_(h, li);
+                     for (unsigned i = 0; i < h->cnt[li]; ++i)
+                        if (cb_big(sp->lref[i]))
+                        {
+                           big[cb_spi(sp->lref[i])]  = true;
+                           blen[cb_spi(sp->lref[i])] = uint8_t(std::max(1u, cb_len8(sp->lref[i])));
+                        }
+                  }
+                  for (unsigned spi = 0; spi < CB_PAGES; ++spi)
+                     if (!h->page_line[spi].is_null())
+                        ln += big[spi] ? blen[spi] : 2;
+                  f(census_row{k, ln * 128, h->rh.hdr.nbranch, uint8_t(ln), uint8_t(ln)});
+                  census_(h->rh.term, f);
+               }
+               return;
+            }
+            case K::null:
+               return;
+         }
+      }
+
+     private:
       size_t cow_node_bytes_(Ptr p) const noexcept
       {
          char* n = static_cast<char*>(deref_(p));

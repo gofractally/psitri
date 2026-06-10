@@ -286,6 +286,8 @@ namespace part::kv
       }
 
       part::arena& store() noexcept { return _arena; }
+      // debug/tools only: the raw live root (no pin — caller must hold off writers)
+      root_ptr     live_root_dbg() const noexcept { return _live_root; }
 
       // Atomic live-root handoff: commit swaps under the mutex; snapshot
       // acquisition pins under the same mutex, so a root can never be released

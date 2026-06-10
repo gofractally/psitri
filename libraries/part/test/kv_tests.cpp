@@ -209,6 +209,27 @@ TEST_CASE("kv terms: a key that is a strict prefix of >64 same-byte siblings")
       }
       REQUIRE(oit == oracle.end());
    }
+   {  // lower_bound from every oracle key and from synthesized misses: the
+      // cursor must land exactly where the oracle's lower_bound lands
+      auto c = ses->get_root(0).snapshot_cursor();
+      for (auto& [k, v] : oracle)
+      {
+         for (std::string probe : {k, k + "\x01", k.substr(0, k.size() - 1)})
+         {
+            auto oit = oracle.lower_bound(probe);
+            c.lower_bound(probe);
+            INFO("probe='" << probe << "'");
+            if (oit == oracle.end())
+               REQUIRE(c.is_end());
+            else
+            {
+               REQUIRE_FALSE(c.is_end());
+               REQUIRE(std::string(c.key()) == oit->first);
+               REQUIRE(*c.value<std::string>() == oit->second);
+            }
+         }
+      }
+   }
    {  // remove every key; arena must drain (no leaked term leaves/wrappers)
       auto tx = ses->start_transaction(0);
       for (auto& [k, v] : oracle)

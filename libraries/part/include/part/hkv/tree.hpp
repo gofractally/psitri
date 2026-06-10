@@ -1651,22 +1651,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                         key_.append(h->prefix, h->rh.hdr.prefix_len);
                         cb = uint32_t(key_.len);
                      }
-                     bord_.clear();  // (li<<8|i), sorted by (stem, suffix)
-                     for (unsigned li = 0; li < 4; ++li)
-                        for (unsigned i = 0; i < h->cnt[li]; ++i)
-                           bord_.push_back(uint16_t((li << 8) | i));
-                     std::sort(bord_.begin(), bord_.end(),
-                               [&](uint16_t x, uint16_t y)
-                               {
-                                  const auto* sx = t_->cb_spl_(h, x >> 8);
-                                  const auto* sy = t_->cb_spl_(h, y >> 8);
-                                  const uint16_t stx = sx->stems[x & 255];
-                                  const uint16_t sty = sy->stems[y & 255];
-                                  if (stx != sty)
-                                     return stx < sty;
-                                  return t_->cb_cell_at_(h, sx->lref[x & 255]).suffix() <
-                                         t_->cb_cell_at_(h, sy->lref[y & 255]).suffix();
-                               });
+                     // storage is totally ordered (cb_place_): iterate in rank
+                     // order directly — no per-descend sort, no order vector
                      stk_.push_back(Frame{child, -1, uint32_t(base), cb});
                      return false;
                   }
@@ -1718,9 +1704,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      }
                      if (f.cur < int32_t(h->rh.hdr.nbranch))
                      {
-                        const uint16_t e  = bord_[size_t(f.cur++)];
-                        const auto*    sp = t_->cb_spl_(h, e >> 8);
-                        auto           c  = t_->cb_cell_at_(h, sp->lref[e & 255]);
+                        unsigned r  = unsigned(f.cur++);
+                        unsigned li = 0;
+                        while (li < 3 && r >= h->cnt[li])  // ragged rank → (line, slot)
+                           r -= h->cnt[li++];
+                        const auto* sp = t_->cb_spl_(h, li);
+                        auto        c  = t_->cb_cell_at_(h, sp->lref[r]);
                         sfx_      = reinterpret_cast<const uint8_t*>(c.p + 3);
                         sfxlen_   = c.p[0];
                         full_str_ = nullptr;
@@ -1846,6 +1835,57 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      if (upper ? cmp > 0 : cmp >= 0) break;
                   }
                   stk_.push_back(Frame{cur, i, 0, 0});  // seek_ yields bord_[i] (or pops if i==nent)
+                  return false;
+               }
+            if constexpr (kv_tree::cb_enabled)
+               if (k == K::cbucket)
+               {
+                  const auto* h =
+                      reinterpret_cast<const typename kv_tree::cb_hdr*>(t_->deref_(cur));
+                  std::string_view P(reinterpret_cast<const char*>(h->prefix),
+                                     h->rh.hdr.prefix_len);
+                  std::string_view R = key.substr(depth);
+                  const size_t     c = lcp(P, R);
+                  if (c < P.size())
+                  {
+                     if (c == R.size() || uint8_t(P[c]) > uint8_t(R[c]))
+                     {
+                        descend_(cur, 0);  // whole bucket > target → leftmost
+                        return false;
+                     }
+                     // whole bucket < target → exhausted frame; seek_ pops it
+                     stk_.push_back(Frame{cur, int32_t(h->rh.hdr.nbranch), 0, 0});
+                     return false;
+                  }
+                  R = R.substr(c);
+                  if (R.empty() && !upper)
+                  {
+                     stk_.push_back(Frame{cur, -1, 0, 0});  // term (== target) first
+                     return false;
+                  }
+                  // rank of the first entry >= R: storage is totally ordered, so
+                  // walk the ragged lines (suffix compare only within stem ties)
+                  const uint16_t stem = kv_tree::cb_stem_(R);
+                  int32_t        rank = 0;
+                  for (unsigned li = 0; li < 4; ++li)
+                  {
+                     if (!h->cnt[li] || h->sp_line[li].is_null())
+                        continue;
+                     const auto*    sp  = t_->cb_spl_(h, li);
+                     const unsigned lb2 = kv_tree::cb_lb_(sp, h->cnt[li], stem);
+                     rank += int32_t(lb2);
+                     for (unsigned i = lb2; i < h->cnt[li]; ++i)
+                     {
+                        if (sp->stems[i] != stem)
+                           goto cb_lb_done;
+                        const int cmp = t_->cb_cell_at_(h, sp->lref[i]).suffix().compare(R);
+                        if (upper ? cmp > 0 : cmp >= 0)
+                           goto cb_lb_done;
+                        ++rank;
+                     }
+                  }
+               cb_lb_done:
+                  stk_.push_back(Frame{cur, rank, 0, 0});  // seek_ yields rank (or pops)
                   return false;
                }
             if (k == K::prefix_node)
@@ -4519,12 +4559,32 @@ namespace detail  // implementation types & node helpers — not part of the pub
          return cb_cell{base};
       }
 
-      static unsigned cb_pick_line_(const cb_hdr* h, uint16_t stem) noexcept
+      // Total-order placement: the line and in-line slot of the first entry
+      // >= (stem, sfx). Storage is kept FULLY sorted — stems ascend across the
+      // concatenation of nonempty lines and equal-stem runs are suffix-sorted —
+      // so iteration and bursts never sort. Holes (lines emptied by removes)
+      // are skipped and stay dead until a rebalance repacks them. Cell derefs
+      // happen only on equal-stem ties.
+      std::pair<unsigned, unsigned> cb_place_(const cb_hdr* h, uint16_t stem,
+                                              std::string_view sfx) const noexcept
       {
-         unsigned li = 0;
-         while (li + 1 < 4 && h->cnt[li + 1] && stem >= h->stem_lo[li + 1])
-            ++li;
-         return li;
+         unsigned last = 0;
+         bool     any  = false;
+         for (unsigned li = 0; li < 4; ++li)
+         {
+            if (!h->cnt[li] || h->sp_line[li].is_null())
+               continue;
+            const cb_sp* sp  = cb_spl_(h, li);
+            unsigned     pos = cb_lb_(sp, h->cnt[li], stem);
+            while (pos < h->cnt[li] && sp->stems[pos] == stem &&
+                   cb_cell_at_(h, sp->lref[pos]).suffix() < sfx)
+               ++pos;
+            if (pos < h->cnt[li])
+               return {li, pos};  // first entry >= (stem, sfx) is here
+            last = li;            // whole line below the new entry: keep walking
+            any  = true;
+         }
+         return {last, any ? unsigned(h->cnt[last]) : 0u};  // append after everything
       }
       static unsigned cb_lb_(const cb_sp* sp, unsigned n, uint16_t stem) noexcept
       {
@@ -4820,7 +4880,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          // insert path
          if (h->rh.hdr.nbranch >= CB_MAX)
             return -1;
-         unsigned li = cb_pick_line_(h, stem);
+         auto [li, pos] = cb_place_(h, stem, sfx);
          if (!h->sp_line[li].is_null())
             cb_own_(&h->sp_line[li], 1);
          cb_sp* sp = cb_spl_(h, li);
@@ -4830,8 +4890,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                if (!h->sp_line[l2].is_null())
                   cb_own_(&h->sp_line[l2], 1);
             cb_rebalance_(h);
-            li = cb_pick_line_(h, stem);
-            sp = cb_spl_(h, li);
+            std::tie(li, pos) = cb_place_(h, stem, sfx);  // entries moved
+            sp                = cb_spl_(h, li);
             if (h->cnt[li] == 16)
                return -1;  // pathological all-equal stems: split
          }
@@ -4844,8 +4904,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             std::memset(deref_(h->sp_line[li]), 0, 128);
             sp = cb_spl_(h, li);
          }
-         const unsigned pos = cb_lb_(sp, h->cnt[li], stem);
-         uint8_t*       fp  = cb_fpl_(h);
+         uint8_t* fp = cb_fpl_(h);
          std::memmove(&sp->stems[pos + 1], &sp->stems[pos],
                       (h->cnt[li] - pos) * sizeof(uint16_t));
          std::memmove(&sp->lref[pos + 1], &sp->lref[pos],
@@ -5109,14 +5168,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
          cb_hdr* h = static_cast<cb_hdr*>(deref_(cur));
          std::vector<cb_ent_> es;
          es.reserve(CB_MAX + 2);
-         cb_for_each_(h, [&](std::string_view s2, std::string_view v2)
-                      { es.push_back({std::string(s2), std::string(v2)}); });
-         // The term rides the rebuild as the empty-suffix entry: cb_build_
-         // places it on whatever node ends up on top, and an empty suffix
-         // stops the shared-prefix strip, so a term bucket can never burst
-         // into a bare prefix/leaf top. (The old post-hoc reattach silently
-         // DROPPED the term for prefix_node tops under NDEBUG.) The old term
-         // leaf is released with the bucket below.
+         // The term rides the rebuild as the empty-suffix entry (FIRST — it
+         // sorts before every nonempty suffix): cb_build_ places it on
+         // whatever node ends up on top, and an empty suffix stops the
+         // shared-prefix strip, so a term bucket can never burst into a bare
+         // prefix/leaf top. The old term leaf is released with the bucket.
          if (!h->rh.term.is_null())
          {
             cb_ent_ te{std::string(), std::string()};
@@ -5138,8 +5194,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
             }
             es.push_back(std::move(te));
          }
-         std::sort(es.begin(), es.end(),
-                   [](const cb_ent_& a, const cb_ent_& b) { return a.sfx < b.sfx; });
+         // storage is totally ordered (cb_place_), so for_each IS key order
+         cb_for_each_(h, [&](std::string_view s2, std::string_view v2)
+                      { es.push_back({std::string(s2), std::string(v2)}); });
+         assert(std::is_sorted(es.begin(), es.end(), [](const cb_ent_& x, const cb_ent_& y)
+                               { return x.sfx < y.sfx; }) &&
+                "cb storage must be totally ordered");
          const std::string pfx(reinterpret_cast<const char*>(h->prefix),
                                h->rh.hdr.prefix_len);
          Ptr np  = cb_build_(es, 0, es.size());

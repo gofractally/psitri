@@ -80,9 +80,9 @@ heart's observed occupancy.
 
 ```
 u16 lref = [big:1][spi:4][off:5][len:6]
-  spi  → range id 0..15: CL0 maps it to a physical cline
-         (page_line[spi]) — or arithmetic (base + 6 + 2*spi) when
-         implicit_layout — Dan's "implicit range → explicit cline" rule
+  spi  → range id 0..15: the implicitly-named address range; CL0's
+         page_line[spi] maps it to the physical cline (the one and only
+         translation — the table IS the per-bucket allocator)
   big=0: payload cell in sub-page spi at byte off*8, allocated length
          len*8 (immutable; the cell's live vlen may shrink below it).
          ≤64B entries never cross the 2-line sub-page boundary

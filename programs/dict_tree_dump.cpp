@@ -30,6 +30,8 @@
 
 #include <radix_engine.hpp>
 
+
+
 using heart::bitset_r2_node;
 using heart::bitset_r4_node;
 using heart::full_radix_node;
@@ -344,6 +346,7 @@ int main(int argc, char** argv)
 
    auto                     dir = std::filesystem::temp_directory_path() / "heart_tree_dump";
    heart::radix::radix_tree t(dir);
+   sal::smart_ptr<sal::alloc_header> snap;  // a snapshot IS a smart_ptr copy
    auto vview = [](const uint64_t& v)
    { return std::string_view(reinterpret_cast<const char*>(&v), 8); };
 
@@ -361,7 +364,7 @@ int main(int argc, char** argv)
       t.upsert(std::string_view(words[i]), vview(v));
       if (commit_every && (i + 1) % commit_every == 0)
       {
-         t.commit();
+         snap = t.root_snapshot();
          ++commits;
       }
    }

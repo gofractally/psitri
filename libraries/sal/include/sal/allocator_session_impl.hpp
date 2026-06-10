@@ -376,6 +376,22 @@ namespace sal
    // drop is always fully inline; only a rare large drop spills the remainder.
    inline constexpr uint32_t inline_destroy_budget = 256;
 
+#ifdef SAL_RELEASE_DEBUG_COUNTERS
+   // Opt-in flow accounting for the bounded-inline release / background-release pipeline
+   // (leak hunts). Compiled out unless the TU defines SAL_RELEASE_DEBUG_COUNTERS.
+   inline std::atomic<uint64_t> g_sal_spill_push{0};           // budget-0 spills queued
+   inline std::atomic<uint64_t> g_sal_spill_fallthrough{0};    // queue full → destroyed inline
+   inline std::atomic<uint64_t> g_sal_inline_destroy{0};       // release() destroys
+   inline std::atomic<uint64_t> g_sal_final_release{0};        // bg pops processed
+   inline std::atomic<uint64_t> g_sal_final_release_early{0};  // bg pop: ref>1 → no destroy
+   inline std::atomic<uint64_t> g_sal_final_destroy{0};        // bg destroys
+   inline std::atomic<uint64_t> g_sal_final_null_loc{0};       // bg pop: NULL LOC → destroy skipped
+   inline std::atomic<uint64_t> g_sal_producer_queue{0};       // &_release_queue the spiller wrote
+   inline std::atomic<uint64_t> g_sal_producer_session{0};     // spiller's session number
+   inline std::atomic<uint64_t> g_sal_consumer_queue0{0};      // &queue(0) the bg loop reads
+   inline std::atomic<uint64_t> g_sal_consumer_queue1{0};      // &queue(1) the bg loop reads
+#endif
+
    inline void allocator_session::release(ptr_address adr) noexcept
    {
       assert(check_thread_ownership());
@@ -394,13 +410,25 @@ namespace sal
          return;
       }
       // Mid-cascade and out of budget → spill: reclaim to ref 1 (safe, we own it) and hand to the
-      // background release thread so a huge drop can't stall this thread unboundedly.
-      if (_destroy_budget == 0)
+      // background release thread so a huge drop can't stall this thread unboundedly. A session
+      // marked defer_destroy (read sessions: dropping a pinned snapshot must never run the dead
+      // lineage's destroy cascade on the reader thread) spills EVERY last-ref release.
+      if (_defer_destroy || _destroy_budget == 0)
       {
          cb.set_ref(1);
          if (_release_queue.try_push(adr)) [[likely]]
+         {
+#ifdef SAL_RELEASE_DEBUG_COUNTERS
+            ++g_sal_spill_push;
+            g_sal_producer_queue   = (uint64_t)&_release_queue;
+            g_sal_producer_session = *_session_num;
+#endif
             return;
+         }
          // queue full (rare): fall through and destroy inline anyway.
+#ifdef SAL_RELEASE_DEBUG_COUNTERS
+         ++g_sal_spill_fallthrough;
+#endif
       }
       const bool top = (_destroy_budget == UINT32_MAX);
       if (top)
@@ -419,6 +447,9 @@ namespace sal
       const alloc_header*   node = get<alloc_header>(prev.loc());
       _sega.type_ops(node).destroy(node, ses_ptr);
       record_freed_space(node, "release_destroy");
+#ifdef SAL_RELEASE_DEBUG_COUNTERS
+      ++g_sal_inline_destroy;
+#endif
       _ptr_alloc.free(adr);
 
       if (top)
@@ -435,6 +466,11 @@ namespace sal
       bool  custom = is_custom_cb(pre);
 
       auto  prev = cb.release();
+#ifdef SAL_RELEASE_DEBUG_COUNTERS
+      ++g_sal_final_release;
+      if (prev.ref > 1)
+         ++g_sal_final_release_early;
+#endif
       if (prev.ref > 1)
          return;
 
@@ -449,7 +485,14 @@ namespace sal
             const alloc_header* nptr = get<alloc_header>(loc);
             _sega.type_ops(nptr).destroy(nptr, ptr);
             record_freed_space(nptr, "release_destroy");
+#ifdef SAL_RELEASE_DEBUG_COUNTERS
+            ++g_sal_final_destroy;
+#endif
          }
+#ifdef SAL_RELEASE_DEBUG_COUNTERS
+         else
+            ++g_sal_final_null_loc;  // destroy SKIPPED — children of this node strand
+#endif
       }
       else if (_sega._on_custom_cb_released) [[unlikely]]
       {

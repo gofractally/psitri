@@ -11,6 +11,7 @@ TIMEOUT=${BENCH_TIMEOUT:-1800}  # 30 minute cap per engine
 
 ENGINES=""
 [ "${HAVE_PSITRI:-0}" = 1 ]         && ENGINES="$ENGINES psitri"
+[ "${HAVE_HEART:-0}" = 1 ]          && ENGINES="$ENGINES heart"
 [ "${HAVE_DWAL:-0}" = 1 ]           && ENGINES="$ENGINES dwal"
 [ "${HAVE_PSITRIROCKS:-0}" = 1 ]    && ENGINES="$ENGINES psitrirocks"
 [ "${HAVE_ROCKSDB:-0}" = 1 ]        && ENGINES="$ENGINES rocksdb"

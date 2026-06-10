@@ -120,6 +120,10 @@ namespace sal
 
       void start_background_threads();
       void stop_background_threads();
+      /// [testing] Stop ONLY the compactor thread (provider/release/decay keep running).
+      /// Lets a test isolate compactor interplay: run a workload with relocation disabled
+      /// and compare allocation accounting against a normal run.
+      void stop_compactor_thread();
 
       void set_runtime_config(const runtime_config& cfg);
 
@@ -638,6 +642,10 @@ namespace sal
       void release_loop(segment_thread& thread);
 
       std::optional<segment_thread> _release_thread;
+      /// Entries the release thread has POPPED from the queues but not yet finished destroying
+      /// (its local batch + the in-flight cascade). Counted by total_pending_releases() so a
+      /// drain-poll can't return while background destruction is still running.
+      std::atomic<uint64_t> _release_in_flight{0};
       ///@}
 
       /**
@@ -830,7 +838,12 @@ namespace sal
 
    inline uint64_t allocator::total_pending_releases() const
    {
-      uint64_t total = 0;
+      // Queued entries PLUS the release thread's in-flight work (its popped-but-unprocessed
+      // batch + the cascade it is currently destroying). Without the in-flight term a caller
+      // polling "pending == 0" (wait-for-drain before asserting an exact object count) returns
+      // while up to 1024 popped entries are still being destroyed in the background — object
+      // counts then read high by however much was in flight (a phantom "leak").
+      uint64_t total = _release_in_flight.load(std::memory_order_acquire);
       for (uint32_t i = 0; i < max_session_count; ++i)
          total += get_release_queue(allocator_session_number(i)).usage();
       return total;

@@ -5,7 +5,8 @@
  * Compares PsiTri, RocksDB (real + PsiTriRocks shim), MDBX, and TidesDB.
  *
  * Compiled into separate binaries per engine via #ifdef:
- *   BANK_ENGINE_PSITRI, BANK_ENGINE_DWAL, BANK_ENGINE_ROCKSDB, BANK_ENGINE_MDBX, BANK_ENGINE_TIDESDB
+ *   BANK_ENGINE_PSITRI, BANK_ENGINE_DWAL, BANK_ENGINE_HEART, BANK_ENGINE_ROCKSDB,
+ *   BANK_ENGINE_MDBX, BANK_ENGINE_TIDESDB
  */
 
 #include <algorithm>
@@ -22,10 +23,16 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "bench_signal.hpp"
 #include "bench_histogram.hpp"
+
+#ifndef XXH_INLINE_ALL
+#define XXH_INLINE_ALL
+#endif
+#include <hash/xxhash.h>  // --key-mode xxh64: account keys = XXH3-64(name)
 
 #include <boost/program_options/cmdline.hpp>
 #include <boost/program_options/options_description.hpp>
@@ -48,6 +55,10 @@
 #include <psitri/dwal/dwal_transaction.hpp>
 #include <psitri/dwal/dwal_read_session.hpp>
 #include <psitri/dwal/merge_cursor.hpp>
+#endif
+
+#if defined(BANK_ENGINE_HEART)
+#include <radix_engine.hpp>  // heart engine + its native psitri-shaped public API
 #endif
 
 #if defined(BANK_ENGINE_ROCKSDB)
@@ -85,6 +96,7 @@ struct BankConfig
    uint64_t    sync_every       = 0;  // sync every N commits (0 = never)
    uint64_t    reads_per_tx     = 100; // point reads per reader "transaction"
    std::string read_mode        = "latest"; // buffered, latest, or direct
+   std::string key_mode         = "names";  // names | xxh64 (keys = 8-byte XXH3-64 of the name)
 };
 
 // ============================================================
@@ -564,6 +576,155 @@ class PsiTriEngine : public BankEngine
    {
       auto     tx  = _ses->start_transaction(0);
       auto     cur = tx.read_cursor();
+      uint64_t count = 0;
+      cur.seek_begin();
+      while (!cur.is_end())
+      {
+         auto val = cur.value<std::string>();
+         if (val)
+         {
+            auto k = cur.key();
+            visitor(std::string(k.data(), k.size()), decode_balance(*val));
+            ++count;
+         }
+         cur.next();
+      }
+      return count;
+   }
+};
+#endif
+
+// ============================================================
+// Heart Engine (heart::radix — the same psitri-shaped native API)
+// ============================================================
+
+#if defined(BANK_ENGINE_HEART)
+class HeartEngine : public BankEngine
+{
+   std::shared_ptr<heart::radix::database>      _db;
+   std::shared_ptr<heart::radix::write_session> _ses;
+   std::optional<heart::radix::transaction>     _tx;
+   sal::sync_type                               _sync = sal::sync_type::none;
+
+  public:
+   const char* name() const override { return "Heart"; }
+
+   void open(const std::string& path, const std::string& sync_mode) override
+   {
+      std::filesystem::remove_all(path);
+      std::filesystem::create_directories(path);
+      if (sync_mode == "async")
+         _sync = sal::sync_type::msync_async;
+      else if (sync_mode == "sync")
+         _sync = sal::sync_type::msync_sync;
+      else
+         _sync = sal::sync_type::none;
+      _db  = heart::radix::database::open(path);
+      _ses = _db->start_write_session();
+   }
+
+   void close() override
+   {
+      _tx.reset();
+      _db->wait_for_compactor();
+      _ses.reset();
+      _db.reset();
+   }
+
+   void bulk_load(const std::vector<std::string>& accounts, uint64_t balance) override
+   {
+      auto bal = encode_balance(balance);
+      auto tx  = _ses->start_transaction(0);
+      for (auto& acct : accounts)
+         tx.upsert(acct, bal);
+      tx.commit();
+   }
+
+   void begin_batch() override { _tx.emplace(_ses->start_transaction(0)); }
+
+   bool transfer(const std::string& src,
+                 const std::string& dst,
+                 uint64_t           amount,
+                 uint64_t           seq) override
+   {
+      auto src_val = _tx->get<std::string>(src);
+      if (!src_val)
+         return false;
+      uint64_t src_bal = decode_balance(*src_val);
+      if (src_bal < amount)
+         return false;
+
+      auto dst_val = _tx->get<std::string>(dst);
+      if (!dst_val)
+         return false;
+      uint64_t dst_bal = decode_balance(*dst_val);
+
+      _tx->upsert(src, encode_balance(src_bal - amount));
+      _tx->upsert(dst, encode_balance(dst_bal + amount));
+
+      // Transaction log entry
+      _tx->upsert(encode_log_key(seq), encode_log_value(src, dst, amount));
+      return true;
+   }
+
+   void commit_batch() override
+   {
+      _tx->commit();
+      _tx.reset();
+   }
+
+   void sync() override
+   {
+      if (_sync != sal::sync_type::none)
+         _db->sync(_sync);
+   }
+
+   SizeReport report_size(const std::string&) override
+   {
+      auto       d = _db->dump();
+      SizeReport r;
+      r.file_size = d.total_segments * sal::segment_size;
+      uint64_t live = 0;
+      for (auto& seg : d.segments)
+         if (!seg.is_free && seg.alloc_pos > 0)
+            live += seg.alloc_pos - seg.freed_bytes;
+      r.live_size = live;
+      r.free_size = r.file_size - live;
+      return r;
+   }
+
+   void wait_compactor() override { _db->wait_for_compactor(); }
+
+   // Reader thread state — its own read_session (created ON the reader thread; one SAL
+   // session per thread), handing out per-batch snapshot cursors.
+   std::shared_ptr<heart::radix::read_session> _reader_rs;
+   std::optional<heart::radix::cursor>         _reader_cur;
+
+   void reader_thread_init() override { _reader_rs = _db->start_read_session(); }
+
+   void reader_thread_teardown() override
+   {
+      _reader_cur.reset();
+      _reader_rs.reset();
+   }
+
+   // Take one snapshot per batch (reads_per_tx reads share the same cursor).
+   void reader_batch_begin() override { _reader_cur.emplace(_reader_rs->create_cursor(0)); }
+   void reader_batch_end() override { _reader_cur.reset(); }
+
+   bool read_account(const std::string& key, uint64_t& balance_out) override
+   {
+      auto val = _reader_cur->get<std::string>(key);
+      if (!val)
+         return false;
+      balance_out = decode_balance(*val);
+      return true;
+   }
+
+   uint64_t scan_all(std::function<void(const std::string&, uint64_t)> visitor) override
+   {
+      auto     tx    = _ses->start_transaction(0);
+      auto     cur   = tx.snapshot_cursor();
       uint64_t count = 0;
       cur.seek_begin();
       while (!cur.is_end())
@@ -1680,6 +1841,9 @@ int main(int argc, char** argv)
        "Point reads per reader thread read-transaction batch");
    opt("read-mode", po::value(&cfg.read_mode)->default_value("latest"),
        "Read mode: buffered (RO+Tri), latest (RW+RO+Tri), trie (Tri only)");
+   opt("key-mode", po::value(&cfg.key_mode)->default_value("names"),
+       "Account keys: names (dictionary/generated strings) or xxh64 "
+       "(8-byte XXH3-64 of each name -> uniform random binary keys)");
    opt("help,h", "Show help");
 
    po::variables_map vm;
@@ -1696,6 +1860,8 @@ int main(int argc, char** argv)
    std::unique_ptr<BankEngine> engine;
 #if defined(BANK_ENGINE_PSITRI)
    engine = std::make_unique<PsiTriEngine>();
+#elif defined(BANK_ENGINE_HEART)
+   engine = std::make_unique<HeartEngine>();
 #elif defined(BANK_ENGINE_DWAL)
    engine = std::make_unique<DwalEngine>();
 #elif defined(BANK_ENGINE_ROCKSDB)
@@ -1723,6 +1889,7 @@ int main(int argc, char** argv)
    printf("  Sync mode:    %s\n", cfg.sync_mode.c_str());
    printf("  Seed:         %llu\n", (unsigned long long)cfg.seed);
    printf("  Read mode:    %s\n", cfg.read_mode.c_str());
+   printf("  Key mode:     %s\n", cfg.key_mode.c_str());
    printf("  DB path:      %s\n", cfg.db_path.c_str());
    printf("\n");
 
@@ -1732,6 +1899,22 @@ int main(int argc, char** argv)
    printf("Phase 1: Account Generation\n");
    auto p1_start = Clock::now();
    auto accounts = generate_account_names(cfg.num_accounts, cfg.seed);
+   if (cfg.key_mode == "xxh64")
+   {
+      // Keys become the 8-byte XXH3-64 of each name: uniformly-distributed binary keys —
+      // the tree-shape isolator (no dictionary clustering, no sequential structure). Log
+      // keys stay distinguishable by size (8 vs 11 bytes). Collisions over <=1M names are
+      // astronomically rare; re-hash deterministically if one ever appears.
+      std::unordered_set<uint64_t> seen;
+      seen.reserve(accounts.size() * 2);
+      for (auto& name : accounts)
+      {
+         uint64_t h = XXH3_64bits(name.data(), name.size());
+         while (!seen.insert(h).second)
+            h = XXH3_64bits(&h, sizeof(h));
+         name.assign(reinterpret_cast<const char*>(&h), sizeof(h));
+      }
+   }
    print_phase("Account generation", elapsed_sec(p1_start), cfg.num_accounts);
 
 #if defined(BANK_ENGINE_TIDESDB)
@@ -1904,6 +2087,52 @@ int main(int argc, char** argv)
                            p3a.successful, true);
    successful += p3b.successful;
 
+   // ── Phase 3c: Reader solo (no concurrent writer) ──
+   // The control for 3b: the SAME reader machinery on the SAME post-3b database, with the
+   // writer idle. (3b reader ÷ 3c reader) isolates writer-induced interference from the
+   // engine's intrinsic read cost.
+   double reader_solo_rate = 0;
+   {
+      printf("\nPhase 3c: Reader solo (no concurrent writer, %s reads/batch)\n",
+             format_comma(cfg.reads_per_tx).c_str());
+      std::atomic<bool>     stop{false};
+      std::atomic<uint64_t> count{0}, found{0};
+      double                secs = 0;
+      std::thread           rt(
+          [&]()
+          {
+             engine->reader_thread_init();
+             std::mt19937_64 rng(cfg.seed + 1234);
+             uint64_t        local = 0, lf = 0;
+             auto            t0 = Clock::now();
+             while (!stop.load(std::memory_order_relaxed) && !bench::interrupted())
+             {
+                engine->reader_batch_begin();
+                for (uint64_t r = 0; r < cfg.reads_per_tx; ++r)
+                {
+                   uint64_t idx = pick_account(rng, cfg.num_accounts);
+                   uint64_t bal;
+                   if (engine->read_account(accounts[idx], bal))
+                      ++lf;
+                   ++local;
+                }
+                engine->reader_batch_end();
+             }
+             secs  = elapsed_sec(t0);
+             count = local;
+             found = lf;
+             engine->reader_thread_teardown();
+          });
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+      stop = true;
+      rt.join();
+      reader_solo_rate = secs > 0 ? count / secs : 0;
+      printf("  Reader solo: %s reads in %.3fs (%s reads/sec, %s found = %.1f%%)\n",
+             format_comma(count.load()).c_str(), secs,
+             format_comma((uint64_t)reader_solo_rate).c_str(), format_comma(found.load()).c_str(),
+             count > 0 ? 100.0 * found / count : 0.0);
+   }
+
    // ── Phase 3 Summary ──
    {
       uint64_t wo_tps = (uint64_t)(cfg.num_transactions / p3a.secs);
@@ -1919,8 +2148,14 @@ int main(int argc, char** argv)
              format_comma(wr_tps).c_str(),
              format_comma(wr_tps * ops_per_tx).c_str(), -impact);
       if (p3b.reader_read_sec > 0)
-         printf("  Reader:     %s reads/sec\n",
-                format_comma((uint64_t)(p3b.reader_reads / p3b.reader_read_sec)).c_str());
+      {
+         double with_writer = p3b.reader_reads / p3b.reader_read_sec;
+         printf("  Reader:     %s reads/sec (with writer)\n",
+                format_comma((uint64_t)with_writer).c_str());
+         printf("  Reader:     %s reads/sec (solo)  -> writer interference: %.1fx\n",
+                format_comma((uint64_t)reader_solo_rate).c_str(),
+                with_writer > 0 ? reader_solo_rate / with_writer : 0.0);
+      }
    }
 
    // ── Phase 4: Validation ──

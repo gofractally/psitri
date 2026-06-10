@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <radix_engine.hpp>  // heart engine + its native psitri-shaped public API
 
@@ -281,4 +282,166 @@ TEMPLATE_TEST_CASE("conformance: abort discards subtree", "[conformance]", psitr
       tx.abort();
    }
    CHECK_FALSE(bool(ses->get_root(0).get_subtree("gone")));
+}
+
+// count_keys on a subtree: cursor count_keys() == manual is_end()/next() iteration == N, on a
+// multi-level subtree read through an UNCOMMITTED write_transaction (working-tree reads).
+TEMPLATE_TEST_CASE("conformance: count_keys on subtree", "[conformance]", psitri_policy, heart_policy)
+{
+   auto db   = TestType::database::open(conf_dir(TestType::nm));
+   auto ses  = db->start_write_session();
+   auto pad6 = [](int i) {  // zero-padded keys → good branch distribution (multi-level tree)
+      std::string s = std::to_string(i);
+      s.insert(0, 6 - s.size(), '0');
+      return s;
+   };
+   const int N   = 500;
+   auto      sub = ses->start_write_transaction(ses->create_temporary_tree());
+   for (int i = 0; i < N; ++i) sub.upsert("sub" + pad6(i), "value_for_sub" + pad6(i));
+   auto tx = ses->start_write_transaction(ses->create_temporary_tree());
+   tx.upsert_subtree("tree", sub.get_tree());
+
+   auto sub_root = tx.get_subtree("tree");
+   REQUIRE(bool(sub_root));
+   auto c = sub_root.snapshot_cursor();
+   CHECK(c.count_keys() == uint64_t(N));
+   uint64_t manual = 0;  // ground truth: manual iteration (psitri's count_via_cursor shape)
+   c.seek_begin();
+   while (!c.is_end())
+   {
+      ++manual;
+      c.next();
+   }
+   CHECK(manual == uint64_t(N));
+}
+
+// large-value subtrees (values > inline threshold: psitri value_nodes / heart external leaves):
+// attach, verify content, replace, remove — allocation returns to baseline (no leak).
+TEMPLATE_TEST_CASE("conformance: large-value subtrees no leak", "[conformance][leak]", psitri_policy, heart_policy)
+{
+   auto db   = TestType::database::open(conf_dir(TestType::nm));
+   auto ses  = db->start_write_session();
+   const auto base = ses->get_total_allocated_objects();
+   auto make_big = [&](int n, char tag) {  // n values of 200 B (> 64 B forces out-of-node storage)
+      auto        sub = ses->start_write_transaction(ses->create_temporary_tree());
+      std::string big(200, 'X');
+      for (int i = 0; i < n; ++i)
+      {
+         big[0] = tag;
+         big[1] = char('a' + i % 26);
+         sub.upsert("big" + std::to_string(i), big);
+      }
+      return sub.get_tree();
+   };
+   {
+      auto tx = ses->start_transaction(0);
+      tx.upsert_subtree("big_tree", make_big(100, 'A'));
+      tx.commit();
+   }
+   {
+      auto sub = ses->get_root(0).get_subtree("big_tree");
+      REQUIRE(bool(sub));
+      CHECK(sub.snapshot_cursor().count_keys() == 100);
+      auto v = sub.template get<std::string>("big7");
+      REQUIRE(v.has_value());
+      std::string expect(200, 'X');
+      expect[0] = 'A';
+      expect[1] = char('a' + 7);
+      CHECK(*v == expect);
+   }
+   {
+      auto tx = ses->start_transaction(0);
+      tx.upsert_subtree("big_tree", make_big(60, 'B'));  // replace → the old subtree is released
+      tx.commit();
+   }
+   CHECK(ses->get_root(0).get_subtree("big_tree").snapshot_cursor().count_keys() == 60);
+   {
+      auto tx = ses->start_transaction(0);
+      tx.remove("big_tree");
+      tx.commit();
+   }
+   REQUIRE(db->wait_for_compactor());
+   CHECK(ses->get_total_allocated_objects() == base);
+}
+
+// update churn: transactional UPDATEs of existing keys (the COW shared-mode path — every commit
+// re-clones the path) must not leak — allocation returns to baseline after dropping the keys.
+// GATE for the heart two-cow orphan bug (one leaked clone per transactional update): the bank
+// bench leaked ~2 objects/commit through exactly this shape until the update sites cow'd ONCE.
+TEMPLATE_TEST_CASE("conformance: update churn no leak", "[conformance][leak]", psitri_policy, heart_policy)
+{
+   auto db   = TestType::database::open(conf_dir(TestType::nm));
+   auto ses  = db->start_write_session();
+   const auto base = ses->get_total_allocated_objects();
+   {
+      auto tx = ses->start_transaction(0);
+      for (int i = 0; i < 200; ++i) tx.upsert("acct" + std::to_string(i), "00000000");
+      tx.commit();
+   }
+   for (int round = 0; round < 100; ++round)  // bench transfer shape: batch=1 update commits
+   {
+      auto tx = ses->start_transaction(0);
+      tx.upsert("acct" + std::to_string((7 * round) % 200), "11111111");
+      tx.upsert("acct" + std::to_string((13 * round + 5) % 200), "22222222");
+      tx.commit();
+   }
+   {
+      auto c = ses->get_root(0).snapshot_cursor();
+      CHECK(c.count_keys() == 200);  // updates added no keys
+   }
+   {
+      auto tx = ses->start_transaction(0);
+      tx.remove_range_counted("acct", "acct\xFF");
+      tx.commit();
+   }
+   REQUIRE(db->wait_for_compactor());
+   CHECK(ses->get_total_allocated_objects() == base);
+}
+
+// range_remove over a mix of byte keys and subtree keys: [key_02, key_08) removed (subtree values
+// cascade-freed, each counting as ONE key of the parent), survivors exact; then a second range
+// sweep empties the tree — allocation returns to baseline (no leak).
+TEMPLATE_TEST_CASE("conformance: range_remove over subtree keys no leak", "[conformance][leak]", psitri_policy, heart_policy)
+{
+   auto db   = TestType::database::open(conf_dir(TestType::nm));
+   auto ses  = db->start_write_session();
+   const auto base = ses->get_total_allocated_objects();
+   {
+      auto tx = ses->start_transaction(0);
+      for (int i = 0; i < 10; ++i)
+      {
+         std::string key = "key_0" + std::to_string(i);
+         if (i % 3 == 0)  // key_00, key_03, key_06, key_09 hold subtrees
+         {
+            auto sub = ses->start_write_transaction(ses->create_temporary_tree());
+            for (int j = 0; j < 40; ++j)
+               sub.upsert("s" + std::to_string(i) + "_" + std::to_string(j), "v");
+            tx.upsert_subtree(key, sub.get_tree());
+         }
+         else
+            tx.upsert(key, "regular");
+      }
+      CHECK(tx.remove_range_counted("key_02", "key_08") == 6);  // 02..07; subtrees at 03 + 06
+      auto rc = tx.snapshot_cursor();  // survivors: exact set, in order
+      std::vector<std::string> remaining;
+      rc.seek_begin();
+      while (!rc.is_end())
+      {
+         remaining.push_back(std::string(rc.key()));
+         rc.next();
+      }
+      REQUIRE(remaining.size() == 4);
+      CHECK(remaining[0] == "key_00");
+      CHECK(remaining[1] == "key_01");
+      CHECK(remaining[2] == "key_08");
+      CHECK(remaining[3] == "key_09");
+      tx.commit();
+   }
+   {
+      auto tx = ses->start_transaction(0);
+      CHECK(tx.remove_range_counted("key_00", "key_99") == 4);  // sweep the survivors
+      tx.commit();
+   }
+   REQUIRE(db->wait_for_compactor());
+   CHECK(ses->get_total_allocated_objects() == base);
 }

@@ -14,6 +14,7 @@
 // COW-to-root (ref-based unique|shared); `versioned`/version_history unused.
 #pragma once
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <stdexcept>  // std::runtime_error (ordered cursor hitting a bucket — see dispatch())
 #include <cstdint>
@@ -47,6 +48,20 @@ namespace heart::radix
    using bytes      = std::span<const uint8_t>;
    using key_view   = std::string_view;
    using value_view = std::string_view;
+
+   namespace detail
+   {
+      inline constexpr std::array<char, 256> max_key_data = []()
+      {
+         std::array<char, 256> arr{};
+         for (auto& c : arr)
+            c = '\xFF';
+         return arr;
+      }();
+   }  // namespace detail
+   /// Sentinel key that compares greater than any real key (psitri parity).
+   /// Use as the upper bound in range operations to mean "unbounded".
+   static constexpr key_view max_key{detail::max_key_data.data(), detail::max_key_data.size()};
 
    // A value_view kept SAFE TO READ by a held read_lock. ref-count keeps the object logically
    // alive; the read_lock pins its PAGE resident (the compactor can't evict/relocate it) — both
@@ -82,6 +97,27 @@ namespace heart::radix
    {
       return {reinterpret_cast<const uint8_t*>(s.data()), s.size()};
    }
+   // Compile-time COW mode (psitri's upsert_mode pattern): the mode is a TEMPLATE parameter of
+   // the whole mutation descent, never a runtime member — the unique fast path compiles with
+   // zero shared-handling overhead and a stale latch is unrepresentable. `unique` = a node may
+   // mutate in place when its own refcount is 1; `shared` = EVERY node on the path clones (a
+   // ref==1 child below a shared node is still snapshot-reachable). Discovery of sharedness
+   // (own ref>1 at a router entry, or a shared child range at a recursion site) selects the
+   // make_shared() INSTANTIATION for the rest of that subtree. Extensible enum (psitri also
+   // encodes op kinds); keep it a literal class so it can be a C++20 NTTP.
+   struct upsert_mode
+   {
+      enum kind : uint8_t
+      {
+         unique = 0,
+         shared = 1
+      };
+      kind k = unique;
+      constexpr bool        is_shared() const noexcept { return k == shared; }
+      constexpr upsert_mode make_shared() const noexcept { return {shared}; }
+      constexpr bool        operator==(const upsert_mode&) const noexcept = default;
+   };
+
    inline int common_prefix_len(bytes a, bytes b) noexcept
    {
       int n = int(std::min(a.size(), b.size()));
@@ -115,9 +151,11 @@ namespace heart::radix
          _alloc->register_type_ops<bitset_r4_node>();
          _alloc->register_type_ops<full_radix_node>();
          _alloc->register_type_ops<bucket_node>();
-         _root = make_node<setlist_u8>(bytes{});
-         for (uint32_t i = 0; i < num_roots; ++i)
-            _roots_ext[i] = sal::null_ptr_address;  // ptr_address(0) is VALID — null is 0xFFFFFFFF
+         // NULL IS A VALID EMPTY TREE — everywhere. No eager root: the direct-API working root
+         // (`_root`, an OWNING smart_ptr — psitri tree_context's discipline) starts empty and
+         // upsert_raw lazily creates on first write; an emptied tree returns to null. (The
+         // database layer's published roots live in SAL's root table, likewise null until the
+         // first commit.)
          // Start SAL's background threads ONLY AFTER this (main) thread has its session and root
          // — exactly as psitri's database does. Constructing with start_threads_now=true spins
          // the threads up mid-construction; they race the thread-local session handout so this
@@ -136,15 +174,34 @@ namespace heart::radix
          if (on == _bucket_mode)
             return;
          _bucket_mode = on;
-         _ses->release(_root);
-         _root = on ? make_bucket() : make_node<setlist_u8>(bytes{});
+         // Bucket mode needs its page root up front; radix mode starts null (= empty tree).
+         // smart_ptr assignment releases the previous root.
+         _root = sal::smart_ptr<sal::alloc_header>(
+             _ses, on ? make_bucket() : sal::ptr_address(sal::null_ptr_address));
       }
 
       // ── public API (psitri key_view/value_view; values are arbitrary bytes) ───
+      // psitri tree_context's root discipline: `_root` is an OWNING smart_ptr; mutation takes
+      // the address out, runs the COW (which releases the pre-image on change), and re-adopts.
       int upsert(key_view key, value_view val)
       {
          _ins_value_type = inline_value::vt_bytes;
-         upsert_raw(_root, as_bytes(key), as_bytes(val));
+         // Bucket mode is the WHOLE-TREE hybrid (bucket leaves at any depth; a full bucket
+         // splits into a radix router with bucket children, and insert_node's bucket case
+         // handles buckets met during any descent). This branch is just the main tree's entry
+         // into the bucket engine (bkt_insert: root-level bucket handling/splits) — the same
+         // scoping the old `&root_ref == &_root` identity check expressed before _root became
+         // a smart_ptr.
+         if (_bucket_mode)
+         {
+            auto        lock = _ses->lock();
+            ptr_address w    = _root.take();
+            _root = sal::smart_ptr<sal::alloc_header>(_ses, bkt_insert(w, as_bytes(key), 0,
+                                                                       as_bytes(val)));
+            return _old_value_size;
+         }
+         mutate_root(_root,
+                     [&](ptr_address pre) { return upsert_step(pre, as_bytes(key), as_bytes(val)); });
          return _old_value_size;
       }
 
@@ -178,10 +235,8 @@ namespace heart::radix
          int upsert(key_view k, value_view v)
          {
             _t->_ins_value_type = inline_value::vt_bytes;
-            ptr_address w       = _root.take();
-            if (w == sal::null_ptr_address) w = _t->make_node<setlist_u8>(bytes{});
-            _t->upsert_raw(w, as_bytes(k), as_bytes(v));  // engine COW: release(old)+assign(new)
-            _root = sal::smart_ptr<sal::alloc_header>(_t->session(), w);  // re-adopt (no inc)
+            _t->mutate_root(_root, [&](ptr_address pre)
+                            { return _t->upsert_step(pre, as_bytes(k), as_bytes(v)); });
             return _t->_old_value_size;
          }
       };
@@ -190,12 +245,8 @@ namespace heart::radix
       // Attach a built subtree under `key` (consumes the handle's ref → the terminal owns it).
       int upsert_subtree(key_view key, subtree&& s)
       {
-         _ins_value_type = inline_value::vt_subtree;
-         ptr_address sr  = s.consume();
-         uint32_t    raw = *sr;  // value bytes = the 4-byte root address
-         upsert_raw(_root, as_bytes(key),
-                    bytes{reinterpret_cast<const uint8_t*>(&raw), sizeof(raw)});
-         _ins_value_type = inline_value::vt_bytes;
+         ptr_address sub = s.consume();
+         mutate_root(_root, [&](ptr_address pre) { return attach_subtree_step(pre, key, sub); });
          return _old_value_size;
       }
       // Is the value at `key` a subtree?  get_subtree returns it as a handle (falsy if absent).
@@ -203,39 +254,81 @@ namespace heart::radix
       read_handle get_subtree(key_view key);  // defined out-of-line (needs cursor)
 
      private:
-      // Shared insert body for upsert/upsert_subtree/subtree::upsert (value-type already stashed).
-      // Updates root_ref in place on a COW-to-root; sets _old_value_size.
-      void upsert_raw(ptr_address& root_ref, bytes kb, bytes val)
+      // ── THE ROOT-TRANSITION DISCIPLINE (psitri tree_context) ───────────────────────────────
+      // Every mutating entry owns the pre-image as a smart_ptr moved OUT of the root, runs the
+      // descent against the borrowed address, restores the root on exception, and adopts the
+      // result via give(). The pre-image's release is STRUCTURAL — the displaced smart_ptr's
+      // destructor — never a manual _ses->release() in the entry, so no path (including throws)
+      // can orphan or double-release a root. `op` is ptr_address pre → ptr_address post; the
+      // *_step descents below never release the pre-image themselves.
+      template <class Op>
+      void mutate_root(sal::smart_ptr<sal::alloc_header>& root, Op&& op)
+      {
+         auto        old = std::move(root);  // own the pre-image; `root` is empty during the op
+         ptr_address nr;
+         try
+         {
+            nr = op(old.address());
+         }
+         catch (...)
+         {
+            root = std::move(old);  // restore on exception (psitri's guard)
+            throw;
+         }
+         if (nr != old.address())
+         {
+            // Adopt the new root bound to THE ENGINE SESSION (a default-constructed tree{}'s
+            // smart_ptr carries no session — its first write must bind one, or the eventual
+            // release dereferences null). `old` releases the pre-image on scope exit.
+            root = sal::smart_ptr<sal::alloc_header>(_ses, nr);
+         }
+         else
+            root = std::move(old);  // unchanged / mutated in place — put it back
+      }
+
+      // Shared insert descent for upsert/upsert_subtree/subtree::upsert (value-type already
+      // stashed). BORROWS `root` (the caller owns the pre-image; see mutate_root) and returns
+      // the post-image root — never releases the pre-image. A null root is the valid empty
+      // tree: the descent creates the first node lazily.
+      [[nodiscard]] ptr_address upsert_step(ptr_address root, bytes kb, bytes val)
       {
          auto lock       = _ses->lock();
          _old_value_size = -1;
-         _shared         = false;  // fresh unique→shared latch for this COW-to-root descent
-         if (_bucket_mode && &root_ref == &_root)
+         // The descent starts UNIQUE; sharedness is discovered per node/range and selects the
+         // shared INSTANTIATION (upsert_mode is a template parameter — no runtime latch).
+         if (root == sal::null_ptr_address)  // null = empty tree → first write creates the root
          {
-            _root = bkt_insert(_root, kb, 0, val);
-            return;
+            // Own the first node structurally: if the insert outgrows it the smart_ptr's
+            // destructor releases the intermediate; otherwise hand the ref to the caller.
+            sal::smart_ptr<sal::alloc_header> base(_ses, make_node<setlist_u8>(bytes{}));
+            ptr_address nr = insert_node<upsert_mode{}>(base.address(), kb, 0, val, {});
+            return nr == base.address() ? base.take() : nr;
          }
-         ptr_address nr = insert_node(root_ref, kb, 0, val, {});
-         if (nr != root_ref)
-         {
-            _ses->release(root_ref);
-            root_ref = nr;
-         }
+         return insert_node<upsert_mode{}>(root, kb, 0, val, {});
       }
 
      public:
 
       bool find(key_view key, value_view& out)
       {
-         auto        lock  = _ses->lock();
-         bytes       kb    = as_bytes(key);
+         auto  lock = _ses->lock();
+         bytes kb   = as_bytes(key);
          if (_bucket_mode)
             return bkt_find(kb, out);
-         ptr_address addr  = _root;
-         uint32_t    depth = 0;
+         if (!_root)  // null = empty tree
+            return false;
+         return find_in(*_ses, _root.address(), kb, out);
+      }
+      // The NATIVE iterative point lookup (skip-header dispatch + prefetch) on an ARBITRARY
+      // pinned root via an ARBITRARY session — STATIC: no engine state, so reader-session
+      // cursors share this exact hot path with the writer-thread find(). Returns false on a
+      // miss AND for subtree values (use is_subtree()/get_subtree()).
+      static bool find_in(sal::allocator_session& ses, ptr_address addr, bytes kb, value_view& out)
+      {
+         uint32_t depth = 0;
          for (;;)
          {
-            auto    ref   = _ses->get_ref<sal::alloc_header>(addr);
+            auto    ref   = ses.get_ref<sal::alloc_header>(addr);
             uint8_t shape = ref.cb_type();
             if (shape == uint8_t(dispatch_shape::r8) || shape == uint8_t(dispatch_shape::r2) ||
                 shape == uint8_t(dispatch_shape::r4))  // SKIP-HEADER: route off the segment line
@@ -273,17 +366,18 @@ namespace heart::radix
                                       : (shape == uint8_t(dispatch_shape::r2)
                                              ? ref.as<bitset_r2_node>().obj()->term_value()
                                              : ref.as<bitset_r4_node>().obj()->term_value());
-               return term_lookup(ref.obj(), tv, kb, depth, out);
+               return term_lookup(ses, ref.obj(), tv, kb, depth, out);
             }
             // R1: read CL0, dispatch by format. ONE get_ref resolves the node; the switch
             // (jump table) reinterprets that single resolved pointer per case (alloc_header is
             // at offset 0 of every node) — no second per-case get_ref on the same address.
-            bool                     cont = false;
-            const sal::alloc_header* b    = _ses->get_ref<sal::alloc_header>(addr).obj();
+            bool                     cont  = false;
+            bool                     found = false;
+            const sal::alloc_header* b     = ses.get_ref<sal::alloc_header>(addr).obj();
             switch (kind_of(b->type()))
             {
                case radix_kind::leaf:
-                  return leaf_read(addr, kb, depth, out);
+                  return leaf_read(ses, addr, kb, depth, out);
                case radix_kind::bucket:  // a bucket LEAF: search its key suffix
                {
                   const inline_value* iv = reinterpret_cast<const bucket_node*>(b)->find(
@@ -295,37 +389,37 @@ namespace heart::radix
                   return true;
                }
                case radix_kind::setlist_u8:
-                  cont = route_r1(reinterpret_cast<const setlist_u8*>(b), kb, depth, out, addr);
+                  cont = route_r1(ses, reinterpret_cast<const setlist_u8*>(b), kb, depth, out, addr, found);
                   break;
                case radix_kind::setlist_u16:
-                  cont = route_r1(reinterpret_cast<const setlist_u16*>(b), kb, depth, out, addr);
+                  cont = route_r1(ses, reinterpret_cast<const setlist_u16*>(b), kb, depth, out, addr, found);
                   break;
                case radix_kind::setlist_u32:
-                  cont = route_r1(reinterpret_cast<const setlist_u32*>(b), kb, depth, out, addr);
+                  cont = route_r1(ses, reinterpret_cast<const setlist_u32*>(b), kb, depth, out, addr, found);
                   break;
                case radix_kind::c1_32:
-                  cont = route_r1(reinterpret_cast<const bitset_c1_32*>(b), kb, depth, out, addr);
+                  cont = route_r1(ses, reinterpret_cast<const bitset_c1_32*>(b), kb, depth, out, addr, found);
                   break;
                case radix_kind::c1_64:
-                  cont = route_r1(reinterpret_cast<const bitset_c1_64*>(b), kb, depth, out, addr);
+                  cont = route_r1(ses, reinterpret_cast<const bitset_c1_64*>(b), kb, depth, out, addr, found);
                   break;
                case radix_kind::c1_128:
-                  cont = route_r1(reinterpret_cast<const bitset_c1_128*>(b), kb, depth, out, addr);
+                  cont = route_r1(ses, reinterpret_cast<const bitset_c1_128*>(b), kb, depth, out, addr, found);
                   break;
                case radix_kind::bitset_r2:
-                  cont = route_r1(reinterpret_cast<const bitset_r2_node*>(b), kb, depth, out, addr);
+                  cont = route_r1(ses, reinterpret_cast<const bitset_r2_node*>(b), kb, depth, out, addr, found);
                   break;
                case radix_kind::bitset_r4:
-                  cont = route_r1(reinterpret_cast<const bitset_r4_node*>(b), kb, depth, out, addr);
+                  cont = route_r1(ses, reinterpret_cast<const bitset_r4_node*>(b), kb, depth, out, addr, found);
                   break;
                case radix_kind::full:
-                  cont = route_r1(reinterpret_cast<const full_radix_node*>(b), kb, depth, out, addr);
+                  cont = route_r1(ses, reinterpret_cast<const full_radix_node*>(b), kb, depth, out, addr, found);
                   break;
                case radix_kind::bitset1:
                   __builtin_unreachable();  // not produced by the engine
             }
             if (!cont)
-               return _route_found;
+               return found;
          }
       }
 
@@ -337,8 +431,8 @@ namespace heart::radix
       // no double-free (mirrors insert's clone-retains-children / caller-releases-original
       // contract). An inline-tail value's bytes stay in the node's tail heap (intra-node
       // space, reclaimed on the next clone); that is not a refcount leak. A node that loses
-      // its last entry is dropped from its parent and freed, propagating to the root, which
-      // is reset to a fresh empty node (the tree always has a root).
+      // its last entry is dropped from its parent and freed, propagating to the root; a
+      // fully drained tree returns to null (the valid empty tree).
       bool remove(key_view key)
       {
          if (_bucket_mode)
@@ -346,34 +440,92 @@ namespace heart::radix
             auto lock = _ses->lock();
             return bkt_remove(as_bytes(key));
          }
-         return remove_raw(_root, as_bytes(key));
+         bool removed = false;
+         mutate_root(_root, [&](ptr_address pre) { return remove_step(pre, as_bytes(key), removed); });
+         return removed;
       }
-      // Root-parameterized COW-to-root remove (radix mode). Updates root_ref in place; on a fully
-      // drained tree installs a fresh empty root. Returns whether the key was found+removed.
-      bool remove_raw(ptr_address& root_ref, bytes kb)
+      // COW-to-root remove descent (radix mode). BORROWS `root` (the caller owns the pre-image;
+      // see mutate_root) and returns the post-image root — null when the tree fully drained
+      // (null IS the valid empty tree). Sets `removed` iff the key was found+deleted. Never
+      // releases the pre-image; a cloned-then-drained root (a descent-internal intermediate)
+      // is released here.
+      [[nodiscard]] ptr_address remove_step(ptr_address root, bytes kb, bool& removed)
       {
          auto lock = _ses->lock();
          _removed  = false;
          _emptied  = false;
-         _shared   = false;  // fresh unique→shared latch for this COW-to-root remove descent
-         if (root_ref == sal::null_ptr_address)
-            return false;
-         ptr_address nr = remove_node(root_ref, kb, 0);
+         removed   = false;
+         if (root == sal::null_ptr_address)
+            return root;
+         ptr_address nr = remove_node<upsert_mode{}>(root, kb, 0);  // unique start; mode discovered
+         removed         = _removed;
          if (!_removed)
-            return false;
-         if (_emptied)  // whole tree drained → free it, install a fresh empty root
+            return root;
+         if (_emptied)  // whole tree drained → the post-image is the empty (null) tree
          {
-            if (nr != root_ref)
-               _ses->release(root_ref);  // shared: drop our ref (snapshot keeps it)
-            _ses->release(nr);           // free the emptied (in-place or cloned) root
-            root_ref = make_node<setlist_u8>(bytes{});
+            if (nr != root)
+               _ses->release(nr);  // cloned-then-drained intermediate (pre-image is the caller's)
+            return sal::null_ptr_address;
          }
-         else if (nr != root_ref)
-         {
-            _ses->release(root_ref);
-            root_ref = nr;
-         }
-         return true;
+         return nr;
+      }
+      // Root-parameterized counted range-remove (radix mode), psitri semantics: delete every key in
+      // [lower, upper) and return how many; `upper == max_key` means unbounded; an inverted/empty
+      // range removes nothing. A removed subtree value cascades (and counts as ONE key of THIS
+      // tree). v1 is a remove-the-front loop — re-seek lower_bound(lower), point-remove — i.e.
+      // O(removed · depth), not psitri's recursive whole-subtree drop. The cursor is scoped to die
+      // BEFORE each remove so the working root stays uniquely owned (in-place delete, no COW churn).
+      uint64_t remove_range_counted_step(sal::smart_ptr<sal::alloc_header>& root, key_view lower,
+                                         key_view upper)
+      {
+         if (!root)
+            return 0;
+         if (lower >= upper && upper != max_key)
+            return 0;  // empty range
+         if (upper == max_key)
+            upper = {};  // internal unbounded representation
+         uint64_t removed = 0;
+         uint8_t  kb[1024];  // stack copy of the victim key (cursor keys are <= 1024 B; no heap)
+         mutate_root(root, [&](ptr_address pre) {
+            ptr_address cur = pre;  // borrowed; intermediate roots are owned (released) in-loop
+            for (;;)
+            {
+               size_t klen = 0;
+               {
+                  cursor c(this, cur);  // pins cur — scoped: released before the remove
+                  if (!(lower.empty() ? c.seek_begin() : c.lower_bound(lower)))
+                     break;  // nothing >= lower
+                  key_view k = c.key();
+                  if (!upper.empty() && !(k < upper))
+                     break;  // first candidate is already past the range
+                  klen = k.size();
+                  std::memcpy(kb, k.data(), klen);
+               }
+               bool        rem = false;
+               ptr_address nxt = remove_step(cur, bytes{kb, klen}, rem);
+               if (!rem)
+                  break;  // defensive: the key just seen must be removable (single writer)
+               if (nxt != cur && cur != pre)
+                  _ses->release(cur);  // intermediate post-image displaced by this iteration
+               cur = nxt;
+               ++removed;
+            }
+            return cur;  // mutate_root releases `pre` iff cur != pre
+         });
+         return removed;
+      }
+      // Subtree-attach descent: store a vt_subtree terminal at `k` whose value is the subtree
+      // root's 4 address bytes; the terminal takes ownership of the caller's DONATED ref (no
+      // retain here). BORROWS `root` like every *_step (the caller owns the pre-image; null is
+      // the valid empty tree). Shared stash discipline: _ins_value_type set and restored.
+      [[nodiscard]] ptr_address attach_subtree_step(ptr_address root, key_view k, ptr_address sub)
+      {
+         _ins_value_type = inline_value::vt_subtree;
+         uint32_t    raw = *sub;
+         ptr_address nr =
+             upsert_step(root, as_bytes(k), bytes{reinterpret_cast<const uint8_t*>(&raw), sizeof(raw)});
+         _ins_value_type = inline_value::vt_bytes;
+         return nr;
       }
 
       // ── ordered queries (this is a SORTED container, not a hash map) ────────────
@@ -394,7 +546,7 @@ namespace heart::radix
       {
          auto lock = _ses->lock();
          KB   kb;
-         inorder_walk(_root, kb, cb);
+         inorder_walk(_root.address(), kb, cb);
       }
       // ══ TESTING / DIAGNOSTIC HOOKS — NOT THE PUBLIC API; DO NOT USE IN PRODUCTION ══════════
       // The hooks in this region (count_keys_at, sig_at, drop_root, take_snapshot/release_snapshot,
@@ -415,6 +567,32 @@ namespace heart::radix
          inorder_walk(root, kb, cb);
          return n;
       }
+      // [testing] refcount audit: in a QUIESCED single-root tree (no snapshots, no transactions)
+      // every reachable node + external leaf must be at EXACTLY ref 1 (one owner: its parent /
+      // the root slot). Walks the tree and reports nodes whose ref != 1 — each one carries a
+      // phantom ref and will be STRANDED (never destroyed) when the tree is dropped.
+      struct ref_audit
+      {
+         uint64_t nodes = 0, leaves = 0, bad = 0;
+         uint64_t bad_by_depth[16] = {};
+      };
+      ref_audit audit_refs(int max_print = 10)
+      {
+         auto      lock = _ses->lock();
+         ref_audit ra;
+         if (!_root)  // null = empty tree
+            return ra;
+         audit_walk(_root.address(), 0, ra, max_print);
+         uint32_t rref = _ses->get_ref<sal::alloc_header>(_root.address()).ref();
+         if (rref != 1)
+            std::printf("  [audit] ROOT %u ref=%u (expect 1)\n", *_root.address(), rref);
+         return ra;
+      }
+
+     private:
+      void audit_walk(ptr_address a, int depth, ref_audit& ra, int& max_print);  // after dispatch
+
+     public:
       // [testing] order-independent (count, checksum) signature of the keyspace at a pinned root —
       // verifies a snapshot's exact contents (not just count) against the test model after churn.
       std::pair<uint64_t, uint64_t> sig_at(ptr_address root)
@@ -433,31 +611,13 @@ namespace heart::radix
          return {n, sum};
       }
 
-      void commit()
-      {
-         auto lock = _ses->lock();
-         if (_snap_valid)
-            _ses->release(_snap);
-         _snap = _root;
-         _ses->retain(_root);
-         _snap_valid = true;
-      }
-
-      // [testing] release the ENTIRE tree in one cascade — bench hook for big-subtree-drop latency.
-      // Drops the snapshot pin first so the root is uniquely owned (ref==1) and the single
-      // release() cascades through every node. Resets to a fresh empty root so the tree stays
-      // usable. (Build the tree WITHOUT per-op commit() so interior nodes are uniquely owned and
-      // the cascade actually frees them rather than stopping at a shared snapshot.)
+      // [testing] release the ENTIRE tree in one cascade — bench hook for big-subtree-drop
+      // latency. The tree keeps NO snapshot state of its own (callers pin snapshots via
+      // take_snapshot/release_snapshot); null is the valid empty tree.
       void drop_root()
       {
          auto lock = _ses->lock();
-         if (_snap_valid)
-         {
-            _ses->release(_snap);
-            _snap_valid = false;
-         }
-         _ses->release(_root);
-         _root = make_node<setlist_u8>(bytes{});
+         _root.release();  // null = empty tree
       }
 
       uint64_t object_count() const { return _alloc->total_allocated_objects(); }
@@ -482,22 +642,23 @@ namespace heart::radix
       bool adaptive() const { return _adaptive; }
       void set_c1_promote(bool on) { _c1_promote_on = on; }
       // ══ TESTING / DIAGNOSTIC HOOKS (cont.) — NOT THE PUBLIC API; raw ptr_address, no safety ══
-      // [testing] current refcount of the root node (is the snapshot pinning it?).
-      uint32_t root_use_count() { return _ses->get_ref<sal::alloc_header>(_root).ref(); }
-      // [testing] pin the current root as an independent snapshot (caller must release_snapshot()).
-      ptr_address take_snapshot() { _ses->retain(_root); return _root; }
-      void        release_snapshot(ptr_address s) { _ses->release(s); }
+      // [testing] current refcount of the root node (is a snapshot pinning it?).
+      uint32_t root_use_count()
+      {
+         return !_root ? 0 : _ses->get_ref<sal::alloc_header>(_root.address()).ref();
+      }
+      // [testing] A SNAPSHOT IS A smart_ptr COPY — the psitri definition: copying retains,
+      // destruction releases. Hold the returned smart_ptr to pin this version of the tree;
+      // drop it (scope/assignment) to release. No engine-held pin state, no manual unpin.
+      sal::smart_ptr<sal::alloc_header> root_snapshot() const { return _root; }
       // [testing] adopt a pinned snapshot as the live working root → writes COW a DIVERGENT lineage
       // from it (the snapshot stays frozen). Used to stress two+ writers sharing a common ancestor.
-      void adopt_root(ptr_address s)
+      void adopt_root(sal::smart_ptr<sal::alloc_header> s)
       {
          auto lk = _ses->lock();
-         if (_snap_valid) { _ses->release(_snap); _snap_valid = false; }
-         _ses->retain(s);
-         _ses->release(_root);
-         _root = s;
+         _root   = std::move(s);  // assignment releases the displaced working root
       }
-      ptr_address working_root() const { return _root; }
+      ptr_address working_root() const { return _root.address(); }
       // [testing] read a key from an ARBITRARY (pinned) root — used to test snapshot isolation.
       bool find_at(ptr_address root, key_view key, value_view& out)
       {
@@ -525,10 +686,11 @@ namespace heart::radix
          uint64_t grows = 0;           // subset of clones forced by a full tail heap
          uint64_t in_place = 0;        // unique + room: mutated in place (no copy)
          uint64_t restrides = 0;       // wide-node splits (re_stride to a narrower stride)
+         uint64_t upgrades = 0;        // grow_and_set tier widenings (setlist→c1/r2/r4/full)
       };
       const cow_counters&        counters() const { return _cc; }
       sal::allocator_session_ptr session() const { return _ses; }
-      ptr_address                root_addr() const { return _root; }
+      ptr_address                root_addr() const { return _root.address(); }
 
       struct tier_counts
       {
@@ -556,7 +718,7 @@ namespace heart::radix
       {
          auto        lock = _ses->lock();
          tier_counts tc;
-         walk(_root, tc);
+         walk(_root.address(), tc);
          return tc;
       }
 
@@ -634,6 +796,8 @@ namespace heart::radix
       }
       void walk(ptr_address a, tier_counts& tc)
       {
+         if (a == sal::null_ptr_address)  // null = empty tree
+            return;
          switch (kind_of(_ses->get_ref<sal::alloc_header>(a)->type()))
          {
             case radix_kind::leaf:
@@ -912,13 +1076,15 @@ namespace heart::radix
       // here, which would double-free). modify()'s own SAL-COW is never reached: heart pre-clones
       // whenever ref>1, so a node that reaches modify() is unique and (write_protect off)
       // always can_modify → an in-place write.
-      template <class N>
+      template <upsert_mode mode, class N>
       N* cow(sal::smart_ref<N>& ref, ptr_address& addr, uint32_t extra = 0)
       {
-         // SHARED mode (snapshot reachable) OR a directly-shared node → must CLONE, never mutate in
-         // place. _shared forces the clone even at ref==1, because a ref==1 child of a shared parent
-         // is still reachable from the snapshot (the clone retains the siblings — the COW-to-root cost).
-         if (_shared || ref.ref() > 1)
+         // SHARED mode (snapshot reachable) OR a directly-shared node → must CLONE, never mutate
+         // in place. The mode forces the clone even at ref==1, because a ref==1 child of a shared
+         // parent is still reachable from the snapshot (the clone retains the siblings — the
+         // COW-to-root cost). The runtime ref check remains in unique mode: it is the discovery
+         // point for nodes that became snapshot-reachable since the entry dispatch.
+         if (mode.is_shared() || ref.ref() > 1)
          {
             addr = clone<N>(addr, ref.obj(), extra);  // reuse the held ref — no second get_ref
             return mut<N>(addr);
@@ -934,11 +1100,29 @@ namespace heart::radix
       }
       // Address-only overload: resolves once and delegates. Behavior-identical to threading a
       // ref; used by call sites not (yet) holding a smart_ref.
-      template <class N>
+      template <upsert_mode mode, class N>
       N* cow(ptr_address& addr, uint32_t extra = 0)
       {
          sal::smart_ref<N> ref = _ses->get_ref<N>(addr);
-         return cow<N>(ref, addr, extra);
+         return cow<mode, N>(ref, addr, extra);
+      }
+      // Writable access to a FRESH node — one THIS op just allocated (collision child, re_stride
+      // target, prefix-split parent). A fresh node is never snapshot-reachable, so the shared
+      // latch does NOT apply: grow in place when the heap has room, else realloc wider and FREE
+      // the original (we hold its only ref). Using cow() here instead is a BUG — under the latch
+      // it clones the fresh node and orphans the original (one leaked object per call).
+      template <class N>
+      N* grow_fresh(ptr_address& addr, uint32_t extra = 0)
+      {
+         sal::smart_ref<N> ref = _ses->get_ref<N>(addr);
+         assert(ref.ref() == 1 && "grow_fresh targets a node this op just built");
+         if (ref->free_heap() >= extra)
+            return ref.modify().get();
+         const ptr_address pre = addr;
+         addr = clone<N>(addr, ref.obj(), extra);  // clone retains children…
+         _ses->release(pre);  // …and destroying the fresh original releases its refs: balanced
+         ++_cc.grows;
+         return mut<N>(addr);
       }
 
       // ── terminal values: one size-gated rule ───────────────────────────────────
@@ -946,7 +1130,7 @@ namespace heart::radix
       {
          return int(suffix.size() + value.size()) <= max_inline;
       }
-      const inline_value* inline_of(const sal::alloc_header* node, smart_address sa) const
+      static const inline_value* inline_of(const sal::alloc_header* node, smart_address sa)
       {
          return reinterpret_cast<const inline_value*>(reinterpret_cast<const char*>(node) +
                                                       node->size() - sa.tail_offset());
@@ -979,12 +1163,14 @@ namespace heart::radix
          }
          return smart_address::from_pointer(make_leaf(suffix, value, hint));
       }
-      // Allocate a terminal attached to `addr`: cow (room for the value), then write it in.
-      // (Address overload for callers not threading a smart_ref.)
+      // Allocate a terminal attached to a FRESH node `addr` (every caller passes a node this op
+      // just built — collision child, prefix-split parent, re_stride router): grow_fresh (room
+      // for the value), then write it in. NOT for snapshot-reachable nodes — those go through
+      // cow() exactly once at their mutation site (see the router same-key update).
       template <class N>
       smart_address make_value(ptr_address& addr, bytes suffix, bytes value, sal::alloc_hint hint)
       {
-         N* n = cow<N>(addr, value_tail_need(suffix, value));
+         N* n = grow_fresh<N>(addr, value_tail_need(suffix, value));
          return make_value_into<N>(n, suffix, value, hint);
       }
       // Zero-copy view of a terminal's {suffix,value} as raw bytes — a `bytes` overload of
@@ -994,9 +1180,14 @@ namespace heart::radix
       // in is COW-released. So views into node memory stay valid across later allocations.
       void term_view(const sal::alloc_header* node, smart_address sa, bytes& suf, bytes& val) const
       {
+         term_view(*_ses, node, sa, suf, val);
+      }
+      static void term_view(sal::allocator_session& ses, const sal::alloc_header* node,
+                            smart_address sa, bytes& suf, bytes& val)
+      {
          const inline_value* iv = sa.is_tail()
                                       ? inline_of(node, sa)
-                                      : &_ses->get_ref<leaf_node>(sa.as_pointer()).obj()->value;
+                                      : &ses.get_ref<leaf_node>(sa.as_pointer()).obj()->value;
          suf = bytes{iv->data, size_t(iv->suffix_len)};
          val = bytes{iv->data + iv->suffix_len, size_t(iv->value_len)};
       }
@@ -1004,11 +1195,17 @@ namespace heart::radix
       // byte value from a subtree value.
       const inline_value* term_iv(const sal::alloc_header* node, smart_address sa) const
       {
+         return term_iv(*_ses, node, sa);
+      }
+      static const inline_value* term_iv(sal::allocator_session& ses, const sal::alloc_header* node,
+                                         smart_address sa)
+      {
          return sa.is_tail() ? inline_of(node, sa)
-                             : &_ses->get_ref<leaf_node>(sa.as_pointer()).obj()->value;
+                             : &ses.get_ref<leaf_node>(sa.as_pointer()).obj()->value;
       }
       // Resolve an inline tail on `node`: its suffix must equal `rem`.
-      bool inline_at(const sal::alloc_header* node, smart_address sa, bytes rem, value_view& out) const
+      static bool inline_at(const sal::alloc_header* node, smart_address sa, bytes rem,
+                            value_view& out)
       {
          const inline_value* iv = inline_of(node, sa);
          if (iv->suffix_len != rem.size() ||
@@ -1019,18 +1216,19 @@ namespace heart::radix
          out = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len), iv->value_len);
          return true;
       }
-      bool term_lookup(const sal::alloc_header* node, smart_address tv, bytes key, uint32_t depth,
-                       value_view& out)
+      static bool term_lookup(sal::allocator_session& ses, const sal::alloc_header* node,
+                              smart_address tv, bytes key, uint32_t depth, value_view& out)
       {
          if (tv.is_null())
             return false;
          if (tv.is_tail())
             return inline_at(node, tv, key.subspan(depth), out);
-         return leaf_read(tv.as_pointer(), key, depth, out);
+         return leaf_read(ses, tv.as_pointer(), key, depth, out);
       }
-      bool leaf_read(ptr_address addr, bytes key, uint32_t depth, value_view& out)
+      static bool leaf_read(sal::allocator_session& ses, ptr_address addr, bytes key,
+                            uint32_t depth, value_view& out)
       {
-         const leaf_node* n   = _ses->get_ref<leaf_node>(addr).obj();
+         const leaf_node* n   = ses.get_ref<leaf_node>(addr).obj();
          bytes            suf = n->suffix();
          bytes            rem = key.subspan(depth);
          if (suf.size() != rem.size() ||
@@ -1042,14 +1240,17 @@ namespace heart::radix
          out     = value_view(reinterpret_cast<const char*>(v.data()), v.size());
          return true;
       }
+      template <upsert_mode mode>
       ptr_address update_leaf_value(ptr_address addr, bytes val)
       {
          auto             ref = _ses->get_ref<leaf_node>(addr);
          const leaf_node* ln  = ref.obj();
          // Never overwrite in place when a subtree is involved (old or new): route through
          // make_leaf so the OLD leaf is released (its destroy frees the old subtree root) and the
-         // NEW leaf is stamped with the pending value_type.
-         if (_ins_value_type == inline_value::vt_bytes && !ln->is_subtree() &&
+         // NEW leaf is stamped with the pending value_type. Also never in place under the SHARED
+         // latch: a ref==1 leaf below a shared node is still reachable from the snapshot —
+         // mutating it would corrupt the snapshot's view (same rule as cow()).
+         if (_ins_value_type == inline_value::vt_bytes && !ln->is_subtree() && !mode.is_shared() &&
              ref.ref() == 1 && ln->value.value_len == val.size())
          {
             leaf_node* w = ref.modify().get();
@@ -1081,28 +1282,39 @@ namespace heart::radix
          void truncate(uint32_t l) noexcept { len = l; }
       };
 
-      bool is_terminal_branch(smart_address sa) const
+      bool is_terminal_branch(smart_address sa) const { return is_terminal_branch(*_ses, sa); }
+      static bool is_terminal_branch(sal::allocator_session& ses, smart_address sa)
       {
          if (sa.is_tail())
             return true;
-         return _ses->get_ref<sal::alloc_header>(sa.as_pointer())->type() == leaf_node::type_id;
+         return ses.get_ref<sal::alloc_header>(sa.as_pointer())->type() == leaf_node::type_id;
       }
       // Suffix bytes + value of a terminal, both viewing node memory (no copy).
       void term_view(const sal::alloc_header* node, smart_address sa, bytes& suf,
                      value_view& val) const
       {
+         term_view(*_ses, node, sa, suf, val);
+      }
+      static void term_view(sal::allocator_session& ses, const sal::alloc_header* node,
+                            smart_address sa, bytes& suf, value_view& val)
+      {
          const inline_value* iv =
              sa.is_tail() ? inline_of(node, sa)
-                          : &_ses->get_ref<leaf_node>(sa.as_pointer()).obj()->value;
+                          : &ses.get_ref<leaf_node>(sa.as_pointer()).obj()->value;
          suf = bytes{iv->data, size_t(iv->suffix_len)};
          val = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len), iv->value_len);
       }
       // Append a terminal's suffix to kb and return its value (both view node memory).
       value_view append_terminal(const sal::alloc_header* node, smart_address sa, KB& kb)
       {
+         return append_terminal(*_ses, node, sa, kb);
+      }
+      static value_view append_terminal(sal::allocator_session& ses, const sal::alloc_header* node,
+                                        smart_address sa, KB& kb)
+      {
          bytes      suf;
          value_view v;
-         term_view(node, sa, suf, v);
+         term_view(ses, node, sa, suf, v);
          kb.append(suf.data(), suf.size());
          return v;
       }
@@ -1274,10 +1486,22 @@ namespace heart::radix
       // ONE get_ref resolves the node; the type-switch lowers to a jump table; each case
       // reinterprets that single resolved pointer (alloc_header is at offset 0 of every node)
       // — no second per-case get_ref. This is the per-step cost of an ordered scan.
+      // ── READ-PATH SESSION CONTRACT ─────────────────────────────────────────────────────────
+      // Every read-only descent helper below takes the SAL session as an explicit parameter and
+      // is STATIC: the compiler proves the read path touches no engine state, so a cursor pinned
+      // through a READER session (one session per thread; allocator_session_ptr's refcount is
+      // non-atomic and must never be copied cross-thread — every get_ref copies it) can descend
+      // concurrently with the single writer. The parameterless members forward *_ses (writer
+      // thread). Write paths (insert/remove/flush) stay member-session by construction.
       template <class F>
       auto dispatch(ptr_address addr, F&& f)
       {
-         const sal::alloc_header* b = _ses->get_ref<sal::alloc_header>(addr).obj();
+         return dispatch(*_ses, addr, std::forward<F>(f));
+      }
+      template <class F>
+      static auto dispatch(sal::allocator_session& ses, ptr_address addr, F&& f)
+      {
+         const sal::alloc_header* b = ses.get_ref<sal::alloc_header>(addr).obj();
          switch (kind_of(b->type()))
          {
             case radix_kind::setlist_u8:
@@ -1315,9 +1539,10 @@ namespace heart::radix
       // Resolve `a` to a bucket leaf, or nullptr if it is a radix node. Buckets are dense sorted
       // (suffix,value) pages, not radix routers, so the ordered descent/seek/inorder paths handle
       // them explicitly instead of through dispatch() (which has no bucket adaptor).
-      const bucket_node* bucket_at(ptr_address a)
+      const bucket_node* bucket_at(ptr_address a) { return bucket_at(*_ses, a); }
+      static const bucket_node* bucket_at(sal::allocator_session& ses, ptr_address a)
       {
-         const sal::alloc_header* b = _ses->get_ref<sal::alloc_header>(a).obj();
+         const sal::alloc_header* b = ses.get_ref<sal::alloc_header>(a).obj();
          return b->type() == bucket_node::type_id ? reinterpret_cast<const bucket_node*>(b) : nullptr;
       }
       // Append a bucket entry's suffix to kb and view its value (entry order == key order).
@@ -1331,47 +1556,48 @@ namespace heart::radix
       // Append an entry's stem bytes (+ inline suffix if terminal) and either yield its
       // value (terminal) or descend into its child to that subtree's minimum.
       template <class Ad>
-      void take_entry_min(Ad ad, int c, KB& kb, value_view& out)
+      static void take_entry_min(sal::allocator_session& ses, Ad ad, int c, KB& kb, value_view& out)
       {
          uint8_t       sb[4];
          const int     nb = stem_bytes(ad.cell(c), ad.stem_width(), ad.cw(), sb);
          kb.append(sb, size_t(nb));
          const smart_address br = ad.branch(c);
-         if (is_terminal_branch(br))
+         if (is_terminal_branch(ses, br))
          {
-            out = append_terminal(ad.node(), br, kb);
+            out = append_terminal(ses, ad.node(), br, kb);
             return;
          }
-         descend_min(br.as_pointer(), kb, out);
+         descend_min(ses, br.as_pointer(), kb, out);
       }
       // Minimum key of this node's subtree, with the node's prefix ALREADY in kb.
       template <class Ad>
-      void take_min_here(Ad ad, KB& kb, value_view& out)
+      static void take_min_here(sal::allocator_session& ses, Ad ad, KB& kb, value_view& out)
       {
          if (!ad.term().is_null())  // a key ends here → EOF sorts before any byte
          {
-            out = append_terminal(ad.node(), ad.term(), kb);
+            out = append_terminal(ses, ad.node(), ad.term(), kb);
             return;
          }
-         take_entry_min(ad, ad.first(), kb, out);  // else the smallest stem
+         take_entry_min(ses, ad, ad.first(), kb, out);  // else the smallest stem
       }
-      void descend_min(ptr_address addr, KB& kb, value_view& out)
+      static void descend_min(sal::allocator_session& ses, ptr_address addr, KB& kb, value_view& out)
       {
-         if (const bucket_node* bn = bucket_at(addr))  // bucket subtree → its smallest entry
+         if (const bucket_node* bn = bucket_at(ses, addr))  // bucket subtree → its smallest entry
          {
             assert(bn->nent > 0);
             out = bucket_entry(bn, 0, kb);
             return;
          }
-         dispatch(addr, [&](auto ad) {
+         dispatch(ses, addr, [&](auto ad) {
             bytes pfx = ad.prefix();
             kb.append(pfx.data(), pfx.size());
-            take_min_here(ad, kb, out);
+            take_min_here(ses, ad, kb, out);
          });
       }
 
       template <class Ad>
-      bool seek_in(Ad ad, bytes q, uint32_t depth, bool strict, KB& kb, value_view& out)
+      static bool seek_in(sal::allocator_session& ses, Ad ad, bytes q, uint32_t depth, bool strict,
+                          KB& kb, value_view& out)
       {
          const uint32_t save  = kb.len;
          bytes          pfx   = ad.prefix();
@@ -1389,7 +1615,7 @@ namespace heart::radix
          if (j < m && cmp < 0)  // q < this path → whole subtree > q → its minimum
          {
             kb.append(pfx.data(), pfx.size());
-            take_min_here(ad, kb, out);
+            take_min_here(ses, ad, kb, out);
             return true;
          }
          if (j < m && cmp > 0)  // q > this path → every key here < q
@@ -1399,13 +1625,13 @@ namespace heart::radix
          {
             if (avail < int(pfx.size()))  // q is a strict prefix of the path → all > q
             {
-               take_min_here(ad, kb, out);
+               take_min_here(ses, ad, kb, out);
                return true;
             }
             // q == path exactly
             if (!strict && !ad.term().is_null())
             {
-               out = append_terminal(ad.node(), ad.term(), kb);
+               out = append_terminal(ses, ad.node(), ad.term(), kb);
                return true;
             }
             if (!ad.valid(ad.first()))  // nothing greater (term-only & strict)
@@ -1413,7 +1639,7 @@ namespace heart::radix
                kb.truncate(save);
                return false;
             }
-            take_entry_min(ad, ad.first(), kb, out);
+            take_entry_min(ses, ad, ad.first(), kb, out);
             return true;
          }
          // q continues past the prefix; the node term (== path) is < q, so skip it.
@@ -1432,9 +1658,9 @@ namespace heart::radix
             kb.append(sb, size_t(nb));
             if (exact)  // stem equals q's stem → q may continue into this branch
             {
-               if (is_terminal_branch(br))
+               if (is_terminal_branch(ses, br))
                {
-                  const value_view v  = append_terminal(ad.node(), br, kb);
+                  const value_view v  = append_terminal(ses, ad.node(), br, kb);
                   const int        kc = key_cmp(kb, q);
                   if (kc > 0 || (kc == 0 && !strict))
                   {
@@ -1443,19 +1669,19 @@ namespace heart::radix
                   }
                   kb.truncate(s2);  // this key <= q (or == q & strict) → try the next stem
                }
-               else if (seek(br.as_pointer(), q, d2 + uint32_t(ad.cw()), strict, kb, out))
+               else if (seek(ses, br.as_pointer(), q, d2 + uint32_t(ad.cw()), strict, kb, out))
                   return true;
                else
                   kb.truncate(s2);  // child held nothing >= q → next stem
             }
             else  // strictly greater stem → whole branch > q → its minimum
             {
-               if (is_terminal_branch(br))
+               if (is_terminal_branch(ses, br))
                {
-                  out = append_terminal(ad.node(), br, kb);
+                  out = append_terminal(ses, ad.node(), br, kb);
                   return true;
                }
-               descend_min(br.as_pointer(), kb, out);
+               descend_min(ses, br.as_pointer(), kb, out);
                return true;
             }
          }
@@ -1463,8 +1689,8 @@ namespace heart::radix
          return false;
       }
       // Seek inside a bucket: the smallest entry whose suffix >= q[depth:] (or > q if strict).
-      bool seek_bucket(const bucket_node* bn, bytes q, uint32_t depth, bool strict, KB& kb,
-                       value_view& out)
+      static bool seek_bucket(const bucket_node* bn, bytes q, uint32_t depth, bool strict, KB& kb,
+                              value_view& out)
       {
          const int      avail = int(q.size()) > int(depth) ? int(q.size()) - int(depth) : 0;
          const uint8_t* s     = q.data() + depth;  // not dereferenced when avail == 0
@@ -1476,18 +1702,25 @@ namespace heart::radix
       }
       bool seek(ptr_address addr, bytes q, uint32_t depth, bool strict, KB& kb, value_view& out)
       {
-         if (const bucket_node* bn = bucket_at(addr))
+         return seek(*_ses, addr, q, depth, strict, kb, out);
+      }
+      static bool seek(sal::allocator_session& ses, ptr_address addr, bytes q, uint32_t depth,
+                       bool strict, KB& kb, value_view& out)
+      {
+         if (const bucket_node* bn = bucket_at(ses, addr))
             return seek_bucket(bn, q, depth, strict, kb, out);
-         return dispatch(addr,
-                         [&](auto ad) { return seek_in(ad, q, depth, strict, kb, out); });
+         return dispatch(ses, addr,
+                         [&](auto ad) { return seek_in(ses, ad, q, depth, strict, kb, out); });
       }
       bool ordered_seek(key_view key, bool strict, std::string& out_key, value_view& out_val)
       {
          auto       lock = _ses->lock();
+         if (!_root)  // null = empty tree
+            return false;
          bytes      q    = as_bytes(key);
          KB         kb;
          value_view v;
-         if (!seek(_root, q, 0, strict, kb, v))
+         if (!seek(_root.address(), q, 0, strict, kb, v))
             return false;
          out_key.assign(reinterpret_cast<const char*>(kb.buf), kb.len);
          out_val = v;
@@ -1530,6 +1763,8 @@ namespace heart::radix
       template <class Cb>
       void inorder_walk(ptr_address addr, KB& kb, Cb& cb)
       {
+         if (addr == sal::null_ptr_address)  // null = empty tree
+            return;
          if (const bucket_node* bn = bucket_at(addr))  // bucket leaf: emit entries in key order
          {
             const uint32_t save = kb.len;
@@ -1565,6 +1800,19 @@ namespace heart::radix
              : _t(t), _root(t->session(), root, /*retain=*/true)
          {
          }
+         // Pre-pinned ctor: adopt a root ALREADY retained via an arbitrary session — the reader-
+         // session path (the retain happens under the publish mutex; see snapshot_cursor_at).
+         cursor(radix_tree* t, sal::smart_ptr<sal::alloc_header> pinned) noexcept
+             : _t(t), _root(std::move(pinned))
+         {
+         }
+         // Every read_lock AND every node access (get_ref) this cursor makes goes through the
+         // session that PINNED its root. SAL sessions are single-thread-owned (and every get_ref
+         // copies the session ptr, whose refcount is NON-atomic): a reader-session cursor must
+         // lock, descend, and release through its OWN session, never the writer's. For cursors
+         // made on the writer thread _root.session() == the engine session — identical behavior.
+         sal::read_lock          rlock() const noexcept { return _root.session()->lock(); }
+         sal::allocator_session& ses() const noexcept { return *_root.session(); }
 
         public:
          explicit cursor(radix_tree* t) noexcept
@@ -1576,7 +1824,12 @@ namespace heart::radix
          // is left ON a valid entry, `false` when it lands at end / the key is absent. (NOT is_end.)
          bool seek_begin()  // position at the first (smallest) key; true if there is one
          {
-            auto lk = _t->_ses->lock();
+            if (_root.address() == sal::null_ptr_address)  // empty/uncommitted root
+            {
+               reset();
+               return false;
+            }
+            auto lk = rlock();
             reset();
             descend_min(_root.address());
             return _valid;
@@ -1595,7 +1848,7 @@ namespace heart::radix
          {
             if (!_valid)
                return (_end < 0) ? seek_begin() : false;  // from rend → first key; from end → stay
-            auto lk = _t->_ses->lock();
+            auto lk = rlock();
             while (_depth > 0)
             {
                const int r = advance_top();
@@ -1616,7 +1869,7 @@ namespace heart::radix
          {
             if (!_valid)
                return (_end >= 0) ? seek_last() : false;  // from end → last key; from rend → stay
-            auto lk = _t->_ses->lock();
+            auto lk = rlock();
             while (_depth > 0)
             {
                const int r = retreat_top();
@@ -1635,7 +1888,13 @@ namespace heart::radix
          }
          bool seek_last()  // position at the last (largest) key; true if there is one
          {
-            auto lk = _t->_ses->lock();
+            if (_root.address() == sal::null_ptr_address)  // empty/uncommitted root
+            {
+               reset();
+               _end = -1;
+               return false;
+            }
+            auto lk = rlock();
             reset();
             descend_max(_root.address());
             if (!_valid) _end = -1;
@@ -1654,7 +1913,11 @@ namespace heart::radix
          // ── first-class subtree values ── (handles only; ptr_address stays internal)
          bool        is_subtree() const noexcept { return _valid && _is_subtree; }  // value is a subtree
          read_handle subtree() const;                                    // the nested tree (handle)
-         cursor      subtree_cursor() const { return cursor(_t, _subtree); }  // iterate it
+         cursor      subtree_cursor() const  // iterate it (pinned via THIS cursor's session)
+         {
+            return cursor(_t, sal::smart_ptr<sal::alloc_header>(_root.session(), _subtree,
+                                                                /*retain=*/true));
+         }
          // Borrowed value VIEW, kept valid by a read_lock bundled into the return (the caller extends
          // the safe-read window by holding the value_ref). Empty if not positioned/subtree. Symmetric
          // with psitri::cursor::pinned_value() — the safe replacement for value(read_lock&).
@@ -1663,27 +1926,27 @@ namespace heart::radix
          // need the bytes longer.
          value_ref pinned_value() const
          {
-            return value_ref{_t->_ses->lock(), (_valid && !_is_subtree) ? _val : value_view{}};
+            return value_ref{rlock(), (_valid && !_is_subtree) ? _val : value_view{}};
          }
          // Owned COPY of the value (no lifetime concern). Holds the read_lock only across the copy.
          template <class T = std::string>
          std::optional<T> value() const
          {
             if (!_valid || _is_subtree) return std::nullopt;
-            auto lk = _t->_ses->lock();  // pin the page resident while we copy out
+            auto lk = rlock();  // pin the page resident while we copy out
             return T(_val.data(), _val.data() + _val.size());
          }
          template <class F>
          void get_value(F&& fn) const  // scoped: the view is valid only inside fn (lock held)
          {
-            auto lk = _t->_ses->lock();
+            auto lk = rlock();
             fn(_val);
          }
          int32_t get(key_view k, std::string* buf)  // point lookup on THIS cursor's root
          {
             if (!find(k)) return value_not_found;  // find() positions on _root; false = absent
             if (_is_subtree) return value_subtree;
-            auto lk = _t->_ses->lock();  // pin while copying
+            auto lk = rlock();  // pin while copying
             buf->assign(_val.data(), _val.size());
             return int32_t(_val.size());
          }
@@ -1700,20 +1963,28 @@ namespace heart::radix
          {
             return !_valid ? value_not_found : (_is_subtree ? value_subtree : int32_t(_val.size()));
          }
+         // Point lookups via the NATIVE iterative descent (find_in: skip-header dispatch +
+         // prefetch) — several times cheaper than the ordered seek+frame machinery, which
+         // matters most when a concurrent writer keeps the path cache-cold. These do NOT move
+         // the cursor (use find() to position); a subtree value reads as not-found, as before.
          template <class F>
          bool get(key_view k, F&& fn)  // point lookup on THIS cursor's root → lambda; true if found
          {
-            if (!find(k) || _is_subtree) return false;
-            auto lk = _t->_ses->lock();  // pin while fn reads the view
-            fn(_val);
+            if (_root.address() == sal::null_ptr_address) return false;
+            auto       lk = rlock();  // pin while descending + while fn reads the view
+            value_view v;
+            if (!find_in(ses(), _root.address(), as_bytes(k), v)) return false;
+            fn(v);
             return true;
          }
          template <class T = std::string>
          std::optional<T> get(key_view k)  // point lookup on THIS cursor's root → optional buffer
          {
-            if (!find(k) || _is_subtree) return std::nullopt;
-            auto lk = _t->_ses->lock();  // pin while copying
-            return T(_val.data(), _val.data() + _val.size());
+            if (_root.address() == sal::null_ptr_address) return std::nullopt;
+            auto       lk = rlock();  // pin while descending + copying
+            value_view v;
+            if (!find_in(ses(), _root.address(), as_bytes(k), v)) return std::nullopt;
+            return T(v.data(), v.data() + v.size());
          }
          // psitri-compatible borrowed view: valid while the CALLER's read_lock `rl` is held (it pins
          // the page resident). The caller must keep `rl` alive for the view's use. (value() returns a
@@ -1763,7 +2034,7 @@ namespace heart::radix
          template <class Ad>
          void take_terminal(Ad ad, smart_address br)  // append suffix, capture value or subtree
          {
-            const inline_value* iv = _t->term_iv(ad.node(), br);
+            const inline_value* iv = _t->term_iv(ses(), ad.node(), br);
             append(iv->data, iv->suffix_len);
             if (iv->is_subtree())
             {
@@ -1784,12 +2055,7 @@ namespace heart::radix
          // router, so dispatch() has no adaptor for it. The cursor walks it as a flat entry
          // array (entry 0 = smallest), resolving the page ONCE per frame and advancing pos in
          // place. Entry i's full key = the path prefix [0, klen1) + the entry's stored suffix.
-         const bucket_node* as_bucket(ptr_address a) const
-         {
-            const sal::alloc_header* b = _t->_ses->get_ref<sal::alloc_header>(a).obj();
-            return b->type() == bucket_node::type_id ? reinterpret_cast<const bucket_node*>(b)
-                                                     : nullptr;
-         }
+         const bucket_node* as_bucket(ptr_address a) const { return bucket_at(ses(), a); }
          void take_bucket_entry(const bucket_node* bn, int i, uint16_t klen1)
          {
             const inline_value* iv = bn->entry(i);
@@ -1820,7 +2086,7 @@ namespace heart::radix
                   return;
                }
                const uint32_t k0 = _klen;  // key length before this node's prefix (local; not stored)
-               const int      r  = _t->dispatch(addr, [&](auto ad) -> int {
+               const int      r  = _t->dispatch(ses(), addr, [&](auto ad) -> int {
                   frame& f = _fr[_depth];
                   f.addr   = addr;
                   bytes pfx = ad.prefix();
@@ -1845,7 +2111,7 @@ namespace heart::radix
                   const int nb = stem_bytes(ad.cell(c), ad.stem_width(), ad.cw(), sb);
                   append(sb, size_t(nb));
                   const smart_address br = ad.branch(c);
-                  if (_t->is_terminal_branch(br))
+                  if (_t->is_terminal_branch(ses(), br))
                   {
                      take_terminal(ad, br);
                      return 1;
@@ -1870,7 +2136,7 @@ namespace heart::radix
                take_bucket_entry(bn, f.pos, f.klen1);
                return 1;
             }
-            return _t->dispatch(f.addr, [&](auto ad) -> int {
+            return _t->dispatch(ses(), f.addr, [&](auto ad) -> int {
                const int nc = (f.pos < 0) ? ad.first() : ad.next(f.pos);
                _klen        = f.klen1;  // drop the previous entry's stem (+ any descent)
                if (!ad.valid(nc))
@@ -1883,7 +2149,7 @@ namespace heart::radix
                append(sb, size_t(nb));
                f.pos                  = int16_t(nc);
                const smart_address br = ad.branch(nc);
-               if (_t->is_terminal_branch(br))
+               if (_t->is_terminal_branch(ses(), br))
                {
                   take_terminal(ad, br);
                   return 1;
@@ -1914,7 +2180,7 @@ namespace heart::radix
                   return;
                }
                const uint32_t k0 = _klen;
-               const int      r  = _t->dispatch(addr, [&](auto ad) -> int {
+               const int      r  = _t->dispatch(ses(), addr, [&](auto ad) -> int {
                   frame& f = _fr[_depth];
                   f.addr   = addr;
                   bytes pfx = ad.prefix();
@@ -1929,7 +2195,7 @@ namespace heart::radix
                      const int nb = stem_bytes(ad.cell(c), ad.stem_width(), ad.cw(), sb);
                      append(sb, size_t(nb));
                      const smart_address br = ad.branch(c);
-                     if (_t->is_terminal_branch(br)) { take_terminal(ad, br); return 1; }
+                     if (_t->is_terminal_branch(ses(), br)) { take_terminal(ad, br); return 1; }
                      _nextaddr = br.as_pointer();
                      return 2;
                   }
@@ -1960,7 +2226,7 @@ namespace heart::radix
                take_bucket_entry(bn, f.pos, f.klen1);
                return 1;
             }
-            return _t->dispatch(f.addr, [&](auto ad) -> int {
+            return _t->dispatch(ses(), f.addr, [&](auto ad) -> int {
                _klen = f.klen1;  // drop the previous entry's stem (+ any descent)
                if (f.pos < 0)    // we were at this node's term (last in reverse) → pop
                {
@@ -1975,7 +2241,7 @@ namespace heart::radix
                   const int nb = stem_bytes(ad.cell(pc), ad.stem_width(), ad.cw(), sb);
                   append(sb, size_t(nb));
                   const smart_address br = ad.branch(pc);
-                  if (_t->is_terminal_branch(br)) { take_terminal(ad, br); return 1; }
+                  if (_t->is_terminal_branch(ses(), br)) { take_terminal(ad, br); return 1; }
                   _nextaddr = br.as_pointer();
                   return 2;
                }
@@ -1994,10 +2260,15 @@ namespace heart::radix
          // root: a raw inner seek finds the key, then build_to lays down the descent path.
          bool position(bytes q, bool strict)
          {
-            auto       lk = _t->_ses->lock();
+            if (_root.address() == sal::null_ptr_address)  // empty/uncommitted root
+            {
+               reset();
+               return true;  // at end (matches a seek past every key)
+            }
+            auto       lk = rlock();
             KB         kb;
             value_view v;
-            if (!_t->seek(_root.address(), q, 0, strict, kb, v))
+            if (!_t->seek(ses(), _root.address(), q, 0, strict, kb, v))
             {
                reset();
                return true;
@@ -2028,7 +2299,7 @@ namespace heart::radix
                   _valid = true;
                   return;
                }
-               const int r = _t->dispatch(addr, [&](auto ad) -> int {
+               const int r = _t->dispatch(ses(), addr, [&](auto ad) -> int {
                   frame& f = _fr[_depth];
                   f.addr   = addr;
                   bytes pfx = ad.prefix();
@@ -2051,7 +2322,7 @@ namespace heart::radix
                   const int nb = stem_bytes(ad.cell(c), ad.stem_width(), ad.cw(), sb);
                   append(sb, size_t(nb));
                   const smart_address br = ad.branch(c);
-                  if (_t->is_terminal_branch(br))
+                  if (_t->is_terminal_branch(ses(), br))
                   {
                      take_terminal(ad, br);
                      return 1;
@@ -2083,12 +2354,16 @@ namespace heart::radix
 
      public:
       // ── multi-root + transactions (psitri-shaped) ──────────────────────────────────────
-      // Roots 0..num_roots-1; root 0 is the legacy _root, 1.. live in _roots_ext (null = empty).
-      // A transaction takes a COW working copy of a root; commit publishes it, abort drops it.
-      // COW-to-root makes this natural: retaining the base forces the first write to clone, so the
-      // published root is never mutated under a reader. Savepoints (sub_transaction) retain the
-      // working root and restore it on abort.
-      static constexpr uint32_t num_roots = 512;
+      // Published roots live in SAL's root table — the SINGLE source of truth, exactly psitri's
+      // model. SAL synchronizes it: set_root swaps under the per-root writer lock and writes the
+      // commit sync-header (sealing filled segments for compaction/recycling); get_root retains
+      // under the per-root SHARED lock, so readers scale and never wait behind a writer's tree
+      // work. There is NO engine-side root index and no engine lock. A transaction acquires a
+      // retained base from the table; the first write clones (COW-to-root), so a published root
+      // is never mutated under a reader; commit hands the working root to set_root, abort drops
+      // it. Savepoints (sub_transaction) retain the working root and restore it on abort. The
+      // engine member `_root` is unrelated: it is the raw DIRECT-API working pointer (single-
+      // threaded benches/tests, bucket mode) and never feeds the database layer.
 
       // A read-only TREE HANDLE over a root (or subtree root) — the psitri `tree`-equivalent.
       // Holds a ptr_address internally but never exposes it; reads go through cursors it makes.
@@ -2147,6 +2422,8 @@ namespace heart::radix
          radix_tree*                       _t = nullptr;
          sal::smart_ptr<sal::alloc_header> _root;  // owns a ref; empty = null/empty tree
          tree(radix_tree* t, ptr_address r, bool retain) : _t(t), _root(t->session(), r, retain) {}
+         // Adopt an already-acquired root (SAL get_root's retained smart_ptr — the database path).
+         tree(radix_tree* t, sal::smart_ptr<sal::alloc_header> r) : _t(t), _root(std::move(r)) {}
 
         public:
          tree()                       = default;
@@ -2180,8 +2457,11 @@ namespace heart::radix
             return c.template get<T>(k);
          }
       };
-      read_handle get_root_internal(uint32_t idx) { return {this, root_slot(idx)}; }
-      tree        get_root(uint32_t idx) { return tree(this, root_slot(idx), /*retain=*/true); }
+      // The last COMMITTED root, acquired from SAL's table (retain under the per-root shared lock).
+      tree get_root(uint32_t idx)
+      {
+         return tree(this, _ses->get_root<sal::alloc_header>(sal::root_object_number(idx)));
+      }
 
       // A MUTABLE tree editor (psitri tree_handle): accumulates COW changes to a (sub)tree's working
       // root and lazily opens child subtrees, which are written back BOTTOM-UP when the owning
@@ -2206,27 +2486,20 @@ namespace heart::radix
              : _t(t), _working(t->session(), base, retain)
          {
          }
-         ptr_address begin_write()
-         {
-            ptr_address w = _working.take();
-            if (w == sal::null_ptr_address) w = _t->make_node<setlist_u8>(bytes{});
-            return w;
-         }
-         void end_write(ptr_address w) { _working = root_ptr(_t->session(), w); }
+         // Adopt an already-acquired root (SAL get_root's retained smart_ptr — the database path).
+         tree_handle(radix_tree* t, root_ptr base) : _t(t), _working(std::move(base)) {}
+         // All mutations transition _working via mutate_root (the tree_context discipline):
+         // the pre-image is owned across the descent and released structurally; null = the
+         // valid empty tree (the descent lazily creates on first write).
          // Write every opened child back into _working (deepest first), then yield the final root.
          root_ptr flush()
          {
             for (auto& c : _children)
             {
-               root_ptr child = c.h->flush();   // recurse bottom-up
-               _t->_ins_value_type = inline_value::vt_subtree;
-               ptr_address sr  = child.take();  // consume the child's ref → the terminal owns it
-               uint32_t    raw = *sr;
-               ptr_address w   = begin_write();
-               _t->upsert_raw(w, as_bytes(c.key),
-                              bytes{reinterpret_cast<const uint8_t*>(&raw), sizeof(raw)});
-               _t->_ins_value_type = inline_value::vt_bytes;
-               end_write(w);
+               root_ptr    child = c.h->flush();  // recurse bottom-up
+               ptr_address sub   = child.take();  // consume the child's ref → the terminal owns it
+               _t->mutate_root(_working, [&](ptr_address pre)
+                               { return _t->attach_subtree_step(pre, c.key, sub); });
             }
             _children.clear();
             return std::move(_working);
@@ -2241,17 +2514,20 @@ namespace heart::radix
          void upsert(key_view k, value_view v)
          {
             _t->_ins_value_type = inline_value::vt_bytes;
-            ptr_address w       = begin_write();
-            _t->upsert_raw(w, as_bytes(k), as_bytes(v));
-            end_write(w);
+            _t->mutate_root(_working, [&](ptr_address pre)
+                            { return _t->upsert_step(pre, as_bytes(k), as_bytes(v)); });
          }
          int remove(key_view k)
          {
             if (!_working) return -1;
-            ptr_address w  = _working.take();
-            bool        ok = _t->remove_raw(w, as_bytes(k));
-            end_write(w);
-            return ok ? 0 : -1;
+            bool removed = false;
+            _t->mutate_root(_working, [&](ptr_address pre)
+                            { return _t->remove_step(pre, as_bytes(k), removed); });
+            return removed ? 0 : -1;
+         }
+         uint64_t remove_range_counted(key_view lower, key_view upper)  // delete [lower,upper), count
+         {
+            return _t->remove_range_counted_step(_working, lower, upper);
          }
          void upsert_subtree(key_view k, subtree&& s)  // attach an already-built detached subtree
          {
@@ -2262,14 +2538,10 @@ namespace heart::radix
             attach_subtree(k, t._root.take());
          }
        private:
-         void attach_subtree(key_view k, ptr_address root)  // store a vt_subtree terminal owning `root`
+         void attach_subtree(key_view k, ptr_address sub)  // store a vt_subtree terminal owning `sub`
          {
-            _t->_ins_value_type = inline_value::vt_subtree;
-            uint32_t    raw = *root;
-            ptr_address w   = begin_write();
-            _t->upsert_raw(w, as_bytes(k), bytes{reinterpret_cast<const uint8_t*>(&raw), sizeof(raw)});
-            _t->_ins_value_type = inline_value::vt_bytes;
-            end_write(w);
+            _t->mutate_root(_working, [&](ptr_address pre)
+                            { return _t->attach_subtree_step(pre, k, sub); });
          }
        public:
          // Open an existing subtree for in-place editing (deduped; written back on commit).
@@ -2319,14 +2591,22 @@ namespace heart::radix
          tree_handle _primary;                                              // the root at _primary_idx
          std::vector<std::pair<uint32_t, std::unique_ptr<tree_handle>>> _extra;  // open_root(idx)
          transaction(radix_tree* t, uint32_t idx)
-             : _t(t), _primary_idx(idx), _open(true), _primary(t, t->root_slot(idx), /*retain=*/true)
+             : _t(t),
+               _primary_idx(idx),
+               _open(true),
+               _primary(t, t->_ses->get_root<sal::alloc_header>(sal::root_object_number(idx)))
          {
          }
-         void publish(uint32_t idx, root_ptr w)  // swap a flushed working root into its slot
+         // COMMIT a flushed working root: hand it to SAL's root table — set_root TAKES the
+         // working ref, writes the commit sync-header (sealing filled segments so the compactor
+         // can recycle them), and swaps under SAL's per-root writer lock; readers acquire under
+         // the shared lock and never wait behind the writer's tree work. SAL's table IS the
+         // published-root storage — no engine-side index, no engine lock (psitri's pattern).
+         // The table's previous root releases on scope exit.
+         void publish(uint32_t idx, root_ptr w)
          {
-            ptr_address& slot = _t->root_slot(idx);
-            root_ptr     old(_t->session(), slot);  // ADOPT the pre-image → released on scope exit
-            slot = w.take();
+            auto old = _t->_ses->set_root<sal::alloc_header>(sal::root_object_number(idx),
+                                                             std::move(w), sal::sync_type::none);
          }
 
         public:
@@ -2338,6 +2618,10 @@ namespace heart::radix
          // ── primary-root mutations / reads (forward to the primary handle) ──
          void upsert(key_view k, value_view v) { _primary.upsert(k, v); }
          int  remove(key_view k) { return _primary.remove(k); }
+         uint64_t remove_range_counted(key_view lower, key_view upper)
+         {
+            return _primary.remove_range_counted(lower, upper);
+         }
          void upsert_subtree(key_view k, subtree&& s) { _primary.upsert_subtree(k, std::move(s)); }
          void upsert_subtree(key_view k, tree t) { _primary.upsert_subtree(k, std::move(t)); }  // psitri
          tree_handle& primary() { return _primary; }
@@ -2358,8 +2642,9 @@ namespace heart::radix
             if (idx == _primary_idx) return _primary;
             for (auto& [i, h] : _extra)
                if (i == idx) return *h;
-            _extra.emplace_back(idx, std::unique_ptr<tree_handle>(
-                                         new tree_handle(_t, _t->root_slot(idx), /*retain=*/true)));
+            _extra.emplace_back(idx, std::unique_ptr<tree_handle>(new tree_handle(
+                                         _t, _t->_ses->get_root<sal::alloc_header>(
+                                                 sal::root_object_number(idx)))));
             return *_extra.back().second;
          }
 
@@ -2406,6 +2691,10 @@ namespace heart::radix
          void upsert(key_view k, value_view v) { _tx->upsert(k, v); }
          void upsert_subtree(key_view k, subtree&& s) { _tx->upsert_subtree(k, std::move(s)); }
          int  remove(key_view k) { return _tx->remove(k); }
+         uint64_t remove_range_counted(key_view lower, key_view upper)
+         {
+            return _tx->remove_range_counted(lower, upper);
+         }
          tree_handle& open_subtree(key_view k) { return _tx->open_subtree(k); }
          tree_handle& create_subtree(key_view k) { return _tx->create_subtree(k); }
          bool         is_subtree(key_view k) { return _tx->is_subtree(k); }
@@ -2422,58 +2711,116 @@ namespace heart::radix
          }
       };
 
-      // psitri-compatible builder for a DETACHED tree: start_write_transaction(create_temporary_tree())
-      // → upsert(...) → get_tree(). Owns a working tree; get_tree() hands it off (to upsert_subtree).
+      // psitri-compatible editor for a DETACHED tree: start_write_transaction(create_temporary_tree()
+      // or an existing tree) → upsert/remove/... → get_tree(). Owns a working tree; mutations COW it
+      // in place; reads reflect it; get_tree() hands it off (e.g. to upsert_subtree).
       class write_transaction
       {
          radix_tree* _t = nullptr;
          tree        _wt;
+
         public:
-         write_transaction(radix_tree* t, tree base) : _t(t), _wt(std::move(base)) {}
+         write_transaction(radix_tree* t, tree base) : _t(t), _wt(std::move(base))
+         {
+            _wt._t = t;  // bind: tolerate an engine-less tree{} (e.g. a get_subtree miss)
+         }
          void upsert(key_view k, value_view v)
          {
             _t->_ins_value_type = inline_value::vt_bytes;
-            ptr_address w       = _wt._root.take();
-            if (w == sal::null_ptr_address) w = _t->make_node<setlist_u8>(bytes{});
-            _t->upsert_raw(w, as_bytes(k), as_bytes(v));
-            _wt._root = sal::smart_ptr<sal::alloc_header>(_t->session(), w);  // re-adopt
+            _t->mutate_root(_wt._root, [&](ptr_address pre)
+                            { return _t->upsert_step(pre, as_bytes(k), as_bytes(v)); });
+         }
+         void upsert_subtree(key_view k, tree sub)  // psitri parity: attach an owning tree (consumes)
+         {
+            ptr_address donated = sub._root.take();  // the terminal owns the attached root's ref
+            _t->mutate_root(_wt._root, [&](ptr_address pre)
+                            { return _t->attach_subtree_step(pre, k, donated); });
+         }
+         int remove(key_view k)
+         {
+            if (!_wt._root) return -1;
+            bool removed = false;
+            _t->mutate_root(_wt._root, [&](ptr_address pre)
+                            { return _t->remove_step(pre, as_bytes(k), removed); });
+            return removed ? 0 : -1;
+         }
+         uint64_t remove_range_counted(key_view lower, key_view upper)  // delete [lower,upper), count
+         {
+            return _t->remove_range_counted_step(_wt._root, lower, upper);
+         }
+         // ── reads reflect the working tree (psitri write_transaction read surface) ──
+         cursor snapshot_cursor() const { return _wt.snapshot_cursor(); }
+         bool   is_subtree(key_view k) const { return _wt.is_subtree(k); }
+         tree   get_subtree(key_view k) const { return _wt.get_subtree(k); }
+         template <class T = std::string>
+         std::optional<T> get(key_view k) const
+         {
+            return _wt.template get<T>(k);
          }
          tree get_tree() { return std::move(_wt); }  // hand off the built (owning) tree
       };
 
       // ── psitri-compatible engine entry points (database/write_session delegate here) ──
-      tree             create_temporary_tree() { return tree{}; }  // empty detached tree
+      // NOTE: the temporary tree must be ENGINE-BOUND (not tree{}): reads on the working tree
+      // (write_transaction get/get_subtree/snapshot_cursor) construct cursors through tree::_t.
+      tree create_temporary_tree() { return tree(this, sal::null_ptr_address, /*retain=*/false); }
       write_transaction start_write_transaction(tree base)
       {
          return write_transaction(this, std::move(base));
       }
-      void set_root(uint32_t idx, tree t)  // publish a tree into root slot idx (empty = clear)
+      // COMMIT a tree into SAL's root table at idx (empty tree = clear). set_root takes the
+      // tree's ref, writes the durable commit record (sealing filled segments — without commit
+      // boundaries nothing ever compacts or recycles and the file grows by the full COW-garbage
+      // rate), and swaps under SAL's per-root writer lock. The table's previous root releases on
+      // scope exit. DIRECT mutations (upsert/remove on _root, bucket mode) are uncommitted by
+      // definition and never touch the table.
+      void set_root(uint32_t idx, tree t, sal::sync_type st = sal::sync_type::none)
       {
-         ptr_address& slot = root_slot(idx);
-         if (slot != sal::null_ptr_address) _ses->release(slot);
-         slot = t._root.take();
+         auto old =
+             _ses->set_root<sal::alloc_header>(sal::root_object_number(idx), std::move(t._root), st);
       }
       uint64_t get_total_allocated_objects() const { return object_count(); }
       uint64_t get_pending_release_count() const { return pending_releases(); }
+      // [testing] stop ONLY the compactor (provider/release threads keep running) — isolates
+      // compactor↔writer interplay in leak/strand hunts.
+      void stop_compactor_for_test() { _alloc->stop_compactor_thread(); }
+      // Reader-session snapshot: acquire the LAST COMMITTED root from SAL's root table —
+      // get_root retains under the per-root SHARED lock (readers scale; a committing writer
+      // holds the exclusive lock only for the table exchange, never for its tree work). The
+      // root is pinned via the CALLER's session, so the cursor's read locks and its release-
+      // on-destruction run on that session (one SAL session per thread). Readers see commit
+      // boundaries only — never the writer-private working state.
+      cursor snapshot_cursor_at(uint32_t idx, const sal::allocator_session_ptr& ses)
+      {
+         return cursor(this,
+                       ses->get_root<sal::alloc_header>(sal::root_object_number(idx)));
+      }
+      // One SAL session per thread: call on the thread that will use it (psitri read_session model).
+      sal::allocator_session_ptr make_session() { return _alloc->get_session(); }
+      sal::seg_alloc_dump        dump() const { return _alloc->dump(); }
+      void                       sync(sal::sync_type st) { _alloc->sync(st); }
 
      private:
-      ptr_address& root_slot(uint32_t idx) { return idx == 0 ? _root : _roots_ext[idx]; }
 
       // ── descent helper for r1 nodes (prefixed routers) ─────────────────────────
+      // STATIC + session-parametric (read-path contract): no engine state — `found` replaces the
+      // old _route_found member side-channel, so reader-session cursors can run this descent
+      // concurrently with the writer.
       template <class N>
-      bool route_r1(const N* n, bytes key, uint32_t& depth, value_view& out, ptr_address& addr)
+      static bool route_r1(sal::allocator_session& ses, const N* n, bytes key, uint32_t& depth,
+                           value_view& out, ptr_address& addr, bool& found)
       {
          bytes pfx = n->prefix();
          if (pfx.size() > key.size() - depth ||
              (pfx.size() && std::memcmp(pfx.data(), key.data() + depth, pfx.size()) != 0))
          {
-            _route_found = false;
+            found = false;
             return false;
          }
          depth += uint32_t(pfx.size());
          if (depth == key.size())
          {
-            _route_found = term_lookup(n, n->term_value(), key, depth, out);
+            found = term_lookup(ses, n, n->term_value(), key, depth, out);
             return false;
          }
          // Route by the node's consume-width key bytes. For setlist_u8 (stem_width==1)
@@ -2490,19 +2837,19 @@ namespace heart::radix
             W = uint32_t(n->consume_width());  // 2 (u16) or 3/4 (u32 cell)
             if (key.size() - depth < W)        // key ends inside this node's stride -> miss
             {
-               _route_found = false;
+               found = false;
                return false;
             }
             sa = n->find(read_stem<N>(key, depth, W));
          }
          if (sa.is_null())
          {
-            _route_found = false;
+            found = false;
             return false;
          }
          if (sa.is_tail())
          {
-            _route_found = inline_at(n, sa, key.subspan(depth + W), out);
+            found = inline_at(n, sa, key.subspan(depth + W), out);
             return false;
          }
          addr = sa.as_pointer();
@@ -2523,6 +2870,7 @@ namespace heart::radix
       }
 
       // ── insert (tier dispatch is the ONLY place type matters) ───────────────────
+      template <upsert_mode mode>
       ptr_address insert_node(ptr_address addr, bytes key, uint32_t depth, bytes val,
                               sal::alloc_hint peer_hint)
       {
@@ -2531,23 +2879,23 @@ namespace heart::radix
             case radix_kind::bucket:  // bucket LEAF: insert (split on overflow)
                return bucket_leaf_insert(addr, key, depth, val);
             case radix_kind::setlist_u8:
-               return router_insert<setlist_u8>(addr, key, depth, val, peer_hint);
+               return router_insert<mode, setlist_u8>(addr, key, depth, val, peer_hint);
             case radix_kind::setlist_u16:
-               return router_insert_wide<setlist_u16>(addr, key, depth, val, peer_hint);
+               return router_insert_wide<mode, setlist_u16>(addr, key, depth, val, peer_hint);
             case radix_kind::setlist_u32:
-               return router_insert_wide<setlist_u32>(addr, key, depth, val, peer_hint);
+               return router_insert_wide<mode, setlist_u32>(addr, key, depth, val, peer_hint);
             case radix_kind::c1_32:
-               return router_insert<bitset_c1_32>(addr, key, depth, val, peer_hint);
+               return router_insert<mode, bitset_c1_32>(addr, key, depth, val, peer_hint);
             case radix_kind::c1_64:
-               return router_insert<bitset_c1_64>(addr, key, depth, val, peer_hint);
+               return router_insert<mode, bitset_c1_64>(addr, key, depth, val, peer_hint);
             case radix_kind::c1_128:
-               return router_insert<bitset_c1_128>(addr, key, depth, val, peer_hint);
+               return router_insert<mode, bitset_c1_128>(addr, key, depth, val, peer_hint);
             case radix_kind::bitset_r2:
-               return router_insert<bitset_r2_node>(addr, key, depth, val, peer_hint);
+               return router_insert<mode, bitset_r2_node>(addr, key, depth, val, peer_hint);
             case radix_kind::bitset_r4:
-               return router_insert<bitset_r4_node>(addr, key, depth, val, peer_hint);
+               return router_insert<mode, bitset_r4_node>(addr, key, depth, val, peer_hint);
             case radix_kind::full:
-               return router_insert<full_radix_node>(addr, key, depth, val, peer_hint);
+               return router_insert<mode, full_radix_node>(addr, key, depth, val, peer_hint);
             case radix_kind::leaf:     // a terminal value — never inserted into directly
             case radix_kind::bitset1:  // not produced by the engine
                break;
@@ -2557,6 +2905,7 @@ namespace heart::radix
 
       // ── remove descent (mirrors insert_node dispatch; routers only — a terminal value
       // is handled in-place by the parent via is_terminal_branch, never recursed into) ──
+      template <upsert_mode mode>
       ptr_address remove_node(ptr_address addr, bytes key, uint32_t depth)
       {
          switch (kind_of(_ses->get_ref<sal::alloc_header>(addr)->type()))
@@ -2576,23 +2925,23 @@ namespace heart::radix
                return addr;
             }
             case radix_kind::setlist_u8:
-               return remove_router<setlist_u8>(addr, key, depth);
+               return remove_router<mode, setlist_u8>(addr, key, depth);
             case radix_kind::setlist_u16:
-               return remove_router<setlist_u16>(addr, key, depth);
+               return remove_router<mode, setlist_u16>(addr, key, depth);
             case radix_kind::setlist_u32:
-               return remove_router<setlist_u32>(addr, key, depth);
+               return remove_router<mode, setlist_u32>(addr, key, depth);
             case radix_kind::c1_32:
-               return remove_router<bitset_c1_32>(addr, key, depth);
+               return remove_router<mode, bitset_c1_32>(addr, key, depth);
             case radix_kind::c1_64:
-               return remove_router<bitset_c1_64>(addr, key, depth);
+               return remove_router<mode, bitset_c1_64>(addr, key, depth);
             case radix_kind::c1_128:
-               return remove_router<bitset_c1_128>(addr, key, depth);
+               return remove_router<mode, bitset_c1_128>(addr, key, depth);
             case radix_kind::bitset_r2:
-               return remove_router<bitset_r2_node>(addr, key, depth);
+               return remove_router<mode, bitset_r2_node>(addr, key, depth);
             case radix_kind::bitset_r4:
-               return remove_router<bitset_r4_node>(addr, key, depth);
+               return remove_router<mode, bitset_r4_node>(addr, key, depth);
             case radix_kind::full:
-               return remove_router<full_radix_node>(addr, key, depth);
+               return remove_router<mode, full_radix_node>(addr, key, depth);
             case radix_kind::leaf:     // a terminal value — never recursed into
             case radix_kind::bitset1:  // not produced by the engine
                break;
@@ -2623,18 +2972,23 @@ namespace heart::radix
          return addr;
       }
 
-      template <class N>
+      template <upsert_mode mode, class N>
       ptr_address remove_router(ptr_address addr, bytes key, uint32_t depth)
       {
          const ptr_address pre = addr;  // original (pre-COW) node, for clone-release on downgrade
          sal::smart_ref<N> ref = _ses->get_ref<N>(addr);  // resolved once; threaded into cow()
-         const N*          cn  = ref.obj();
-         // must_clone = is THIS node reachable from a snapshot (clone me). NOT children_shared —
-         // that decides whether the CHILDREN clone (propagated per-descent below). A unique working
-         // node with co-owned children mutates IN-PLACE; only the shared child clones. This is what
-         // lets a batch converge toward an in-place (non-COW) tree as nodes become unique.
-         const bool        must_clone = _shared || ref.ref() > 1;
-         _shared                      = must_clone;  // N's own cow() decisions use this
+         // SHAREDNESS IS THE INSTANTIATION (psitri upsert_mode): a unique-mode router whose own
+         // node is snapshot-reachable re-enters as the SHARED instantiation — from here on `mode`
+         // is the whole truth (no runtime latch). range_shared at the recursion site selects the
+         // CHILD's instantiation, so a unique working node with co-owned children still mutates
+         // IN-PLACE; only the shared child subtree clones (what lets a batch converge to an
+         // in-place tree as nodes become unique).
+         if constexpr (!mode.is_shared())
+         {
+            if (ref.ref() > 1)
+               return remove_router<upsert_mode{upsert_mode::shared}, N>(addr, key, depth);
+         }
+         const N* cn = ref.obj();
          bytes             pfx = cn->prefix();
          if (pfx.size() > key.size() - depth ||
              (pfx.size() && std::memcmp(pfx.data(), key.data() + depth, pfx.size()) != 0))
@@ -2651,7 +3005,7 @@ namespace heart::radix
                _removed = false;
                return addr;
             }
-            N* n = cow<N>(ref, addr);
+            N* n = cow<mode, N>(ref, addr);
             if (tv.is_pointer())
                _ses->release(tv.as_pointer());  // external leaf/subtree value
             n->set_term_value(smart_address::null());
@@ -2696,7 +3050,7 @@ namespace heart::radix
                _removed = false;  // same routing cell, different suffix → key absent
                return addr;
             }
-            N* n = cow<N>(ref, addr);
+            N* n = cow<mode, N>(ref, addr);
             rr_diverge<N>(n, range_of(cell));  // big tier: privatize range before dropping a branch
             if (sa.is_pointer())
                _ses->release(sa.as_pointer());  // external leaf value (inline tail just orphans)
@@ -2706,17 +3060,20 @@ namespace heart::radix
             return finalize_remove<N>(addr, pre);
          }
          // pointer to an inner node → recurse. The child is shared (must clone) if THIS node is
-         // shared OR its big-tier children are co-owned via shared counters; restore must_clone for
-         // N's own cow() after the recursion clobbers _shared.
+         // shared OR its big-tier children are co-owned via shared counters (the child's MODE).
          ptr_address child = sa.as_pointer();
-         _shared           = must_clone || range_shared<N>(cn, range_of(cell));  // PER-RANGE
-         ptr_address nc    = remove_node(child, key, depth + W);
-         _shared           = must_clone;
+         ptr_address nc;
+         if constexpr (mode.is_shared())
+            nc = remove_node<mode>(child, key, depth + W);
+         else  // PER-RANGE: only a co-owned range forces the child subtree into shared mode
+            nc = range_shared<N>(cn, range_of(cell))
+                     ? remove_node<upsert_mode{upsert_mode::shared}>(child, key, depth + W)
+                     : remove_node<mode>(child, key, depth + W);
          if (!_removed)
             return addr;  // absent in subtree → nothing changed here
          if (_emptied)     // the child drained → drop its branch and free it
          {
-            N* n = cow<N>(ref, addr);  // ref valid: the recursion didn't COW this node
+            N* n = cow<mode, N>(ref, addr);  // ref valid: the recursion didn't COW this node
             rr_diverge<N>(n, range_of(cell));  // big tier: privatize range before dropping a branch
             n->remove_branch(cell);
             _ses->release(nc);  // the emptied child (in-place == child, or a clone)
@@ -2727,7 +3084,7 @@ namespace heart::radix
          }
          if (nc != child)  // child was path-COW'd (shared) → repoint, release the original
          {
-            N* n = cow<N>(ref, addr);  // ref valid: the recursion didn't COW this node
+            N* n = cow<mode, N>(ref, addr);  // ref valid: the recursion didn't COW this node
             rr_diverge<N>(n, range_of(cell));  // big tier: privatize range before re-pointing
             n->set_branch(cell, smart_address::from_pointer(nc));
             _ses->release(child);
@@ -2736,7 +3093,7 @@ namespace heart::radix
          return addr;
       }
 
-      template <class N>
+      template <upsert_mode mode, class N>
       ptr_address router_insert(ptr_address addr, bytes key, uint32_t depth, bytes val,
                                 sal::alloc_hint peer_hint)
       {
@@ -2746,24 +3103,30 @@ namespace heart::radix
          // cow(ref, …) reuses it for an in-place mutation (no second get_ref). After a COW the
          // ref is stale (clone → new address), so the post-COW writable `n` is used instead.
          sal::smart_ref<N> ref = _ses->get_ref<N>(addr);
-         const N*          cn  = ref.obj();
-         // must_clone = is THIS node reachable from a snapshot (clone me). children_shared decides
-         // whether the CHILDREN clone (propagated per-descent), NOT whether I do — so a unique
-         // working node with co-owned children mutates IN-PLACE; only the shared child clones. This
-         // is what lets a batch converge to an in-place (non-COW) tree as nodes become unique.
-         const bool        must_clone = _shared || ref.ref() > 1;
-         _shared                      = must_clone;  // N's own cow() decisions use this
+         // SHAREDNESS IS THE INSTANTIATION (psitri upsert_mode): a unique-mode router whose own
+         // node is snapshot-reachable re-enters as the SHARED instantiation — `mode` is the whole
+         // truth from here (no runtime latch). range_shared at the recursion site selects the
+         // CHILD's instantiation, so a unique working node with co-owned children still mutates
+         // IN-PLACE; only the shared child subtree clones (what lets a batch converge to an
+         // in-place tree as nodes become unique).
+         if constexpr (!mode.is_shared())
+         {
+            if (ref.ref() > 1)
+               return router_insert<upsert_mode{upsert_mode::shared}, N>(addr, key, depth, val,
+                                                                         peer_hint);
+         }
+         const N* cn = ref.obj();
          bytes             pfx = cn->prefix();
          int               avail     = int(key.size() - depth);
          int               maxp      = std::min(int(pfx.size()), avail);
          int p = common_prefix_len(key.subspan(depth, size_t(maxp)), pfx.subspan(0, size_t(maxp)));
          if (p < int(pfx.size()))
-            return prefix_split<N>(addr, key, depth, p, val, peer_hint);
+            return prefix_split<mode, N>(addr, key, depth, p, val, peer_hint);
 
          depth += uint32_t(pfx.size());
          if (depth == key.size())  // key ends here → term
          {
-            set_term<N>(addr, val, peer_hint);
+            set_term<mode, N>(addr, val, peer_hint);
             return addr;
          }
          uint8_t         b     = key[depth];
@@ -2779,7 +3142,7 @@ namespace heart::radix
             // is re-made on the wider node). The COW may clone addr → release that clone here
             // (the caller releases the original), else it orphans.
             const ptr_address pre = addr;
-            N*                 n   = cow<N>(ref, addr, value_tail_need(suf, val));
+            N*                 n   = cow<mode, N>(ref, addr, value_tail_need(suf, val));
             rr_diverge<N>(n, range_of(b));  // big tier: privatize range before adding a branch
             smart_address      sab = make_value_into<N>(n, suf, val, chint);
             bool               to_c1 = false;
@@ -2789,7 +3152,13 @@ namespace heart::radix
                return addr;
             if constexpr (!std::is_same_v<N, full_radix_node>)
             {
-               ptr_address up = grow_and_set<N>(addr, b, smart_address::null(), suf, val, peer_hint);
+               // Re-home wider, skipping b. If the value spilled to a LEAF, hand it through —
+               // re-making it via (suf,val) would leak the leaf just made (same rule as the
+               // update site). A tail is re-made on the wide node.
+               ptr_address up =
+                   sab.is_pointer()
+                       ? grow_and_set<N>(addr, b, sab, bytes{}, bytes{}, chint)
+                       : grow_and_set<N>(addr, b, smart_address::null(), suf, val, peer_hint);
                if (addr != pre)
                   _ses->release(addr);
                return up;
@@ -2807,27 +3176,63 @@ namespace heart::radix
             if (esuf.size() == suf.size() &&
                 std::memcmp(esuf.data(), suf.data(), esuf.size()) == 0)  // same key → update
             {
+               // COW exactly ONCE per level (set_term's discipline). The old two-step —
+               // make_value(addr) cowing, then cow(addr) again for set_branch — cloned TWICE in
+               // shared mode (the latch clones even ref==1) and orphaned the first clone: one
+               // leaked object per transactional update (the bank-bench bloat).
                _old_value_size = int(eval.size());
-               smart_address nsa =
-                   (sa.is_pointer())
-                       ? smart_address::from_pointer(update_leaf_value(sa.as_pointer(), val))
-                       : make_value<N>(addr, suf, val, chint);  // old tail leaks
-               if (nsa != sa)
+               const ptr_address pre = addr;
+               if (sa.is_pointer())  // external (leaf_node) value
                {
-                  N* n = cow<N>(addr);
+                  smart_address nsa =
+                      smart_address::from_pointer(update_leaf_value<mode>(sa.as_pointer(), val));
+                  if (nsa == sa)
+                     return addr;  // updated in place (unique + same size)
+                  N* n = cow<mode, N>(ref, addr);
                   rr_diverge<N>(n, range_of(b));  // big tier: privatize range before replace
-                  if (sa.is_pointer() && nsa != sa)
-                     _ses->release(sa.as_pointer());
-                  n->set_branch(b, nsa);
+                  if (n->set_branch(b, nsa))
+                  {
+                     _ses->release(sa.as_pointer());  // replaced: return this node's ref on it
+                     return addr;
+                  }
+                  if constexpr (!std::is_same_v<N, full_radix_node>)
+                  {
+                     // grow_and_set skips b and sets b→nsa; releasing the COW'd addr runs its
+                     // destroy, releasing the OLD leaf at b — so don't release sa here.
+                     ptr_address up = grow_and_set<N>(addr, b, nsa, bytes{}, bytes{}, chint);
+                     if (addr != pre)
+                        _ses->release(addr);
+                     return up;
+                  }
+                  return addr;  // full_radix never fails set_branch
                }
-               return addr;
+               // inline tail value: ONE cow (room for the new tail entry), write it, repoint b.
+               // The OLD tail entry's bytes leak intra-node only (reclaimed on the next clone).
+               N*            n   = cow<mode, N>(ref, addr, value_tail_need(suf, val));
+               rr_diverge<N>(n, range_of(b));  // big tier: privatize range before replace
+               smart_address nsa = make_value_into<N>(n, suf, val, chint);
+               if (n->set_branch(b, nsa))
+                  return addr;
+               if constexpr (!std::is_same_v<N, full_radix_node>)
+               {
+                  // Re-home wider, skipping b. If the value spilled to a LEAF, hand it through
+                  // (re-making it would leak the one just made); a tail is re-made on the wide node.
+                  ptr_address up =
+                      nsa.is_pointer()
+                          ? grow_and_set<N>(addr, b, nsa, bytes{}, bytes{}, chint)
+                          : grow_and_set<N>(addr, b, smart_address::null(), suf, val, peer_hint);
+                  if (addr != pre)
+                     _ses->release(addr);
+                  return up;
+               }
+               return addr;  // full_radix never fails set_branch
             }
             // diverge → child holding both continuations (a wide setlist_u32 when the gate
             // is on and both suffixes have ≥4 bytes past the common prefix; else u8)
             int           cp    = common_prefix_len(esuf, suf);
             ptr_address   child = make_collision_child(esuf, eval, evt, suf, val, cp, chint);
             smart_address csa   = smart_address::from_pointer(child);
-            N*            n   = cow<N>(ref, addr);  // ref valid: make_collision_child didn't COW addr
+            N*            n   = cow<mode, N>(ref, addr);  // ref valid: make_collision_child didn't COW addr
             rr_diverge<N>(n, range_of(b));  // big tier: privatize range before replace
             if (n->set_branch(b, csa))
             {
@@ -2863,14 +3268,19 @@ namespace heart::radix
             }
          }
          // child is shared (must clone) if THIS node is shared OR its children are co-owned;
-         // restore must_clone for N's own cow() after the recursion clobbers _shared.
-         _shared        = must_clone || range_shared<N>(cn, range_of(b));  // PER-RANGE: only THIS
-         ptr_address nc = insert_node(child, key, depth + 1, val, chint);  // child's range matters
-         _shared        = must_clone;
+         // the child subtree's MODE (instantiation) is shared iff its range is co-owned.
+         ptr_address nc;
+         if constexpr (mode.is_shared())
+            nc = insert_node<mode>(child, key, depth + 1, val, chint);
+         else  // PER-RANGE: only a co-owned range forces the child subtree into shared mode
+            nc = range_shared<N>(cn, range_of(b))
+                     ? insert_node<upsert_mode{upsert_mode::shared}>(child, key, depth + 1, val,
+                                                                     chint)
+                     : insert_node<mode>(child, key, depth + 1, val, chint);
          if (nc != child)
          {
             smart_address nsab = smart_address::from_pointer(nc);
-            N*            n    = cow<N>(ref, addr);  // ref valid: the recursion didn't COW this node
+            N*            n    = cow<mode, N>(ref, addr);  // ref valid: the recursion didn't COW this node
             rr_diverge<N>(n, range_of(b));  // big tier: privatize range before re-pointing
             if (!n->set_branch(b, nsab))  // compact re-home failed → widen with the pointer
             {
@@ -2933,43 +3343,47 @@ namespace heart::radix
       // Precondition: suffix.size() >= 4 (the create gate guarantees it).
       void add_wide_entry(ptr_address& child, bytes suffix, bytes value, sal::alloc_hint hint)
       {
-         uint32_t      q   = read_stem<setlist_u32>(suffix, 0, 4);
-         smart_address sv  = make_value<setlist_u32>(child, suffix.subspan(4), value, hint);
-         setlist_u32*  w   = cow<setlist_u32>(child, uint32_t(setlist_u32::stem_width) + 4);
+         uint32_t      q  = read_stem<setlist_u32>(suffix, 0, 4);
+         smart_address sv = make_value<setlist_u32>(child, suffix.subspan(4), value, hint);
+         setlist_u32*  w  = grow_fresh<setlist_u32>(child, uint32_t(setlist_u32::stem_width) + 4);
          [[maybe_unused]] bool ok = w->set_branch(q, sv);
          assert(ok && "fresh wide node always has room for an entry");
       }
 
       // Insert into a wide setlist (u16/u32). Stride = consume_width; new stems GROW the
       // node (clone bigger). Mid-stem / 4 KB split is step 4 (asserted unreachable here).
-      template <class N>
+      template <upsert_mode mode, class N>
       ptr_address router_insert_wide(ptr_address addr, bytes key, uint32_t depth, bytes val,
                                      sal::alloc_hint peer_hint)
       {
          const uint32_t    depth0 = depth;
          sal::smart_ref<N> ref    = _ses->get_ref<N>(addr);  // resolved once (reads + safe cows)
-         const bool        must_clone = _shared || ref.ref() > 1;  // is THIS node snapshot-reachable
-         _shared                      = must_clone;
-         const N*          cn     = ref.obj();
+         if constexpr (!mode.is_shared())  // own node snapshot-reachable → SHARED instantiation
+         {
+            if (ref.ref() > 1)
+               return router_insert_wide<upsert_mode{upsert_mode::shared}, N>(addr, key, depth,
+                                                                              val, peer_hint);
+         }
+         const N* cn = ref.obj();
          bytes             pfx    = cn->prefix();
          int            avail  = int(key.size() - depth);
          int            maxp   = std::min(int(pfx.size()), avail);
          int p = common_prefix_len(key.subspan(depth, size_t(maxp)), pfx.subspan(0, size_t(maxp)));
          if (p < int(pfx.size()))
-            return prefix_split<N>(addr, key, depth, p, val, peer_hint);
+            return prefix_split<mode, N>(addr, key, depth, p, val, peer_hint);
 
          depth += uint32_t(pfx.size());
          int rem = int(key.size() - depth);
          if (rem == 0)  // key ends here → term
          {
-            set_term<N>(addr, val, peer_hint);
+            set_term<mode, N>(addr, val, peer_hint);
             return addr;
          }
          int cw = cn->consume_width();
          if (rem < cw)  // key ends inside the stride → split to a stride that fits it
          {
             ptr_address na = re_stride_wide<N>(addr, rem, peer_hint);
-            return insert_node(na, key, depth0, val, peer_hint);
+            return insert_node<mode>(na, key, depth0, val, peer_hint);
          }
          uint32_t        q     = read_stem<N>(key, depth, uint32_t(cw));
          sal::alloc_hint chint = cn->branch_hint();
@@ -2982,10 +3396,12 @@ namespace heart::radix
             {
                int         Wp = cw >= 3 ? 2 : 1;  // u32/u24 → u16; u16 → u8
                ptr_address na = re_stride_wide<N>(addr, Wp, peer_hint);
-               return insert_node(na, key, depth0, val, peer_hint);
+               return insert_node<mode>(na, key, depth0, val, peer_hint);
             }
-            smart_address sv = make_value<N>(addr, suf, val, chint);  // else grow + append
-            N*            w  = cow<N>(addr, uint32_t(N::stem_width) + 4);
+            // ONE cow sized for the tail AND a stem slot (two cows would orphan the first
+            // clone under the shared latch — one leaked object per insert).
+            N* w = cow<mode, N>(ref, addr, value_tail_need(suf, val) + uint32_t(N::stem_width) + 4);
+            smart_address         sv = make_value_into<N>(w, suf, val, chint);
             [[maybe_unused]] bool ok = w->set_branch(q, sv);
             assert(ok && "wide node grows → set_branch must succeed");
             return addr;
@@ -3000,38 +3416,52 @@ namespace heart::radix
             if (esuf.size() == suf.size() &&
                 std::memcmp(esuf.data(), suf.data(), esuf.size()) == 0)  // same key → update
             {
+               // ONE cow per level (see the u8 router site): the old make_value + cow pair
+               // cloned twice under the shared latch and orphaned the first clone.
                _old_value_size = int(eval.size());
-               smart_address nsa =
-                   sa.is_pointer()
-                       ? smart_address::from_pointer(update_leaf_value(sa.as_pointer(), val))
-                       : make_value<N>(addr, suf, val, chint);
-               if (nsa != sa)
+               if (sa.is_pointer())  // external (leaf_node) value
                {
-                  N* w = cow<N>(addr);
-                  if (sa.is_pointer())
-                     _ses->release(sa.as_pointer());
-                  w->set_branch(q, nsa);
+                  smart_address nsa =
+                      smart_address::from_pointer(update_leaf_value<mode>(sa.as_pointer(), val));
+                  if (nsa == sa)
+                     return addr;  // updated in place (unique + same size)
+                  N* w = cow<mode, N>(ref, addr, uint32_t(N::stem_width) + 4);
+                  [[maybe_unused]] bool ok = w->set_branch(q, nsa);
+                  assert(ok && "wide node grows → set_branch must succeed");
+                  _ses->release(sa.as_pointer());  // replaced: return this node's ref on it
+                  return addr;
                }
+               // inline tail value: one cow with room for the new tail (+ stem slot), repoint q.
+               N* w = cow<mode, N>(ref, addr, value_tail_need(suf, val) + uint32_t(N::stem_width) + 4);
+               smart_address         nsa = make_value_into<N>(w, suf, val, chint);
+               [[maybe_unused]] bool ok  = w->set_branch(q, nsa);
+               assert(ok && "wide node grows → set_branch must succeed");
                return addr;
             }
             int           cp    = common_prefix_len(esuf, suf);
             ptr_address   child = make_collision_child(esuf, eval, evt, suf, val, cp, chint);
-            N*            w     = cow<N>(ref, addr);  // ref valid (same-key make_value not taken here)
+            N*            w     = cow<mode, N>(ref, addr);  // ref valid (same-key make_value not taken here)
             if (sa.is_pointer())
                _ses->release(sa.as_pointer());
             w->set_branch(q, smart_address::from_pointer(child));
             return addr;
          }
 
-         // pointer to an inner node → recurse (wide setlist children are direct-refcounted, so
-         // child_shared == must_clone here); restore must_clone for this node's cow() after.
+         // pointer to an inner node → recurse (wide setlist children are direct-refcounted:
+         // co-owned children put the child subtree into the shared instantiation).
          ptr_address child = sa.as_pointer();
-         _shared           = must_clone || children_shared<N>(cn);
-         ptr_address nc    = insert_node(child, key, depth + uint32_t(cw), val, chint);
-         _shared           = must_clone;
+         ptr_address nc;
+         if constexpr (mode.is_shared())
+            nc = insert_node<mode>(child, key, depth + uint32_t(cw), val, chint);
+         else  // wide setlist children are direct-refcounted: co-owned → shared instantiation
+            nc = children_shared<N>(cn)
+                     ? insert_node<upsert_mode{upsert_mode::shared}>(child, key,
+                                                                     depth + uint32_t(cw), val,
+                                                                     chint)
+                     : insert_node<mode>(child, key, depth + uint32_t(cw), val, chint);
          if (nc != child)
          {
-            N* w = cow<N>(ref, addr);  // ref valid (insert_node recurses into child, not addr)
+            N* w = cow<mode, N>(ref, addr);  // ref valid (insert_node recurses into child, not addr)
             w->set_branch(q, smart_address::from_pointer(nc));
             _ses->release(child);
          }
@@ -3109,12 +3539,12 @@ namespace heart::radix
                    sal::alloc_hint)
       {
          if (t == setlist_u16::type_id)
-            cow<setlist_u16>(node, 8)->set_branch(uint16_t(q), ptr);
+            grow_fresh<setlist_u16>(node, 8)->set_branch(uint16_t(q), ptr);
          else if (t == setlist_u32::type_id)
-            cow<setlist_u32>(node, 8)->set_branch(q, ptr);
+            grow_fresh<setlist_u32>(node, 8)->set_branch(q, ptr);
          else
          {
-            auto* w = cow<full_radix_node>(node);  // direct, no grow/widen
+            auto* w = grow_fresh<full_radix_node>(node);  // direct, no grow/widen
             rr_diverge<full_radix_node>(w, range_of(uint8_t(q)));  // privatize range before set
             w->set_branch(uint8_t(q), ptr);
          }
@@ -3205,12 +3635,12 @@ namespace heart::radix
                         sal::alloc_hint)
       {
          if (t == setlist_u16::type_id)
-            cow<setlist_u16>(node, 8)->set_branch(uint16_t(q), sa);
+            grow_fresh<setlist_u16>(node, 8)->set_branch(uint16_t(q), sa);
          else if (t == setlist_u32::type_id)
-            cow<setlist_u32>(node, 8)->set_branch(q, sa);
+            grow_fresh<setlist_u32>(node, 8)->set_branch(q, sa);
          else
          {
-            auto* w = cow<full_radix_node>(node);
+            auto* w = grow_fresh<full_radix_node>(node);
             rr_diverge<full_radix_node>(w, range_of(uint8_t(q)));  // privatize range before set
             w->set_branch(uint8_t(q), sa);
          }
@@ -3241,7 +3671,7 @@ namespace heart::radix
          assert(ok && "two-entry setlist always fits");
       }
 
-      template <class N>
+      template <upsert_mode mode, class N>
       void set_term(ptr_address& addr, bytes val, sal::alloc_hint peer_hint)
       {
          sal::smart_ref<N> ref = _ses->get_ref<N>(addr);  // resolved once; threaded into cow()
@@ -3252,14 +3682,14 @@ namespace heart::radix
             _old_value_size        = iv->value_len;
             if (iv->value_len == val.size())  // same size → overwrite in place
             {
-               N*    n   = cow<N>(ref, addr);
+               N*    n   = cow<mode, N>(ref, addr);
                auto* wiv = reinterpret_cast<inline_value*>(reinterpret_cast<char*>(n) + n->size() -
                                                            tv.tail_offset());
                std::memcpy(wiv->data + wiv->suffix_len, val.data(), val.size());
             }
             else  // grow → new tail (old leaks), cow once
             {
-               N* n = cow<N>(ref, addr, value_tail_need(bytes{}, val));
+               N* n = cow<mode, N>(ref, addr, value_tail_need(bytes{}, val));
                n->set_term_value(make_value_into<N>(n, bytes{}, val, peer_hint));
             }
             return;
@@ -3268,29 +3698,29 @@ namespace heart::radix
          {
             ptr_address old = tv.as_pointer();
             _old_value_size = int(_ses->get_ref<leaf_node>(old).obj()->value_bytes().size());
-            ptr_address tl  = update_leaf_value(old, val);
+            ptr_address tl  = update_leaf_value<mode>(old, val);
             if (tl != old)
             {
-               N* n = cow<N>(ref, addr);
+               N* n = cow<mode, N>(ref, addr);
                _ses->release(old);
                n->set_term_value(smart_address::from_pointer(tl));
             }
             return;
          }
-         N* n = cow<N>(ref, addr, value_tail_need(bytes{}, val));  // new term, cow once
+         N* n = cow<mode, N>(ref, addr, value_tail_need(bytes{}, val));  // new term, cow once
          n->set_term_value(make_value_into<N>(n, bytes{}, val, peer_hint));
       }
 
       // Split `addr`'s prefix at p: a new setlist parent takes key[depth..depth+p];
       // the demoted node (prefix loses p+1 bytes) hangs under its old prefix byte.
-      template <class N>
+      template <upsert_mode mode, class N>
       ptr_address prefix_split(ptr_address addr, bytes key, uint32_t depth, int p, bytes val,
                                sal::alloc_hint peer_hint)
       {
          uint8_t ob = _ses->get_ref<N>(addr).obj()->prefix()[size_t(p)];
 
          ptr_address dnode = addr;
-         N*          d     = cow<N>(dnode);
+         N*          d     = cow<mode, N>(dnode);
          int         newpl = int(d->prefix_length()) - (p + 1);
          uint8_t     pbuf[sal::cacheline_size];  // a prefix never exceeds prefix_capacity (<1 CL)
          std::memcpy(pbuf, d->prefix().data() + p + 1, size_t(newpl));
@@ -3490,6 +3920,7 @@ namespace heart::radix
       ptr_address grow_and_set(ptr_address from, uint8_t b, smart_address setsa, bytes suf, bytes val,
                                sal::alloc_hint hint)
       {
+         ++_cc.upgrades;
          bool        ok = false;
          ptr_address up;
          if constexpr (std::is_same_v<From, setlist_u8>)
@@ -3661,7 +4092,7 @@ namespace heart::radix
       ptr_address bucket_leaf_insert_impl(ptr_address bp, bytes key, uint32_t depth, bytes val)
       {
          if (!is_bucket(bp))  // already split to a router (e.g. mid-collapse) → route normally
-            return insert_node(bp, key, depth, val, {});
+            return insert_node<upsert_mode{}>(bp, key, depth, val, {});  // bucket mode: in-place engine
          int r = bkt(bp)->insert(key.data() + depth, int(key.size() - depth), val.data(),
                                  int(val.size()));
          if (r != 0)
@@ -3670,7 +4101,7 @@ namespace heart::radix
             return bp;
          }
          ptr_address rp  = bkt_split(bp);                // overflow → router (bp freed by CALLER)
-         ptr_address nrp = insert_node(rp, key, depth, val, {});  // normal path adds the key
+         ptr_address nrp = insert_node<upsert_mode{}>(rp, key, depth, val, {});  // bucket: in-place
          if (nrp != rp)
             _ses->release(rp);  // the freshly-split router got replaced (COW) → free it
          return nrp;
@@ -4012,7 +4443,7 @@ namespace heart::radix
       }
       bool bkt_find(bytes key, value_view& out)
       {
-         ptr_address addr  = _root;
+         ptr_address addr  = _root.address();
          uint32_t    depth = 0;
          for (;;)
          {
@@ -4056,7 +4487,7 @@ namespace heart::radix
       // place (its tail orphans). Empty routers are left (correct for find; not a leak).
       bool bkt_remove(bytes key)
       {
-         ptr_address addr = _root, parent{};
+         ptr_address addr = _root.address(), parent{};
          uint8_t     pb = 0;
          bool        have_parent = false;
          uint32_t    depth       = 0;
@@ -4118,12 +4549,10 @@ namespace heart::radix
 
       std::unique_ptr<sal::allocator> _alloc;
       sal::allocator_session_ptr      _ses;
-      ptr_address                     _root;
-      ptr_address                     _roots_ext[num_roots];  // roots 1..N-1 ([0] unused = _root)
-      ptr_address                     _snap{};
-      bool                            _snap_valid     = false;
+      // The DIRECT-API working root — an OWNING smart_ptr (psitri tree_context's discipline);
+      // empty = the valid empty tree. The database layer never reads it (SAL roots only).
+      sal::smart_ptr<sal::alloc_header> _root;
       int                             _old_value_size = -1;
-      bool                            _route_found    = false;
       bool                            _removed        = false;  // remove(): key was found+deleted
       bool                            _emptied        = false;  // remove(): node drained → drop it
       bool                            _wide_stems     = false;  // gate: off = byte radix
@@ -4135,21 +4564,19 @@ namespace heart::radix
       // at upsert/upsert_subtree, read at make_leaf/make_value_into), so the insert descent never
       // threads it. vt_bytes for a normal upsert, vt_subtree for upsert_subtree.
       uint8_t                         _ins_value_type = inline_value::vt_bytes;
-      // COW-to-root unique→shared MODE LATCH (mirrors psitri upsert_mode.make_shared()). Reset at
-      // the top of each upsert/remove; latched true the moment descent passes through a SHARED node
-      // (ref>1, e.g. a committed snapshot pins the root). Once shared it stays shared for the rest
-      // of this single depth-first path, forcing cow() to CLONE every node below — even ref==1 ones
-      // that are reachable from the snapshot — instead of mutating them in place (which would
-      // corrupt the snapshot). The recursion is a single path, so one member == a threaded mode.
-      bool                            _shared         = false;
       cow_counters                    _cc;
    };
 
    // Out-of-line (uses dispatch(), whose deduced return type must be defined first).
    inline void radix_tree::dump_root_child_refs(const char* tag)
    {
+      if (!_root)  // null = empty tree
+      {
+         std::printf("  [%s] root null (empty tree)\n", tag);
+         return;
+      }
       int total = 0, shared = 0, unique = 0;
-      dispatch(_root, [&](auto ad)
+      dispatch(_root.address(), [&](auto ad)
       {
          ad.p->for_each_child([&](ptr_address c)
          {
@@ -4160,6 +4587,32 @@ namespace heart::radix
       });
       std::printf("  [%s] root ref=%u, pointer-children=%d : ref>=2 (shared)=%d, ref==1 (unique)=%d\n",
                   tag, root_use_count(), total, shared, unique);
+   }
+
+   // Out-of-line: needs dispatch()'s deduced return type to be defined.
+   inline void radix_tree::audit_walk(ptr_address a, int depth, ref_audit& ra, int& max_print)
+   {
+      dispatch(a, [&](auto ad) {
+         ad.p->for_each_child([&](ptr_address c) {
+            auto     ref  = _ses->get_ref<sal::alloc_header>(c);
+            uint32_t rc   = ref.ref();
+            bool     leaf = ref->type() == leaf_node::type_id;
+            ++(leaf ? ra.leaves : ra.nodes);
+            if (rc != 1)
+            {
+               ++ra.bad;
+               ra.bad_by_depth[depth < 15 ? depth : 15]++;
+               if (max_print > 0)
+               {
+                  --max_print;
+                  std::printf("  [audit] depth=%d addr=%u type=%u ref=%u\n", depth, *c,
+                              unsigned(ref->type()), rc);
+               }
+            }
+            if (!leaf)
+               audit_walk(c, depth + 1, ra, max_print);
+         });
+      });
    }
 
    // Out-of-line: need the complete cursor type.
@@ -4189,6 +4642,35 @@ namespace heart::radix
    // These ARE heart's public API (not a facade): a database owns the engine (radix_tree); a
    // write_session is a handle onto it. psitri's tests compile against heart by selecting these
    // types (same names + signatures) — no adapter, no wrapper-translation layer.
+   using cursor      = radix_tree::cursor;       // psitri-shaped namespace-level names
+   using transaction = radix_tree::transaction;
+   using tree        = radix_tree::tree;
+
+   // psitri-shaped READ session: owns its own SAL session, handing out snapshot cursors pinned
+   // through it. CREATE IT ON THE READER THREAD (SAL hands out one session per thread, and the
+   // session is single-thread-owned). Reads run lock-free against the writer: the cursor
+   // acquires the last COMMITTED root via SAL's root protocol (retain under the per-root
+   // shared lock — a committing writer can't free it mid-acquire and never blocks readers
+   // with its tree work), the writer's COW-to-root never mutates a published root, and every
+   // cursor navigation takes THIS session's read_lock for page residency.
+   class read_session
+   {
+      radix_tree*                _t;
+      sal::allocator_session_ptr _ses;  // this reader thread's own SAL session
+
+     public:
+      explicit read_session(radix_tree* t) : _t(t), _ses(t->make_session())
+      {
+         // Dropping a pinned snapshot must never run the dead lineage's destroy cascade on the
+         // reader thread — defer every last-ref release to the background release thread.
+         _ses->set_defer_destroy(true);
+      }
+      radix_tree::cursor create_cursor(uint32_t idx = 0)
+      {
+         return _t->snapshot_cursor_at(idx, _ses);
+      }
+   };
+
    class write_session
    {
       radix_tree* _t = nullptr;
@@ -4225,6 +4707,13 @@ namespace heart::radix
       {
          return std::make_shared<write_session>(&_engine);
       }
+      // One per reader THREAD, created ON that thread (psitri model; see read_session).
+      std::shared_ptr<read_session> start_read_session()
+      {
+         return std::make_shared<read_session>(&_engine);
+      }
+      sal::seg_alloc_dump dump() { return _engine.dump(); }
+      void sync(sal::sync_type st = sal::sync_type::msync_sync) { _engine.sync(st); }
       // Drain the background releaser so a post-op object_count is exact (psitri parity).
       bool wait_for_compactor(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000))
       {

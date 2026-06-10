@@ -27,6 +27,8 @@
 #include <sal_radix_tree.hpp>
 #include <radix_engine.hpp>
 
+
+
 using heart::sal_proto::sal_radix_tree;
 using radix_engine_tree = heart::radix::radix_tree;
 
@@ -116,6 +118,7 @@ namespace
       auto dir = std::filesystem::temp_directory_path() /
                  (std::string("heart_radix_") + tag + (bucket ? "_bkt" : ""));
       radix_engine_tree t(dir);
+      sal::smart_ptr<sal::alloc_header> snap;  // a snapshot IS a smart_ptr copy
       if (bucket)
          t.set_adaptive(true);
       row               r;
@@ -131,7 +134,7 @@ namespace
             uint64_t k = keyfn(i);
             t.upsert(kspan(k), vview(i));
          }
-         t.commit();  // batch boundary → subsequent writes COW (shared mode), like a psitri txn
+         snap = t.root_snapshot();  // batch boundary → subsequent writes COW (shared mode), like a psitri txn
       }
       r.ins = ns(t0, now(), N);
       uint64_t s = 0, q = 0;
@@ -201,7 +204,8 @@ namespace
          uint64_t isum = 0, icnt = 0;
          auto     i0 = now();
          heart::radix::radix_tree::cursor c(&t);
-         for (bool end = c.seek_begin(); !end; end = c.next())
+         // psitri convention: positioning/next return TRUE while ON a valid entry.
+         for (bool ok = c.seek_begin(); ok; ok = c.next())
          {
             isum += c.key().size();  // pure traversal: touch the key, no value access
             ++icnt;
@@ -218,7 +222,7 @@ namespace
          const uint64_t end = std::min(N, base + TX_BATCH);
          for (uint64_t i = base; i < end; ++i)
             t.remove(kspan(keyfn(i)));
-         t.commit();
+         snap = t.root_snapshot();
       }
       r.del          = ns(d0, now(), N);
       uint64_t still = 0;
@@ -479,14 +483,15 @@ int main(int argc, char** argv)
          auto dir = std::filesystem::temp_directory_path() / "heart_worst";
          std::filesystem::remove_all(dir);
          radix_engine_tree t(dir);
+         sal::smart_ptr<sal::alloc_header> snap;  // a snapshot IS a smart_ptr copy
          auto              t0 = now();
          for (uint64_t i = 0; i < N; ++i)
          {
             uint64_t k = keyfn(i);
             t.upsert(kspan(k), vview(i));
-            if ((i + 1) % batch == 0) t.commit();
+            if ((i + 1) % batch == 0) snap = t.root_snapshot();
          }
-         if (N % batch) t.commit();
+         if (N % batch) snap = t.root_snapshot();
          double   ins = ns(t0, now(), N);
          uint64_t s   = 0;
          for (uint64_t i = 0; i < N; ++i)
@@ -555,6 +560,7 @@ int main(int argc, char** argv)
       auto dir = std::filesystem::temp_directory_path() / "heart_uniq";
       std::filesystem::remove_all(dir);
       radix_engine_tree t(dir);
+      sal::smart_ptr<sal::alloc_header> snap;  // a snapshot IS a smart_ptr copy
       auto     t0 = now();
       for (uint64_t i = 0; i < N; ++i) { uint64_t k = rand_key(i); t.upsert(kspan(k), vview(i)); }
       double   ins = ns(t0, now(), N);
@@ -578,8 +584,9 @@ int main(int argc, char** argv)
       auto dir = std::filesystem::temp_directory_path() / "heart_cowtest";
       std::filesystem::remove_all(dir);
       radix_engine_tree t(dir);
+      sal::smart_ptr<sal::alloc_header> snap;  // a snapshot IS a smart_ptr copy
       for (uint64_t i = 0; i < 1000; ++i) { uint64_t k = rand_key(i); t.upsert(kspan(k), vview(i)); }
-      t.commit();
+      snap = t.root_snapshot();
       auto root_before = t.root_addr();
       t.dump_root_child_refs("after commit, before the +1 insert");
       // Insert ONE brand-new key → should COW-to-root: clone root (retain all children), clone path.
@@ -599,7 +606,7 @@ int main(int argc, char** argv)
       {
          uint64_t rb = t.counters().child_retains;
          for (uint64_t i = base; i < base + 2000; ++i)
-         { uint64_t k = rand_key(i); t.upsert(kspan(k), vview(i)); t.commit(); }
+         { uint64_t k = rand_key(i); t.upsert(kspan(k), vview(i)); snap = t.root_snapshot(); }
          uint64_t ra = t.counters().child_retains;
          std::printf("    after %llu keys total: %.1f child-retains/txn over 2000 commit-per-insert txns\n",
                      (unsigned long long)(base + 2000), double(ra - rb) / 2000.0);
@@ -636,9 +643,10 @@ int main(int argc, char** argv)
       auto dir = std::filesystem::temp_directory_path() / "heart_rrstress";
       std::filesystem::remove_all(dir);
       radix_engine_tree t(dir);
+      sal::smart_ptr<sal::alloc_header> snap;  // a snapshot IS a smart_ptr copy
       std::mt19937_64   rng(0xC0FFEEull);
 
-      using paddr = decltype(t.take_snapshot());
+      using paddr = sal::smart_ptr<sal::alloc_header>;  // snapshot = smart_ptr
       struct Ver { paddr root; model_t model; };  // pinned snapshot + its frozen contents
       std::vector<Ver> snaps;
       model_t          live;
@@ -666,7 +674,7 @@ int main(int argc, char** argv)
          }
       };
       auto verify = [&](const Ver& s) {
-         auto got = t.sig_at(s.root);
+         auto got = t.sig_at(s.root.address());
          auto exp = model_sig(s.model);
          ++checks;
          if (got != exp) { ++fails; if (fails <= 5)
@@ -676,14 +684,14 @@ int main(int argc, char** argv)
       };
 
       for (int i = 0; i < 1500; ++i) { uint64_t k = rng(), v = nextval++; t.upsert(kspn(k), vview(v)); live[k] = v; }
-      t.commit();
+      snap = t.root_snapshot();
 
       for (uint64_t r = 0; r < rounds; ++r)
       {
          do_write(3000);
-         t.commit();
+         snap = t.root_snapshot();
          if ((rng() % 3) == 0 && snaps.size() < 40)            // pin a new snapshot
-            snaps.push_back({t.take_snapshot(), live});
+            snaps.push_back({t.root_snapshot(), live});
          if ((rng() % 6) == 0 && !snaps.empty())               // diverge a new lineage off an ancestor
          {
             auto& s = snaps[rng() % snaps.size()];
@@ -693,12 +701,11 @@ int main(int argc, char** argv)
          if ((rng() % 4) == 0 && snaps.size() > 6)             // release a snapshot (incl. ancestors)
          {
             size_t idx = rng() % snaps.size();
-            t.release_snapshot(snaps[idx].root);
-            snaps.erase(snaps.begin() + idx);
+            snaps.erase(snaps.begin() + idx);  // the smart_ptr's destructor IS the release
          }
          for (auto& s : snaps) verify(s);                      // ALL pinned snapshots stay isolated
       }
-      for (auto& s : snaps) { verify(s); t.release_snapshot(s.root); }
+      for (auto& s : snaps) verify(s);  // snaps' destruction releases every pin
       std::printf("rrstress: %llu rounds, %llu checks, %llu MISMATCHES  -> %s\n",
                   (unsigned long long)rounds, (unsigned long long)checks, (unsigned long long)fails,
                   fails == 0 ? "OK" : "FAIL");
@@ -714,25 +721,26 @@ int main(int argc, char** argv)
       auto dir = std::filesystem::temp_directory_path() / "heart_snaptest";
       std::filesystem::remove_all(dir);
       radix_engine_tree t(dir);
+      sal::smart_ptr<sal::alloc_header> cslot;  // one-slot COW-boundary pin
       // Insert 1000 keys with value = i, commit, pin that snapshot.
       for (uint64_t i = 0; i < 1000; ++i) { uint64_t k = rand_key(i); t.upsert(kspan(k), vview(i)); }
-      t.commit();
-      auto snap = t.take_snapshot();
+      cslot = t.root_snapshot();
+      auto snap = t.root_snapshot();
       // (a) UPDATE an existing key to a new value, commit.
       uint64_t k7 = rand_key(7);
-      t.upsert(kspan(k7), vview(999999)); t.commit();
+      t.upsert(kspan(k7), vview(999999)); cslot = t.root_snapshot();
       // (b) INSERT 1000 brand-new keys, commit.
       for (uint64_t i = 1000; i < 2000; ++i) { uint64_t k = rand_key(i); t.upsert(kspan(k), vview(i)); }
-      t.commit();
+      cslot = t.root_snapshot();
       // (c) REMOVE 500 keys that EXIST in the snapshot (keys 0..499) from the LIVE lineage, commit.
       //     A correct COW-to-root remove must clone the path — the snapshot keeps these keys.
       for (uint64_t i = 0; i < 500; ++i) { uint64_t k = rand_key(i); t.remove(kspan(k)); }
-      t.commit();
+      cslot = t.root_snapshot();
       // Now interrogate the PINNED snapshot. Correct COW → it must still show the old world.
       std::string_view v;
-      bool got7   = t.find_at(snap, kspan(k7), v);
+      bool got7   = t.find_at(snap.address(), kspan(k7), v);
       uint64_t v7 = got7 ? getv(v) : 0;
-      uint64_t snap_keys = t.count_keys_at(snap);          // COW-correct → still exactly 1000
+      uint64_t snap_keys = t.count_keys_at(snap.address());          // COW-correct → still exactly 1000
       uint64_t live_keys = t.count_keys_at(t.root_addr()); // 1000 + 1000 inserted - 500 removed = 1500
       std::printf("SNAPSHOT ISOLATION TEST:\n");
       std::printf("  key#7 update isolation: snapshot value=%llu (expect 7)  -> %s\n",
@@ -743,7 +751,7 @@ int main(int argc, char** argv)
                   (unsigned long long)snap_keys, (unsigned long long)live_keys,
                   (snap_keys == 1000 && live_keys == 1500) ? "ISOLATED" : "CORRUPTED");
       (void)got7;
-      t.release_snapshot(snap);
+      snap.release();  // drop the pin
       std::fflush(stdout);
       return 0;
    }
@@ -755,6 +763,7 @@ int main(int argc, char** argv)
       auto dir = std::filesystem::temp_directory_path() / "heart_drop";
       std::filesystem::remove_all(dir);
       radix_engine_tree t(dir);
+      sal::smart_ptr<sal::alloc_header> snap;  // a snapshot IS a smart_ptr copy
       for (uint64_t i = 0; i < N; ++i)  // NO per-op commit → interior nodes uniquely owned
       {
          uint64_t k = rand_key(i);
@@ -788,6 +797,7 @@ int main(int argc, char** argv)
       auto dir = std::filesystem::temp_directory_path() / "heart_scale";
       std::filesystem::remove_all(dir);
       radix_engine_tree t(dir);
+      sal::smart_ptr<sal::alloc_header> snap;  // a snapshot IS a smart_ptr copy
       std::mt19937_64   qrng(123);
       std::printf("heart radix engine — %lluM random keys, commit every %lluK, %lluk rand+seq queries/chunk\n",
                   (unsigned long long)(N / 1'000'000), (unsigned long long)(batch / 1000),
@@ -827,7 +837,7 @@ int main(int argc, char** argv)
          auto i0 = now();
          for (uint64_t i = base; i < base + batch && i < N; ++i)
             t.upsert(kspan(rand_key(i)), vview(i));
-         t.commit();  // COW-to-root snapshot boundary
+         snap = t.root_snapshot();  // COW-to-root snapshot boundary
          double ins = ns(i0, now(), std::min(batch, N - base));
          std::printf("  %7.1f  %9.1f  %9.1f  %9.1f  %9llu\n", double(base + batch) / 1e6, ins, rqns,
                      sqns, (unsigned long long)t.object_count());
@@ -860,22 +870,23 @@ int main(int argc, char** argv)
          auto dir = std::filesystem::temp_directory_path() / "heart_mixins";
          std::filesystem::remove_all(dir);
          radix_engine_tree t(dir);
+         sal::smart_ptr<sal::alloc_header> snap;  // a snapshot IS a smart_ptr copy
          for (uint64_t i = 0; i < base; ++i)  // pre-load (untimed), commit in bulk batches
          {
             uint64_t k = rand_key(i);
             t.upsert(kspan(k), vview(i));
-            if ((i + 1) % 4096 == 0) t.commit();
+            if ((i + 1) % 4096 == 0) snap = t.root_snapshot();
          }
-         t.commit();
+         snap = t.root_snapshot();
          const uint64_t c0 = t.counters().clones;
          auto           t0 = now();
          for (uint64_t i = 0; i < M; ++i)
          {
             uint64_t k = keys[i];
             t.upsert(kspan(k), vview(base + i));
-            if ((i + 1) % batch == 0) t.commit();
+            if ((i + 1) % batch == 0) snap = t.root_snapshot();
          }
-         if (M % batch) t.commit();
+         if (M % batch) snap = t.root_snapshot();
          double nsop = ns(t0, now(), M);
          double clop = double(t.counters().clones - c0) / double(M);
          uint64_t hits = 0;  // spot-verify a sample landed
@@ -911,6 +922,7 @@ int main(int argc, char** argv)
       auto dir = std::filesystem::temp_directory_path() / "heart_dicttest";
       std::filesystem::remove_all(dir);
       radix_engine_tree t(dir);
+      sal::smart_ptr<sal::alloc_header> snap;  // a snapshot IS a smart_ptr copy
       t.set_adaptive(true);  // radix→bucket collapse on deep-narrow subtrees (dict is prefix-dense)
       auto vlen = [](const std::string& w) { return std::string_view(w.data(), w.size()); };
       uint64_t vi = 0;
@@ -919,7 +931,7 @@ int main(int argc, char** argv)
          uint64_t id = vi++;
          t.upsert(vlen(w), std::string_view(reinterpret_cast<const char*>(&id), sizeof(id)));
       }
-      t.commit();
+      snap = t.root_snapshot();
 
       // (1) data correctness: every word is findable via point lookup.
       uint64_t found = 0;

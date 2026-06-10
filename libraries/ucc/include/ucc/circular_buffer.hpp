@@ -10,6 +10,12 @@
 
 namespace ucc
 {
+#ifdef SAL_RELEASE_DEBUG_COUNTERS
+   // Opt-in flow accounting for the 32k rings (sal's release queues) — leak hunts only.
+   inline std::atomic<uint64_t> g_ucc_rq32k_push{0};  // try_push successes
+   inline std::atomic<uint64_t> g_ucc_rq32k_pop{0};   // entries handed out by pop
+#endif
+
    /**
     * @brief A lock-free single-producer single-consumer circular buffer implementation
     * 
@@ -89,6 +95,10 @@ namespace ucc
          buf[current_push & mask] = data;
          current_push++;
          push_pos.store(current_push, std::memory_order_release);
+#ifdef SAL_RELEASE_DEBUG_COUNTERS
+         if constexpr (buffer_size == 32768)
+            ++g_ucc_rq32k_push;
+#endif
          return true;
       }
 
@@ -134,6 +144,10 @@ namespace ucc
 
          // Atomically update read position
          read_pos.store(current_read + to_read, std::memory_order_relaxed);
+#ifdef SAL_RELEASE_DEBUG_COUNTERS
+         if constexpr (buffer_size == 32768)
+            g_ucc_rq32k_pop += to_read;
+#endif
          return to_read;
       }
 

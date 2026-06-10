@@ -800,21 +800,30 @@ endif()
 # PsiTri bank bench (always available)
 add_executable(bank-bench-psitri programs/bank_bench.cpp)
 target_compile_definitions(bank-bench-psitri PRIVATE BANK_ENGINE_PSITRI=1)
-target_link_libraries(bank-bench-psitri PRIVATE psitri Boost::program_options)
+target_link_libraries(bank-bench-psitri PRIVATE psitri Boost::program_options hash)
 set_target_properties(bank-bench-psitri PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 # PsiTri DWAL bank bench (always available)
 add_executable(bank-bench-dwal programs/bank_bench.cpp)
 target_compile_definitions(bank-bench-dwal PRIVATE BANK_ENGINE_DWAL=1)
-target_link_libraries(bank-bench-dwal PRIVATE psitri Boost::program_options)
+target_link_libraries(bank-bench-dwal PRIVATE psitri Boost::program_options hash)
 set_target_properties(bank-bench-dwal PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# Heart bank bench — the heart::radix engine via its native psitri-shaped API
+# (depends only on sal + ucc; must NOT link psitri)
+add_executable(bank-bench-heart programs/bank_bench.cpp)
+target_compile_definitions(bank-bench-heart PRIVATE BANK_ENGINE_HEART=1)
+target_link_libraries(bank-bench-heart PRIVATE heart Boost::program_options hash)
+target_include_directories(bank-bench-heart PRIVATE ${CMAKE_SOURCE_DIR}/libraries/heart/test)
+set_target_properties(bank-bench-heart PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 # PsiTriMDBX bank bench — uses the same MDBX C API but backed by psitrimdbx
 add_executable(bank-bench-psitrimdbx programs/bank_bench.cpp)
 target_compile_definitions(bank-bench-psitrimdbx PRIVATE BANK_ENGINE_MDBX=1)
-target_link_libraries(bank-bench-psitrimdbx PRIVATE psitrimdbx Boost::program_options)
+target_link_libraries(bank-bench-psitrimdbx PRIVATE psitrimdbx Boost::program_options hash)
 set_target_properties(bank-bench-psitrimdbx PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
@@ -822,7 +831,7 @@ set_target_properties(bank-bench-psitrimdbx PROPERTIES
 if(BUILD_SQLITE)
     add_executable(bank-bench-psitri-sqlite programs/bank_bench.cpp)
     target_compile_definitions(bank-bench-psitri-sqlite PRIVATE BANK_ENGINE_SQLITE=1 PSITRI_SQLITE=1)
-    target_link_libraries(bank-bench-psitri-sqlite PRIVATE psitri-sqlite Boost::program_options)
+    target_link_libraries(bank-bench-psitri-sqlite PRIVATE psitri-sqlite Boost::program_options hash)
     target_include_directories(bank-bench-psitri-sqlite PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/libraries/psitri-sqlite/sqlite3)
     set_target_properties(bank-bench-psitri-sqlite PROPERTIES
@@ -833,7 +842,7 @@ endif()
 if(SQLite3_FOUND)
     add_executable(bank-bench-system-sqlite programs/bank_bench.cpp)
     target_compile_definitions(bank-bench-system-sqlite PRIVATE BANK_ENGINE_SQLITE=1)
-    target_link_libraries(bank-bench-system-sqlite PRIVATE SQLite3::SQLite3 Boost::program_options)
+    target_link_libraries(bank-bench-system-sqlite PRIVATE SQLite3::SQLite3 Boost::program_options hash)
     set_target_properties(bank-bench-system-sqlite PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endif()
@@ -842,14 +851,14 @@ if(BUILD_ROCKSDB_BENCH)
     # PsiTriRocks bank bench
     add_executable(bank-bench-psitrirocks programs/bank_bench.cpp)
     target_compile_definitions(bank-bench-psitrirocks PRIVATE BANK_ENGINE_ROCKSDB=1 PSITRIROCKS_BACKEND=1)
-    target_link_libraries(bank-bench-psitrirocks PRIVATE psitrirocks Boost::program_options)
+    target_link_libraries(bank-bench-psitrirocks PRIVATE psitrirocks Boost::program_options hash)
     set_target_properties(bank-bench-psitrirocks PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
     # Real RocksDB bank bench
     add_executable(bank-bench-rocksdb programs/bank_bench.cpp)
     target_compile_definitions(bank-bench-rocksdb PRIVATE BANK_ENGINE_ROCKSDB=1)
-    target_link_libraries(bank-bench-rocksdb PRIVATE rocksdb Boost::program_options)
+    target_link_libraries(bank-bench-rocksdb PRIVATE rocksdb Boost::program_options hash)
     target_include_directories(bank-bench-rocksdb PRIVATE ${rocksdb_SOURCE_DIR}/include)
     set_target_properties(bank-bench-rocksdb PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

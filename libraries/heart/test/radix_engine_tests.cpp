@@ -621,6 +621,31 @@ TEST_CASE("radix_engine: transactions, savepoints, multi-root", "[radix_engine][
    CHECK(t.object_count() == before);  // aborted subtree fully released
 }
 
+// Regression gate for the phantom-strand bug: dropping a big SCATTERED tree (built by single-
+// commit churn, nodes spread across many segments) spills the destroy cascade to the background
+// releaser. total_pending_releases() must count the releaser's popped-but-unprocessed batch and
+// its in-flight cascade — not just queue usage — or a bare pending==0 poll (the
+// wait_for_compactor contract) returns while background destruction is still running and the
+// object count reads thousands high. This test deliberately polls pending ONLY (no count-
+// stability loop like drain()) and then asserts the exact count.
+TEST_CASE("radix_engine: big scattered drop fully drains via the pending poll",
+          "[radix_engine][txn]")
+{
+   radix_tree t(tmp("heart_big_drop"));
+   for (int i = 0; i < 60000; ++i)
+   {
+      auto tx = t.start_transaction(0);
+      tx.upsert("log" + std::to_string(i), "logvalue_logvalue_logvalue");
+      tx.commit();
+   }
+   REQUIRE(t.get_root(0).count_keys() == 60000);
+   t.set_root(0, radix_tree::tree{});
+   for (int i = 0; i < 30000 && t.pending_releases() > 0; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+   REQUIRE(t.pending_releases() == 0);
+   CHECK(t.object_count() == 0);  // nothing in flight, nothing stranded
+}
+
 // Regression gate for the collision-child subtree double-free: many prefix-sharing subtree keys
 // force the root through tier transitions / prefix-splits / collisions while it holds subtree
 // leaves — the path that re-created an existing subtree terminal from its value bytes without
@@ -647,7 +672,9 @@ TEST_CASE("radix_engine: many subtrees across tier transitions (no double-free)"
       if (sh && sh.get<std::string>("v").value_or("") == std::to_string(i)) ++ok;
    }
    CHECK(ok == int(oracle.size()));
-   CHECK(t.get_root(0).count_keys() == oracle.size());
+   // Direct-API build → verify through the direct surface (get_root reads SAL's COMMITTED
+   // root table, which direct mutations never touch).
+   CHECK(radix_tree::cursor(&t).count_keys() == oracle.size());
 }
 
 // tree_handle: in-place subtree editing (open_subtree/create_subtree) with bottom-up commit,
@@ -836,8 +863,9 @@ TEST_CASE("radix_engine: cursor value_ref / value<T> / get_value", "[radix_engin
 
 TEST_CASE("radix_engine: overwrite returns prior size + COW commit cycle", "[radix_engine]")
 {
-   radix_tree t(tmp("heart_re_cow"));
-   const int  N = 4000;
+   radix_tree       t(tmp("heart_re_cow"));
+   const int        N    = 4000;
+   sal::smart_ptr<sal::alloc_header> snap;  // caller-held pin: a snapshot IS a smart_ptr copy
    for (int round = 0; round < 6; ++round)
    {
       for (int i = 0; i < N; ++i)
@@ -850,7 +878,9 @@ TEST_CASE("radix_engine: overwrite returns prior size + COW commit cycle", "[rad
          else
             REQUIRE(prv == int(make_value(uint64_t((round - 1) * 100000 + i)).size()));
       }
-      t.commit();
+      // pin this round's root (forcing next round's overwrites through the shared-COW path);
+      // the assignment drops the previous round's pin.
+      snap = t.root_snapshot();
       for (int i = 0; i < N; ++i)
       {
          value_view got;
@@ -1066,7 +1096,7 @@ TEST_CASE("radix_engine: remove under MVCC snapshots stays leak-bounded",
    const int      N    = 6000;
    for (int i = 0; i < N; ++i)
       t.upsert(u64key(hashed(uint64_t(i))), make_value(uint64_t(i)));
-   t.commit();  // snapshot pins the whole tree (ref>1 → removes COW the path)
+   auto snap = t.root_snapshot();  // pins the whole tree (ref>1 → removes COW the path)
 
    for (int i = 0; i < N; ++i)  // remove all from the live root (shared-mode COW path)
       REQUIRE(t.remove(u64key(hashed(uint64_t(i)))));
@@ -1074,7 +1104,7 @@ TEST_CASE("radix_engine: remove under MVCC snapshots stays leak-bounded",
    for (int i = 0; i < N; ++i)
       REQUIRE_FALSE(t.find(u64key(hashed(uint64_t(i))), g));
 
-   t.commit();  // drop the old snapshot → the original (full) tree is freed
+   snap.release();  // drop the snapshot → the original (full) tree is freed
    drain(t);
    REQUIRE(t.object_count() < base + 8);  // back to ~empty: no per-version leak
 }

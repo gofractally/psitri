@@ -264,6 +264,11 @@ namespace sal
       ~allocator_session();
       allocator&               get_allocator() const noexcept { return _sega; }
       allocator_session_number get_session_num() const noexcept { return _session_num; }
+
+      /// Read-session policy: spill EVERY last-ref release to the background release thread
+      /// instead of destroying inline. A reader dropping a pinned snapshot must not pay the
+      /// dead lineage's destroy cascade on its own thread — that work belongs to the releaser.
+      void set_defer_destroy(bool defer) noexcept { _defer_destroy = defer; }
       [[nodiscard]] operation_scope record_operation(mapped_memory::session_operation op,
                                                      uint64_t count = 1) noexcept;
 
@@ -417,6 +422,10 @@ namespace sal
       // it on the top-level call, decrements per node, and spills the remainder to the background
       // release thread once it hits 0 so one drop can't stall the writer unboundedly.
       uint32_t _destroy_budget = UINT32_MAX;
+      /// When set (read sessions), EVERY last-ref release spills to the background release
+      /// thread instead of destroying inline: a reader dropping a pinned snapshot must not run
+      /// the dead lineage's destroy cascade on its own thread (that is the writer's garbage).
+      bool _defer_destroy = false;
 
       friend class allocator_session_ptr;
       friend class allocator;

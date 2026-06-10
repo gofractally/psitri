@@ -1430,7 +1430,14 @@ namespace sal
          {
             auto& rqueue =
                 _mapped_state->_session_data.release_queue(allocator_session_number(snum));
+            // Popped entries leave the queue's usage() immediately, but they are NOT done:
+            // publish them as in-flight so total_pending_releases() (the drain predicate)
+            // stays non-zero until each entry's destroy cascade has actually completed.
+            // Claim BEFORE the pop (a poller must never observe usage already decremented
+            // while in-flight still reads 0), then correct to the real batch size.
+            _release_in_flight.store(1, std::memory_order_release);
             auto num_loaded = rqueue.pop(read_ids, 1024);
+            _release_in_flight.store(num_loaded, std::memory_order_release);
             for (uint32_t i = 0; i < num_loaded; ++i)
             {
                // Fine-grained read lock prevents the compactor from recycling
@@ -1440,6 +1447,7 @@ namespace sal
                sesr.retain_read_lock();
                sesr.final_release(read_ids[i]);
                sesr.release_read_lock();
+               _release_in_flight.store(num_loaded - i - 1, std::memory_order_release);
             }
          }
       }
@@ -2304,6 +2312,15 @@ namespace sal
       _release_thread->start();
       _compactor_thread->start();
       _segment_provider_thread->start();
+   }
+
+   void allocator::stop_compactor_thread()
+   {
+      if (_compactor_thread)
+      {
+         _compactor_thread->stop();
+         _compactor_thread.reset();
+      }
    }
 
    void allocator::stop_background_threads()

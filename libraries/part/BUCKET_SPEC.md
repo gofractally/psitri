@@ -25,16 +25,10 @@ update-in-place page churn) is dissolved by composition.
 | sub-pages (small payload heap) ×≤12 | 2 each (256B) | 2 | yes, individually |
 | dedicated value lines (entries ≥64B) | 1..n | 1..n | yes |
 
-No 16-contiguous allocation is required anywhere. (Optional later: a fully
-IMPLICIT bucket — one contiguous run where fp/sp/page addresses are
-computed from base+k, no CL0 table loads — created by bulk load and
-clone-forward re-promotion, demoted to the explicit form on first COW:
-the same implicit↔explicit cycle as node_full↔full_x. If implicit-16
-creation proves common, the freeset grows a free_lines_16 hint tier; the
-allocator already counts 16s as adjacent-8 pairs.)
-
-Tags: implicit bucket = existing K::bucket (9); explicit composed bucket =
-K::bucket_x (12). Both ≤ 0xE.
+No 16-contiguous allocation is required anywhere, and there is NO implicit
+variant: the sub-page table in CL0 makes the explicit composed form the
+default and only bucket (Dan, 2026-06-11). One tag: K::bucket (9),
+redefined as this composed form.
 
 ## 2. CL0 — the header cacheline (byte map, 128 B)
 
@@ -44,21 +38,24 @@ off  sz   field
                         router_hdr-compatible at offset 0: term update and
                         set_or_update_term reuse verbatim
   2   4   term          line_ptr, value when the key ends at this bucket
-  6   1   flags         {implicit_layout:1, open_page:4, rsv:3}
-  7   1   npages        live sub-pages (≤12)
+  6   1   open_spi      the ONE open (bump-allocating) sub-page slot
+  7   1   open_off8     bump position within it, 8B units (the "global
+                        alloc_pos": advancing past a page folds its
+                        untouched tail into that page's free_space)
   8   4   cnt[4]  u8    entries in each SP line (lines are RAGGED: entry's
                         global rank = prefix-sum(cnt) + slot — removal
                         touches ONE SP line, no cross-line shifting)
+                        npages/live-slot mask derivable: page_line[i]!=null
  12   8   stem_lo[4]u16 first stem of each SP line — the header-resident
                         line index: 3 compares pick the ONE SP line to
                         load (heart's stem lower_bound trick)
- 20   1   dead8         dead payload bytes /8 (compaction-at-clone hint)
- 21   1   nbig          dedicated-line entries
- 22   2   rsv
- 24   4   fp_line       line_ptr → FP line      (computed, not loaded,
- 28  16   sp_line[4]    line_ptr → SP lines      when implicit_layout=1)
+ 20   1   nbig          dedicated-line entries
+ 21   3   rsv
+ 24   4   fp_line       line_ptr → FP line
+ 28  16   sp_line[4]    line_ptr → SP lines
  44  48   page_line[12] line_ptr → sub-page (2 lines) or dedicated value
-                        lines; low spare bits tag {subpage | bigval}
+                        lines; null = free table slot (reusable for a
+                        FRESH page); low spare bits tag {subpage | bigval}
  92  36   prefix[36]    common prefix of the collapsed radix tail
                         (longer prefixes keep a prefix_node above)
                                                                   = 128
@@ -86,8 +83,9 @@ u16 lref = [big:1][spi:4][off:5][len:6]
   spi  → range id 0..15: CL0 maps it to a physical cline
          (page_line[spi]) — or arithmetic (base + 6 + 2*spi) when
          implicit_layout — Dan's "implicit range → explicit cline" rule
-  big=0: payload cell in sub-page spi at byte off*8, length len*8 (≤64B
-         entries: never cross the 2-line sub-page boundary by construction)
+  big=0: payload cell in sub-page spi at byte off*8, allocated length
+         len*8 (immutable; the cell's live vlen may shrink below it).
+         ≤64B entries never cross the 2-line sub-page boundary
   big=1: page_line[spi] is a DEDICATED 1..len-line allocation owning the
          whole entry — values ≥64B waste <50% (line-rounded), never bloat
          sub-pages
@@ -95,7 +93,13 @@ u16 lref = [big:1][spi:4][off:5][len:6]
 
 Payload cell (the design5 leaf, finally variable):
 `[klen u8][vlen u8][vtype u8][suffix klen][value vlen]`, padded to 8B.
-Sub-page header: `[used8 u8][dead8 u8][rsv 6B]` then bump-packed cells.
+Sub-page header: `[free_space8 u8][rsv 7B]` then bump-packed cells.
+free_space is a DEAD-BYTE LEDGER, not an allocator: deleting a cell adds
+its allocated size; closing the page (the bump moved past it) adds the
+untouched tail. Nothing ever reallocates INTO it — COW regenerates nodes
+constantly, so holes are not worth chasing. Its one job: when
+free_space == capacity, the page is dead → the bucket releases its line
+ref and nulls page_line[spi]; the slot is reused for a FRESH page.
 
 ## 5. Operations
 
@@ -111,14 +115,19 @@ open_page if it fits, else next page with room, else new sub-page
 (class-2 alloc), else dedicated lines (≥64B or no room).
 
 **remove**: delete slot in ONE SP line (ragged lines — no global shift),
-clear FP slot, add entry size to dead8/sub-page dead counter. Payload
-space reclaims lazily: the next CLONE of that sub-page skips dead cells
-(COW is the compactor); a bucket whose dead8 crosses a threshold compacts
-fully on its next privatize.
+clear FP slot, credit the cell's allocated size to its page's free_space.
+When a non-open page's free_space reaches capacity it is RELEASED (line
+ref dropped, table slot nulled). No intra-page reclamation ever: dead
+space rides until the page empties or the bucket splits/rebuilds —
+bounded by pages × 248B, and COW churn regenerates buckets often enough
+in practice (the no-realloc rule keeps lrefs stable so clones never have
+to rewrite SP lines).
 
-**update value, same vlen, all-private**: write in place (pages already
-dirty this txn — no amplification). Different vlen: new cell (old marked
-dead), lref rewritten in the (private) SP line.
+**update value**: new_len <= allocated len AND line private this txn →
+write in place, update cell vlen (page already dirty; no amplification;
+free_space NOT credited — the cell stays live at its allocated size).
+Growing → bump-alloc a new cell in the open page (old cell's allocated
+size → free_space), rewrite lref in the (private) SP line.
 
 ## 6. COW (the whole point)
 
@@ -136,17 +145,18 @@ Typical COW touch = 2–4 line copies + ≤17 retains vs 16-line monolithic
 copy, and vs leaf-model's router+leaf clone chain it is a near-wash on
 writes while being ~2.7x denser and far faster to scan. Release is
 line-wise (dying sub-pages/SP/FP lines free independently; shared ones
-survive) — identical to fx/cx destroy rules. Cloning a sub-page compacts
-it for free.
+survive) — identical to fx/cx destroy rules. Clones are verbatim 256B
+memcpys (no compaction — lrefs stay valid, SP lines untouched).
 
 ## 7. Allocator interplay
 
 Only class-1 and class-2 allocations on the hot path (dedicated values
 1..n). Per-line refcounts of one bucket's pieces land near each other
 (allocated together by the same session) ⇒ retains/releases of a bucket
-generation touch 1–2 refcount cachelines. The "16-bit free slot index"
-(free_lines_16 hint tier) is OPTIONAL and only if/when the implicit
-contiguous bucket fast path is added.
+generation touch 1–2 refcount cachelines. The per-bucket page allocator
+is the CL0 table itself: one open page bumping, dead pages released and
+their slots reused for fresh pages — never a 16-contig alloc, no
+freeset changes needed.
 
 ## 8. Open questions for sign-off
 
@@ -159,6 +169,6 @@ contiguous bucket fast path is added.
 4. Reserved 64B per SP line: leave reserved, or 21×6B stem+lref pairs
    (capacity 84) at the cost of the shift/mask indexing? Proposed: keep 16
    + reserved (indexing simplicity wins; capacity comes from splitting).
-5. bucket_x only at first (created by bkt creation under COW); implicit
-   K::bucket re-promotion deferred with full_x/cx re-promotion work.
+5. (resolved 2026-06-11: explicit composed form is the only bucket; no
+   implicit variant, no allocator tier.)
 ```

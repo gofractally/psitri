@@ -31,6 +31,19 @@ namespace
    }
 }  // namespace
 
+namespace
+{
+   // Every line the engine ever allocated must come back once the sessions and
+   // database are gone — the leak detector for the whole COW machinery.
+   void require_drained(part::arena& a)
+   {
+      uint64_t free_total = 0;
+      for (uint32_t s = 0; s < a.num_segments(); ++s)
+         free_total += a.freeset_of(s).free_lines();
+      REQUIRE(free_total == uint64_t(a.num_segments()) * part::lines_per_segment);
+   }
+}  // namespace
+
 TEST_CASE("kv battery: batched commits, updates, removes vs oracle")
 {
    auto dir = fs::temp_directory_path() / "part_kv_battery";
@@ -122,4 +135,65 @@ TEST_CASE("kv battery: batched commits, updates, removes vs oracle")
       }
       REQUIRE(oit == oracle.end());
    }
+
+   // Phase 5: remove EVERYTHING, then the arena must drain to empty once the
+   // session and database release their roots.
+   for (size_t base = half; base < keys.size(); base += B)
+   {
+      auto   tx  = ses->start_transaction(0);
+      size_t end = std::min(keys.size(), base + size_t(B));
+      for (size_t i = base; i < end; ++i)
+         tx.remove(keys[i]);
+      tx.commit();
+   }
+   // After remove-all the live root is null: every generation has drained
+   // and the arena must be empty even while the database stays open.
+   require_drained(db->store());
+}
+
+TEST_CASE("kv churn: repeated overwrites under generation turnover drain fully")
+{
+   auto dir = fs::temp_directory_path() / "part_kv_churn";
+   fs::remove_all(dir);
+   auto db  = part::kv::database::create(dir);
+   auto ses = db->start_write_session();
+
+   // Bank-shaped churn: a fixed key population, every txn overwrites a few
+   // keys and commits (slot retain forces COW + demotion next txn).
+   std::mt19937_64          rng(7);
+   std::vector<std::string> keys;
+   for (int i = 0; i < 4000; ++i)
+      keys.push_back("acct/" + std::to_string(i));
+   {
+      auto tx = ses->start_transaction(0);
+      for (auto& k : keys)
+         tx.upsert(k, "00000000");
+      tx.commit();
+   }
+   for (int round = 0; round < 3000; ++round)
+   {
+      auto tx = ses->start_transaction(0);
+      for (int j = 0; j < 3; ++j)
+      {
+         auto& k = keys[rng() % keys.size()];
+         char  v[9];
+         snprintf(v, sizeof v, "%08x", uint32_t(rng()));
+         tx.upsert(k, std::string_view(v, 8));
+      }
+      tx.commit();
+   }
+   // The live tree should be the ONLY generation: live bytes must be sane
+   // (population is fixed; churn must not accumulate).
+   const auto& st   = db->store().stats();
+   const auto  live = st.bytes_allocated.load() - st.bytes_freed.load();
+   INFO("live bytes after churn: " << live);
+   REQUIRE(live < 16u * 1024 * 1024);  // 4k keys * ~0.5KB tree ≈ 2MB; 16MB = generous
+
+   {  // remove everything: the arena must drain with the database still open
+      auto tx = ses->start_transaction(0);
+      for (auto& k : keys)
+         tx.remove(k);
+      tx.commit();
+   }
+   require_drained(db->store());
 }

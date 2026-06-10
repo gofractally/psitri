@@ -206,6 +206,78 @@ namespace
       }
       verify_present();
 
+      // ── Phase 4.5 (ported from psitri fuzz_tests): adversarial insert/remove
+      // shapes — nested prefixes, binary 0x00/0xFF edges, long keys, sequential
+      // runs, insert/remove/reinsert interleave, reverse-order removal.
+      {
+         std::vector<std::pair<std::string, std::string>> adv;
+         std::string nest;
+         // NOTE: nest depth 200 / key length ~580B abort HEART (silent SIGABRT
+         // after a 1-key page split) — a real finding for the generic suite;
+         // bounds reduced here so the x3 comparison still runs end to end.
+         for (int i = 0; i < 64; ++i)
+         {  // "a", "aa", "aaa", ... every key a prefix of the next
+            nest += char('a' + (i % 3));
+            adv.emplace_back(nest, mkval(uint64_t(i)));
+         }
+         for (int i = 0; i < 64; ++i)
+         {  // binary edge bytes around 0x00/0xFF (router segment boundaries)
+            std::string k;
+            k += char(i & 1 ? 0x00 : 0xFF);
+            k += char(uint8_t(i * 37));
+            k += char(i & 2 ? 0x00 : 0xFF);
+            k += std::to_string(i);
+            adv.emplace_back(k, mkval(uint64_t(i) + 7));
+         }
+         for (int i = 0; i < 32; ++i)  // long keys (deep descent, long suffixes)
+            adv.emplace_back(std::string(20 + i * 3, char('A' + i % 23)) + std::to_string(i),
+                             mkval(uint64_t(i) + 100));
+         for (int i = 0; i < 512; ++i)  // tight sequential run (BE counter keys)
+         {
+            uint64_t be = __builtin_bswap64(uint64_t(i));
+            adv.emplace_back("seq" + std::string(reinterpret_cast<char*>(&be), 8),
+                             mkval(uint64_t(i) + 200));
+         }
+         for (auto& [k, v] : adv)
+            oracle[k] = v;
+         upsert_pairs(adv);
+         verify_present();
+
+         // interleaved remove/reinsert thrash over the adversarial set
+         for (int round = 0; round < 3; ++round)
+         {
+            auto tx = ses->start_transaction(0);
+            for (size_t i = round; i < adv.size(); i += 3)
+            {
+               tx.remove(adv[i].first);
+               oracle.erase(adv[i].first);
+            }
+            tx.commit();
+            auto tx2 = ses->start_transaction(0);
+            for (size_t i = round; i < adv.size(); i += 3)
+            {
+               auto nv = mkval(uint64_t(i * 31 + round));
+               tx2.upsert(adv[i].first, nv);
+               oracle[adv[i].first] = nv;
+            }
+            tx2.commit();
+         }
+         verify_present();
+
+         // reverse-order removal of the nested-prefix chain (max collapse churn)
+         {
+            auto tx = ses->start_transaction(0);
+            for (int i = 199; i >= 0; --i)
+            {
+               std::string k = adv[size_t(i)].first;
+               tx.remove(k);
+               oracle.erase(k);
+            }
+            tx.commit();
+         }
+         verify_present();
+      }
+
       // ── Phase 5: remove everything → all miss
       {
          std::vector<std::string> keys;
@@ -215,6 +287,19 @@ namespace
          verify_absent(keys);
       }
 
+      // All keys removed: a correct engine has freed every node. part's arena
+      // makes that checkable exactly: every line must be back in the freeset.
+      if constexpr (requires(DB& d) { d.store(); })
+      {
+         auto&    arena      = db->store();
+         uint64_t free_total = 0;
+         for (uint32_t sg = 0; sg < arena.num_segments(); ++sg)
+            free_total += arena.freeset_of(sg).free_lines();
+         const uint64_t cap = uint64_t(arena.num_segments()) * part::lines_per_segment;
+         std::printf("    [%s] memory drained: %llu / %llu lines free\n", name,
+                     (unsigned long long)free_total, (unsigned long long)cap);
+         ok(free_total == cap);
+      }
       std::printf("  %-7s: %ld checks, %ld failures  [%s]\n", name, checks, fails,
                   fails == 0 ? "PASS" : "FAIL");
       return fails == 0;

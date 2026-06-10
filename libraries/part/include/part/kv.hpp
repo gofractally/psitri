@@ -39,14 +39,18 @@ namespace part::kv
    };
 
    // Inline POD value: len-prefixed bytes, trivially copyable (COW memcpy).
+   // 80 B total keeps a typical leaf (4 B header + value + short suffix) inside
+   // ONE 128 B line — at 128 B every 8-byte bank balance burned a 2-line leaf,
+   // which alone doubled resident memory. Variable-length leaf values (design5
+   // val_len) are the real fix and live in the tree layer's future.
    struct pval
    {
       uint16_t len = 0;
-      char     b[126];
+      char     b[78];
       static pval from(value_view v)
       {
          if (v.size() > sizeof(b))
-            throw std::length_error("part::kv value exceeds 126 bytes");
+            throw std::length_error("part::kv value exceeds 78 bytes");
          pval p;
          p.len = uint16_t(v.size());
          std::memcpy(p.b, v.data(), v.size());
@@ -54,7 +58,7 @@ namespace part::kv
       }
       value_view view() const noexcept { return value_view(b, len); }
    };
-   static_assert(std::is_trivially_copyable_v<pval>);
+   static_assert(std::is_trivially_copyable_v<pval> && sizeof(pval) == 80);
 
    using engine_t = hkv::kv_tree<std::string_view, pval, hkv::mode::none, part_alloc<pval>>;
    using root_ptr = part::detail::line_ptr;

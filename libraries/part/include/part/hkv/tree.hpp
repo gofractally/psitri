@@ -2350,6 +2350,51 @@ namespace detail  // implementation types & node helpers — not part of the pub
          {
             const packed_ptr nd = *slot;
             const K          k  = nd.tag();
+            if constexpr (cow_enabled)
+               if (k == K::full_x || k == K::cx)
+               {
+                  router_hdr*    xrh = static_cast<router_hdr*>(deref_(nd));
+                  const unsigned xnb = xrh->hdr.nbranch;
+                  const bool     xtm = !xrh->term.is_null();
+                  if (xnb == 0 && !xtm)
+                  {
+                     cow_release(nd);  // line-wise: dying lines release their content
+                     return true;      // empty shell: caller unlinks and cascades
+                  }
+                  if (xnb == 0)
+                  {  // only payload is the term: it replaces the node
+                     const Ptr t = xrh->term;
+                     if (!cow_retain(t))
+                        return false;  // pathological refcount: keep the node
+                     *slot = t;
+                     cow_release(nd);
+                     return false;
+                  }
+                  if (xnb <= unsigned(SHRINK_MAX))
+                  {
+                     try  // de-widen to one setlist line (shared-line safe:
+                     {    // +1 per copied child pairs the -1 from dying lines)
+                        setlist* s2         = new_setlist();
+                        s2->rh.hdr.has_term = xrh->hdr.has_term;
+                        s2->rh.term         = xrh->term;
+                        cow_fix_child_(&s2->rh.term);
+                        router_for_each(nd, [&](uint8_t bb, packed_ptr br) {
+                           const bool ok = setlist_set(s2, bb, br);
+                           assert(ok && "SHRINK_MAX <= setlist CAP");
+                           (void)ok;
+                        });
+                        for (int i = 0; i < s2->rh.hdr.nbranch; ++i)
+                           cow_fix_child_(&s2->branch[i]);
+                        *slot = pack_(s2, K::setlist_u8);
+                        cow_release(nd);
+                        continue;  // re-evaluate as a setlist
+                     }
+                     catch (...)
+                     {
+                     }
+                  }
+                  return false;
+               }
             if (k == K::prefix_node || !is_router(k))
                return false;
             router_hdr*    rh = static_cast<router_hdr*>(deref_(nd));
@@ -2386,7 +2431,14 @@ namespace detail  // implementation types & node helpers — not part of the pub
                rm_free_(nd);
                return false;
             }
-            if (nb == 1 && !tm)
+            // Under COW, an implicit cN/full may share its tail lines with a
+            // demoted explicit node: the raw single-child collapse would move
+            // the child out without a retain. Route those through the
+            // de-widen-to-setlist below (shared-safe); the setlist re-collapses
+            // on the next loop iteration.
+            const bool cow_dewiden_first =
+                cow_enabled && k != K::setlist_u8 && k != K::setlist_u16;
+            if (nb == 1 && !tm && !cow_dewiden_first)
             {
                uint8_t  pfx[setlist::PREFIX_CAP + 2];
                unsigned pl = 0;
@@ -2430,7 +2482,16 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      (void)ok;
                   });
                   *slot = pack_(s2, K::setlist_u8);
-                  rm_free_(nd);
+                  if constexpr (cow_enabled)
+                  {  // tails may be shared (post-demotion): retain the copies,
+                     // release the node line-wise — pairs exactly either way
+                     cow_fix_child_(&s2->rh.term);
+                     for (int i = 0; i < s2->rh.hdr.nbranch; ++i)
+                        cow_fix_child_(&s2->branch[i]);
+                     cow_release(nd);
+                  }
+                  else
+                     rm_free_(nd);
                   continue;  // re-evaluate as a setlist (may now be 1-branch -> collapse)
                }
                catch (...)

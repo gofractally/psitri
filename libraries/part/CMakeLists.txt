@@ -27,7 +27,7 @@ if(PART_BUILD_TESTS)
             test/kv_tests.cpp
         )
         target_link_libraries(part-tests PRIVATE part Catch2::Catch2WithMain)
-        target_compile_options(part-tests PRIVATE -O1 -g -Wall -Werror=switch)
+        target_compile_options(part-tests PRIVATE -O1 -g -UNDEBUG -Wall -Werror=switch)
         set_target_properties(part-tests PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
         add_test(NAME part-tests COMMAND part-tests)

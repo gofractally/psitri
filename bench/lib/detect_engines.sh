@@ -7,6 +7,7 @@ BIN="${1:-build/release}/bin"
 
 HAVE_PSITRI=0;     [ -x "$BIN/bank-bench-psitri" ]      && HAVE_PSITRI=1
 HAVE_HEART=0;      [ -x "$BIN/bank-bench-heart" ]       && HAVE_HEART=1
+HAVE_ART=0;        [ -x "$BIN/bank-bench-art" ]         && HAVE_ART=1
 HAVE_DWAL=0;       [ -x "$BIN/bank-bench-dwal" ]        && HAVE_DWAL=1
 HAVE_PSITRIROCKS=0;[ -x "$BIN/psitrirocks-bench" ]      && HAVE_PSITRIROCKS=1
 HAVE_ROCKSDB=0;    [ -x "$BIN/rocksdb-bench" ]           && HAVE_ROCKSDB=1
@@ -26,6 +27,7 @@ HAVE_KV_MDBX=0;    [ -x "$BIN/kv-bench-mdbx" ]          && HAVE_KV_MDBX=1
 echo "=== Available Engines ==="
 echo "  PsiTri (native):  $HAVE_PSITRI"
 echo "  Heart:            $HAVE_HEART"
+echo "  libart (1-thread):$HAVE_ART"
 echo "  DWAL:             $HAVE_DWAL"
 echo "  PsiTriRocks:      $HAVE_PSITRIROCKS"
 echo "  RocksDB:          $HAVE_ROCKSDB"

@@ -824,6 +824,16 @@ target_include_directories(bank-bench-heart PRIVATE ${CMAKE_SOURCE_DIR}/librarie
 set_target_properties(bank-bench-heart PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+# libart bank bench — upstream C ART (third_party/libart), in-memory,
+# SINGLE THREAD ONLY: the pure-algorithm baseline every engine reads against.
+add_executable(bank-bench-art programs/bank_bench.cpp third_party/libart/art.c)
+target_compile_definitions(bank-bench-art PRIVATE BANK_ENGINE_ART=1)
+target_link_libraries(bank-bench-art PRIVATE Boost::program_options hash)
+target_include_directories(bank-bench-art PRIVATE ${CMAKE_SOURCE_DIR}/third_party/libart)
+set_target_properties(bank-bench-art PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    INTERPROCEDURAL_OPTIMIZATION OFF)  # art.c objects must not be thin-LTO bitcode
+
 # Part bank bench — the part engine via its native psitri-shaped API
 # (depends only on sal + ucc + part; must NOT link psitri)
 add_executable(bank-bench-part programs/bank_bench.cpp)

@@ -384,6 +384,11 @@ class BankEngine
 
    virtual uint64_t scan_all(
        std::function<void(const std::string& key, uint64_t bal)> visitor) = 0;
+
+   /// Engine has no concurrent-reader support (e.g. libart): phase 3b runs write-only
+   /// (no reader thread alongside the writer); 3c's solo reader is still safe — the
+   /// writer is quiesced before it starts and thread creation orders the memory.
+   virtual bool single_threaded() const { return false; }
 };
 
 // ============================================================
@@ -1956,6 +1961,166 @@ class TidesDbEngine : public BankEngine
 #endif
 
 // ============================================================
+// libart Engine (upstream C ART; in-memory, SINGLE THREAD ONLY)
+// ============================================================
+// The pure-algorithm baseline: armon/libart with malloc'd values, no
+// persistence, no transactions, no concurrency. Establishes the floor cost
+// of "just the trie" — everything an engine adds (COW, commits, sessions,
+// durability) reads against this. Keys follow the standard libart
+// convention of including a trailing NUL so prefix-of-another keys work.
+
+#if defined(BANK_ENGINE_ART)
+extern "C" {
+#include <art.h>
+}
+
+class ArtEngine : public BankEngine
+{
+   art_tree _t{};
+   bool     _open = false;
+   uint64_t _value_bytes = 0;  // live malloc'd value payload (for report_size)
+
+   // value blob: [u32 len][bytes]
+   static void* make_blob(const std::string& v)
+   {
+      auto* p = static_cast<unsigned char*>(std::malloc(4 + v.size()));
+      uint32_t n = uint32_t(v.size());
+      std::memcpy(p, &n, 4);
+      std::memcpy(p + 4, v.data(), v.size());
+      return p;
+   }
+   static std::string_view blob_view(const void* b)
+   {
+      uint32_t n;
+      std::memcpy(&n, b, 4);
+      return {reinterpret_cast<const char*>(b) + 4, n};
+   }
+   // libart keys carry a trailing NUL (length-delimited, so binary-safe)
+   static const unsigned char* kdata(const std::string& k)
+   {
+      return reinterpret_cast<const unsigned char*>(k.c_str());
+   }
+   static int klen(const std::string& k) { return int(k.size()) + 1; }
+
+   void put(const std::string& k, const std::string& v)
+   {
+      void* old = art_insert(&_t, kdata(k), klen(k), make_blob(v));
+      _value_bytes += v.size();
+      if (old)
+      {
+         _value_bytes -= blob_view(old).size();
+         std::free(old);
+      }
+   }
+   bool get(const std::string& k, std::string_view& out) const
+   {
+      void* b = art_search(&_t, kdata(k), klen(k));
+      if (!b)
+         return false;
+      out = blob_view(b);
+      return true;
+   }
+
+  public:
+   const char* name() const override { return "libart (single-thread, in-memory)"; }
+   bool        single_threaded() const override { return true; }
+
+   void open(const std::string&, const std::string&) override
+   {
+      art_tree_init(&_t);
+      _open        = true;
+      _value_bytes = 0;
+   }
+   void close() override
+   {
+      if (!_open)
+         return;
+      art_iter(&_t, [](void*, const unsigned char*, uint32_t, void* value) {
+         std::free(value);
+         return 0;
+      }, nullptr);
+      art_tree_destroy(&_t);
+      _open = false;
+   }
+
+   void bulk_load(const std::vector<std::string>& accounts, uint64_t balance) override
+   {
+      auto bal = encode_balance(balance);
+      for (auto& acct : accounts)
+         put(acct, bal);
+   }
+
+   void begin_batch() override {}   // no transactions: every write is immediately visible
+   void commit_batch() override {}
+   void sync() override {}          // in-memory: nothing to make durable
+
+   bool transfer(const std::string& src,
+                 const std::string& dst,
+                 uint64_t           amount,
+                 uint64_t           seq) override
+   {
+      std::string_view sv;
+      if (!get(src, sv))
+         return false;
+      uint64_t src_bal = decode_balance(sv.data(), sv.size());
+      if (src_bal < amount)
+         return false;
+      std::string_view dv;
+      if (!get(dst, dv))
+         return false;
+      uint64_t dst_bal = decode_balance(dv.data(), dv.size());
+
+      put(src, encode_balance(src_bal - amount));
+      put(dst, encode_balance(dst_bal + amount));
+      put(encode_log_key(seq), encode_log_value(src, dst, amount));
+      return true;
+   }
+
+   SizeReport report_size(const std::string&) override
+   {
+      SizeReport r;  // in-memory: report the live payload + a leaf-count node estimate
+      r.file_size = 0;
+      r.live_size = _value_bytes + art_size(&_t) * 64;
+      r.free_size = 0;
+      return r;
+   }
+
+   // 3c solo reader only (single_threaded() suppresses the 3b concurrent reader): the
+   // writer is quiesced before the reader thread starts, so plain reads are safe.
+   bool read_account(const std::string& key, uint64_t& balance_out) override
+   {
+      std::string_view v;
+      if (!get(key, v))
+         return false;
+      balance_out = decode_balance(v.data(), v.size());
+      return true;
+   }
+
+   uint64_t scan_all(std::function<void(const std::string&, uint64_t)> visitor) override
+   {
+      struct Ctx
+      {
+         std::function<void(const std::string&, uint64_t)>* vis;
+         uint64_t                                           count;
+      } ctx{&visitor, 0};
+      art_iter(&_t,
+               [](void* data, const unsigned char* key, uint32_t key_len, void* value) {
+                  auto* c = static_cast<Ctx*>(data);
+                  auto  v = blob_view(value);
+                  // strip the trailing NUL the key convention added
+                  std::string k(reinterpret_cast<const char*>(key),
+                                key_len ? key_len - 1 : 0);
+                  (*c->vis)(k, decode_balance(v.data(), v.size()));
+                  ++c->count;
+                  return 0;
+               },
+               &ctx);
+      return ctx.count;
+   }
+};
+#endif
+
+// ============================================================
 // Main
 // ============================================================
 
@@ -2024,6 +2189,8 @@ int main(int argc, char** argv)
    engine = std::make_unique<TidesDbEngine>();
 #elif defined(BANK_ENGINE_SQLITE)
    engine = std::make_unique<SqliteEngine>();
+#elif defined(BANK_ENGINE_ART)
+   engine = std::make_unique<ArtEngine>();
 #else
 #error "No BANK_ENGINE_* defined"
 #endif
@@ -2233,10 +2400,15 @@ int main(int argc, char** argv)
    uint64_t successful = p3a.successful;
 
    // ── Phase 3b: Transactions with concurrent reader ──
-   printf("\nPhase 3b: Transactions (with 1 reader, %s reads/batch)\n",
-          format_comma(cfg.reads_per_tx).c_str());
+   // Single-threaded engines (libart baseline) run 3b WITHOUT the reader thread —
+   // the numbers stay comparable as a second write pass; 3c's solo reader still runs.
+   if (engine->single_threaded())
+      printf("\nPhase 3b: Transactions (engine is SINGLE-THREADED: no concurrent reader)\n");
+   else
+      printf("\nPhase 3b: Transactions (with 1 reader, %s reads/batch)\n",
+             format_comma(cfg.reads_per_tx).c_str());
    auto p3b = run_tx_phase("Write+Read", cfg.num_transactions, cfg.seed + 1,
-                           p3a.successful, true);
+                           p3a.successful, !engine->single_threaded());
    successful += p3b.successful;
 
    // ── Phase 3c: Reader solo (no concurrent writer) ──

@@ -64,7 +64,74 @@ variable):
 - then part::kv drops pval entirely: upsert takes value_view straight in,
   valuetype byte reserved next to vlen for future typed values.
 
-## Composed bucket — correctness session 2 findings (gate still 0)
+## Composed bucket — CORRECT and MEASURED (2026-06-10, gate=1 default)
+
+Full suite green with the gate on: 30 cases / 1.08M assertions + TSan.
+Two final husk-class bugs (keys stored unreachable) plus two iterator bugs:
+
+1. **split-retry depth rewind**: the burst re-encodes the bucket prefix in
+   a prefix_node wrapper, so insert_'s retry must `depth -= pl` before
+   re-descending (was landing keys pl bytes off — find-unreachable husk).
+2. **term rides the burst rebuild**: a term bucket CAN burst into a
+   prefix_node top (term + 64 entries sharing the next byte — dictionary
+   keys hit it 343/1M); the post-hoc term reattach asserted there and
+   under NDEBUG dropped the key + leaked a setlist. Now the term joins
+   cb_build_ as the empty-suffix entry (an empty suffix also stops the
+   shared-prefix strip, so the bad shape can't form). Regression case in
+   kv_tests.
+3. **suffix-as-full-key leaves**: cb-built leaves used make_value_at(sfx,0)
+   which records the SUFFIX as the leaf's zero-copy FULL key → scans
+   returned truncated/empty keys. cb_leaf_ clears LEAF_FULL
+   (layout-identical at plen==0); iterator reconstructs from the stack.
+4. **iterator self-pointer**: bucket-cell values materialize into the
+   iterator's cvalbuf_; val_ pointed there and dangled under the
+   DEFAULTED copy/move (kv cursor does `_it = view.begin()`), visible
+   only under -flto=thin stack reuse. val_local_ flag; value() rebases
+   off `this`.
+
+**Measured (same-session A/B, M5, one process at a time):**
+
+Bank 1M acct / 10M transfers, batch=1 (bucket ON vs OFF / vs heart):
+| metric | ON | OFF | heart |
+|---|---|---|---|
+| bulk load | 6.23M ops/s | 7.21M | 2.94M |
+| write-only | 361.3k tx/s | 383.6k | 259.8k |
+| write+read | 362.1k tx/s | 372.3k | 233.2k |
+| reader w/ writer | 3.84M/s | 3.97M | 2.68M |
+| validation scan | 13.67M/s | 13.20M | 31.2M |
+| file end / live end | 2747 / 1792MB | 2359 / 1837MB | 1120 / 663MB |
+| file load / live load | 130 / 109MB | 194 / 154MB | 320 / 31MB |
+
+Dictionary probe (236k words, value=word, ×3 get sweeps, ×5 scans):
+| metric | ON | OFF |
+|---|---|---|
+| insert | 4.79M/s | 5.95M/s |
+| point get | 18.4M/s | 19.7M/s |
+| scan | 25.6M/s | **45.9M/s** |
+| live | **33.7MB** | 56.1MB |
+
+**Reading:** the space win at rest is real (−40% dict live, −29% bank
+load live). Everything else went the wrong way, and the original
+motivation has shifted under us: the leaf model's scan (45.9M/s) now
+BEATS heart's 31.2M — the 3.3x scan deficit that justified the bucket
+predates LEAF_FULL zero-copy keys + the inline-frame iterator. The bank
+scan barely moves (+4%) because 93% of scanned keys are log entries
+(sequential, never bucketed). End-of-bank file is +16% WORSE with
+buckets: a bucket COW touch retires ~5 lines (CL0+FP+SP+subpage) vs 1–2
+for leaf+router, so batch=1 churn carries more outstanding garbage.
+
+**Levers if the space win should keep the gate on:**
+- iterator: replace the per-descend bord_ std::sort (64-entry sort with
+  SP/cell-deref comparator) with the natural 4-line merge (stems already
+  sorted per line; only equal-stem runs need suffix ordering) — the scan
+  regression is mostly this sort.
+- yield: lazy value materialization (store cell ptr/len; from_bytes only
+  when value() is read) — scans that only touch keys skip the 80B copy.
+- COW: clone CL0+SP+FP as one 3-line ALLOC (1 alloc + 1 refcount line
+  instead of 3) and/or revisit writer_clone_at for bucket lines.
+Decision pending: space (−30..40%) vs scan (−44%) and writes (−3..6%).
+
+## Composed bucket — correctness session 2 findings (gate still 0, HISTORICAL)
 
 Unit suite (test/cbucket_tests.cpp): GREEN — 20k-step oracle fuzz of the
 raw ops (insert/update/remove/find, shrink/regrow-in-place, page

@@ -4,6 +4,7 @@
 // upsert/remove/commit, and reads via transaction::get(key, lambda). Each result is
 // cross-checked against std::map. Exit 0 iff both engines pass every check.
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -30,6 +31,81 @@ static_assert(part::shape::kv_database<psitri::database>);
 
 namespace
 {
+   // ── side-by-side perf accounting (same battery, engines back-to-back) ────
+   struct perf_acc
+   {
+      uint64_t ops = 0;
+      double   sec = 0;
+   };
+   std::map<std::string, std::map<std::string, perf_acc>> g_perf;  // phase -> engine
+   std::vector<std::string>                               g_phase_order;
+   std::vector<std::string>                               g_engine_order;
+   const char*                                            g_engine = "";
+   double now_s()
+   {
+      return std::chrono::duration<double>(
+                 std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+   }
+   void rec(const char* phase, uint64_t ops, double sec)
+   {
+      if (g_perf.find(phase) == g_perf.end() ||
+          std::find(g_phase_order.begin(), g_phase_order.end(), phase) ==
+              g_phase_order.end())
+         g_phase_order.push_back(phase);
+      auto& a = g_perf[phase][g_engine];
+      a.ops += ops;
+      a.sec += sec;
+   }
+   void perf_report()
+   {
+      std::printf("\n== side-by-side: ops/sec, ns/op, best vs rest ==\n");
+      std::printf("%-12s", "phase");
+      for (auto& e : g_engine_order)
+         std::printf(" | %-22s", e.c_str());
+      std::printf(" | best\n");
+      for (auto& ph : g_phase_order)
+      {
+         auto& row = g_perf[ph];
+         double best_ops = 0;
+         std::string best;
+         for (auto& e : g_engine_order)
+         {
+            auto it = row.find(e);
+            if (it == row.end() || it->second.sec <= 0)
+               continue;
+            const double r = double(it->second.ops) / it->second.sec;
+            if (r > best_ops)
+            {
+               best_ops = r;
+               best     = e;
+            }
+         }
+         std::printf("%-12s", ph.c_str());
+         for (auto& e : g_engine_order)
+         {
+            auto it = row.find(e);
+            if (it == row.end() || it->second.sec <= 0)
+            {
+               std::printf(" | %-22s", "-");
+               continue;
+            }
+            const double ops_s = double(it->second.ops) / it->second.sec;
+            const double ns    = 1e9 * it->second.sec / double(it->second.ops);
+            char         buf[64];
+            if (e == best)
+               snprintf(buf, sizeof buf, "%7.2fM/s %6.0fns *", ops_s / 1e6, ns);
+            else
+               snprintf(buf, sizeof buf, "%7.2fM/s %6.0fns %.2fx", ops_s / 1e6, ns,
+                        best_ops / ops_s);
+            std::printf(" | %-22s", buf);
+         }
+         std::printf(" | %s\n", best.c_str());
+      }
+      std::printf("(* = fastest; Nx = slowdown vs fastest. One process, identical op\n"
+                  " sequence per engine, engines run back-to-back.)\n");
+   }
+
    uint64_t    hashed(uint64_t i) { return (i * 0x9E3779B97F4A7C15ull) ^ (i >> 29); }
    std::string u64key(uint64_t x) { return std::string(reinterpret_cast<const char*>(&x), sizeof(x)); }
    std::string mkval(uint64_t seed)
@@ -50,6 +126,8 @@ namespace
       long checks = 0, fails = 0;
       auto ok = [&](bool c) { ++checks; fails += !c; };
 
+      g_engine = name;
+      g_engine_order.push_back(name);
       auto db  = DB::create(dir);              // native, default config
       auto ses = db->start_write_session();    // native
 
@@ -59,22 +137,28 @@ namespace
 
       // present-with-value / absent checks against the latest committed state, via a read txn.
       auto verify_present = [&]() {
-         auto tx = ses->start_transaction(0);
+         auto         tx = ses->start_transaction(0);
+         const double t0 = now_s();
          for (auto& [k, v] : oracle)
          {
             bool match = false;
             bool found = tx.get(k, [&](std::string_view got) { match = (got == v); });
             ok(found && match);
          }
+         rec("get-hit", oracle.size(), now_s() - t0);
          tx.abort();
       };
       auto verify_absent = [&](const std::vector<std::string>& keys) {
-         auto tx = ses->start_transaction(0);
+         auto         tx = ses->start_transaction(0);
+         const double t0 = now_s();
          for (auto& k : keys)
             ok(!tx.get(k, [](std::string_view) {}));
+         rec("get-miss", keys.size(), now_s() - t0);
          tx.abort();
       };
-      auto upsert_pairs = [&](const std::vector<std::pair<std::string, std::string>>& kv) {
+      auto upsert_pairs = [&](const std::vector<std::pair<std::string, std::string>>& kv,
+                              const char* phase = "upsert") {
+         const double t0 = now_s();
          for (size_t base = 0; base < kv.size(); base += B)
          {
             auto   tx  = ses->start_transaction(0);
@@ -83,8 +167,10 @@ namespace
                tx.upsert(kv[i].first, kv[i].second);  // overwrite semantics (set key=value)
             tx.commit();
          }
+         rec(phase, kv.size(), now_s() - t0);
       };
       auto remove_keys = [&](const std::vector<std::string>& keys, size_t count) {
+         const double t0 = now_s();
          for (size_t base = 0; base < count; base += B)
          {
             auto   tx  = ses->start_transaction(0);
@@ -93,6 +179,7 @@ namespace
                tx.remove(keys[i]);
             tx.commit();
          }
+         rec("remove", count, now_s() - t0);
       };
 
       // ── Phase 1: batched upsert of mixed-shape keys (binary u64 + prefix-sharing strings)
@@ -109,7 +196,7 @@ namespace
          kv.emplace_back(k, mkval(k.size() + 7));
          oracle[k] = kv.back().second;
       }
-      upsert_pairs(kv);
+      upsert_pairs(kv, "load");
       verify_present();
       {
          std::vector<std::string> miss;
@@ -118,9 +205,11 @@ namespace
          verify_absent(miss);
       }
 
-      // ── Iterator: a full forward scan (get_root().snapshot_cursor() + seek_begin + next)
+      // ── Iterator: a full forward scan — timed as "scan"
+      // (get_root().snapshot_cursor() + seek_begin + next)
       // must enumerate keys in std::map order with matching values — the psitri pattern.
       {
+         const double t0 = now_s();
          auto root = ses->get_root(0);
          auto c    = root.snapshot_cursor();
          c.seek_begin();
@@ -136,6 +225,7 @@ namespace
          }
          std::printf("    [%s] forward scan enumerated %ld of %zu\n", name, cnt, oracle.size());
          ok(c.is_end() && it == oracle.end());  // both exhausted together — same length & order
+         rec("scan", oracle.size(), now_s() - t0);
       }
       // ── Iterator range: lower_bound(lo) .. up to (not incl) hi, vs the std::map range.
       {
@@ -312,6 +402,7 @@ int main()
    bool h = run<heart::kv::database>("heart", tmp("kvcompat_heart"));
    bool p = run<psitri::database>("psitri", tmp("kvcompat_psitri"));
    bool a = run<part::kv::database>("part", tmp("kvcompat_part"));
+   perf_report();
    std::printf("RESULT: heart %s, psitri %s, part %s\n", h ? "PASS" : "FAIL",
                p ? "PASS" : "FAIL", a ? "PASS" : "FAIL");
    return (h && p && a) ? 0 : 1;

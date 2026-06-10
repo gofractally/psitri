@@ -157,6 +157,67 @@ TEST_CASE("kv battery: batched commits, updates, removes vs oracle")
    require_drained(db->store());
 }
 
+TEST_CASE("kv terms: a key that is a strict prefix of >64 same-byte siblings")
+{
+   // Burst shape that silently dropped the bucket term under NDEBUG: the
+   // bucket holds a term ("base" == its prefix) and 64+ entries that all
+   // share the next byte, so the rebuilt subtree tops with a prefix node.
+   auto dir = fs::temp_directory_path() / "part_kv_terms";
+   fs::remove_all(dir);
+   auto db  = part::kv::database::create(dir);
+   auto ses = db->start_write_session();
+
+   std::map<std::string, std::string> oracle;
+   {
+      auto tx = ses->start_transaction(0);
+      for (int v = 0; v < 4; ++v)
+      {
+         std::string base = "trm/" + std::to_string(v) + "/key";
+         tx.upsert(base, "TERMVAL" + std::to_string(v));
+         oracle[base] = "TERMVAL" + std::to_string(v);
+         for (int i = 0; i < 200; ++i)  // shared 'a' rides every suffix
+         {
+            std::string k = base + "a" + std::to_string(i);
+            tx.upsert(k, mkval(uint64_t(v * 1000 + i)));
+            oracle[k] = mkval(uint64_t(v * 1000 + i));
+         }
+      }
+      tx.commit();
+   }
+   {
+      auto tx = ses->start_transaction(0);
+      for (auto& [k, v] : oracle)
+      {
+         auto got = tx.template get<std::string>(k);
+         INFO("key='" << k << "'");
+         REQUIRE(got.has_value());
+         REQUIRE(*got == v);
+      }
+      tx.abort();
+   }
+   {  // scan sees them all, in order
+      auto c   = ses->get_root(0).snapshot_cursor();
+      auto oit = oracle.begin();
+      c.seek_begin();
+      while (!c.is_end())
+      {
+         REQUIRE(oit != oracle.end());
+         REQUIRE(std::string(c.key()) == oit->first);
+         REQUIRE(*c.value<std::string>() == oit->second);
+         c.next();
+         ++oit;
+      }
+      REQUIRE(oit == oracle.end());
+   }
+   {  // remove every key; arena must drain (no leaked term leaves/wrappers)
+      auto tx = ses->start_transaction(0);
+      for (auto& [k, v] : oracle)
+         tx.remove(k);
+      tx.commit();
+   }
+   require_drained(db->store());
+}
+
 TEST_CASE("kv churn: repeated overwrites under generation turnover drain fully")
 {
    auto dir = fs::temp_directory_path() / "part_kv_churn";

@@ -5108,47 +5108,41 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
          cb_hdr* h = static_cast<cb_hdr*>(deref_(cur));
          std::vector<cb_ent_> es;
-         es.reserve(CB_MAX + 1);
+         es.reserve(CB_MAX + 2);
          cb_for_each_(h, [&](std::string_view s2, std::string_view v2)
                       { es.push_back({std::string(s2), std::string(v2)}); });
+         // The term rides the rebuild as the empty-suffix entry: cb_build_
+         // places it on whatever node ends up on top, and an empty suffix
+         // stops the shared-prefix strip, so a term bucket can never burst
+         // into a bare prefix/leaf top. (The old post-hoc reattach silently
+         // DROPPED the term for prefix_node tops under NDEBUG.) The old term
+         // leaf is released with the bucket below.
+         if (!h->rh.term.is_null())
+         {
+            cb_ent_ te{std::string(), std::string()};
+            if constexpr (inlineable)
+            {
+               if (h->rh.term.tag() == K::value_inline)
+               {
+                  T tv;
+                  unpack_inline(h->rh.term, tv);
+                  const auto b = tv.to_bytes();
+                  te.val.assign(b.data(), b.size());
+               }
+            }
+            if (h->rh.term.tag() == K::value_ptr)
+            {
+               const auto b =
+                   leaf_val(static_cast<const char*>(deref_(h->rh.term)))->to_bytes();
+               te.val.assign(b.data(), b.size());
+            }
+            es.push_back(std::move(te));
+         }
          std::sort(es.begin(), es.end(),
                    [](const cb_ent_& a, const cb_ent_& b) { return a.sfx < b.sfx; });
          const std::string pfx(reinterpret_cast<const char*>(h->prefix),
                                h->rh.hdr.prefix_len);
-         Ptr np = cb_build_(es, 0, es.size());
-         // re-attach the bucket's own term and prefix
-         if (!h->rh.term.is_null())
-         {
-            // np is bucket/leaf/setlist/prefix; only routers/buckets carry terms.
-            // Build guarantees a router or bucket at top when >1 entry; for the
-            // 1-entry edge wrap in a tiny bucket via make2 semantics upstream.
-            router_hdr* rh2 = static_cast<router_hdr*>(deref_(np));
-            if (np.tag() == K::setlist_u8 || np.tag() == K::cbucket)
-            {
-               rh2->term = h->rh.term;
-               rh2->hdr.has_term = 1;
-               cow_fix_child_(&rh2->term);
-            }
-            else
-            {  // prefix/leaf top: wrap with a 0-prefix setlist carrying the term
-               setlist* sw = new_setlist();
-               sw->rh.term = h->rh.term;
-               sw->rh.hdr.has_term = 1;
-               cow_fix_child_(&sw->rh.term);
-               if (np.tag() == K::prefix_node)
-               {
-                  // descend one level: keep wrapper above the prefix node by
-                  // moving the prefix into the setlist? simplest: setlist with
-                  // single branch on the prefix node's first byte is wrong —
-                  // instead attach via term-only setlist + branch for np's
-                  // first byte is unknowable here; fall back: tiny bucket
-                  // cannot hold a subtree. Practical rule: buckets with a term
-                  // never burst into a bare prefix/leaf top because the term
-                  // plus >=64 entries guarantees the setlist path above.
-                  assert(false && "term bucket burst to non-router top");
-               }
-            }
-         }
+         Ptr np  = cb_build_(es, 0, es.size());
          Ptr out = np;
          if (!pfx.empty())
             out = make_prefix(std::string_view(pfx), out);

@@ -64,6 +64,28 @@ variable):
 - then part::kv drops pval entirely: upsert takes value_view straight in,
   valuetype byte reserved next to vlen for future typed values.
 
+## Composed bucket (BUCKET_SPEC) — integration WIP, gated PART_CBUCKET=0
+
+All machinery is in tree.hpp and compiled (structures, lref, sub-page
+lifecycle, self-privatizing ops, recursive burst, iterator frames, COW
+arms, pval bytes-bridge = variable-length values). Oracle bisection fixed
+three integration bugs (run-spanning equal-stem lookups; recursive split
+with prefix_node wrappers — setlist PREFIX_CAP=8 smash; burst targets
+scale setlist->node_full — dropped-branch bug). REMAINING: duplicate-key
+update under churn inserts a second entry (WRONGVAL @ ~2k keys, repro:
+/tmp/cbr*.cpp pattern). Next: the BUCKET_SPEC TDD pass (cell/page/SP unit
+tests vs oracle), then flip PART_CBUCKET=1 and measure (expected: file
+~psitri-class, scan gap closed).
+
+## Found in OTHER engines by the generic suite
+
+- heart: silent SIGABRT after a 1-key page split at nest=200 / ~580B keys
+  (bounds reduced in kv_compat with a note).
+- psitri: SEGV in cursor::find_impl during the adversarial phase —
+  REPRODUCIBLE as of d84abf08 (layout-sensitive: identical inputs passed
+  in earlier binaries). Blocks kv-compat x3 (heart PASS, psitri crash,
+  part unreached; part's own kv battery mirrors these phases and passes).
+
 ## Open levers (next session)
 
 1. **Reader interference / write+read**: per-batch pin→unpin frees a whole

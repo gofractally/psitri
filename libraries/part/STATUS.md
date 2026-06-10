@@ -42,6 +42,28 @@ demotion work moved write+read from 0.58x → 0.95x; profile-confirmed the
 remaining interference is generation lifecycle (clone/destroy churn + the
 reader's per-batch unpin cascades contending the freeset).
 
+## NEXT SESSION, FIRST: variable-length leaf values (Dan's directive)
+
+pval must NOT be size-limited: the leaf is sized to the user data —
+prefix + postfix(suffix) + valuetype + value in ONE object (the design5
+leaf). The current fixed-80B pval is interim. Implementation map (the
+fixed-T model is the only thing in the way; the SUFFIX is already
+variable):
+- leaf layout -> [slen u16][pfx u16][vlen u16][value bytes][suffix/key bytes];
+  introduce marker type `hkv::bytes_value{string_view}` and gate with
+  `raw_vals = is_same_v<T, bytes_value>` in: leaf_value_off/leaf_size/
+  leaf_alloc_size (+leaf_vlen), leaf_val/leaf_str, make_value_at,
+  split_leaf (byte-copy not move), the Assign overwrite paths (insert_
+  leaf case + set_or_update_term: same-vlen memcpy in place, else
+  REBUILD leaf + replace slot/term handle + free old), find/val_of_/
+  copy_value (view out; part::kv copies to std::string immediately),
+  iterator value() (mutable bytes_value cache instead of set_ptr_),
+  free_all_/cow paths already byte-copy/size via leaf_alloc_size.
+- bucket code paths must compile but stay unreachable (mode::none);
+  gate bkt_val uses with if constexpr.
+- then part::kv drops pval entirely: upsert takes value_view straight in,
+  valuetype byte reserved next to vlen for future typed values.
+
 ## Open levers (next session)
 
 1. **Reader interference / write+read**: per-batch pin→unpin frees a whole

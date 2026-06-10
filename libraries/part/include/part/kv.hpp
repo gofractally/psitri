@@ -36,6 +36,7 @@ namespace part::kv
       sal::sync_type sync_mode               = sal::sync_type::none;
       bool           write_protect_on_commit = false;
       bool           checksum_on_commit      = false;
+      uint32_t       max_segments            = 4096;  // x 8MB arena ceiling (32 GB default)
    };
 
    // Inline POD value: len-prefixed bytes, trivially copyable (COW memcpy).
@@ -313,8 +314,9 @@ namespace part::kv
       static part::arena_config make_cfg_(std::filesystem::path dir, runtime_config cfg)
       {
          part::arena_config c;
-         c.dir       = std::move(dir);
-         c.sync_mode = cfg.sync_mode;
+         c.dir          = std::move(dir);
+         c.sync_mode    = cfg.sync_mode;
+         c.max_segments = cfg.max_segments;
          // COW churn frees whole generations but long-lived survivors pepper
          // old segments; demanding 50%-in-8-contig before reuse lets the file
          // grow without bound. 1/8 keeps the can-this-segment-serve-allocs

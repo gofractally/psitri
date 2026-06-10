@@ -756,6 +756,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   const uint8_t byte = uint8_t(key[depth]);
                   unsigned      li, sl;
                   full_index<Ptr>(byte, li, sl);
+                  if (x->lines[li].is_null())
+                     x->lines[li] = fx_new_line_();  // empty range materializes on demand
                   cline_direct_t<Ptr>* L  = fx_line_(x, li);
                   packed_ptr*          cs = &L->ptr[sl];
                   if (!cs->is_null())
@@ -4125,6 +4127,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          while (!router_try_set(node, byte, child))
          {
             if constexpr (cow_enabled)
+            {
                if (node.tag() == K::cx)
                {
                   node_cx*       x  = static_cast<node_cx*>(deref_(node));
@@ -4135,6 +4138,16 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      continue;
                   }
                }
+               if (node.tag() == K::full_x)
+               {  // terminal tier: try_set can only fail on an absent range line
+                  node_fullx* x = static_cast<node_fullx*>(deref_(node));
+                  unsigned    li, sl;
+                  full_index<Ptr>(byte, li, sl);
+                  assert(x->lines[li].is_null());
+                  x->lines[li] = fx_new_line_();
+                  continue;
+               }
+            }
             node = widen(node);  // frees the old node; re-anchor before the next (throwing) widen
             if (pn) pn_set_next(pn, node);
             else    *slot = node;

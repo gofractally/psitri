@@ -483,6 +483,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
       using node_cx    = node_cx_t<Ptr>;
       template <int N>
       using cnode = cnode_t<N, Ptr>;
+      static_assert(cnode_layout_ok_v<2, Ptr> && cnode_layout_ok_v<4, Ptr> &&
+                    cnode_layout_ok_v<8, Ptr>,
+                    "cnode CL0 must tile one line at this handle width");
 
       using codec = key_codec<Key>;
       // Pass cheap keys (string_view, integers) BY VALUE — a const-ref forces a stack
@@ -4055,20 +4058,50 @@ namespace detail  // implementation types & node helpers — not part of the pub
          packed_ptr   out;
          if constexpr (cow_enabled)
          {
-            // part ladder: EXPLICIT segmented tiers (cx lg=1,2,3 then full_x),
-            // empty ranges are null lines — never an allocated-but-empty cline.
-            // The terminal tier is full_x rather than the implicit node_full:
-            // dense nodes pay one extra dependent load, sparse ones stop paying
-            // 10 lines for 17 branches. (Implicit node_full remains for the
-            // non-COW upstream modes only.)
-            if (k == K::setlist_u8)
-               out = cx_from_router_(cur, 1);
-            else if (k == K::cx)
+            // part ladder: setlist -> {c2|cx1} -> {c4|cx2} -> {c8|cx3} ->
+            // {node_full|full_x}, the form chosen by TARGET occupancy (Dan's
+            // rule): implicit (monolithic, skip-CL0 1-load descent) only when
+            // at most ONE of its range lines would be empty; otherwise the
+            // explicit per-line form where empty ranges are NULL lines. Dense
+            // tops keep the direct-node read path; sparse ones stop paying
+            // dead clines. COW demotion later turns implicit into explicit
+            // with the same null-empty rule, so write-hot subtrees converge
+            // to the shareable form and read-only ones keep the fast one.
+            const unsigned next_lg = k == K::setlist_u8 ? 1
+                                   : k == K::cx ? unsigned(static_cast<node_cx*>(deref_(cur))->lg) + 1
+                                   : k == K::c2 ? 2
+                                   : k == K::c4 ? 3
+                                   : k == K::c8 ? 4
+                                   : (assert(false), 0u);  // 4 = the full tier
+            unsigned used = 0;
+            const unsigned nrange = next_lg == 4 ? full_lines_v<Ptr> : (1u << next_lg);
             {
-               node_cx* x = static_cast<node_cx*>(deref_(cur));
-               out = x->lg < 3 ? cx_from_router_(cur, unsigned(x->lg) + 1) : fx_from_cx_(cur);
+               uint64_t mask = 0;
+               router_for_each(cur, [&](uint8_t b, packed_ptr) {
+                  mask |= 1ull << (next_lg == 4 ? b / full_per_line_v<Ptr> : b >> (8 - next_lg));
+               });
+               used = unsigned(std::popcount(mask));
             }
-            else { assert(false); __builtin_unreachable(); }
+            const bool implicit_ok = used + 1 >= nrange;  // <=1 empty range line
+            const bool src_cx      = k == K::cx;
+            if (next_lg == 4)
+               out = implicit_ok ? (src_cx ? implicit_from_cx_<node_full>(cur, K::node_full)
+                                           : build_wider<node_full>(cur, K::node_full))
+                                 : (src_cx ? fx_from_cx_(cur) : fx_from_implicit_(cur));
+            else if (implicit_ok)
+            {
+               const K nt = next_lg == 1 ? K::c2 : next_lg == 2 ? K::c4 : K::c8;
+               if (src_cx)
+                  out = next_lg == 1   ? implicit_from_cx_<cnode<2>>(cur, nt)
+                        : next_lg == 2 ? implicit_from_cx_<cnode<4>>(cur, nt)
+                                       : implicit_from_cx_<cnode<8>>(cur, nt);
+               else
+                  out = next_lg == 1   ? build_wider<cnode<2>>(cur, nt)
+                        : next_lg == 2 ? build_wider<cnode<4>>(cur, nt)
+                                       : build_wider<cnode<8>>(cur, nt);
+            }
+            else
+               out = cx_from_router_(cur, next_lg);  // handles cx AND implicit sources
          }
          else if constexpr (!DenseTiers)
             out = build_wider<node_full>(cur, K::node_full);  // fast path: straight to full
@@ -5360,7 +5393,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   {
                      la += !x->lines[li].is_null();
                      lu += !x->lines[li].is_null() &&
-                           static_cast<const cline_direct*>(deref_(x->lines[li]))->nset > 0;
+                           static_cast<const cline_direct_t<Ptr>*>(deref_(x->lines[li]))->nset > 0;
                   }
                   f(census_row{k, uint32_t(la) * 128, x->rh.hdr.nbranch, lu, la});
                   census_(x->rh.term, f);
@@ -5662,17 +5695,14 @@ namespace detail  // implementation types & node helpers — not part of the pub
          unsigned fixed = 0;  // shared-copy progress, for unwind
          try
          {
-            if (src.tag() == K::setlist_u8)
-            {
-               setlist* ss = static_cast<setlist*>(deref_(src));
-               for (int i2 = 0; i2 < ss->rh.hdr.nbranch; ++i2)  // pass 1: targets
-               {
-                  Ptr& t = nx->seglines[ss->bytes[i2] >> (8 - lg)];
+            if (src.tag() != K::cx)
+            {  // implicit source (setlist / cnode): whole-node private — pure move
+               router_for_each(src, [&](uint8_t b, packed_ptr) {  // pass 1: targets
+                  Ptr& t = nx->seglines[b >> (8 - lg)];
                   if (t.is_null())
                      t = cx_new_seg_(lg);
-               }
-               for (int i2 = 0; i2 < ss->rh.hdr.nbranch; ++i2)  // move (nothrow)
-                  place(ss->bytes[i2], ss->branch[i2]);
+               });
+               router_for_each(src, [&](uint8_t b, packed_ptr br) { place(b, br); });
                return pack_(nx, K::cx);
             }
             node_cx*       sx    = static_cast<node_cx*>(deref_(src));
@@ -5783,6 +5813,101 @@ namespace detail  // implementation types & node helpers — not part of the pub
             fx_unwind_built_(nx, fixed);
             throw;
          }
+      }
+      // cx -> MONOLITHIC target (cnode<X> or node_full): the dense-occupancy
+      // widen. Same line-granular move/copy discipline as the explicit builders.
+      template <class N>
+      Ptr implicit_from_cx_(Ptr src, K newtag)
+      {
+         node_cx* sx = static_cast<node_cx*>(deref_(src));
+         N*       n  = ::new (node_alloc_(sizeof(N))) N;
+         if constexpr (std::is_same_v<N, node_full>)
+            full_init(n);
+         else
+            cnode_init(n);
+         n->rh.hdr.has_term = sx->rh.hdr.has_term;
+         n->rh.term         = sx->rh.term;  // moves
+         auto place = [&](uint8_t b, packed_ptr br) noexcept -> Ptr*
+         {
+            if constexpr (std::is_same_v<N, node_full>)
+            {
+               full_set(n, b, br);
+               return reinterpret_cast<packed_ptr*>(reinterpret_cast<char*>(n) +
+                                                    full_offtab_v<Ptr>[b]);
+            }
+            else
+            {
+               const bool ok = cnode_set(n, b, br);
+               assert(ok && "occupancy-checked target always has room");
+               (void)ok;
+               return cnode_child_slot(n, b);
+            }
+         };
+         const unsigned snseg     = 1u << sx->lg;
+         bool           shared[8] = {};
+         unsigned       fixed     = 0;
+         try
+         {
+            for (unsigned sg = 0; sg < snseg; ++sg)
+               if (!sx->seglines[sg].is_null())
+                  shared[sg] = alloc_.hkv_ref(line_of(sx->seglines[sg])) >= 2;
+            for (unsigned sg = 0; sg < snseg; ++sg)  // shared copies first (may throw)
+            {
+               if (sx->seglines[sg].is_null() || !shared[sg])
+                  continue;
+               cx_for_each_seg_(sx, sg, [&](uint8_t b, packed_ptr br) {
+                  Ptr* p = place(b, br);
+                  cow_fix_child_(p);
+                  ++fixed;
+               });
+            }
+            for (unsigned sg = 0; sg < snseg; ++sg)  // nothrow moves + releases
+            {
+               if (sx->seglines[sg].is_null())
+                  continue;
+               if (shared[sg])
+                  cx_release_line_(sx->seglines[sg], sx->lg);
+               else
+               {
+                  cx_for_each_seg_(sx, sg, [&](uint8_t b, packed_ptr br) { place(b, br); });
+                  alloc_.hkv_release(line_of(sx->seglines[sg]), [](uint32_t) {});
+               }
+               sx->seglines[sg] = packed_ptr::null();
+            }
+            return pack_(n, newtag);
+         }
+         catch (...)
+         {
+            // release the fixed prefix (ascending bytes = placement order)
+            router_for_each(pack_(n, newtag), [&](uint8_t, packed_ptr br) {
+               if (fixed) { cow_release(br); --fixed; }
+            });
+            node_free_(n, sizeof(N));
+            throw;
+         }
+      }
+      // implicit source (c8: whole-node private) -> sparse full_x with null lines
+      Ptr fx_from_implicit_(Ptr src)
+      {
+         router_hdr* srh = static_cast<router_hdr*>(deref_(src));
+         node_fullx* nx  = static_cast<node_fullx*>(node_alloc_(cacheline_bytes));
+         nx->rh          = *srh;
+         for (auto& l2 : nx->lines)
+            l2 = packed_ptr::null();
+         router_for_each(src, [&](uint8_t b, packed_ptr) {  // pass 1: lines
+            unsigned li, sl;
+            full_index<Ptr>(b, li, sl);
+            if (nx->lines[li].is_null())
+               nx->lines[li] = fx_new_line_();
+         });
+         router_for_each(src, [&](uint8_t b, packed_ptr br) {  // pure move
+            unsigned li, sl;
+            full_index<Ptr>(b, li, sl);
+            cline_direct_t<Ptr>* L = fx_line_(nx, li);
+            L->ptr[sl]             = br;
+            ++L->nset;
+         });
+         return pack_(nx, K::full_x);
       }
       // iterate one seg line of a cx: (absolute byte, branch) ascending
       template <class F>

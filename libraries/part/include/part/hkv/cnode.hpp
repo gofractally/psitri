@@ -69,9 +69,19 @@ namespace hkv::detail
       static_assert(sizeof(seg) == 128, "segment tiles one cacheline");
 
       router_hdr_t<Ptr> rh;            // CL0 header (no inline prefix)
-      uint8_t           cl0pad[120];
+      // pad CL0 to exactly one cacheline FOR THIS HANDLE WIDTH: a hardcoded
+      // 120 assumed the 8-byte router_hdr of the 6-byte handle and silently
+      // shifted every seg by -2 under a 4-byte handle, breaking all line-
+      // boundary math (demote/destroy from_off, per-line refcounts).
+      uint8_t           cl0pad[128 - sizeof(router_hdr_t<Ptr>)];
       seg               segs[NSEG];    // CL1.. one cacheline each
    };
+   // CL0 must tile exactly one line so segs sit on line boundaries (the
+   // line-wise demote/destroy math depends on it) — checked per handle width.
+   template <int N, class Ptr>
+   inline constexpr bool cnode_layout_ok_v = sizeof(cnode_t<N, Ptr>) == size_t(1 + N) * 128;
+   static_assert(cnode_layout_ok_v<2, packed_ptr> && cnode_layout_ok_v<4, packed_ptr> &&
+                 cnode_layout_ok_v<8, packed_ptr>);
    template <int N>
    using cnode = cnode_t<N, packed_ptr>;  // default-handle alias
    static_assert(sizeof(typename cnode<2>::seg) == 128, "c2 segment is one cacheline");

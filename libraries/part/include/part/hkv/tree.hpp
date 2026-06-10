@@ -4860,7 +4860,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
       };
 #ifndef PART_CBUCKET
-#define PART_CBUCKET 1  // composed bucket ON: unit suite + tree battery green
+#define PART_CBUCKET 0  // phase 1 (Dan): no-bucket default; dense ladder carries size. Bucket rework (heart diver rule) = phase 2.
                         // WIP: 3 oracle-found bugs fixed (run-spanning lookup,
                         // recursive split, burst capacity); a duplicate-update
                         // edge remains — needs the BUCKET_SPEC TDD pass before

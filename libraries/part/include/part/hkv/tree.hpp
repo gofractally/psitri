@@ -787,26 +787,21 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      ++depth;
                      continue;
                   }
+                  const unsigned sg = byte >> (8 - x->lg);
+                  if (x->seglines[sg].is_null())  // empty range materializes on demand
+                     x->seglines[sg] = cx_new_seg_(x->lg);
                   packed_ptr lf = make_value_at(key, depth + 1, std::forward<VF>(v));
                   if (router_try_set(x, byte, lf))
                   {
                      ++count_;
                      return true;
                   }
-                  // Segment line full: re-promote to the implicit cnode form
-                  // (clone-forward, SPEC principle 7) and let the normal widen
-                  // ladder take it from there on re-descend.
+                  // Segment line full: widen (cx lg+1 ... full_x), re-anchored at *slot
                   build_guard glf{this, &lf};
-                  *slot = cx_promote_(cur);
+                  grow_router_(slot, cur, byte, lf);
                   glf.release();
-                  // lf not yet linked: retry the insert against the promoted node
-                  {
-                     bool sub = router_try_set(*slot, byte, lf);
-                     if (!sub)
-                        grow_router_(slot, *slot, byte, lf);
-                     ++count_;
-                     return true;
-                  }
+                  ++count_;
+                  return true;
                }
             if constexpr (cb_enabled)
                if (k == K::cbucket)
@@ -1073,6 +1068,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
    if (depth == klen) return op.term(reinterpret_cast<const router_hdr*>(p)); \
    unsigned li_, sl_; full_index<Ptr>(uint8_t(kp[depth]), li_, sl_); \
    uint64_t lraw = 0; std::memcpy(&lraw, p + sizeof(router_hdr) + li_ * sizeof(Ptr), sizeof(Ptr)); \
+   { Ptr lp_; std::memcpy(&lp_, &lraw, sizeof(Ptr)); if (lp_.is_null()) return op.miss(); } \
    std::memcpy(&raw, HKV_PTR(lraw) + sl_ * sizeof(Ptr), sizeof(Ptr)); HKV_NEXT(depth + 1); }
 #define HKV_BODY_CBUCKET { \
    if constexpr (cb_enabled) { \
@@ -1091,6 +1087,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
    const unsigned sg_ = by_ >> (8 - lg_); \
    const unsigned d_  = by_ & ((256u >> lg_) - 1); \
    uint64_t lraw = 0; std::memcpy(&lraw, p + sizeof(router_hdr) + 2 + sg_ * sizeof(Ptr), sizeof(Ptr)); \
+   { Ptr lp_; std::memcpy(&lp_, &lraw, sizeof(Ptr)); if (lp_.is_null()) return op.miss(); } \
    const uint8_t* m_ = reinterpret_cast<const uint8_t*>(HKV_PTR(lraw)); \
    if (!bm_test(m_, int(d_))) return op.miss(); \
    std::memcpy(&raw, m_ + ((256u >> lg_) / 8) + unsigned(bm_rank(m_, int(d_))) * sizeof(Ptr), sizeof(Ptr)); \
@@ -3705,6 +3702,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
          unsigned li, sl;
          full_index<Ptr>(byte, li, sl);
+         if (x->lines[li].is_null())
+            return packed_ptr::null();
          return fx_line_(x, li)->ptr[sl];
       }
       bool router_next(node_fullx* x, int from, uint8_t& ob, packed_ptr& oc) const noexcept
@@ -3713,6 +3712,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
          full_index<Ptr>(uint8_t(from), li, sl);
          for (; li < full_lines_v<Ptr>; ++li, sl = 0)
          {
+            if (x->lines[li].is_null())
+               continue;
             const cline_direct_t<Ptr>* ln = fx_line_(x, li);
             if (ln->nset == 0)
                continue;
@@ -3735,6 +3736,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
          unsigned li, sl;
          full_index<Ptr>(byte, li, sl);
+         if (x->lines[li].is_null())
+            return nullptr;
          packed_ptr* p = &fx_line_(x, li)->ptr[sl];
          return p->is_null() ? nullptr : p;
       }
@@ -3743,6 +3746,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
          for (unsigned li = 0; li < full_lines_v<Ptr>; ++li)
          {
+            if (x->lines[li].is_null())
+               continue;
             cline_direct_t<Ptr>* ln = fx_line_(x, li);
             if (ln->nset == 0)
                continue;
@@ -3784,22 +3789,28 @@ namespace detail  // implementation types & node helpers — not part of the pub
       packed_ptr router_find(node_cx* x, uint8_t byte) const noexcept
       {
          const unsigned sg = byte >> (8 - x->lg);
-         const unsigned d  = byte & (cx_segw(x->lg) - 1);
-         uint8_t*       m  = cx_seg_(x, sg);
+         if (x->seglines[sg].is_null())  // empty range: no line allocated
+            return packed_ptr::null();
+         const unsigned d = byte & (cx_segw(x->lg) - 1);
+         uint8_t*       m = cx_seg_(x, sg);
          return bm_test(m, int(d)) ? cx_branches<Ptr>(m, x->lg)[bm_rank(m, int(d))]
                                    : packed_ptr::null();
       }
       packed_ptr* router_find_slot(node_cx* x, uint8_t byte) const noexcept
       {
          const unsigned sg = byte >> (8 - x->lg);
-         const unsigned d  = byte & (cx_segw(x->lg) - 1);
-         uint8_t*       m  = cx_seg_(x, sg);
+         if (x->seglines[sg].is_null())
+            return nullptr;
+         const unsigned d = byte & (cx_segw(x->lg) - 1);
+         uint8_t*       m = cx_seg_(x, sg);
          return bm_test(m, int(d)) ? &cx_branches<Ptr>(m, x->lg)[bm_rank(m, int(d))] : nullptr;
       }
       // Update-or-insert; false when THIS segment line is full (promote signal).
       bool router_try_set(node_cx* x, uint8_t byte, packed_ptr p) const noexcept
       {
-         const unsigned sg  = byte >> (8 - x->lg);
+         const unsigned sg = byte >> (8 - x->lg);
+         if (x->seglines[sg].is_null())
+            return false;  // no line for this range: caller allocates (cx_ensure_seg_)
          const unsigned d   = byte & (cx_segw(x->lg) - 1);
          uint8_t*       m   = cx_seg_(x, sg);
          Ptr*           br  = cx_branches<Ptr>(m, x->lg);
@@ -3818,11 +3829,13 @@ namespace detail  // implementation types & node helpers — not part of the pub
          ++x->rh.hdr.nbranch;
          return true;
       }
-      void router_remove(node_cx* x, uint8_t byte) const noexcept
+      void router_remove(node_cx* x, uint8_t byte) noexcept
       {
          const unsigned sg = byte >> (8 - x->lg);
-         const unsigned d  = byte & (cx_segw(x->lg) - 1);
-         uint8_t*       m  = cx_seg_(x, sg);
+         if (x->seglines[sg].is_null())
+            return;
+         uint8_t* m = cx_seg_(x, sg);
+         const unsigned d = byte & (cx_segw(x->lg) - 1);
          if (!bm_test(m, int(d)))
             return;
          Ptr*      br  = cx_branches<Ptr>(m, x->lg);
@@ -3831,12 +3844,20 @@ namespace detail  // implementation types & node helpers — not part of the pub
          std::memmove(&br[pos], &br[pos + 1], size_t(cnt - 1 - pos) * sizeof(Ptr));
          m[d >> 3] &= uint8_t(~(1u << (d & 7)));
          --x->rh.hdr.nbranch;
+         if (cnt == 1)
+         {  // range emptied: drop the line (private here — the remove path
+            // privatized it), so an emptied range costs nothing until reused
+            cx_release_line_(x->seglines[sg], x->lg);
+            x->seglines[sg] = packed_ptr::null();
+         }
       }
       bool router_next(node_cx* x, int from, uint8_t& ob, packed_ptr& oc) const noexcept
       {
          const unsigned segw = cx_segw(x->lg), nseg = 1u << x->lg, maskb = cx_maskb(x->lg);
          for (unsigned sg = unsigned(from) / segw; sg < nseg; ++sg)
          {
+            if (x->seglines[sg].is_null())
+               continue;
             uint8_t*       m  = cx_seg_(x, sg);
             const unsigned lo = (sg == unsigned(from) / segw) ? unsigned(from) % segw : 0;
             for (unsigned w = lo / 64; w < (maskb + 7) / 8; ++w)
@@ -3863,6 +3884,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
          const unsigned segw = cx_segw(x->lg), nseg = 1u << x->lg, maskb = cx_maskb(x->lg);
          for (unsigned sg = 0; sg < nseg; ++sg)
          {
+            if (x->seglines[sg].is_null())
+               continue;
             uint8_t* m   = cx_seg_(x, sg);
             int      idx = 0;
             for (unsigned wo = 0; wo < maskb; wo += 8)
@@ -3926,6 +3949,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
          unsigned li, sl;
          full_index<Ptr>(byte, li, sl);
+         if (x->lines[li].is_null())
+            return p.is_null();  // clearing an absent slot is a no-op; setting needs
+                                 // the line allocated first (fx insert arm / ensure)
          cline_direct_t<Ptr>* L        = fx_line_(x, li);
          const bool           was_null = L->ptr[sl].is_null();
          L->ptr[sl]                    = p;
@@ -3952,18 +3978,25 @@ namespace detail  // implementation types & node helpers — not part of the pub
       template <int N>
       static void router_remove(cnode<N>* c, uint8_t byte) noexcept { cnode_remove(c, byte); }
       static void router_remove(node_full* f, uint8_t byte) noexcept { full_set(f, byte, packed_ptr::null()); }
-      void router_remove(node_fullx* x, uint8_t byte) const noexcept
+      void router_remove(node_fullx* x, uint8_t byte) noexcept
       {
          unsigned li, sl;
          full_index<Ptr>(byte, li, sl);
+         if (x->lines[li].is_null())
+            return;
          cline_direct_t<Ptr>* L = fx_line_(x, li);
          if (L->ptr[sl].is_null())
             return;
          L->ptr[sl] = packed_ptr::null();
          --L->nset;
          --x->rh.hdr.nbranch;
+         if (L->nset == 0)
+         {  // range emptied: drop the line (private here via the remove path)
+            fx_release_line_(x->lines[li]);
+            x->lines[li] = packed_ptr::null();
+         }
       }
-      void router_remove(packed_ptr cur, uint8_t byte) const noexcept
+      void router_remove(packed_ptr cur, uint8_t byte) noexcept
       {
          with_router(cur, [&](auto* n) noexcept { router_remove(n, byte); });
       }
@@ -4018,7 +4051,24 @@ namespace detail  // implementation types & node helpers — not part of the pub
          const K      k  = cur.tag();
          const size_t os = node_size(k);
          packed_ptr   out;
-         if constexpr (!DenseTiers)
+         if constexpr (cow_enabled)
+         {
+            // part ladder: EXPLICIT segmented tiers (cx lg=1,2,3 then full_x),
+            // empty ranges are null lines — never an allocated-but-empty cline.
+            // The terminal tier is full_x rather than the implicit node_full:
+            // dense nodes pay one extra dependent load, sparse ones stop paying
+            // 10 lines for 17 branches. (Implicit node_full remains for the
+            // non-COW upstream modes only.)
+            if (k == K::setlist_u8)
+               out = cx_from_router_(cur, 1);
+            else if (k == K::cx)
+            {
+               node_cx* x = static_cast<node_cx*>(deref_(cur));
+               out = x->lg < 3 ? cx_from_router_(cur, unsigned(x->lg) + 1) : fx_from_cx_(cur);
+            }
+            else { assert(false); __builtin_unreachable(); }
+         }
+         else if constexpr (!DenseTiers)
             out = build_wider<node_full>(cur, K::node_full);  // fast path: straight to full
          else if (k == K::setlist_u8) out = build_wider<cnode<2>>(cur, K::c2);
          else if (k == K::c2)         out = build_wider<cnode<4>>(cur, K::c4);
@@ -4074,6 +4124,17 @@ namespace detail  // implementation types & node helpers — not part of the pub
          packed_ptr node = cur;
          while (!router_try_set(node, byte, child))
          {
+            if constexpr (cow_enabled)
+               if (node.tag() == K::cx)
+               {
+                  node_cx*       x  = static_cast<node_cx*>(deref_(node));
+                  const unsigned sg = byte >> (8 - x->lg);
+                  if (x->seglines[sg].is_null())
+                  {  // try_set failed only because the range had no line yet
+                     x->seglines[sg] = cx_new_seg_(x->lg);
+                     continue;
+                  }
+               }
             node = widen(node);  // frees the old node; re-anchor before the next (throwing) widen
             if (pn) pn_set_next(pn, node);
             else    *slot = node;
@@ -5281,12 +5342,14 @@ namespace detail  // implementation types & node helpers — not part of the pub
                if constexpr (cow_enabled)
                {
                   const node_fullx* x  = static_cast<const node_fullx*>(deref_(cur));
-                  uint8_t           lu = 1;
+                  uint8_t           lu = 1, la = 1;
                   for (unsigned li = 0; li < full_lines_v<Ptr>; ++li)
+                  {
+                     la += !x->lines[li].is_null();
                      lu += !x->lines[li].is_null() &&
                            static_cast<const cline_direct*>(deref_(x->lines[li]))->nset > 0;
-                  f(census_row{k, uint32_t(128 + full_lines_v<Ptr> * 128), x->rh.hdr.nbranch, lu,
-                               uint8_t(1 + full_lines_v<Ptr>)});
+                  }
+                  f(census_row{k, uint32_t(la) * 128, x->rh.hdr.nbranch, lu, la});
                   census_(x->rh.term, f);
                   router_for_each(cur, [&](uint8_t, packed_ptr br) { census_(br, f); });
                }
@@ -5296,10 +5359,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
             {
                if constexpr (cow_enabled)
                {
-                  const node_cx* x = static_cast<const node_cx*>(deref_(cur));
-                  const unsigned n = 1u << x->lg;
-                  f(census_row{k, uint32_t(128 + n * 128), x->rh.hdr.nbranch, uint8_t(1 + n),
-                               uint8_t(1 + n)});
+                  const node_cx* x  = static_cast<const node_cx*>(deref_(cur));
+                  uint8_t        la = 1;
+                  for (unsigned sg = 0; sg < (1u << x->lg); ++sg)
+                     la += !x->seglines[sg].is_null();
+                  f(census_row{k, uint32_t(la) * 128, x->rh.hdr.nbranch, la, la});
                   census_(x->rh.term, f);
                   router_for_each(cur, [&](uint8_t, packed_ptr br) { census_(br, f); });
                }
@@ -5490,6 +5554,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
       // line dies, the <=31 children packed inside it are released first.
       void fx_release_line_(Ptr lp) noexcept
       {
+         if (lp.is_null())
+            return;
          alloc_.hkv_release(line_of(lp),
                             [&](uint32_t)
                             {
@@ -5503,6 +5569,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
       // branches recorded by its presence bitmap.
       void cx_release_line_(Ptr lp, unsigned lg) noexcept
       {
+         if (lp.is_null())
+            return;
          alloc_.hkv_release(line_of(lp),
                             [&](uint32_t)
                             {
@@ -5515,9 +5583,28 @@ namespace detail  // implementation types & node helpers — not part of the pub
       }
       void cx_own_line_(Ptr* slot, unsigned lg)
       {
+         if (slot->is_null())
+            return;
          if (alloc_.hkv_retain(line_of(*slot)))
             return;
          *slot = cx_clone_line_(*slot, lg);
+      }
+      // fresh, empty pieces for the explicit tiers (bitmap/slots cleared; the
+      // rank-dense branch tail is never read past the population)
+      Ptr cx_new_seg_(unsigned lg)
+      {
+         void* L = node_alloc_(cacheline_bytes);
+         std::memset(L, 0, cx_maskb(lg));
+         return pack_(L, K::node_full /*tag unused on seg lines*/);
+      }
+      Ptr fx_new_line_()
+      {
+         auto* L = static_cast<cline_direct_t<Ptr>*>(node_alloc_(cacheline_bytes));
+         for (unsigned sl = 0; sl < full_per_line_v<Ptr>; ++sl)
+            L->ptr[sl] = packed_ptr::null();
+         L->nset = 0;
+         L->rsvd = 0;
+         return pack_(L, K::node_full /*tag unused on direct lines*/);
       }
       Ptr cx_clone_line_(Ptr lp, unsigned lg)
       {
@@ -5530,47 +5617,219 @@ namespace detail  // implementation types & node helpers — not part of the pub
             cow_fix_child_(&br[i]);
          return pack_(dst, K::node_full /*tag unused on seg lines*/);
       }
-      // Re-promote an explicit cx to the implicit cnode<N> it came from (used
-      // when a segment line overflows: the implicit form re-materializes
-      // forward and the normal widen ladder continues from there).
-      Ptr cx_promote_(Ptr cur)
+      // ── widen builders for the explicit ladder ──────────────────────────────
+      // Both MOVE branches out of `src` (widen() raw-frees its CL0 after) with
+      // line-granular care: an EXCLUSIVE source seg line transfers its branch
+      // references as-is and is raw-released; a SHARED one is copied with
+      // cow_fix_child_ per branch (retain / clone-forward) and released — the
+      // sharer's eventual line destroy pairs with our retains. Throw safety:
+      // target lines are allocated up front, shared segs are copied BEFORE any
+      // exclusive seg is consumed, and the unwind releases exactly the fixed
+      // prefix — the source is untouched until the nothrow move phase.
+      Ptr cx_from_router_(Ptr src, unsigned lg)
       {
-         node_cx*       x  = static_cast<node_cx*>(deref_(cur));
-         const unsigned lg = x->lg;
-         Ptr            np;
-         auto           build = [&](auto* tag_null, auto nseg_c) -> Ptr
+         node_cx*    nx  = static_cast<node_cx*>(node_alloc_(cacheline_bytes));
+         router_hdr* srh = static_cast<router_hdr*>(deref_(src));
+         nx->rh          = *srh;  // term MOVES with the rebuild
+         nx->lg          = uint8_t(lg);
+         nx->pad0        = 0;
+         for (auto& sl2 : nx->seglines)
+            sl2 = packed_ptr::null();
+         const unsigned segw = cx_segw(lg);
+         // nothrow placement into a preallocated target seg (ascending feed)
+         auto place = [&](uint8_t b, packed_ptr br) noexcept -> Ptr*
          {
-            using CN = std::remove_pointer_t<decltype(tag_null)>;
-            CN* c    = static_cast<CN*>(node_alloc_(sizeof(CN)));
-            cnode_init(c);
-            c->rh = x->rh;
-            for (unsigned sg = 0; sg < nseg_c; ++sg)
-               std::memcpy(&c->segs[sg], deref_(x->seglines[sg]), cacheline_bytes);
-            // the copy shares no lines: re-own every branch
-            for (unsigned sg = 0; sg < nseg_c; ++sg)
-            {
-               auto*     seg = &c->segs[sg];
-               const int cnt = bm_count(seg->present, CN::MASKB);
-               for (int i = 0; i < cnt; ++i)
-                  cow_fix_child_(&seg->branch[i]);
-            }
-            cow_fix_child_(&c->rh.term);
-            return pack_(c, lg == 1 ? K::c2 : lg == 2 ? K::c4 : K::c8);
+            uint8_t*  m = static_cast<uint8_t*>(deref_(nx->seglines[b >> (8 - lg)]));
+            const int d = int(b & (segw - 1));
+            Ptr*      p = &cx_branches<Ptr>(m, lg)[bm_rank(m, d)];
+            *p = br;
+            bm_set(m, d);
+            return p;
          };
-         if (lg == 1)
-            np = build(static_cast<cnode<2>*>(nullptr), 2u);
-         else if (lg == 2)
-            np = build(static_cast<cnode<4>*>(nullptr), 4u);
-         else
-            np = build(static_cast<cnode<8>*>(nullptr), 8u);
-         cow_release(cur);  // the slot's reference to the cx
-         return np;
+         unsigned fixed = 0;  // shared-copy progress, for unwind
+         try
+         {
+            if (src.tag() == K::setlist_u8)
+            {
+               setlist* ss = static_cast<setlist*>(deref_(src));
+               for (int i2 = 0; i2 < ss->rh.hdr.nbranch; ++i2)  // pass 1: targets
+               {
+                  Ptr& t = nx->seglines[ss->bytes[i2] >> (8 - lg)];
+                  if (t.is_null())
+                     t = cx_new_seg_(lg);
+               }
+               for (int i2 = 0; i2 < ss->rh.hdr.nbranch; ++i2)  // move (nothrow)
+                  place(ss->bytes[i2], ss->branch[i2]);
+               return pack_(nx, K::cx);
+            }
+            node_cx*       sx    = static_cast<node_cx*>(deref_(src));
+            const unsigned snseg = 1u << sx->lg;
+            bool           shared[8] = {};
+            for (unsigned sg = 0; sg < snseg; ++sg)  // pass 1: classify + targets
+            {
+               if (sx->seglines[sg].is_null())
+                  continue;
+               shared[sg] = alloc_.hkv_ref(line_of(sx->seglines[sg])) >= 2;
+               cx_for_each_seg_(sx, sg, [&](uint8_t b, packed_ptr) {
+                  Ptr& t = nx->seglines[b >> (8 - lg)];
+                  if (t.is_null())
+                     t = cx_new_seg_(lg);
+               });
+            }
+            for (unsigned sg = 0; sg < snseg; ++sg)  // pass 2: copy SHARED (may throw)
+            {
+               if (sx->seglines[sg].is_null() || !shared[sg])
+                  continue;
+               cx_for_each_seg_(sx, sg, [&](uint8_t b, packed_ptr br) {
+                  Ptr* p = place(b, br);
+                  cow_fix_child_(p);  // retain / clone-forward
+                  ++fixed;
+               });
+            }
+            for (unsigned sg = 0; sg < snseg; ++sg)  // pass 3: nothrow
+            {
+               if (sx->seglines[sg].is_null())
+                  continue;
+               if (shared[sg])
+                  cx_release_line_(sx->seglines[sg], sx->lg);  // sharer keeps the children
+               else
+               {
+                  cx_for_each_seg_(sx, sg, [&](uint8_t b, packed_ptr br) { place(b, br); });
+                  alloc_.hkv_release(line_of(sx->seglines[sg]), [](uint32_t) {});  // refs moved
+               }
+               sx->seglines[sg] = packed_ptr::null();
+            }
+            return pack_(nx, K::cx);
+         }
+         catch (...)
+         {
+            cx_unwind_built_(nx, lg, fixed);
+            throw;
+         }
+      }
+      Ptr fx_from_cx_(Ptr src)
+      {
+         node_cx*    sx = static_cast<node_cx*>(deref_(src));
+         node_fullx* nx = static_cast<node_fullx*>(node_alloc_(cacheline_bytes));
+         nx->rh         = sx->rh;  // term moves
+         for (auto& l2 : nx->lines)
+            l2 = packed_ptr::null();
+         auto place = [&](uint8_t b, packed_ptr br) noexcept -> Ptr*
+         {
+            unsigned li, sl;
+            full_index<Ptr>(b, li, sl);
+            cline_direct_t<Ptr>* L = fx_line_(nx, li);
+            L->ptr[sl]             = br;
+            ++L->nset;
+            return &L->ptr[sl];
+         };
+         const unsigned snseg = 1u << sx->lg;
+         bool           shared[8] = {};
+         unsigned       fixed     = 0;
+         try
+         {
+            for (unsigned sg = 0; sg < snseg; ++sg)  // pass 1
+            {
+               if (sx->seglines[sg].is_null())
+                  continue;
+               shared[sg] = alloc_.hkv_ref(line_of(sx->seglines[sg])) >= 2;
+               cx_for_each_seg_(sx, sg, [&](uint8_t b, packed_ptr) {
+                  unsigned li, sl;
+                  full_index<Ptr>(b, li, sl);
+                  if (nx->lines[li].is_null())
+                     nx->lines[li] = fx_new_line_();
+               });
+            }
+            for (unsigned sg = 0; sg < snseg; ++sg)  // pass 2: shared copies
+            {
+               if (sx->seglines[sg].is_null() || !shared[sg])
+                  continue;
+               cx_for_each_seg_(sx, sg, [&](uint8_t b, packed_ptr br) {
+                  Ptr* p = place(b, br);
+                  cow_fix_child_(p);
+                  ++fixed;
+               });
+            }
+            for (unsigned sg = 0; sg < snseg; ++sg)  // pass 3: nothrow moves
+            {
+               if (sx->seglines[sg].is_null())
+                  continue;
+               if (shared[sg])
+                  cx_release_line_(sx->seglines[sg], sx->lg);
+               else
+               {
+                  cx_for_each_seg_(sx, sg, [&](uint8_t b, packed_ptr br) { place(b, br); });
+                  alloc_.hkv_release(line_of(sx->seglines[sg]), [](uint32_t) {});
+               }
+               sx->seglines[sg] = packed_ptr::null();
+            }
+            return pack_(nx, K::full_x);
+         }
+         catch (...)
+         {
+            fx_unwind_built_(nx, fixed);
+            throw;
+         }
+      }
+      // iterate one seg line of a cx: (absolute byte, branch) ascending
+      template <class F>
+      void cx_for_each_seg_(const node_cx* x, unsigned sg, F&& f) const
+      {
+         const unsigned segw = cx_segw(x->lg), maskb = cx_maskb(x->lg);
+         uint8_t*       m    = static_cast<uint8_t*>(deref_(x->seglines[sg]));
+         int            idx  = 0;
+         for (unsigned wo = 0; wo < maskb; wo += 8)
+         {
+            uint64_t       w  = 0;
+            const unsigned wb = maskb - wo < 8 ? maskb - wo : 8;
+            std::memcpy(&w, m + wo, size_t(wb));
+            while (w)
+            {
+               const int b = std::countr_zero(w);
+               w &= w - 1;
+               f(uint8_t(sg * segw + wo * 8 + unsigned(b)), cx_branches<Ptr>(m, x->lg)[idx++]);
+            }
+         }
+      }
+      // unwind a partially-built widen target: release the first `fixed`
+      // shared-copied branches (in feed order), then raw-free its lines + CL0.
+      void cx_unwind_built_(node_cx* nx, unsigned lg, unsigned fixed) noexcept
+      {
+         for (unsigned sg = 0; sg < (1u << lg) && fixed; ++sg)
+         {
+            if (nx->seglines[sg].is_null())
+               continue;
+            cx_for_each_seg_(nx, sg, [&](uint8_t, packed_ptr br) {
+               if (fixed) { cow_release(br); --fixed; }
+            });
+         }
+         for (unsigned sg = 0; sg < (1u << lg); ++sg)
+            if (!nx->seglines[sg].is_null())
+               alloc_.hkv_release(line_of(nx->seglines[sg]), [](uint32_t) {});
+         node_free_(nx, cacheline_bytes);
+      }
+      void fx_unwind_built_(node_fullx* nx, unsigned fixed) noexcept
+      {
+         for (unsigned li = 0; li < full_lines_v<Ptr> && fixed; ++li)
+         {
+            if (nx->lines[li].is_null())
+               continue;
+            cline_direct_t<Ptr>* L = fx_line_(nx, li);
+            for (unsigned sl = 0; sl < full_per_line_v<Ptr> && fixed; ++sl)
+               if (!L->ptr[sl].is_null()) { cow_release(L->ptr[sl]); --fixed; }
+         }
+         for (unsigned li = 0; li < full_lines_v<Ptr>; ++li)
+            if (!nx->lines[li].is_null())
+               alloc_.hkv_release(line_of(nx->lines[li]), [](uint32_t) {});
+         node_free_(nx, cacheline_bytes);
       }
 
       // Retain a direct line for a new owner; at the writer band, clone the
       // 128B line forward instead (its <=31 children get retained).
       void fx_own_line_(Ptr* slot)
       {
+         if (slot->is_null())
+            return;
          if (alloc_.hkv_retain(line_of(*slot)))
             return;
          *slot = fx_clone_line_(*slot);
@@ -5613,6 +5872,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
             const uint32_t base_line = line_of(cur) + 1;  // segs follow CL0
             for (unsigned sg = 0; sg < (1u << x->lg); ++sg)
             {
+               const uint8_t* m = static_cast<const uint8_t*>(deref_(cur)) + 128 + sg * 128;
+               if (bm_count(m, int(cx_maskb(x->lg))) == 0)
+               {  // empty range: no line, no retain — reclaimable immediately
+                  x->seglines[sg] = packed_ptr::null();
+                  continue;
+               }
                x->seglines[sg] =
                    Ptr::from_off(size_t(base_line + sg) << 7, K::node_full);
                cx_own_line_(&x->seglines[sg], x->lg);
@@ -5633,6 +5898,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
             const uint32_t base_line = line_of(cur) + 1;  // direct lines follow CL0
             for (unsigned li = 0; li < full_lines_v<Ptr>; ++li)
             {
+               if (f->ranges[li].nset == 0)
+               {  // empty range: null line instead of a retained dead cline
+                  x->lines[li] = packed_ptr::null();
+                  continue;
+               }
                x->lines[li] =
                    Ptr::from_off(size_t(base_line + li) << 7, K::node_full);
                fx_own_line_(&x->lines[li]);
@@ -5913,6 +6183,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   }
                   unsigned li, sl;
                   full_index<Ptr>(uint8_t(key[depth]), li, sl);
+                  if (x->lines[li].is_null())
+                     return;  // absent range: insert materializes it in the private node
                   // The descent (or its writeback) mutates this direct line:
                   // it must be exclusively owned too (per-line COW).
                   if (alloc_.hkv_ref(line_of(x->lines[li])) >= 2)
@@ -5938,6 +6210,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   }
                   const uint8_t  byte = uint8_t(key[depth]);
                   const unsigned sg   = byte >> (8 - x->lg);
+                  if (x->seglines[sg].is_null())
+                     return;  // absent range: insert materializes it in the private node
                   if (alloc_.hkv_ref(line_of(x->seglines[sg])) >= 2)
                   {
                      const Ptr old   = x->seglines[sg];

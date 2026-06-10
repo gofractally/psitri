@@ -157,6 +157,108 @@ TEST_CASE("kv battery: batched commits, updates, removes vs oracle")
    require_drained(db->store());
 }
 
+TEST_CASE("dense ladder: every tier boundary, narrow ranges, shared-seg widen")
+{
+   auto dir = fs::temp_directory_path() / "part_kv_ladder";
+   fs::remove_all(dir);
+   auto db  = part::kv::database::create(dir);
+   auto ses = db->start_write_session();
+
+   // One subtree per fanout: keys "L<id>/" + byte b + "tail", fanout swept across
+   // every ladder boundary (setlist 16 -> cx1 -> cx2 -> cx3 -> full_x 256) plus
+   // narrow clusters (all bytes in one 32-range: lowercase ASCII shape).
+   const int fan[] = {2, 16, 17, 31, 32, 62, 63, 124, 125, 248, 249, 256};
+   std::map<std::string, std::string> oracle;
+   {
+      auto tx = ses->start_transaction(0);
+      int  id = 0;
+      for (int n : fan)
+      {
+         std::string base = "L" + std::to_string(id++) + "/";
+         for (int b = 0; b < n; ++b)
+         {
+            std::string k = base + char(uint8_t(b)) + "tail";
+            tx.upsert(k, mkval(uint64_t(b * 7 + n)));
+            oracle[k] = mkval(uint64_t(b * 7 + n));
+         }
+      }
+      // narrow: 32 keys all inside one 32-byte range (forces cx3 seg overflow -> fx)
+      for (int b = 0; b < 32; ++b)
+      {
+         std::string k = "narrow/" + std::string(1, char(uint8_t(96 + b))) + "x";
+         tx.upsert(k, mkval(uint64_t(b)));
+         oracle[k] = mkval(uint64_t(b));
+      }
+      tx.commit();
+   }
+   auto verify = [&] {
+      auto tx = ses->start_transaction(0);
+      for (auto& [k, v] : oracle)
+      {
+         auto got = tx.template get<std::string>(k);
+         REQUIRE(got.has_value());
+         REQUIRE(*got == v);
+      }
+      tx.abort();
+   };
+   verify();
+   {  // scan order vs oracle
+      auto c   = ses->get_root(0).snapshot_cursor();
+      auto oit = oracle.begin();
+      c.seek_begin();
+      while (!c.is_end())
+      {
+         REQUIRE(oit != oracle.end());
+         REQUIRE(std::string(c.key()) == oit->first);
+         c.next();
+         ++oit;
+      }
+      REQUIRE(oit == oracle.end());
+   }
+   {  // SHARED-SEG WIDEN: pin the committed root, then grow a 31-branch subtree
+      // (cx) past every boundary while its seg lines are shared with the pin.
+      auto pin = ses->get_root(0).snapshot_cursor();
+      {
+         auto tx = ses->start_transaction(0);
+         for (int b = 0; b < 256; ++b)
+         {
+            std::string k = "L3/" + std::string(1, char(uint8_t(b))) + "tail2";  // L3 = fanout 31
+            tx.upsert(k, mkval(uint64_t(b + 1000)));
+            oracle[k] = mkval(uint64_t(b + 1000));
+         }
+         tx.commit();
+      }
+      verify();  // new generation complete
+      // the pinned snapshot still sees the OLD subtree intact
+      for (int b = 0; b < 31; ++b)
+      {
+         std::string k = "L3/" + std::string(1, char(uint8_t(b))) + "tail";
+         REQUIRE(pin.get<std::string>(k).has_value());
+      }
+   }
+   {  // removes: empty out ranges (seg lines must release), then everything
+      auto tx = ses->start_transaction(0);
+      std::vector<std::string> kill;
+      for (auto& [k, v] : oracle)
+         if (k.size() > 3 && uint8_t(k[3]) >= 128)  // upper half of each fanout
+            kill.push_back(k);
+      for (auto& k : kill)
+      {
+         tx.remove(k);
+         oracle.erase(k);
+      }
+      tx.commit();
+   }
+   verify();
+   {
+      auto tx = ses->start_transaction(0);
+      for (auto& [k, v] : oracle)
+         tx.remove(k);
+      tx.commit();
+   }
+   require_drained(db->store());
+}
+
 TEST_CASE("kv terms: a key that is a strict prefix of >64 same-byte siblings")
 {
    // Burst shape that silently dropped the bucket term under NDEBUG: the

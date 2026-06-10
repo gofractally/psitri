@@ -27,8 +27,13 @@ namespace heart
       //   vt_subtree — the value bytes are a 4-byte sal::ptr_address: the root of a nested tree
       //                (a first-class subtree value). Lifecycle code that retains/releases a
       //                terminal must, for vt_subtree, retain/release that embedded root.
+      //   vt_extern  — the value lives in an external SAL object; the value bytes are a 2-byte
+      //                cbase code private to the containing leaf_page (which owns the cbase
+      //                table that decodes it to a ptr_address). Lifecycle code must
+      //                retain/release the decoded address.
       static constexpr uint8_t vt_bytes   = 0;
       static constexpr uint8_t vt_subtree = 1;
+      static constexpr uint8_t vt_extern  = 2;
 
       uint8_t suffix_len;
       uint8_t value_len;

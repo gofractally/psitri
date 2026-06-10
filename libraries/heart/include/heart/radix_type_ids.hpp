@@ -28,6 +28,10 @@ namespace heart
       inline constexpr sal::header_type bitset_c1_32  = sal::header_type(base + 9);
       inline constexpr sal::header_type bitset_c1_64  = sal::header_type(base + 10);
       inline constexpr sal::header_type bitset_c1_128 = sal::header_type(base + 11);
+      // 2KB COW leaf page (leaf_page.hpp) — the page-leaf terminal tier. NOTE: not in
+      // radix_kind yet; the enumerator is added when the engine wires pages in, so
+      // -Wswitch flags every dispatch switch that must learn the new case.
+      inline constexpr sal::header_type leaf_page = sal::header_type(base + 12);
 
       // The same taxonomy as a STRONG enum (enumerator order == the header_type offsets above).
       // Engine dispatch switches on this — never on a raw int — so -Wswitch flags any switch that

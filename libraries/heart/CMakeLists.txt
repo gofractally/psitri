@@ -30,6 +30,7 @@ if(HEART_BUILD_TESTS)
         test/radix_bitset_tests.cpp
         test/radix_full_tests.cpp
         test/paged_tests.cpp
+        test/leaf_page_tests.cpp
         test/radix_node_tests.cpp
         test/branch_smart_address_tests.cpp
         test/radix_tree_tests.cpp

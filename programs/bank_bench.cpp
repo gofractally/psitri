@@ -619,7 +619,11 @@ class HeartEngine : public BankEngine
          _sync = sal::sync_type::msync_sync;
       else
          _sync = sal::sync_type::none;
-      _db  = heart::radix::database::open(path);
+      _db = heart::radix::database::open(path);
+      // A/B hook: HEART_LEGACY=1 selects the legacy byte-radix layout instead of the
+      // (default) radix-indexed leaf pages — same binary, identical workload.
+      if (const char* lg = std::getenv("HEART_LEGACY"); lg && lg[0] == '1')
+         _db->set_page_mode(false);
       _ses = _db->start_write_session();
    }
 

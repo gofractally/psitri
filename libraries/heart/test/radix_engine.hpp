@@ -5973,6 +5973,9 @@ namespace heart::radix
       }
       sal::seg_alloc_dump dump() { return _engine.dump(); }
       void sync(sal::sync_type st = sal::sync_type::msync_sync) { _engine.sync(st); }
+      // Data-layout selector (default = page model). Exposed so benches/tools can A/B the
+      // legacy byte-radix engine against radix-indexed leaf pages on identical workloads.
+      void set_page_mode(bool on) { _engine.set_page_mode(on); }
       // Drain the background releaser so a post-op object_count is exact (psitri parity).
       bool wait_for_compactor(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000))
       {

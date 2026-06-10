@@ -62,11 +62,12 @@ namespace heart
       static constexpr uint16_t         max_suffix_len   = 255;  // inline_value u8 field
 
       uint16_t         _nkeys;
-      uint16_t         _cap;       // column capacity, always a multiple of 4
-      uint8_t          _ncb;       // used cbases
-      uint8_t          _cpfx_len;  // factored common prefix length
-      uint16_t         _dead;      // dead tail-heap bytes (orphaned records)
-      tail_ptr<>       _cpfx_pos;  // common prefix bytes in the tail heap (0 = none)
+      uint16_t         _cap;        // column capacity, always a multiple of 4
+      uint8_t          _ncb : 5;    // used cbases (<= 16)
+      uint8_t          _pfxw : 3;   // prefix-column width (1, 2 or 4 bytes per entry)
+      uint8_t          _cpfx_len;   // factored common prefix length
+      uint16_t         _dead;       // dead tail-heap bytes (orphaned records)
+      tail_ptr<>       _cpfx_pos;   // common prefix bytes in the tail heap (0 = none)
       sal::ptr_address _cbases[max_cbases];
 
       // ── op tickets ───────────────────────────────────────────────────────────────
@@ -119,7 +120,7 @@ namespace heart
 
       // ── SAL lifecycle ────────────────────────────────────────────────────────────
       static constexpr uint32_t head_bytes() noexcept { return uint32_t(sizeof(leaf_page)); }
-      uint32_t head_size() const noexcept { return head_bytes() + 5u * _cap; }
+      uint32_t head_size() const noexcept { return head_bytes() + (3u + _pfxw) * _cap; }
       static uint32_t alloc_size() noexcept { return page_bytes; }
       static uint32_t alloc_size(const clone_op&) noexcept { return page_bytes; }
       static uint32_t alloc_size(const clone_insert_op&) noexcept { return page_bytes; }
@@ -133,8 +134,10 @@ namespace heart
       }
       uint32_t compact_size() const noexcept
       {
-         return ucc::round_up_multiple<sal::cacheline_size>(head_bytes() +
-                                                            5u * round_cap(_nkeys) + live_tail());
+         // must PREDICT the same prefix width compact_to's rebuild will choose
+         const uint32_t w = pick_pfx_width(live_min_suffix());
+         return ucc::round_up_multiple<sal::cacheline_size>(
+             head_bytes() + (3u + w) * round_cap(_nkeys) + live_tail());
       }
       void compact_to(sal::alloc_header* dst) const noexcept
       {
@@ -219,6 +222,7 @@ namespace heart
       uint16_t num_keys() const noexcept { return _nkeys; }
       uint16_t capacity() const noexcept { return _cap; }
       uint8_t  num_cbases() const noexcept { return _ncb; }
+      uint8_t  prefix_width() const noexcept { return _pfxw; }
       std::span<const uint8_t> common_prefix() const noexcept
       {
          return {cpfx_data(), _cpfx_len};
@@ -259,25 +263,45 @@ namespace heart
          return _cpfx_len + uint32_t(s.size());
       }
 
-      /// Fingerprint of a FULL key — FNV-1a folded to one byte. Full-key (not suffix)
+      /// Fingerprint of a FULL key — a word-at-a-time multiply-mix folded to one byte
+      /// (~2 multiplies for an 8-byte key vs 8 serial FNV rounds). Full-key (not suffix)
       /// so the column survives reprefix and split verbatim.
       static uint8_t fingerprint_of(const uint8_t* k, size_t n) noexcept
       {
-         uint32_t h = 2166136261u;
-         for (size_t i = 0; i < n; ++i)
-            h = (h ^ k[i]) * 16777619u;
-         return uint8_t(h ^ (h >> 8) ^ (h >> 16) ^ (h >> 24));
+         uint64_t h = 0x9E3779B97F4A7C15ull ^ (uint64_t(n) * 0xff51afd7ed558ccdull);
+         while (n >= 8)
+         {
+            uint64_t w;
+            std::memcpy(&w, k, 8);
+            h = (h ^ w) * 0x9E3779B97F4A7C15ull;
+            h ^= h >> 29;
+            k += 8;
+            n -= 8;
+         }
+         if (n)
+         {
+            uint64_t w = 0;
+            std::memcpy(&w, k, n);
+            h = (h ^ w) * 0x9E3779B97F4A7C15ull;
+            h ^= h >> 29;
+         }
+         return uint8_t(h >> 56);
       }
 
-      // ── point find: fingerprint column scan, verify by suffix compare ────────────
-      /// @return entry index, or -1 if absent.
+      // ── point find: fingerprint column scan, pfx-column pre-screen, verify by suffix ─────
+      /// @return entry index, or -1 if absent. TOUCH ORDER is the design: the fp scan and the
+      /// u16 prefix pre-screen read only the (adjacent) columns; the tail heap — the far
+      /// cachelines — is touched only for a candidate that survives both, and the page cpfx
+      /// is compared exactly once, inside that verify (a fingerprint-less miss never touches
+      /// the tail at all).
       int find(const uint8_t* k, uint32_t n) const noexcept
       {
-         if (n < _cpfx_len || (_cpfx_len && std::memcmp(k, cpfx_data(), _cpfx_len) != 0))
+         if (n < _cpfx_len)
             return -1;
-         const uint8_t* s  = k + _cpfx_len;
-         const uint32_t sn = n - _cpfx_len;
-         const uint8_t  f  = fingerprint_of(k, n);
+         const uint8_t* s   = k + _cpfx_len;
+         const uint32_t sn  = n - _cpfx_len;
+         const uint8_t  f   = fingerprint_of(k, n);
+         const uint32_t q2  = stem(s, sn);
          const uint8_t* fpc = fp();
          uint32_t       i   = 0;
          while (i < _nkeys)
@@ -286,9 +310,17 @@ namespace heart
             if (uint32_t(rel) == _nkeys - i)
                return -1;
             i += uint32_t(rel);
-            const inline_value* iv = record(i);
-            if (iv->suffix_len == sn && (sn == 0 || std::memcmp(iv->data, s, sn) == 0))
-               return int(i);
+            if (pfx_get(i) == q2)  // column pre-screen: kills fp collisions without a tail touch
+            {
+               const inline_value* iv = record(i);
+               if (iv->suffix_len == sn && (sn == 0 || std::memcmp(iv->data, s, sn) == 0))
+               {
+                  // suffix matched → the only possible entry; settle the cpfx part once
+                  if (_cpfx_len && std::memcmp(k, cpfx_data(), _cpfx_len) != 0)
+                     return -1;  // key diverges from the page prefix — nothing here matches
+                  return int(i);
+               }
+            }
             ++i;
          }
          return -1;
@@ -309,7 +341,7 @@ namespace heart
          }
          const uint8_t* s  = k + _cpfx_len;
          const uint32_t sn = n - _cpfx_len;
-         int i = ucc::lower_bound_u16_padded(pfx(), _nkeys, stem2(s, sn));
+         int i = pfx_lower_bound(stem(s, sn));
          while (i < int(_nkeys) && cmp_suffix(uint32_t(i), s, sn) < 0)
             ++i;
          return i;
@@ -335,7 +367,7 @@ namespace heart
          if (ins.vtype == inline_value::vt_extern && !can_add_address(ins.ext))
             return can_apply_mode::none;  // 17th cline => split early
          const uint32_t need = uint32_t(record_bytes(n - _cpfx_len, ins)) +
-                               (_nkeys == _cap ? 5u * 4u : 0u);
+                               (_nkeys == _cap ? (3u + _pfxw) * 4u : 0u);
          return free_bytes(cols_end()) >= need ? can_apply_mode::modify : can_apply_mode::none;
       }
 
@@ -352,8 +384,8 @@ namespace heart
          const uint16_t off = alloc_record(s, sn, ins);
          const uint16_t pos = uint16_t(lower_bound(ins.key.data(), uint32_t(ins.key.size())));
          open_gap(pos);
-         fp()[pos]   = fingerprint_of(ins.key.data(), ins.key.size());
-         pfx()[pos]  = stem2(s, sn);
+         fp()[pos] = fingerprint_of(ins.key.data(), ins.key.size());
+         pfx_set(pos, stem(s, sn));
          vals()[pos] = off;
          ++_nkeys;
          return pos;
@@ -424,7 +456,10 @@ namespace heart
             cb += 1;  // conservative: may need a fresh base
          if (cb > max_cbases)
             return false;
-         const uint32_t content = head_bytes() + 5u * round_cap(_nkeys + 1u) + ncp +
+         // width upper bound: the rebuild picks pick(min suffix), and `ins` is in the set,
+         // so its (post-ncp) suffix bounds the chosen width from above.
+         const uint32_t wb      = pick_pfx_width(sn);
+         const uint32_t content = head_bytes() + (3u + wb) * round_cap(_nkeys + 1u) + ncp +
                                   (live_tail() - _cpfx_len) +
                                   uint32_t(_cpfx_len - ncp) * _nkeys + record_bytes(sn, ins);
          return content <= page_bytes;
@@ -438,8 +473,9 @@ namespace heart
             return false;
          if (upd.vtype == inline_value::vt_extern && live_cbase_count() + 1 > max_cbases)
             return false;
-         const uint32_t content = head_bytes() + 5u * round_cap(_nkeys) + live_tail() + npay -
-                                  iv->value_len;
+         // suffixes are unchanged by an update rebuild → the chosen width never exceeds _pfxw
+         const uint32_t content = head_bytes() + (3u + _pfxw) * round_cap(_nkeys) + live_tail() +
+                                  npay - iv->value_len;
          return content <= page_bytes;
       }
 
@@ -538,7 +574,9 @@ namespace heart
                return false;
             const inline_value* iv = record(i);
             live += uint32_t(iv->byte_size());
-            if (pfx()[i] != stem2(iv->data, iv->suffix_len))
+            if (_pfxw != 1 && _pfxw != 2 && _pfxw != 4)
+               return false;
+            if (pfx_get(i) != stem(iv->data, iv->suffix_len))
                return false;
             const uint32_t klen = full_key(i, kbuf);
             if (fp()[i] != fingerprint_of(kbuf, klen))
@@ -569,17 +607,55 @@ namespace heart
       }
       uint8_t*        fp() noexcept { return reinterpret_cast<uint8_t*>(cols()); }
       const uint8_t*  fp() const noexcept { return reinterpret_cast<const uint8_t*>(cols()); }
-      uint16_t*       pfx() noexcept { return reinterpret_cast<uint16_t*>(cols() + _cap); }
-      const uint16_t* pfx() const noexcept
+      // prefix column: _pfxw native-endian unsigned values per entry (big-endian key bytes
+      // packed into an integer, so numeric order == lexicographic order). cap is a multiple
+      // of 4 and head_bytes() is a multiple of 4, so every width is naturally aligned.
+      uint8_t*       pfxb() noexcept { return reinterpret_cast<uint8_t*>(cols() + _cap); }
+      const uint8_t* pfxb() const noexcept
       {
-         return reinterpret_cast<const uint16_t*>(cols() + _cap);
+         return reinterpret_cast<const uint8_t*>(cols() + _cap);
       }
-      uint16_t*       vals() noexcept { return reinterpret_cast<uint16_t*>(cols() + 3u * _cap); }
+      uint32_t pfx_get(uint32_t i) const noexcept
+      {
+         switch (_pfxw)
+         {
+            case 1: return pfxb()[i];
+            case 2: return reinterpret_cast<const uint16_t*>(pfxb())[i];
+            default: return reinterpret_cast<const uint32_t*>(pfxb())[i];
+         }
+      }
+      void pfx_set(uint32_t i, uint32_t v) noexcept
+      {
+         switch (_pfxw)
+         {
+            case 1: pfxb()[i] = uint8_t(v); break;
+            case 2: reinterpret_cast<uint16_t*>(pfxb())[i] = uint16_t(v); break;
+            default: reinterpret_cast<uint32_t*>(pfxb())[i] = v; break;
+         }
+      }
+      /// SIMD lower-bound over the prefix column: first index whose stem >= v.
+      int pfx_lower_bound(uint32_t v) const noexcept
+      {
+         switch (_pfxw)
+         {
+            case 1: return int(ucc::lower_bound_padded(pfxb(), _nkeys, uint8_t(v)));
+            case 2:
+               return ucc::lower_bound_u16_padded(reinterpret_cast<const uint16_t*>(pfxb()),
+                                                  _nkeys, uint16_t(v));
+            default:
+               return ucc::lower_bound_u32_padded(reinterpret_cast<const uint32_t*>(pfxb()),
+                                                  _nkeys, v);
+         }
+      }
+      uint16_t*       vals() noexcept
+      {
+         return reinterpret_cast<uint16_t*>(cols() + (1u + _pfxw) * _cap);
+      }
       const uint16_t* vals() const noexcept
       {
-         return reinterpret_cast<const uint16_t*>(cols() + 3u * _cap);
+         return reinterpret_cast<const uint16_t*>(cols() + (1u + _pfxw) * _cap);
       }
-      const void* cols_end() const noexcept { return cols() + 5u * _cap; }
+      const void* cols_end() const noexcept { return cols() + (3u + _pfxw) * _cap; }
 
       const uint8_t* cpfx_data() const noexcept
       {
@@ -590,9 +666,30 @@ namespace heart
       uint32_t live_tail() const noexcept { return tail_used() - _dead; }
 
       // ── small helpers ────────────────────────────────────────────────────────────
-      static uint16_t stem2(const uint8_t* s, size_t n) noexcept
+      /// Big-endian first `w` suffix bytes packed into an integer (zero-padded when the
+      /// suffix is shorter) — numeric compare == lexicographic compare on those bytes.
+      static uint32_t stemN(const uint8_t* s, size_t n, uint32_t w) noexcept
       {
-         return uint16_t((n > 0 ? uint16_t(s[0]) << 8 : 0) | (n > 1 ? uint16_t(s[1]) : 0));
+         uint32_t v = 0;
+         for (uint32_t i = 0; i < w; ++i)
+            v = (v << 8) | (i < n ? uint32_t(s[i]) : 0u);
+         return v;
+      }
+      uint32_t stem(const uint8_t* s, size_t n) const noexcept { return stemN(s, n, _pfxw); }
+      /// Width chosen at rebuild time: serve the MIN post-cpfx suffix length, capped at 4
+      /// (rounded down to a SIMD-friendly 1/2/4).
+      static uint32_t pick_pfx_width(uint32_t min_suffix) noexcept
+      {
+         return min_suffix >= 4 ? 4u : (min_suffix >= 2 ? 2u : 1u);
+      }
+      /// Smallest live suffix length (UINT32_MAX when empty) — the width input.
+      uint32_t live_min_suffix() const noexcept
+      {
+         uint32_t m = UINT32_MAX;
+         for (uint32_t i = 0; i < _nkeys; ++i)
+            if (record(i)->suffix_len < m)
+               m = record(i)->suffix_len;
+         return m;
       }
       static uint32_t shared_prefix(const uint8_t* a, size_t an, const uint8_t* b,
                                     size_t bn) noexcept
@@ -700,24 +797,27 @@ namespace heart
       void open_gap(uint32_t pos) noexcept
       {
          assert(_nkeys < _cap);
+         const uint32_t w = _pfxw;
          std::memmove(fp() + pos + 1, fp() + pos, _nkeys - pos);
-         std::memmove(pfx() + pos + 1, pfx() + pos, 2u * (_nkeys - pos));
+         std::memmove(pfxb() + (pos + 1) * w, pfxb() + pos * w, w * (_nkeys - pos));
          std::memmove(vals() + pos + 1, vals() + pos, 2u * (_nkeys - pos));
       }
       void close_gap(uint32_t pos) noexcept
       {
+         const uint32_t w = _pfxw;
          std::memmove(fp() + pos, fp() + pos + 1, _nkeys - pos - 1);
-         std::memmove(pfx() + pos, pfx() + pos + 1, 2u * (_nkeys - pos - 1));
+         std::memmove(pfxb() + pos * w, pfxb() + (pos + 1) * w, w * (_nkeys - pos - 1));
          std::memmove(vals() + pos, vals() + pos + 1, 2u * (_nkeys - pos - 1));
       }
       /// +4 column capacity within the free middle; rightmost column moves first.
       void grow_cap() noexcept
       {
+         const uint32_t w  = _pfxw;
          const uint16_t nc = _cap + 4;
-         assert(head_bytes() + 5u * nc <= size() - tail_used());
+         assert(head_bytes() + (3u + w) * nc <= size() - tail_used());
          char* base = cols();
-         std::memmove(base + 3u * nc, base + 3u * _cap, 2u * _nkeys);  // vals
-         std::memmove(base + nc, base + _cap, 2u * _nkeys);            // pfx
+         std::memmove(base + (1u + w) * nc, base + (1u + w) * _cap, 2u * _nkeys);  // vals
+         std::memmove(base + nc, base + _cap, w * _nkeys);                          // pfx
          _cap = nc;
       }
 
@@ -727,6 +827,7 @@ namespace heart
          _nkeys         = 0;
          _cap           = round_cap(0);
          _ncb           = 0;
+         _pfxw          = 2;  // until a rebuild picks the width from the live suffixes
          _cpfx_len      = 0;
          _dead          = 0;
          _cpfx_pos      = tail_ptr<>{0};
@@ -748,7 +849,24 @@ namespace heart
          _version_history = src->_version_history;
          const uint32_t cnt = (hi - lo) + (ins ? 1u : 0u) - (drop >= 0 ? 1u : 0u);
          _cap               = round_cap(cnt);
-         assert(head_bytes() + 5u * _cap <= size());
+         // DYNAMIC PREFIX WIDTH: serve the min post-cpfx suffix length, capped at 4 — a
+         // rebuild is the only place the column layout changes, so it decides the width.
+         {
+            const int prepend_d = int(src->_cpfx_len) - int(ncp);
+            uint32_t  min_sfx   = UINT32_MAX;
+            for (uint32_t si = lo; si < hi; ++si)
+            {
+               if (int(si) == drop)
+                  continue;
+               const uint32_t sl = uint32_t(int(src->record(si)->suffix_len) + prepend_d);
+               if (sl < min_sfx)
+                  min_sfx = sl;
+            }
+            if (ins && uint32_t(ins->key.size()) - ncp < min_sfx)
+               min_sfx = uint32_t(ins->key.size()) - ncp;
+            _pfxw = uint8_t(pick_pfx_width(min_sfx == UINT32_MAX ? 2u : min_sfx));
+         }
+         assert(head_bytes() + (3u + _pfxw) * _cap <= size());
 
          // new common prefix bytes: src's cpfx truncated-or-extended
          _cpfx_len = uint8_t(ncp);
@@ -802,8 +920,8 @@ namespace heart
                nv->value_type = iv->value_type;
                std::memcpy(nv->data + sn, iv->data + iv->suffix_len, iv->value_len);
             }
-            fp()[w]   = src->fp()[si];  // full-key fingerprints survive any refactoring
-            pfx()[w]  = stem2(nv->data, sn);
+            fp()[w] = src->fp()[si];  // full-key fingerprints survive any refactoring
+            pfx_set(w, stem(nv->data, sn));
             vals()[w] = tail_used();
             ++w;
          };
@@ -849,7 +967,7 @@ namespace heart
          const uint32_t sn = n - _cpfx_len;
          vals()[w]         = alloc_record(k + _cpfx_len, sn, ins);
          fp()[w]           = fingerprint_of(k, n);
-         pfx()[w]          = stem2(k + _cpfx_len, sn);
+         pfx_set(w, stem(k + _cpfx_len, sn));
       }
    } __attribute__((packed));
 

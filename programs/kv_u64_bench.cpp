@@ -207,12 +207,16 @@ namespace
       else
       {
          auto tc = t.count_tiers();
-         std::printf("    [%s tiers: %llu pages (%llu entries), %llu leaf, %llu setlist, %llu r2, "
-                     "%llu r4, %llu full(R8); %llu obj]\n",
+         std::printf("    [%s tiers: %llu pages (%llu entries, avg %.1f keys/page; pfxw 1/2/4 = "
+                     "%llu/%llu/%llu), %llu leaf, %llu setlist, %llu r2, %llu r4, %llu full(R8); "
+                     "%llu obj]\n",
                      tag, (unsigned long long)tc.pages, (unsigned long long)tc.page_entries,
-                     (unsigned long long)tc.leaf, (unsigned long long)tc.setlist,
-                     (unsigned long long)tc.bitset_r2, (unsigned long long)tc.bitset_r4,
-                     (unsigned long long)tc.full, (unsigned long long)t.object_count());
+                     tc.pages ? double(tc.page_entries) / double(tc.pages) : 0.0,
+                     (unsigned long long)tc.pages_w1, (unsigned long long)tc.pages_w2,
+                     (unsigned long long)tc.pages_w4, (unsigned long long)tc.leaf,
+                     (unsigned long long)tc.setlist, (unsigned long long)tc.bitset_r2,
+                     (unsigned long long)tc.bitset_r4, (unsigned long long)tc.full,
+                     (unsigned long long)t.object_count());
          std::printf("    [%s bitset: ptr %llu / %llu CLs (s_ptr=%.2f) | tails %llu]\n",
                      tag, (unsigned long long)tc.cptr, (unsigned long long)tc.cptr_cl,
                      tc.cptr_cl ? double(tc.cptr) / double(tc.cptr_cl) : 0.0,

@@ -699,6 +699,8 @@ namespace heart::radix
          auto  lk = _ses->lock();
          KB    kb;
          bytes q = as_bytes(key);
+         if (_page_mode)
+            return page_find_in(*_ses, root, q, out);
          return seek(root, q, 0, /*strict=*/false, kb, out);  // first key >= q; q exists → lands on it
       }
       // [testing] enumerate the CURRENT root's immediate pointer-children and their refcounts.
@@ -731,8 +733,10 @@ namespace heart::radix
       {
          uint64_t leaf = 0, setlist = 0, setlist_w16 = 0, setlist_w32 = 0;
          uint64_t bitset_c1 = 0, bitset_r2 = 0, bitset_r4 = 0, full = 0;
-         // page model: 2KB leaf_page terminals + their entry total
+         // page model: 2KB leaf_page terminals + their entry total (avg keys/page =
+         // page_entries / pages) + the dynamic prefix-column width census (1/2/4 bytes).
          uint64_t pages = 0, page_entries = 0;
+         uint64_t pages_w1 = 0, pages_w2 = 0, pages_w4 = 0;
          // compact_addresses sharing: branches / live cacheline bases across all bitset
          // segments (avg sharing factor s = cbranches / cbases; 1.0 = no sharing).
          uint64_t cbranches = 0, cbases = 0, csegs = 0;
@@ -890,9 +894,18 @@ namespace heart::radix
                tc.bucket_entries += _ses->get_ref<bucket_node>(a).obj()->nent;
                break;
             case radix_kind::page:  // 2KB leaf page — a counted endpoint (like leaf/bucket)
+            {
+               const leaf_page* pg = _ses->get_ref<leaf_page>(a).obj();
                ++tc.pages;
-               tc.page_entries += _ses->get_ref<leaf_page>(a).obj()->num_keys();
+               tc.page_entries += pg->num_keys();
+               switch (pg->prefix_width())
+               {
+                  case 1: ++tc.pages_w1; break;
+                  case 2: ++tc.pages_w2; break;
+                  default: ++tc.pages_w4; break;
+               }
                break;
+            }
             case radix_kind::bitset1:  // not produced
                break;
          }

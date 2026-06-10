@@ -86,6 +86,7 @@ namespace part
       void pin(line_idx i);  // +1 in the reserved band; throws ref_overflow at 255
       template <typename Destroy>
       void unpin(line_idx i, Destroy&& d);  // exact release (may cascade via d)
+      uint32_t slot() const noexcept { return _slot; }
 
      private:
       friend class arena;
@@ -377,6 +378,15 @@ namespace part
       // ── sessions ───────────────────────────────────────────────────────────
       session start_session() { return session(this); }
 
+      std::atomic<uint64_t>& reader_slot(uint32_t i) noexcept { return _reader_roots[i]; }
+      bool root_published(uint64_t raw) const noexcept
+      {
+         for (uint32_t i = 0; i < max_read_sessions; ++i)
+            if (_reader_roots[i].load(std::memory_order_seq_cst) == raw)
+               return true;
+         return false;
+      }
+
       read_session start_read_session()
       {
          auto cur = _read_slots.load(std::memory_order_relaxed);
@@ -641,6 +651,11 @@ namespace part
       std::atomic<uint8_t>*                 _ref_base  = nullptr;
       std::mutex                            _claim_mutex;
       std::atomic<uint64_t>                 _read_slots{0};
+      // Hazard-pointer table (sal's reader paradigm): slot i publishes the
+      // root the reader currently traverses; readers never touch refcounts or
+      // locks, and the WRITER defers retired-root release until no slot shows
+      // it. Transient: rebuilt empty every open.
+      std::atomic<uint64_t> _reader_roots[max_read_sessions] = {};
       arena_stats                           _stats;
       bool                                  _was_clean = false;
    };

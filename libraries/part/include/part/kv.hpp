@@ -72,9 +72,10 @@ namespace part::kv
    {
      public:
       cursor(cursor&& o) noexcept
-          : _a(o._a), _root(o._root), _view(std::move(o._view)), _it(_view.end())
+          : _a(o._a), _hp(o._hp), _root(o._root), _view(std::move(o._view)), _it(_view.end())
       {
-         o._a = nullptr;  // moved-from cursor owns no pin; position resets
+         o._a  = nullptr;  // moved-from cursor owns no pin; position resets
+         o._hp = nullptr;
       }
       cursor(const cursor&) = delete;
       ~cursor()
@@ -83,8 +84,10 @@ namespace part::kv
             return;
          const root_ptr r = _root;
          _view.adopt_root(root_ptr::null());  // the view owns nothing
-         if (!r.is_null())
-            _view.cow_release(r);  // drop the pin (cascades on last reference)
+         if (_hp)
+            _hp->store(0, std::memory_order_seq_cst);  // readers only clear their slot:
+         else if (!r.is_null())                        // reclamation is the writer's job
+            _view.cow_release(r);  // write-side pinned cursor (scan_all path)
       }
 
       void seek_begin() { _it = _view.begin(); }
@@ -139,13 +142,15 @@ namespace part::kv
 
      private:
       friend class database;
-      cursor(part::arena* a, root_ptr root)
-          : _a(a), _root(root), _view(part_alloc<pval>(a)), _it(_view.end())
+      friend class read_session;
+      cursor(part::arena* a, root_ptr root, std::atomic<uint64_t>* hp = nullptr)
+          : _a(a), _hp(hp), _root(root), _view(part_alloc<pval>(a)), _it(_view.end())
       {
          _view.adopt_root(_root);
       }
 
       part::arena*             _a;
+      std::atomic<uint64_t>*   _hp;  // sal paradigm: the reader's published slot
       root_ptr                 _root;
       mutable engine_t         _view;
       engine_t::const_iterator _it;
@@ -260,7 +265,16 @@ namespace part::kv
 
       ~database()
       {
-         // Release the live-root slot's reference (cascades unless pins remain).
+         // No readers remain by contract: force-drain retired roots, then the
+         // live root's slot reference.
+         for (uint64_t raw : _retired)
+         {
+            root_ptr       p;
+            const uint32_t r32 = uint32_t(raw);
+            std::memcpy(p.b, &r32, 4);
+            engine_t v{part_alloc<pval>(&_arena)};
+            v.cow_release(p);
+         }
          if (!_live_root.is_null())
          {
             engine_t v{part_alloc<pval>(&_arena)};
@@ -304,9 +318,33 @@ namespace part::kv
          return c;
       }
 
-      part::arena _arena;
-      std::mutex  _root_mx;
-      root_ptr    _live_root;
+      // Retired-root release is DEFERRED to the writer: a root leaves the
+      // queue only when no reader slot publishes it (sal's reader paradigm —
+      // readers never touch refcounts or locks).
+      void drain_retired_()  // caller holds _root_mx
+      {
+         for (size_t i = 0; i < _retired.size();)
+         {
+            if (_arena.root_published(_retired[i]))
+            {
+               ++i;
+               continue;
+            }
+            root_ptr p;
+            const uint32_t r32 = uint32_t(_retired[i]);
+            std::memcpy(p.b, &r32, 4);
+            engine_t v{part_alloc<pval>(&_arena)};
+            v.cow_release(p);
+            _retired[i] = _retired.back();
+            _retired.pop_back();
+         }
+      }
+
+      part::arena           _arena;
+      std::mutex            _root_mx;
+      root_ptr              _live_root;
+      std::atomic<uint64_t> _live_raw{0};
+      std::vector<uint64_t> _retired;
    };
 
    // ── bodies ────────────────────────────────────────────────────────────────
@@ -322,7 +360,23 @@ namespace part::kv
 
    inline cursor read_session::create_cursor(uint32_t)
    {
-      return _db->pin_snapshot();
+      auto& slot = _db->_arena.reader_slot(_rs.slot());
+      for (;;)
+      {
+         const uint64_t r = _db->_live_raw.load(std::memory_order_seq_cst);
+         slot.store(r, std::memory_order_seq_cst);  // publish FIRST...
+         if (_db->_live_raw.load(std::memory_order_seq_cst) == r)
+         {  // ...then validate: r was live after our publish, so the writer's
+            // drain (which runs after replacing the root) must see our slot.
+            root_ptr p = root_ptr::null();
+            if (r)
+            {
+               const uint32_t r32 = uint32_t(r);
+               std::memcpy(p.b, &r32, 4);
+            }
+            return cursor(&_db->_arena, p, &slot);
+         }
+      }
    }
 
    inline cursor tree::snapshot_cursor() const
@@ -361,18 +415,18 @@ namespace part::kv
       _tx.commit();  // data msync + floor advance (layer 1)
       database* db = _ws->_db;
       root_ptr  nr = _ws->_t.root_handle();
-      root_ptr  old;
+      std::lock_guard g(db->_root_mx);
+      const root_ptr  old = db->_live_root;
+      if (nr.raw() != old.raw())
       {
-         std::lock_guard g(db->_root_mx);
-         old = db->_live_root;
-         if (nr.raw() == old.raw())
-            return;  // no structural change this txn
          if (!nr.is_null() && !_ws->_t.cow_retain(nr))
             throw std::runtime_error("part::kv: root retain refused");
          db->_live_root = nr;
+         db->_live_raw.store(nr.is_null() ? 0 : nr.raw(), std::memory_order_seq_cst);
          db->_arena.set_root(0, nr.is_null() ? 0 : nr.raw());
+         if (!old.is_null())
+            db->_retired.push_back(old.raw());  // strictly after the root moved on
       }
-      if (!old.is_null())
-         _ws->_t.cow_release(old);  // strictly after the new root is durable (SPEC §7)
+      db->drain_retired_();  // all reclamation on the writer thread (SPEC §7)
    }
 }  // namespace part::kv

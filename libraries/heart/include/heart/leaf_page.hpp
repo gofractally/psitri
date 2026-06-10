@@ -135,6 +135,14 @@ namespace heart
       }
       void copy_to(sal::alloc_header* dst) const noexcept { blit_head_tail(dst, head_size()); }
 
+      /// SAL destroy hook: a dying page releases its children (external value objects
+      /// and nested subtree roots) — the cascade that frees what only this page owned.
+      template <typename Session>
+      void destroy(const Session& s) const
+      {
+         for_each_child([&](sal::ptr_address c) { s->release(c); });
+      }
+
       /// Visit SAL children (external values + nested subtree roots) — the release/
       /// retain cascade and ref audits walk this.
       template <typename F>

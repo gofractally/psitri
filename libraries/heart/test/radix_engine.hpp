@@ -38,6 +38,7 @@
 
 #include <heart/bucket_node.hpp>
 #include <heart/leaf_node.hpp>
+#include <heart/leaf_page.hpp>
 #include <heart/radix_nodes.hpp>
 
 namespace heart::radix
@@ -151,6 +152,7 @@ namespace heart::radix
          _alloc->register_type_ops<bitset_r4_node>();
          _alloc->register_type_ops<full_radix_node>();
          _alloc->register_type_ops<bucket_node>();
+         _alloc->register_type_ops<leaf_page>();
          // NULL IS A VALID EMPTY TREE — everywhere. No eager root: the direct-API working root
          // (`_root`, an OWNING smart_ptr — psitri tree_context's discipline) starts empty and
          // upsert_raw lazily creates on first write; an emptied tree returns to null. (The
@@ -171,6 +173,7 @@ namespace heart::radix
       // empty tree. (in-place mutation; COW/MVCC is a later add.)
       void set_bucket_mode(bool on)
       {
+         _page_mode = false;  // legacy-engine knob (see set_wide_stems)
          if (on == _bucket_mode)
             return;
          _bucket_mode = on;
@@ -240,7 +243,10 @@ namespace heart::radix
             return _t->_old_value_size;
          }
       };
-      subtree create_subtree() { return subtree(this, make_node<setlist_u8>(bytes{})); }
+      subtree create_subtree()
+      {
+         return subtree(this, _page_mode ? make_page() : make_node<setlist_u8>(bytes{}));
+      }
 
       // Attach a built subtree under `key` (consumes the handle's ref → the terminal owns it).
       int upsert_subtree(key_view key, subtree&& s)
@@ -294,6 +300,8 @@ namespace heart::radix
       {
          auto lock       = _ses->lock();
          _old_value_size = -1;
+         if (_page_mode)  // radix-indexed leaf pages (the default data layout)
+            return page_upsert_step(root, kb, val);
          // The descent starts UNIQUE; sharedness is discovered per node/range and selects the
          // shared INSTANTIATION (upsert_mode is a template parameter — no runtime latch).
          if (root == sal::null_ptr_address)  // null = empty tree → first write creates the root
@@ -317,6 +325,8 @@ namespace heart::radix
             return bkt_find(kb, out);
          if (!_root)  // null = empty tree
             return false;
+         if (_page_mode)
+            return page_find_in(*_ses, _root.address(), kb, out);
          return find_in(*_ses, _root.address(), kb, out);
       }
       // The NATIVE iterative point lookup (skip-header dispatch + prefetch) on an ARBITRARY
@@ -415,6 +425,9 @@ namespace heart::radix
                case radix_kind::full:
                   cont = route_r1(ses, reinterpret_cast<const full_radix_node*>(b), kb, depth, out, addr, found);
                   break;
+               case radix_kind::page:  // page-model trees route via page_find_in, never here
+                  assert(false && "find_in on a page-model tree (use page_find_in)");
+                  return false;
                case radix_kind::bitset1:
                   __builtin_unreachable();  // not produced by the engine
             }
@@ -455,6 +468,8 @@ namespace heart::radix
          _removed  = false;
          _emptied  = false;
          removed   = false;
+         if (_page_mode)
+            return page_remove_step(root, kb, removed);
          if (root == sal::null_ptr_address)
             return root;
          ptr_address nr = remove_node<upsert_mode{}>(root, kb, 0);  // unique start; mode discovered
@@ -630,17 +645,36 @@ namespace heart::radix
       // the libart-conformant byte radix. When on, the growth algorithm may pick
       // setlist_u16/u32 at the existing build points (fewer hops → fewer CB indirections).
       // Routing is already stride-aware; nothing else in the engine changes.
-      void set_wide_stems(bool on) { _wide_stems = on; }
+      // Selecting ANY legacy growth knob (wide stems / adaptive / c1-promote / bucket mode)
+      // opts the tree out of the page model into the legacy byte-radix engine — those knobs
+      // shape machinery that only routes data there.
+      void set_wide_stems(bool on)
+      {
+         _page_mode  = false;
+         _wide_stems = on;
+      }
       bool wide_stems() const { return _wide_stems; }
+      // Page model (the default): keys live in 2KB leaf_page terminals behind a lower-bound
+      // divider radix. Off = the legacy byte-consuming radix.
+      void set_page_mode(bool on) { _page_mode = on; }
+      bool page_mode() const { return _page_mode; }
 
       // Adaptive radix↔bucket: start radix; when insert descent crosses 2 levels that each
       // have < 3 branches (children + term) — i.e. going deep without widening, the signature
       // of clustered/non-radix-friendly data caught while the region is still a provably small
       // number of keys — collapse that subtree into a bucket leaf. Wide (radix-friendly) data
       // never trips it. Off by default so the gated baseline stays libart-exact.
-      void set_adaptive(bool on) { _adaptive = on; }
+      void set_adaptive(bool on)
+      {
+         _page_mode = false;  // legacy-engine knob (see set_wide_stems)
+         _adaptive  = on;
+      }
       bool adaptive() const { return _adaptive; }
-      void set_c1_promote(bool on) { _c1_promote_on = on; }
+      void set_c1_promote(bool on)
+      {
+         _page_mode     = false;  // legacy-engine knob (see set_wide_stems)
+         _c1_promote_on = on;
+      }
       // ══ TESTING / DIAGNOSTIC HOOKS (cont.) — NOT THE PUBLIC API; raw ptr_address, no safety ══
       // [testing] current refcount of the root node (is a snapshot pinning it?).
       uint32_t root_use_count()
@@ -687,6 +721,7 @@ namespace heart::radix
          uint64_t in_place = 0;        // unique + room: mutated in place (no copy)
          uint64_t restrides = 0;       // wide-node splits (re_stride to a narrower stride)
          uint64_t upgrades = 0;        // grow_and_set tier widenings (setlist→c1/r2/r4/full)
+         uint64_t page_splits = 0;     // leaf_page splits (page model)
       };
       const cow_counters&        counters() const { return _cc; }
       sal::allocator_session_ptr session() const { return _ses; }
@@ -696,6 +731,8 @@ namespace heart::radix
       {
          uint64_t leaf = 0, setlist = 0, setlist_w16 = 0, setlist_w32 = 0;
          uint64_t bitset_c1 = 0, bitset_r2 = 0, bitset_r4 = 0, full = 0;
+         // page model: 2KB leaf_page terminals + their entry total
+         uint64_t pages = 0, page_entries = 0;
          // compact_addresses sharing: branches / live cacheline bases across all bitset
          // segments (avg sharing factor s = cbranches / cbases; 1.0 = no sharing).
          uint64_t cbranches = 0, cbases = 0, csegs = 0;
@@ -851,6 +888,10 @@ namespace heart::radix
             case radix_kind::bucket:  // adaptive dense terminal leaf — a counted endpoint
                ++tc.bucket;
                tc.bucket_entries += _ses->get_ref<bucket_node>(a).obj()->nent;
+               break;
+            case radix_kind::page:  // 2KB leaf page — a counted endpoint (like leaf/bucket)
+               ++tc.pages;
+               tc.page_entries += _ses->get_ref<leaf_page>(a).obj()->num_keys();
                break;
             case radix_kind::bitset1:  // not produced
                break;
@@ -1529,6 +1570,11 @@ namespace heart::radix
                // observable. find()/upsert have their own switch and handle buckets directly.
                throw std::runtime_error(
                    "heart ordered cursor: reached a bucket leaf — buckets are not traversed");
+            case radix_kind::page:
+               // Pages are terminals, not routers — every page-model walker resolves a page
+               // BEFORE dispatching (page_at). Reaching here is a logic error; observable > UB.
+               throw std::runtime_error(
+                   "heart ordered cursor: dispatch() reached a leaf page — resolve pages first");
             case radix_kind::leaf:     // not ordered routers — dispatch() is never called on these
             case radix_kind::bitset1:
                break;
@@ -1552,6 +1598,946 @@ namespace heart::radix
          kb.append(iv->data, iv->suffix_len);
          return value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len), iv->value_len);
       }
+
+      // ════ RADIX-INDEXED LEAF PAGES (the page model — the DEFAULT data layout) ═══════════════
+      // Keys live in 2KB leaf_page terminals; the radix above stores only DIVIDERS — short
+      // separator keys emitted by page splits. A divider is FULLY consumed by the radix path
+      // (node prefixes + branch bytes) and its slot points DIRECTLY at a leaf_page: no suffix
+      // bytes and no inline/leaf_node terminals exist anywhere in a page-model radix. Pages are
+      // ordinary pointer children, so clone/destroy/range-refcount machinery applies unchanged.
+      //
+      // ROUTING IS LOWER-BOUND, not exact: key K belongs to the page of the LARGEST divider
+      // <= K. The empty divider "" (the radix root's term_value) always exists once a radix
+      // does, so a fallback page always exists. At each node take the largest branch <= the
+      // key byte: equal → descend (remembering this node's nearest lesser branch/term as the
+      // fallback); less → that branch subtree's MAX page (max-path walk); none → this node's
+      // term page, else the remembered ancestor fallback. A key diverging from a node's prefix
+      // resolves the same way (above → this subtree's max; below → fallback). A miss must still
+      // reach a page — that is the design's stated sacrifice (the page's fingerprint column is
+      // the point-lookup advantage instead).
+      static bool is_page(sal::allocator_session& ses, ptr_address a)
+      {
+         return ses.get_ref<sal::alloc_header>(a)->type() == leaf_page::type_id;
+      }
+      static const leaf_page* page_at(sal::allocator_session& ses, ptr_address a)
+      {
+         const sal::alloc_header* b = ses.get_ref<sal::alloc_header>(a).obj();
+         return b->type() == leaf_page::type_id ? reinterpret_cast<const leaf_page*>(b) : nullptr;
+      }
+      const leaf_page* page_at(ptr_address a) { return page_at(*_ses, a); }
+
+      ptr_address make_page() { return _ses->alloc<leaf_page>(sal::alloc_hint{}); }
+
+      // Append helper for divider capture (route + max-path build the divider as they walk).
+      static void div_append(uint8_t* div, uint32_t* dlen, const uint8_t* p, size_t n)
+      {
+         if (!div || !n)
+            return;
+         std::memcpy(div + *dlen, p, n);
+         *dlen += uint32_t(n);
+      }
+
+      // The rightmost page under `addr` (the page of the subtree's MAX divider). Appends the
+      // divider bytes it walks when `div` is non-null.
+      static ptr_address max_page(sal::allocator_session& ses, ptr_address addr, uint8_t* div,
+                                  uint32_t* dlen)
+      {
+         for (;;)
+         {
+            if (is_page(ses, addr))
+               return addr;
+            ptr_address next{};
+            dispatch(ses, addr, [&](auto ad) {
+               bytes pfx = ad.prefix();
+               div_append(div, dlen, pfx.data(), pfx.size());
+               const int c = ad.last();
+               if (c >= 0)
+               {
+                  uint8_t   sb[4];
+                  const int nb = stem_bytes(ad.cell(c), ad.stem_width(), ad.cw(), sb);
+                  div_append(div, dlen, sb, size_t(nb));
+                  next = ad.branch(c).as_pointer();  // page-model branches are always pointers
+               }
+               else
+               {
+                  assert(!ad.term().is_null() && "page-model router with neither branches nor term");
+                  next = ad.term().as_pointer();
+               }
+            });
+            addr = next;
+         }
+      }
+
+      // Lower-bound route: the page owning `kb` (the largest divider <= kb). When `div` is
+      // non-null the owning divider's bytes are captured there — the currency for the mutating
+      // descents and the cursor. `addr` must be a router (callers handle a root that IS a page).
+      static ptr_address route_to_page(sal::allocator_session& ses, ptr_address addr, bytes kb,
+                                       uint8_t* div, uint32_t* dlen)
+      {
+         uint32_t depth = 0;
+         // remembered fallback: the nearest divider < kb seen on the exact-descent path
+         ptr_address fb_node = sal::null_ptr_address;
+         int         fb_pos  = -2;  // -1 = that node's term; >= 0 = entry cursor
+         uint32_t    fb_dlen = 0;
+         for (;;)
+         {
+            if (is_page(ses, addr))
+               return addr;
+            ptr_address next{};
+            int         action = 0;  // 0 descend, 1 done(next=page), 2 fallback, 3 max(addr), 4 max(next)
+            dispatch(ses, addr, [&](auto ad) {
+               bytes        pfx = ad.prefix();
+               bytes        rem = kb.subspan(depth);
+               const size_t m   = pfx.size() < rem.size() ? pfx.size() : rem.size();
+               int          c   = m ? std::memcmp(rem.data(), pfx.data(), m) : 0;
+               if (c == 0 && rem.size() < pfx.size())
+                  c = -1;  // key exhausts inside the prefix → below every divider through here
+               if (c < 0)
+               {
+                  action = 2;
+                  return;
+               }
+               if (c > 0)  // above every divider in this subtree → its max page
+               {
+                  action = 3;
+                  return;
+               }
+               div_append(div, dlen, pfx.data(), pfx.size());
+               const uint32_t d2 = depth + uint32_t(pfx.size());
+               if (d2 == kb.size())  // key == path exactly → its own divider (term) or fallback
+               {
+                  if (!ad.term().is_null())
+                  {
+                     next   = ad.term().as_pointer();
+                     action = 1;
+                  }
+                  else
+                     action = 2;
+                  return;
+               }
+               bytes     r2 = kb.subspan(d2);
+               bool      full;
+               uint32_t  fc;
+               const int li    = ad.lower(r2, full, fc);
+               const bool exact = full && ad.valid(li) && ad.cell(li) == fc;
+               if (exact)
+               {
+                  const int less = ad.prev(li);
+                  if (less >= 0 || !ad.term().is_null())
+                  {
+                     fb_node = addr;
+                     fb_pos  = less >= 0 ? less : -1;
+                     fb_dlen = dlen ? *dlen : 0;
+                  }
+                  uint8_t   sb[4];
+                  const int nb = stem_bytes(ad.cell(li), ad.stem_width(), ad.cw(), sb);
+                  div_append(div, dlen, sb, size_t(nb));
+                  next   = ad.branch(li).as_pointer();
+                  depth  = d2 + uint32_t(ad.cw());
+                  action = 0;
+                  return;
+               }
+               const int less = ad.prev(li);
+               if (less >= 0)
+               {
+                  uint8_t   sb[4];
+                  const int nb = stem_bytes(ad.cell(less), ad.stem_width(), ad.cw(), sb);
+                  div_append(div, dlen, sb, size_t(nb));
+                  next   = ad.branch(less).as_pointer();
+                  action = 4;
+                  return;
+               }
+               if (!ad.term().is_null())
+               {
+                  next   = ad.term().as_pointer();
+                  action = 1;
+                  return;
+               }
+               action = 2;
+            });
+            switch (action)
+            {
+               case 0:
+                  addr = next;
+                  break;
+               case 1:
+                  return next;
+               case 3:
+                  return max_page(ses, addr, div, dlen);
+               case 4:
+                  return max_page(ses, next, div, dlen);
+               case 2:
+               {
+                  assert(fb_pos != -2 && "no fallback: the radix root must hold the \"\" divider");
+                  if (dlen)
+                     *dlen = fb_dlen;
+                  ptr_address fnext{};
+                  bool        fpage = false;
+                  dispatch(ses, fb_node, [&](auto ad) {
+                     if (fb_pos < 0)
+                     {
+                        fnext = ad.term().as_pointer();
+                        fpage = true;
+                        return;
+                     }
+                     uint8_t   sb[4];
+                     const int nb = stem_bytes(ad.cell(fb_pos), ad.stem_width(), ad.cw(), sb);
+                     div_append(div, dlen, sb, size_t(nb));
+                     fnext = ad.branch(fb_pos).as_pointer();
+                  });
+                  return fpage ? fnext : max_page(ses, fnext, div, dlen);
+               }
+            }
+         }
+      }
+
+      // Retain the children `pg` shares with a clone successor — every child except the record
+      // at `skip` (-1 = none). The successor's slot-swap release of the old page then balances:
+      // each shared child nets one owner per owning page; the skipped child is freed when the
+      // old page was unique, or stays owned by the snapshot's page when it was shared.
+      void retain_page_children(const leaf_page* pg, int skip)
+      {
+         for (uint32_t i = 0; i < pg->num_keys(); ++i)
+         {
+            if (int(i) == skip)
+               continue;
+            const inline_value* iv = pg->record(i);
+            if (iv->value_type == inline_value::vt_extern)
+               _ses->retain(pg->external_addr(i));
+            else if (iv->is_subtree() && iv->subtree_root() != sal::null_ptr_address)
+               _ses->retain(iv->subtree_root());
+         }
+      }
+
+      // Apply an upsert to `page` under the page-COW discipline: shared (snapshot-reachable
+      // parent OR own ref>1) → rebuild-clone; unique + room → mutate in place (the page IS the
+      // COW unit — no node copies at all on this path). Returns the page's successor (== page
+      // when in-place/untouched). When the entry can't fit even via a rebuild, sets _page_split
+      // and leaves the page untouched — the caller splits and retries.
+      ptr_address page_apply_upsert(ptr_address page, bool parent_shared, bytes kb, bytes val)
+      {
+         auto             ref    = _ses->get_ref<leaf_page>(page);
+         const leaf_page* pg     = ref.obj();
+         const bool       shared = parent_shared || ref.ref() > 1;
+         assert(kb.size() <= leaf_page::max_suffix_len && "page-model keys are <= 255 bytes");
+         // Classify inline vs external by the would-be suffix (post-cpfx). A rebuild can only
+         // shorten cpfx to common(cpfx, key), which is exactly what we compute → stable.
+         auto     cp  = pg->common_prefix();
+         uint32_t ncp = 0;
+         {
+            const size_t m = cp.size() < kb.size() ? cp.size() : kb.size();
+            while (ncp < m && cp[ncp] == kb[ncp])
+               ++ncp;
+         }
+         const uint32_t       slen = uint32_t(kb.size()) - ncp;
+         leaf_page::insert_op ins{
+             .key = kb, .value = val, .vtype = _ins_value_type, .ext = sal::null_ptr_address};
+         if (ins.vtype == inline_value::vt_bytes &&
+             int(slen + val.size()) > leaf_page::max_inline_entry)
+         {
+            assert(val.size() <= 255 && "external value cap (leaf_node u8 length)");
+            ins.vtype = inline_value::vt_extern;
+            ins.value = {};
+            // the external object holds ONLY the value — the suffix stays in-page for compares
+            ins.ext = _ses->alloc<leaf_node>(sal::alloc_hint{}, bytes{}, val);
+         }
+         const int idx = pg->find(kb.data(), uint32_t(kb.size()));
+         if (idx >= 0)  // UPDATE — capture the displaced record's identity first
+         {
+            const inline_value* old       = pg->record(uint32_t(idx));
+            ptr_address         old_child = sal::null_ptr_address;
+            if (old->value_type == inline_value::vt_extern)
+            {
+               old_child = pg->external_addr(uint32_t(idx));
+               _old_value_size =
+                   int(_ses->get_ref<leaf_node>(old_child).obj()->value_bytes().size());
+            }
+            else
+            {
+               _old_value_size = old->value_len;
+               if (old->is_subtree())
+                  old_child = old->subtree_root();
+            }
+            leaf_page::update_op upd{
+                .index = uint16_t(idx), .value = ins.value, .vtype = ins.vtype, .ext = ins.ext};
+            if (!shared && pg->can_apply(upd) == leaf_page::can_apply_mode::modify)
+            {
+               ref.modify().get()->apply(upd);
+               if (old_child != sal::null_ptr_address)
+                  _ses->release(old_child);  // the replaced external/subtree child
+               return page;
+            }
+            if (pg->rebuilt_fits(upd))
+            {
+               ptr_address np =
+                   _ses->alloc<leaf_page>(sal::alloc_hint{}, leaf_page::clone_update_op{pg, upd});
+               retain_page_children(pg, idx);  // the slot swap's release of `page` balances this
+               return np;
+            }
+            if (ins.ext != sal::null_ptr_address)
+               _ses->release(ins.ext);  // not consumed this pass (split first)
+            _page_split = page;
+            return page;
+         }
+         _old_value_size = -1;
+         if (!shared && pg->can_apply(ins) == leaf_page::can_apply_mode::modify)
+         {
+            ref.modify().get()->apply(ins);
+            return page;
+         }
+         if (pg->rebuilt_fits(ins))
+         {
+            ptr_address np =
+                _ses->alloc<leaf_page>(sal::alloc_hint{}, leaf_page::clone_insert_op{pg, ins});
+            retain_page_children(pg, -1);
+            return np;
+         }
+         if (ins.ext != sal::null_ptr_address)
+            _ses->release(ins.ext);
+         _page_split = page;
+         return page;
+      }
+
+      // Remove `kb` from `page`. Miss → _removed=false, page untouched. The page's LAST entry
+      // → _page_emptied; the page is left UNTOUCHED unless `force_empty` (the caller is about
+      // to drop the divider + page, whose destroy cascades the children). The LEFTMOST page is
+      // never dropped (its "" divider must survive), so its caller passes force_empty and the
+      // removal applies for real, leaving a legitimately empty page. Otherwise in-place
+      // (unique) or rebuild-clone.
+      ptr_address page_apply_remove(ptr_address page, bool parent_shared, bytes kb,
+                                    bool force_empty = false)
+      {
+         auto             ref = _ses->get_ref<leaf_page>(page);
+         const leaf_page* pg  = ref.obj();
+         const int        idx = pg->find(kb.data(), uint32_t(kb.size()));
+         if (idx < 0)
+         {
+            _removed = false;
+            return page;
+         }
+         _removed                      = true;
+         const bool          shared    = parent_shared || ref.ref() > 1;
+         const inline_value* old       = pg->record(uint32_t(idx));
+         ptr_address         old_child = sal::null_ptr_address;
+         if (old->value_type == inline_value::vt_extern)
+            old_child = pg->external_addr(uint32_t(idx));
+         else if (old->is_subtree())
+            old_child = old->subtree_root();
+         _page_emptied = (pg->num_keys() == 1);
+         if (_page_emptied && !force_empty)
+            return page;
+         if (!shared)
+         {
+            ref.modify().get()->apply(leaf_page::remove_op{uint16_t(idx)});
+            if (old_child != sal::null_ptr_address)
+               _ses->release(old_child);
+            return page;
+         }
+         ptr_address np = _ses->alloc<leaf_page>(sal::alloc_hint{},
+                                                 leaf_page::clone_remove_op{pg, uint16_t(idx)});
+         retain_page_children(pg, idx);
+         return np;
+      }
+
+      // Mutating descent along an EXACT divider path: COW the radix path lazily (only when the
+      // page op produced a successor) and swap the owning slot. `op(page, parent_shared)` runs
+      // the page mutation; an in-place page op leaves the entire radix untouched — the page is
+      // the COW unit.
+      template <upsert_mode mode, class Op>
+      ptr_address page_path_mut(ptr_address addr, bytes D, uint32_t depth, Op&& op)
+      {
+         switch (kind_of(_ses->get_ref<sal::alloc_header>(addr)->type()))
+         {
+            case radix_kind::setlist_u8:
+               return page_router_mut<mode, setlist_u8>(addr, D, depth, std::forward<Op>(op));
+            case radix_kind::c1_32:
+               return page_router_mut<mode, bitset_c1_32>(addr, D, depth, std::forward<Op>(op));
+            case radix_kind::c1_64:
+               return page_router_mut<mode, bitset_c1_64>(addr, D, depth, std::forward<Op>(op));
+            case radix_kind::c1_128:
+               return page_router_mut<mode, bitset_c1_128>(addr, D, depth, std::forward<Op>(op));
+            case radix_kind::bitset_r2:
+               return page_router_mut<mode, bitset_r2_node>(addr, D, depth, std::forward<Op>(op));
+            case radix_kind::bitset_r4:
+               return page_router_mut<mode, bitset_r4_node>(addr, D, depth, std::forward<Op>(op));
+            case radix_kind::full:
+               return page_router_mut<mode, full_radix_node>(addr, D, depth, std::forward<Op>(op));
+            case radix_kind::setlist_u16:  // the page-model radix never builds wide/bucket tiers
+            case radix_kind::setlist_u32:
+            case radix_kind::bucket:
+            case radix_kind::leaf:
+            case radix_kind::bitset1:
+            case radix_kind::page:  // callers resolve pages before descending
+               break;
+         }
+         __builtin_unreachable();
+      }
+      template <upsert_mode mode, class N, class Op>
+      ptr_address page_router_mut(ptr_address addr, bytes D, uint32_t depth, Op&& op)
+      {
+         sal::smart_ref<N> ref = _ses->get_ref<N>(addr);
+         if constexpr (!mode.is_shared())
+         {
+            if (ref.ref() > 1)
+               return page_router_mut<upsert_mode{upsert_mode::shared}, N>(addr, D, depth,
+                                                                           std::forward<Op>(op));
+         }
+         const N* cn  = ref.obj();
+         bytes    pfx = cn->prefix();
+         assert(pfx.size() <= D.size() - depth &&
+                (!pfx.size() || std::memcmp(pfx.data(), D.data() + depth, pfx.size()) == 0));
+         depth += uint32_t(pfx.size());
+         if (depth == D.size())  // the divider's page is this node's term
+         {
+            ptr_address page = cn->term_value().as_pointer();
+            ptr_address np   = op(page, mode.is_shared());
+            if (np != page)
+            {
+               N* n = cow<mode, N>(ref, addr);
+               n->set_term_value(smart_address::from_pointer(np));
+               _ses->release(page);
+            }
+            return addr;
+         }
+         const uint8_t   b     = D[depth];
+         sal::alloc_hint chint = cn->branch_hint(b);
+         smart_address   sa    = cn->find(b);
+         assert(sa.is_pointer());
+         ptr_address child = sa.as_pointer();
+         const bool  csh   = mode.is_shared() || range_shared<N>(cn, range_of(b));
+         ptr_address nc;
+         if (is_page(*_ses, child))
+            nc = op(child, csh);
+         else
+            nc = csh ? page_path_mut<upsert_mode{upsert_mode::shared}>(child, D, depth + 1, op)
+                     : page_path_mut<mode>(child, D, depth + 1, op);
+         if (nc != child)
+         {
+            const ptr_address pre = addr;
+            N*                n   = cow<mode, N>(ref, addr);
+            rr_diverge<N>(n, range_of(b));
+            if (!n->set_branch(b, smart_address::from_pointer(nc)))
+            {
+               if constexpr (!std::is_same_v<N, full_radix_node>)
+               {
+                  // grow_and_set re-homes skipping b and sets b→nc; releasing the COW'd addr
+                  // destroys it, releasing the OLD child at b — so no manual child release.
+                  ptr_address up =
+                      grow_and_set<N>(addr, b, smart_address::from_pointer(nc), bytes{}, bytes{},
+                                      chint);
+                  if (addr != pre)
+                     _ses->release(addr);
+                  return up;
+               }
+            }
+            else
+               _ses->release(child);
+         }
+         return addr;
+      }
+
+      // Insert divider D (fully path-consumed) → `page` into the radix. The caller's ref on
+      // `page` is donated to the slot. Mirrors router_insert minus all terminal-suffix
+      // machinery: every slot written is a direct page pointer.
+      template <upsert_mode mode>
+      ptr_address divider_insert(ptr_address addr, bytes D, uint32_t depth, ptr_address page)
+      {
+         switch (kind_of(_ses->get_ref<sal::alloc_header>(addr)->type()))
+         {
+            case radix_kind::setlist_u8:
+               return divider_insert_in<mode, setlist_u8>(addr, D, depth, page);
+            case radix_kind::c1_32:
+               return divider_insert_in<mode, bitset_c1_32>(addr, D, depth, page);
+            case radix_kind::c1_64:
+               return divider_insert_in<mode, bitset_c1_64>(addr, D, depth, page);
+            case radix_kind::c1_128:
+               return divider_insert_in<mode, bitset_c1_128>(addr, D, depth, page);
+            case radix_kind::bitset_r2:
+               return divider_insert_in<mode, bitset_r2_node>(addr, D, depth, page);
+            case radix_kind::bitset_r4:
+               return divider_insert_in<mode, bitset_r4_node>(addr, D, depth, page);
+            case radix_kind::full:
+               return divider_insert_in<mode, full_radix_node>(addr, D, depth, page);
+            case radix_kind::setlist_u16:
+            case radix_kind::setlist_u32:
+            case radix_kind::bucket:
+            case radix_kind::leaf:
+            case radix_kind::bitset1:
+            case radix_kind::page:
+               break;
+         }
+         __builtin_unreachable();
+      }
+      // The divider's tail past `depth` compresses into ONE fresh child: a setlist with
+      // prefix = D[depth+1..) whose term is the page — or the page itself when b is D's last
+      // byte. Returns the branch target for byte D[depth].
+      smart_address make_divider_tail(bytes D, uint32_t depth, ptr_address page,
+                                      sal::alloc_hint hint)
+      {
+         if (depth + 1 == D.size())
+            return smart_address::from_pointer(page);
+         ptr_address chain = make_node<setlist_u8>(D.subspan(depth + 1), hint);
+         mut<setlist_u8>(chain)->set_term_value(smart_address::from_pointer(page));
+         return smart_address::from_pointer(chain);
+      }
+      template <upsert_mode mode, class N>
+      ptr_address divider_insert_in(ptr_address addr, bytes D, uint32_t depth, ptr_address page)
+      {
+         sal::smart_ref<N> ref = _ses->get_ref<N>(addr);
+         if constexpr (!mode.is_shared())
+         {
+            if (ref.ref() > 1)
+               return divider_insert_in<upsert_mode{upsert_mode::shared}, N>(addr, D, depth, page);
+         }
+         const N*  cn    = ref.obj();
+         bytes     pfx   = cn->prefix();
+         const int avail = int(D.size() - depth);
+         const int maxp  = std::min(int(pfx.size()), avail);
+         const int p = common_prefix_len(D.subspan(depth, size_t(maxp)), pfx.subspan(0, size_t(maxp)));
+         if (p < int(pfx.size()))
+            return divider_prefix_split<mode, N>(addr, D, depth, p, page);
+         depth += uint32_t(pfx.size());
+         if (depth == D.size())  // divider == path → this node's term
+         {
+            assert(cn->term_value().is_null() && "divider already present");
+            N* n = cow<mode, N>(ref, addr);
+            n->set_term_value(smart_address::from_pointer(page));
+            return addr;
+         }
+         const uint8_t   b     = D[depth];
+         sal::alloc_hint chint = cn->branch_hint(b);
+         smart_address   sa    = cn->find(b);
+         if (sa.is_null())  // new slot at b
+         {
+            smart_address     sab = make_divider_tail(D, depth, page, chint);
+            const ptr_address pre = addr;
+            N*                n   = cow<mode, N>(ref, addr);
+            rr_diverge<N>(n, range_of(b));
+            if (n->set_branch(b, sab))
+               return addr;
+            if constexpr (!std::is_same_v<N, full_radix_node>)
+            {
+               ptr_address up = grow_and_set<N>(addr, b, sab, bytes{}, bytes{}, chint);
+               if (addr != pre)
+                  _ses->release(addr);
+               return up;
+            }
+            return addr;  // full_radix never fails set_branch
+         }
+         ptr_address child = sa.as_pointer();
+         if (is_page(*_ses, child))
+         {
+            // an existing divider ends exactly at b (its slot IS this page) and D extends it:
+            // demote the page to the TERM of a fresh empty-prefix router, insert D's tail there.
+            assert(depth + 1 < D.size() && "duplicate divider");
+            _ses->retain(child);  // the mid router's term takes its own ref on the page
+            ptr_address mid = make_node<setlist_u8>(bytes{}, chint);
+            mut<setlist_u8>(mid)->set_term_value(smart_address::from_pointer(child));
+            ptr_address nmid = divider_insert_in<upsert_mode{}, setlist_u8>(mid, D, depth + 1, page);
+            smart_address     msa = smart_address::from_pointer(nmid);
+            const ptr_address pre = addr;
+            N*                n   = cow<mode, N>(ref, addr);
+            rr_diverge<N>(n, range_of(b));
+            if (n->set_branch(b, msa))
+            {
+               _ses->release(child);  // the old branch's ref on the page (moved into mid's term)
+               return addr;
+            }
+            if constexpr (!std::is_same_v<N, full_radix_node>)
+            {
+               // grow_and_set skips b; releasing the COW'd addr destroys it, releasing the old
+               // page ref at b — so no manual release here.
+               ptr_address up = grow_and_set<N>(addr, b, msa, bytes{}, bytes{}, chint);
+               if (addr != pre)
+                  _ses->release(addr);
+               return up;
+            }
+            return addr;
+         }
+         // router child → recurse
+         ptr_address nc;
+         if constexpr (mode.is_shared())
+            nc = divider_insert<mode>(child, D, depth + 1, page);
+         else
+            nc = range_shared<N>(cn, range_of(b))
+                     ? divider_insert<upsert_mode{upsert_mode::shared}>(child, D, depth + 1, page)
+                     : divider_insert<mode>(child, D, depth + 1, page);
+         if (nc != child)
+         {
+            const ptr_address pre = addr;
+            N*                n   = cow<mode, N>(ref, addr);
+            rr_diverge<N>(n, range_of(b));
+            if (!n->set_branch(b, smart_address::from_pointer(nc)))
+            {
+               if constexpr (!std::is_same_v<N, full_radix_node>)
+               {
+                  ptr_address up = grow_and_set<N>(addr, b, smart_address::from_pointer(nc),
+                                                   bytes{}, bytes{}, chint);
+                  if (addr != pre)
+                     _ses->release(addr);
+                  return up;
+               }
+            }
+            else
+               _ses->release(child);
+         }
+         return addr;
+      }
+      // Divider analogue of prefix_split: a new parent takes pfx[0..p); the demoted node hangs
+      // under pfx[p]; the divider's continuation (term or compressed tail) attaches to the parent.
+      template <upsert_mode mode, class N>
+      ptr_address divider_prefix_split(ptr_address addr, bytes D, uint32_t depth, int p,
+                                       ptr_address page)
+      {
+         uint8_t ob = _ses->get_ref<N>(addr).obj()->prefix()[size_t(p)];
+
+         ptr_address dnode = addr;
+         N*          d     = cow<mode, N>(dnode);
+         int         newpl = int(d->prefix_length()) - (p + 1);
+         uint8_t     pbuf[sal::cacheline_size];
+         std::memcpy(pbuf, d->prefix().data() + p + 1, size_t(newpl));
+         reprefix<N>(dnode, bytes{pbuf, size_t(newpl)});
+
+         ptr_address np = make_node<setlist_u8>(D.subspan(depth, size_t(p)));
+         mut<setlist_u8>(np)->set_branch(ob, smart_address::from_pointer(dnode));
+         if (dnode == addr)
+            _ses->retain(dnode);  // in-place demote: np is a 2nd parent; caller releases addr
+
+         const uint32_t d2 = depth + uint32_t(p);
+         if (d2 == D.size())
+            mut<setlist_u8>(np)->set_term_value(smart_address::from_pointer(page));
+         else
+         {
+            smart_address         sab = make_divider_tail(D, d2, page, sal::alloc_hint{});
+            [[maybe_unused]] bool ok  = mut<setlist_u8>(np)->set_branch(D[d2], sab);
+            assert(ok && "fresh two-entry setlist always fits");
+         }
+         return np;
+      }
+
+      // Remove divider D from the radix. `out_page` receives the page the slot held; when
+      // `keep` the caller takes ownership of one ref on it (promotion), else the working
+      // tree's claim is released here (the legacy replace discipline). Sets _removed/_emptied.
+      template <upsert_mode mode>
+      ptr_address divider_remove(ptr_address addr, bytes D, uint32_t depth, ptr_address& out_page,
+                                 bool keep)
+      {
+         switch (kind_of(_ses->get_ref<sal::alloc_header>(addr)->type()))
+         {
+            case radix_kind::setlist_u8:
+               return divider_remove_in<mode, setlist_u8>(addr, D, depth, out_page, keep);
+            case radix_kind::c1_32:
+               return divider_remove_in<mode, bitset_c1_32>(addr, D, depth, out_page, keep);
+            case radix_kind::c1_64:
+               return divider_remove_in<mode, bitset_c1_64>(addr, D, depth, out_page, keep);
+            case radix_kind::c1_128:
+               return divider_remove_in<mode, bitset_c1_128>(addr, D, depth, out_page, keep);
+            case radix_kind::bitset_r2:
+               return divider_remove_in<mode, bitset_r2_node>(addr, D, depth, out_page, keep);
+            case radix_kind::bitset_r4:
+               return divider_remove_in<mode, bitset_r4_node>(addr, D, depth, out_page, keep);
+            case radix_kind::full:
+               return divider_remove_in<mode, full_radix_node>(addr, D, depth, out_page, keep);
+            case radix_kind::setlist_u16:
+            case radix_kind::setlist_u32:
+            case radix_kind::bucket:
+            case radix_kind::leaf:
+            case radix_kind::bitset1:
+            case radix_kind::page:
+               break;
+         }
+         __builtin_unreachable();
+      }
+      template <upsert_mode mode, class N>
+      ptr_address divider_remove_in(ptr_address addr, bytes D, uint32_t depth,
+                                    ptr_address& out_page, bool keep)
+      {
+         const ptr_address pre = addr;
+         sal::smart_ref<N> ref = _ses->get_ref<N>(addr);
+         if constexpr (!mode.is_shared())
+         {
+            if (ref.ref() > 1)
+               return divider_remove_in<upsert_mode{upsert_mode::shared}, N>(addr, D, depth,
+                                                                             out_page, keep);
+         }
+         const N* cn  = ref.obj();
+         bytes    pfx = cn->prefix();
+         assert(pfx.size() <= D.size() - depth &&
+                (!pfx.size() || std::memcmp(pfx.data(), D.data() + depth, pfx.size()) == 0));
+         depth += uint32_t(pfx.size());
+         if (depth == D.size())  // the divider is this node's term
+         {
+            smart_address tv = cn->term_value();
+            assert(tv.is_pointer());
+            out_page = tv.as_pointer();
+            N* n     = cow<mode, N>(ref, addr);
+            if (!keep)
+               _ses->release(out_page);
+            n->set_term_value(smart_address::null());
+            _removed = true;
+            _emptied = (n->branch_count() == 0);
+            return finalize_remove<N>(addr, pre);
+         }
+         const uint8_t b  = D[depth];
+         smart_address sa = cn->find(b);
+         assert(sa.is_pointer());
+         ptr_address child = sa.as_pointer();
+         if (is_page(*_ses, child))
+         {
+            assert(depth + 1 == D.size() && "divider path mismatch");
+            out_page = child;
+            N* n     = cow<mode, N>(ref, addr);
+            rr_diverge<N>(n, range_of(b));
+            if (!keep)
+               _ses->release(out_page);
+            n->remove_branch(typename N::stem_type(b));
+            _removed = true;
+            _emptied = (n->branch_count() == 0 && !n->has_term_value());
+            return finalize_remove<N>(addr, pre);
+         }
+         ptr_address nc;
+         if constexpr (mode.is_shared())
+            nc = divider_remove<mode>(child, D, depth + 1, out_page, keep);
+         else
+            nc = range_shared<N>(cn, range_of(b))
+                     ? divider_remove<upsert_mode{upsert_mode::shared}>(child, D, depth + 1,
+                                                                        out_page, keep)
+                     : divider_remove<mode>(child, D, depth + 1, out_page, keep);
+         if (_emptied)  // the child router drained → drop its branch and free it
+         {
+            N* n = cow<mode, N>(ref, addr);
+            rr_diverge<N>(n, range_of(b));
+            n->remove_branch(typename N::stem_type(b));
+            _ses->release(nc);
+            if (nc != child)
+               _ses->release(child);
+            _emptied = (n->branch_count() == 0 && !n->has_term_value());
+            return finalize_remove<N>(addr, pre);
+         }
+         if (nc != child)
+         {
+            N* n = cow<mode, N>(ref, addr);
+            rr_diverge<N>(n, range_of(b));
+            n->set_branch(b, smart_address::from_pointer(nc));
+            _ses->release(child);
+         }
+         return addr;
+      }
+
+      // Split the full page (stashed in _page_split) into L/R halves, repoint its slot → L,
+      // insert the new divider → R. `cur` is the current working root (== the page itself for
+      // a single-page tree); `borrowed` is the caller's pre-image, never released here.
+      ptr_address page_split_and_attach(ptr_address cur, ptr_address borrowed, bytes D)
+      {
+         const ptr_address P = _page_split;
+         _page_split         = sal::null_ptr_address;
+         auto             pr = _ses->get_ref<leaf_page>(P);
+         const leaf_page* pg = pr.obj();
+         const auto       sp = pg->get_split_pos();
+         ptr_address      L  = _ses->alloc<leaf_page>(sal::alloc_hint{},
+                                                      leaf_page::split_op{pg, 0, sp.index});
+         _ses->get_ref<leaf_page>(L).obj()->for_each_child([&](ptr_address c) { _ses->retain(c); });
+         ptr_address R = _ses->alloc<leaf_page>(
+             sal::alloc_hint{}, leaf_page::split_op{pg, sp.index, uint16_t(pg->num_keys())});
+         _ses->get_ref<leaf_page>(R).obj()->for_each_child([&](ptr_address c) { _ses->retain(c); });
+         ++_cc.page_splits;
+         if (cur == P)  // the root IS the page → grow a radix above it
+         {
+            ptr_address nr = make_node<setlist_u8>(bytes{});
+            mut<setlist_u8>(nr)->set_term_value(smart_address::from_pointer(L));  // "" divider
+            ptr_address nr2 = divider_insert<upsert_mode{}>(nr, sp.divider(), 0, R);
+            if (nr2 != nr)
+               _ses->release(nr);
+            if (cur != borrowed)
+               _ses->release(cur);  // an intermediate page root from an earlier pass
+            return nr2;
+         }
+         // (a) swap P's slot → L (releases the working claim on P; halves' retains balance)
+         ptr_address c2 = page_path_mut<upsert_mode{}>(
+             cur, D, 0, [&](ptr_address pgp, bool) {
+                assert(pgp == P);
+                (void)pgp;
+                return L;
+             });
+         if (c2 != cur && cur != borrowed)
+            _ses->release(cur);
+         // (b) the new divider → R
+         ptr_address c3 = divider_insert<upsert_mode{}>(c2, sp.divider(), 0, R);
+         if (c3 != c2 && c2 != borrowed)
+            _ses->release(c2);
+         return c3;
+      }
+
+      // Page-model upsert entry: route → page op; in-place when unique, rebuild-clone when
+      // shared/full, split-and-retry when the entry can't fit a rebuilt page.
+      [[nodiscard]] ptr_address page_upsert_step(ptr_address root, bytes kb, bytes val)
+      {
+         _old_value_size = -1;
+         _page_split     = sal::null_ptr_address;
+         if (root == sal::null_ptr_address)  // first write → the tree is one page
+         {
+            sal::smart_ptr<sal::alloc_header> base(_ses, make_page());
+            ptr_address nr = page_apply_upsert(base.address(), false, kb, val);
+            assert(_page_split == sal::null_ptr_address && "a fresh page always fits one entry");
+            return nr == base.address() ? base.take() : nr;
+         }
+         ptr_address cur = root;  // borrowed; intermediates are owned (released) in-loop
+         for ([[maybe_unused]] int pass = 0;; ++pass)
+         {
+            assert(pass < 64 && "page split did not converge");
+            _page_split = sal::null_ptr_address;
+            uint8_t     db[520];
+            uint32_t    dl = 0;
+            ptr_address nxt;
+            if (is_page(*_ses, cur))
+               nxt = page_apply_upsert(cur, false, kb, val);
+            else
+            {
+               route_to_page(*_ses, cur, kb, db, &dl);
+               nxt = page_path_mut<upsert_mode{}>(
+                   cur, bytes{db, dl}, 0,
+                   [&](ptr_address pg, bool sh) { return page_apply_upsert(pg, sh, kb, val); });
+            }
+            if (_page_split == sal::null_ptr_address)
+            {
+               if (nxt != cur && cur != root)
+                  _ses->release(cur);
+               return nxt == cur ? cur : nxt;
+            }
+            cur = page_split_and_attach(cur, root, bytes{db, dl});
+         }
+      }
+
+      // Page-model remove entry. An emptied page drops out of the radix together with its
+      // divider; the leftmost ("" ) page stays when other pages remain (an empty page routes
+      // every lookup to a miss — valid); a root that drains to term-only collapses to its page;
+      // an empty single-page tree returns to null.
+      [[nodiscard]] ptr_address page_remove_step(ptr_address root, bytes kb, bool& removed)
+      {
+         _removed      = false;
+         _emptied      = false;
+         _page_emptied = false;
+         removed       = false;
+         if (root == sal::null_ptr_address)
+            return root;
+         if (is_page(*_ses, root))  // single-page tree
+         {
+            ptr_address np = page_apply_remove(root, false, kb);
+            removed        = _removed;
+            if (!_removed)
+               return root;
+            if (_page_emptied)
+               return sal::null_ptr_address;  // mutate_root releases the pre-image page
+            return np;
+         }
+         uint8_t  db[520];
+         uint32_t dl = 0;
+         route_to_page(*_ses, root, kb, db, &dl);
+         // The leftmost ("" divider) page is never dropped, so an emptying remove there must
+         // APPLY the removal (leaving a legitimately empty page) instead of deferring to the
+         // divider-drop path.
+         const bool  leftmost = (dl == 0);
+         ptr_address nr       = page_path_mut<upsert_mode{}>(
+             root, bytes{db, dl}, 0,
+             [&](ptr_address pg, bool sh) { return page_apply_remove(pg, sh, kb, leftmost); });
+         removed = _removed;
+         if (!_removed || !_page_emptied)
+            return nr;
+         if (leftmost)  // the (now empty) leftmost page stays while other dividers exist
+            return page_collapse_root(nr, root);
+         // A non-leftmost emptying remove leaves the page untouched (no slot swap): nr == root.
+         assert(nr == root);
+         _emptied         = false;
+         ptr_address dead = sal::null_ptr_address;
+         ptr_address n2 = divider_remove<upsert_mode{}>(nr, bytes{db, dl}, 0, dead, /*keep=*/false);
+         assert(!_emptied && "the radix root always keeps its \"\" term");
+         return page_collapse_root(n2, root);
+      }
+
+      // If the page-model radix root holds nothing but its "" term, the tree is one page —
+      // promote it (and a drained empty page promotes to the null tree). `borrowed` is the
+      // caller's pre-image (released by mutate_root, never here).
+      ptr_address page_collapse_root(ptr_address cur, ptr_address borrowed)
+      {
+         if (cur == sal::null_ptr_address || is_page(*_ses, cur))
+            return cur;
+         bool        only_term = false;
+         ptr_address pagea     = sal::null_ptr_address;
+         dispatch(*_ses, cur, [&](auto ad) {
+            if (ad.term().is_null())
+               return;
+            if (!ad.valid(ad.first()))
+            {
+               only_term = true;
+               pagea     = ad.term().as_pointer();
+            }
+         });
+         if (!only_term)
+            return cur;
+         _ses->retain(pagea);  // the root slot's claim; the dying router's term ref balances
+         if (cur != borrowed)
+            _ses->release(cur);  // intermediate root: its destroy releases the term ref
+         if (_ses->get_ref<leaf_page>(pagea).obj()->num_keys() == 0)
+         {
+            _ses->release(pagea);  // a drained leftmost page → the empty (null) tree
+            return sal::null_ptr_address;
+         }
+         return pagea;
+      }
+
+      // Page-model static point lookup: lower-bound route + in-page fingerprint find. Subtree
+      // values read as not-found (use is_subtree()/get_subtree()), matching find_in.
+      static bool page_find_in(sal::allocator_session& ses, ptr_address root, bytes kb,
+                               value_view& out)
+      {
+         ptr_address pa = is_page(ses, root) ? root : route_to_page(ses, root, kb, nullptr, nullptr);
+         const leaf_page* pg =
+             reinterpret_cast<const leaf_page*>(ses.get_ref<sal::alloc_header>(pa).obj());
+         const int idx = pg->find(kb.data(), uint32_t(kb.size()));
+         if (idx < 0)
+            return false;
+         const inline_value* iv = pg->record(uint32_t(idx));
+         if (iv->value_type == inline_value::vt_extern)
+         {
+            const leaf_node* ln = ses.get_ref<leaf_node>(pg->external_addr(uint32_t(idx))).obj();
+            bytes            v  = ln->value_bytes();
+            out = value_view(reinterpret_cast<const char*>(v.data()), v.size());
+            return true;
+         }
+         if (iv->is_subtree())
+            return false;
+         out = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len), iv->value_len);
+         return true;
+      }
+
+      // In-order emission of one page (keys are SELF-CONTAINED: cpfx + suffix — the radix path
+      // above is divider bytes, never key bytes). vt_subtree values emit their raw 4-byte root
+      // (legacy inline parity); vt_extern values dereference to the real bytes.
+      template <class Cb>
+      void emit_page(const leaf_page* pg, Cb& cb)
+      {
+         KB   kb2;
+         auto cp = pg->common_prefix();
+         kb2.append(cp.data(), cp.size());
+         for (uint32_t i = 0; i < pg->num_keys(); ++i)
+         {
+            kb2.truncate(uint32_t(cp.size()));
+            auto sfx = pg->suffix(i);
+            kb2.append(sfx.data(), sfx.size());
+            const inline_value* iv = pg->record(i);
+            value_view          v;
+            if (iv->value_type == inline_value::vt_extern)
+            {
+               bytes vb = _ses->get_ref<leaf_node>(pg->external_addr(i)).obj()->value_bytes();
+               v        = value_view(reinterpret_cast<const char*>(vb.data()), vb.size());
+            }
+            else
+               v = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len),
+                              iv->value_len);
+            cb(key_view(reinterpret_cast<const char*>(kb2.buf), kb2.len), v);
+         }
+      }
+
 
       // Append an entry's stem bytes (+ inline suffix if terminal) and either yield its
       // value (terminal) or descend into its child to that subtree's minimum.
@@ -1717,6 +2703,17 @@ namespace heart::radix
          auto       lock = _ses->lock();
          if (!_root)  // null = empty tree
             return false;
+         if (_page_mode)
+         {
+            // Cursor-backed: the cursor pins THE SAME working root (_root keeps the nodes
+            // resident after it dies), so the returned view has find()-equivalent lifetime.
+            cursor c(this);
+            if (!(strict ? c.upper_bound(key) : c.lower_bound(key)))
+               return false;
+            out_key.assign(c.key().data(), c.key().size());
+            out_val = c._val;
+            return true;
+         }
          bytes      q    = as_bytes(key);
          KB         kb;
          value_view v;
@@ -1735,10 +2732,17 @@ namespace heart::radix
          kb.append(pfx.data(), pfx.size());
          if (!ad.term().is_null())
          {
-            const uint32_t   s = kb.len;
-            const value_view v = append_terminal(ad.node(), ad.term(), kb);
-            cb(key_view(reinterpret_cast<const char*>(kb.buf), kb.len), v);
-            kb.truncate(s);
+            // Page model: a term slot holds a PAGE (divider == path); its keys are
+            // self-contained (page cpfx + suffix), so recurse — never append_terminal.
+            if (ad.term().is_pointer() && page_at(ad.term().as_pointer()))
+               inorder_walk(ad.term().as_pointer(), kb, cb);
+            else
+            {
+               const uint32_t   s = kb.len;
+               const value_view v = append_terminal(ad.node(), ad.term(), kb);
+               cb(key_view(reinterpret_cast<const char*>(kb.buf), kb.len), v);
+               kb.truncate(s);
+            }
          }
          for (int c = ad.first(); ad.valid(c); c = ad.next(c))
          {
@@ -1765,6 +2769,11 @@ namespace heart::radix
       {
          if (addr == sal::null_ptr_address)  // null = empty tree
             return;
+         if (const leaf_page* pg = page_at(addr))  // page model: self-contained sorted entries
+         {
+            emit_page(pg, cb);
+            return;
+         }
          if (const bucket_node* bn = bucket_at(addr))  // bucket leaf: emit entries in key order
          {
             const uint32_t save = kb.len;
@@ -1832,6 +2841,8 @@ namespace heart::radix
             auto lk = rlock();
             reset();
             descend_min(_root.address());
+            if (!_valid && _depth > 0)  // the min path ended in an empty (leftmost) page
+               advance_steps();
             return _valid;
          }
          bool lower_bound(key_view k) { position(as_bytes(k), false); return _valid; }  // first key >= k
@@ -1849,42 +2860,14 @@ namespace heart::radix
             if (!_valid)
                return (_end < 0) ? seek_begin() : false;  // from rend → first key; from end → stay
             auto lk = rlock();
-            while (_depth > 0)
-            {
-               const int r = advance_top();
-               if (r == 1)
-                  return true;  // landed on a terminal
-               if (r == 2)
-               {
-                  descend_min(_nextaddr);
-                  return _valid;  // descended into a child subtree's minimum
-               }
-               // r == 0: this frame is exhausted, popped — keep advancing the parent
-            }
-            _valid = false;
-            _end   = 0;  // fell off the top → at end
-            return false;
+            return advance_steps();
          }
          bool prev()  // retreat to the previous key in order; true if it landed on one
          {
             if (!_valid)
                return (_end >= 0) ? seek_last() : false;  // from end → last key; from rend → stay
             auto lk = rlock();
-            while (_depth > 0)
-            {
-               const int r = retreat_top();
-               if (r == 1)
-                  return true;  // landed on a terminal
-               if (r == 2)
-               {
-                  descend_max(_nextaddr);
-                  return _valid;
-               }
-               // r == 0: frame exhausted, popped — keep retreating the parent
-            }
-            _valid = false;
-            _end   = -1;  // fell off the bottom → before begin (rend)
-            return false;
+            return retreat_steps();
          }
          bool seek_last()  // position at the last (largest) key; true if there is one
          {
@@ -1897,6 +2880,8 @@ namespace heart::radix
             auto lk = rlock();
             reset();
             descend_max(_root.address());
+            if (!_valid && _depth > 0)  // the max path ended in an empty (leftmost) page
+               retreat_steps();
             if (!_valid) _end = -1;
             return _valid;
          }
@@ -1973,7 +2958,9 @@ namespace heart::radix
             if (_root.address() == sal::null_ptr_address) return false;
             auto       lk = rlock();  // pin while descending + while fn reads the view
             value_view v;
-            if (!find_in(ses(), _root.address(), as_bytes(k), v)) return false;
+            const bool ok = _t->_page_mode ? page_find_in(ses(), _root.address(), as_bytes(k), v)
+                                           : find_in(ses(), _root.address(), as_bytes(k), v);
+            if (!ok) return false;
             fn(v);
             return true;
          }
@@ -1983,7 +2970,9 @@ namespace heart::radix
             if (_root.address() == sal::null_ptr_address) return std::nullopt;
             auto       lk = rlock();  // pin while descending + copying
             value_view v;
-            if (!find_in(ses(), _root.address(), as_bytes(k), v)) return std::nullopt;
+            const bool ok = _t->_page_mode ? page_find_in(ses(), _root.address(), as_bytes(k), v)
+                                           : find_in(ses(), _root.address(), as_bytes(k), v);
+            if (!ok) return std::nullopt;
             return T(v.data(), v.data() + v.size());
          }
          // psitri-compatible borrowed view: valid while the CALLER's read_lock `rl` is held (it pins
@@ -2050,6 +3039,41 @@ namespace heart::radix
             }
          }
 
+         // ── leaf pages (the page model) ──────────────────────────────────────────────────
+         // A leaf_page is a dense sorted terminal whose keys are SELF-CONTAINED (page cpfx +
+         // suffix) — the radix path above is DIVIDER bytes, never key bytes, so a page frame
+         // rebuilds the key from scratch per entry (klen1 still restores parents on pop).
+         const leaf_page* as_page(ptr_address a) const { return radix_tree::page_at(ses(), a); }
+         void             take_page_entry(const leaf_page* pg, int i)
+         {
+            _klen   = 0;
+            auto cp = pg->common_prefix();
+            append(cp.data(), cp.size());
+            auto sfx = pg->suffix(uint32_t(i));
+            append(sfx.data(), sfx.size());
+            const inline_value* iv = pg->record(uint32_t(i));
+            if (iv->is_subtree())
+            {
+               _is_subtree = true;
+               _subtree    = iv->subtree_root();
+               _val        = {};
+            }
+            else if (iv->value_type == inline_value::vt_extern)
+            {
+               _is_subtree = false;
+               const leaf_node* ln =
+                   ses().get_ref<leaf_node>(pg->external_addr(uint32_t(i))).obj();
+               auto v = ln->value_bytes();
+               _val   = value_view(reinterpret_cast<const char*>(v.data()), v.size());
+            }
+            else
+            {
+               _is_subtree = false;
+               _val = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len),
+                                 iv->value_len);
+            }
+         }
+
          // ── bucket leaves ────────────────────────────────────────────────────────────────
          // A bucket is a dense, lexicographically-sorted (suffix, value) page — NOT a radix
          // router, so dispatch() has no adaptor for it. The cursor walks it as a flat entry
@@ -2068,11 +3092,80 @@ namespace heart::radix
                                                    iv->value_len);
          }
 
+         // The in-order advance loop shared by next() and the empty-page recovery in
+         // seek_begin/position: walk the frame stack until a key lands or the top falls off.
+         // An empty page subtree (descend_min lands invalid with the page frame popped) just
+         // keeps advancing the parent — only the page model produces those.
+         bool advance_steps()
+         {
+            while (_depth > 0)
+            {
+               const int r = advance_top();
+               if (r == 1)
+               {
+                  _valid = true;
+                  return true;  // landed on a terminal/entry
+               }
+               if (r == 2)
+               {
+                  descend_min(_nextaddr);
+                  if (_valid)
+                     return true;
+                  if (_depth == 0)
+                     break;  // defensive: nothing left to advance
+               }
+               // r == 0: this frame is exhausted, popped — keep advancing the parent
+            }
+            _valid = false;
+            _end   = 0;  // fell off the top → at end
+            return false;
+         }
+         bool retreat_steps()  // reverse of advance_steps (prev() and reverse recovery)
+         {
+            while (_depth > 0)
+            {
+               const int r = retreat_top();
+               if (r == 1)
+               {
+                  _valid = true;
+                  return true;
+               }
+               if (r == 2)
+               {
+                  descend_max(_nextaddr);
+                  if (_valid)
+                     return true;
+                  if (_depth == 0)
+                     break;
+               }
+            }
+            _valid = false;
+            _end   = -1;  // fell off the bottom → before begin (rend)
+            return false;
+         }
+
          // Push frames down to the minimum terminal of `addr`'s subtree; sets _valid/_val/_kbuf.
          void descend_min(ptr_address addr)
          {
             for (;;)
             {
+               if (const leaf_page* pg = as_page(addr))  // leftmost path ends in a page
+               {
+                  frame& f = _fr[_depth];
+                  f.addr   = addr;
+                  f.klen1  = uint16_t(_klen);
+                  f.pos    = 0;
+                  ++_depth;
+                  if (pg->num_keys() == 0)  // an empty (leftmost) page — caller skips onward
+                  {
+                     --_depth;
+                     _valid = false;
+                     return;
+                  }
+                  take_page_entry(pg, 0);
+                  _valid = true;
+                  return;
+               }
                if (const bucket_node* bn = as_bucket(addr))  // leftmost path ends in a bucket
                {
                   frame& f = _fr[_depth];
@@ -2096,6 +3189,11 @@ namespace heart::radix
                   if (!ad.term().is_null())  // term (key ends here) sorts before any entry
                   {
                      f.pos = -1;
+                     if (ad.term().is_pointer() && as_page(ad.term().as_pointer()))
+                     {
+                        _nextaddr = ad.term().as_pointer();  // page model: the divider's page
+                        return 2;
+                     }
                      take_terminal(ad, ad.term());
                      return 1;
                   }
@@ -2129,6 +3227,16 @@ namespace heart::radix
          int advance_top()
          {
             frame& f = _fr[_depth - 1];
+            if (const leaf_page* pg = as_page(f.addr))  // advance within a leaf page
+            {
+               if (++f.pos >= int(pg->num_keys()))
+               {
+                  --_depth;  // exhausted → pop; the parent advance restores its klen1
+                  return 0;
+               }
+               take_page_entry(pg, f.pos);
+               return 1;
+            }
             if (const bucket_node* bn = as_bucket(f.addr))  // advance within a bucket page
             {
                _klen = f.klen1;
@@ -2166,6 +3274,24 @@ namespace heart::radix
          {
             for (;;)
             {
+               if (const leaf_page* pg = as_page(addr))  // rightmost path ends in a page
+               {
+                  frame& f = _fr[_depth];
+                  f.addr   = addr;
+                  f.klen1  = uint16_t(_klen);
+                  ++_depth;
+                  if (pg->num_keys() == 0)  // an empty (leftmost) page — caller skips onward
+                  {
+                     --_depth;
+                     _valid = false;
+                     return;
+                  }
+                  f.pos = int16_t(pg->num_keys() - 1);
+                  take_page_entry(pg, f.pos);
+                  _valid = true;
+                  _end   = 0;
+                  return;
+               }
                if (const bucket_node* bn = as_bucket(addr))  // rightmost path ends in a bucket
                {
                   frame& f = _fr[_depth];
@@ -2202,6 +3328,11 @@ namespace heart::radix
                   if (!ad.term().is_null())  // no entries → the term is the only/largest key
                   {
                      f.pos = -1;
+                     if (ad.term().is_pointer() && as_page(ad.term().as_pointer()))
+                     {
+                        _nextaddr = ad.term().as_pointer();  // page model: the divider's page
+                        return 2;
+                     }
                      take_terminal(ad, ad.term());
                      return 1;
                   }
@@ -2219,6 +3350,16 @@ namespace heart::radix
          int retreat_top()
          {
             frame& f = _fr[_depth - 1];
+            if (const leaf_page* pg = as_page(f.addr))  // retreat within a leaf page
+            {
+               if (--f.pos < 0)
+               {
+                  --_depth;  // before first → pop
+                  return 0;
+               }
+               take_page_entry(pg, f.pos);
+               return 1;
+            }
             if (const bucket_node* bn = as_bucket(f.addr))  // retreat within a bucket page
             {
                _klen = f.klen1;
@@ -2248,6 +3389,11 @@ namespace heart::radix
                if (!ad.term().is_null())  // entries exhausted → the term (smallest) is last in reverse
                {
                   f.pos = -1;
+                  if (ad.term().is_pointer() && as_page(ad.term().as_pointer()))
+                  {
+                     _nextaddr = ad.term().as_pointer();  // page model: the divider's page
+                     return 2;
+                  }
                   take_terminal(ad, ad.term());
                   return 1;
                }
@@ -2265,7 +3411,33 @@ namespace heart::radix
                reset();
                return true;  // at end (matches a seek past every key)
             }
-            auto       lk = rlock();
+            auto lk = rlock();
+            if (_t->_page_mode)
+            {
+               reset();
+               ptr_address root = _root.address();
+               if (const leaf_page* pg = as_page(root))  // single-page tree
+               {
+                  frame& f = _fr[0];
+                  f.addr   = root;
+                  f.klen1  = 0;
+                  _depth   = 1;
+                  enter_page_at(pg, q);
+               }
+               else
+               {
+                  // lower-bound route to the owning page, then exact-build the divider path so
+                  // next()/prev() walk neighboring pages from these frames.
+                  uint8_t  db[520];
+                  uint32_t dl = 0;
+                  route_to_page(ses(), root, q, db, &dl);
+                  build_to_page(bytes{db, dl}, q);
+               }
+               if (_valid && strict &&
+                   key() == key_view(reinterpret_cast<const char*>(q.data()), q.size()))
+                  advance_steps();  // upper_bound: skip the exact match
+               return !_valid;
+            }
             KB         kb;
             value_view v;
             if (!_t->seek(ses(), _root.address(), q, 0, strict, kb, v))
@@ -2275,6 +3447,73 @@ namespace heart::radix
             }
             build_to(bytes{kb.buf, kb.len});
             return !_valid;
+         }
+
+         // Position the TOP page frame at the first entry >= q, spilling to the next page
+         // (via the frame walk) when q is past every entry. The frame is already pushed.
+         void enter_page_at(const leaf_page* pg, bytes q)
+         {
+            frame&    f  = _fr[_depth - 1];
+            const int lb = pg->lower_bound(q.data(), uint32_t(q.size()));
+            if (lb < int(pg->num_keys()))
+            {
+               f.pos = int16_t(lb);
+               take_page_entry(pg, lb);
+               _valid = true;
+               return;
+            }
+            f.pos = int16_t(int(pg->num_keys()) - 1);  // ++ in advance_top pops (also empty: -1)
+            advance_steps();
+         }
+
+         // Exact-build the frame path along divider D (the route's owning slot), ending in a
+         // page frame positioned by q. Mirrors build_to, but every slot is a page pointer and
+         // the divider is fully path-consumed (term or branch — never a suffix terminal).
+         void build_to_page(bytes D, bytes q)
+         {
+            reset();
+            ptr_address addr  = _root.address();
+            uint32_t    depth = 0;
+            for (;;)
+            {
+               if (const leaf_page* pg = as_page(addr))
+               {
+                  frame& f = _fr[_depth];
+                  f.addr   = addr;
+                  f.klen1  = uint16_t(_klen);
+                  ++_depth;
+                  enter_page_at(pg, q);
+                  return;
+               }
+               _t->dispatch(ses(), addr, [&](auto ad) {
+                  frame& f = _fr[_depth];
+                  f.addr   = addr;
+                  bytes pfx = ad.prefix();
+                  append(pfx.data(), pfx.size());
+                  f.klen1 = uint16_t(_klen);
+                  ++_depth;
+                  const uint32_t d2 = depth + uint32_t(pfx.size());
+                  if (d2 == D.size())  // the divider is this node's term → its page
+                  {
+                     f.pos      = -1;
+                     _nextaddr  = ad.term().as_pointer();
+                     _nextdepth = d2;
+                     return;
+                  }
+                  bytes     r2 = D.subspan(d2);
+                  bool      full;
+                  uint32_t  fc;
+                  const int c = ad.lower(r2, full, fc);
+                  f.pos       = int16_t(c);
+                  uint8_t   sb[4];
+                  const int nb = stem_bytes(ad.cell(c), ad.stem_width(), ad.cw(), sb);
+                  append(sb, size_t(nb));
+                  _nextaddr  = ad.branch(c).as_pointer();
+                  _nextdepth = d2 + uint32_t(ad.cw());
+               });
+               addr  = _nextaddr;
+               depth = _nextdepth;
+            }
          }
 
          // Position at an EXACT existing key, building the descent path along the way.
@@ -2897,6 +4136,7 @@ namespace heart::radix
             case radix_kind::full:
                return router_insert<mode, full_radix_node>(addr, key, depth, val, peer_hint);
             case radix_kind::leaf:     // a terminal value — never inserted into directly
+            case radix_kind::page:     // page-model writes go through page_upsert_step
             case radix_kind::bitset1:  // not produced by the engine
                break;
          }
@@ -2943,6 +4183,7 @@ namespace heart::radix
             case radix_kind::full:
                return remove_router<mode, full_radix_node>(addr, key, depth);
             case radix_kind::leaf:     // a terminal value — never recursed into
+            case radix_kind::page:     // page-model removes go through page_remove_step
             case radix_kind::bitset1:  // not produced by the engine
                break;
          }
@@ -4555,6 +5796,10 @@ namespace heart::radix
       int                             _old_value_size = -1;
       bool                            _removed        = false;  // remove(): key was found+deleted
       bool                            _emptied        = false;  // remove(): node drained → drop it
+      // ── page model (the default) ──
+      bool        _page_mode    = true;   // radix-indexed leaf pages; legacy knobs turn it off
+      bool        _page_emptied = false;  // page op: the page drained → drop divider + page
+      ptr_address _page_split   = sal::null_ptr_address;  // page op: full page → split + retry
       bool                            _wide_stems     = false;  // gate: off = byte radix
       bool                            _bucket_mode    = false;  // leaf=bucket, split to radix
       bool                            _adaptive       = false;  // gate: radix→bucket on deep-narrow
@@ -4575,16 +5820,17 @@ namespace heart::radix
          std::printf("  [%s] root null (empty tree)\n", tag);
          return;
       }
-      int total = 0, shared = 0, unique = 0;
-      dispatch(_root.address(), [&](auto ad)
+      int  total = 0, shared = 0, unique = 0;
+      auto tally = [&](ptr_address c)
       {
-         ad.p->for_each_child([&](ptr_address c)
-         {
-            uint32_t rc = _ses->get_ref<sal::alloc_header>(c).ref();
-            ++total;
-            if (rc >= 2) ++shared; else ++unique;
-         });
-      });
+         uint32_t rc = _ses->get_ref<sal::alloc_header>(c).ref();
+         ++total;
+         if (rc >= 2) ++shared; else ++unique;
+      };
+      if (const leaf_page* pg = page_at(_root.address()))  // single-page tree
+         pg->for_each_child(tally);
+      else
+         dispatch(_root.address(), [&](auto ad) { ad.p->for_each_child(tally); });
       std::printf("  [%s] root ref=%u, pointer-children=%d : ref>=2 (shared)=%d, ref==1 (unique)=%d\n",
                   tag, root_use_count(), total, shared, unique);
    }
@@ -4592,24 +5838,37 @@ namespace heart::radix
    // Out-of-line: needs dispatch()'s deduced return type to be defined.
    inline void radix_tree::audit_walk(ptr_address a, int depth, ref_audit& ra, int& max_print)
    {
+      auto check_child = [&](ptr_address c) -> bool /*descend?*/ {
+         auto     ref  = _ses->get_ref<sal::alloc_header>(c);
+         uint32_t rc   = ref.ref();
+         bool     leaf = ref->type() == leaf_node::type_id;
+         ++(leaf ? ra.leaves : ra.nodes);
+         if (rc != 1)
+         {
+            ++ra.bad;
+            ra.bad_by_depth[depth < 15 ? depth : 15]++;
+            if (max_print > 0)
+            {
+               --max_print;
+               std::printf("  [audit] depth=%d addr=%u type=%u ref=%u\n", depth, *c,
+                           unsigned(ref->type()), rc);
+            }
+         }
+         return !leaf;
+      };
+      // page model: a page's children are external value leaves + nested subtree roots; the
+      // roots get the full recursive audit (their trees must be exactly singly-owned too).
+      if (const leaf_page* pg = page_at(a))
+      {
+         pg->for_each_child([&](ptr_address c) {
+            if (check_child(c))
+               audit_walk(c, depth + 1, ra, max_print);
+         });
+         return;
+      }
       dispatch(a, [&](auto ad) {
          ad.p->for_each_child([&](ptr_address c) {
-            auto     ref  = _ses->get_ref<sal::alloc_header>(c);
-            uint32_t rc   = ref.ref();
-            bool     leaf = ref->type() == leaf_node::type_id;
-            ++(leaf ? ra.leaves : ra.nodes);
-            if (rc != 1)
-            {
-               ++ra.bad;
-               ra.bad_by_depth[depth < 15 ? depth : 15]++;
-               if (max_print > 0)
-               {
-                  --max_print;
-                  std::printf("  [audit] depth=%d addr=%u type=%u ref=%u\n", depth, *c,
-                              unsigned(ref->type()), rc);
-               }
-            }
-            if (!leaf)
+            if (check_child(c))
                audit_walk(c, depth + 1, ra, max_print);
          });
       });

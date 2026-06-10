@@ -224,6 +224,7 @@ TEST_CASE("radix_engine: forced fan-out exercises bitset_r2/r4 tiers", "[radix_e
    for (int K : {30, 100, 250})
    {
       radix_tree t(tmp("heart_re_fanout"));
+      t.set_page_mode(false);  // this test asserts LEGACY tier structure (bitset_r2/r4)
       for (int i = 0; i < K; ++i)
       {
          std::string key = "AAA";
@@ -949,7 +950,8 @@ TEST_CASE("radix_engine: remove all drains every tier with no leak", "[radix_eng
    // must drain them back to an empty root with the live object count at baseline.
    for (int K : {30, 120, 256})
    {
-      radix_tree     t(tmp("heart_rm_tiers"));
+      radix_tree t(tmp("heart_rm_tiers"));
+      t.set_page_mode(false);  // this test asserts LEGACY tier widening + drain
       const uint64_t base = t.object_count();
       auto           mk   = [](int i) {
          std::string k = "AAA";
@@ -979,6 +981,7 @@ TEST_CASE("radix_engine: remove downgrades a drained wide node to a smaller tier
    // entries must shrink it back (hysteresis: ~25% below the regrow point), so a sparse node
    // doesn't keep its big-tier cacheline footprint. Verify via the tier census + correctness.
    radix_tree t(tmp("heart_rm_downgrade"));
+   t.set_page_mode(false);  // this test asserts LEGACY tier widening/downgrade
    auto       mk = [](int i) {
       std::string k = "AAA";
       k.push_back(char(uint8_t(i)));

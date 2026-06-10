@@ -28,9 +28,9 @@ namespace heart
       inline constexpr sal::header_type bitset_c1_32  = sal::header_type(base + 9);
       inline constexpr sal::header_type bitset_c1_64  = sal::header_type(base + 10);
       inline constexpr sal::header_type bitset_c1_128 = sal::header_type(base + 11);
-      // 2KB COW leaf page (leaf_page.hpp) — the page-leaf terminal tier. NOTE: not in
-      // radix_kind yet; the enumerator is added when the engine wires pages in, so
-      // -Wswitch flags every dispatch switch that must learn the new case.
+      // 2KB COW leaf page (leaf_page.hpp) — the page-leaf terminal tier of the
+      // radix-indexed-leaf-pages model: the radix above stores DIVIDERS whose branch
+      // targets / term_values point directly at pages.
       inline constexpr sal::header_type leaf_page = sal::header_type(base + 12);
 
       // The same taxonomy as a STRONG enum (enumerator order == the header_type offsets above).
@@ -51,6 +51,7 @@ namespace heart
          c1_32,
          c1_64,
          c1_128,
+         page,  // 2KB leaf_page terminal (radix-indexed-leaf-pages model)
       };
       // A node's kind from its SAL header type (the radix tier ids are a contiguous block at base).
       inline constexpr radix_kind kind_of(sal::header_type t) noexcept

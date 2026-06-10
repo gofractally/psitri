@@ -516,6 +516,97 @@ int main(int argc, char** argv)
 
    std::printf("N = %llu  (8-byte u64 keys, value=i)\n\n", (unsigned long long)N);
 
+   if (mode == "batch")  // BATCH-SIZE SWEEP: commit cadence vs COW-vs-in-place rate.
+   {
+      // Pre-build N random keys, then run N random UPDATES committing every B — B sweeps
+      // {1,10,100,1k,10k,1M}. Small B = every page/path COWs per txn; large B = the working
+      // set converges to in-place mutation. Engines: pages, legacy trie, psitri.
+      auto vview = [](const uint64_t& v)
+      { return std::string_view(reinterpret_cast<const char*>(&v), sizeof(v)); };
+      const uint64_t batches[] = {1, 10, 100, 1000, 10000, 1000000};
+      for (int layoutpass = 0; layoutpass < 2; ++layoutpass)
+      {
+         const bool legacy = layoutpass == 1;
+         std::printf("  %s:\n", legacy ? "legacy" : "pages");
+         for (uint64_t B : batches)
+         {
+            auto dir = std::filesystem::temp_directory_path() /
+                       (std::string("heart_batch_") + (legacy ? "l" : "p") + std::to_string(B));
+            std::filesystem::remove_all(dir);
+            radix_engine_tree t(dir);
+            if (legacy)
+               t.set_page_mode(false);
+            sal::smart_ptr<sal::alloc_header> snap;
+            for (uint64_t i = 0; i < N; ++i)  // build (one big batch)
+            {
+               uint64_t k = rand_key(i);
+               t.upsert(kspan(k), vview(i));
+            }
+            snap = t.root_snapshot();  // published → the first touch of each path COWs
+            const auto c0 = t.counters();
+            std::mt19937_64 rng(42);
+            auto            t0 = now();
+            for (uint64_t i = 0; i < N; ++i)
+            {
+               uint64_t j = rng() % N, k = rand_key(j);
+               t.upsert(kspan(k), vview(j));
+               if ((i + 1) % B == 0)
+                  snap = t.root_snapshot();
+            }
+            const double up = ns(t0, now(), N);
+            const auto&  c  = t.counters();
+            std::printf("    B=%-8llu update %7.1f ns/txn   clones/txn %.3f  in-place/txn %.3f"
+                        "  splits %llu\n",
+                        (unsigned long long)B, up, double(c.clones - c0.clones) / double(N),
+                        double(c.in_place - c0.in_place) / double(N),
+                        (unsigned long long)(c.page_splits - c0.page_splits));
+         }
+      }
+      // psitri: same sweep, one transaction per B updates
+      {
+         std::printf("  psitri:\n");
+         for (uint64_t B : batches)
+         {
+            auto dir = std::filesystem::temp_directory_path() / ("psitri_batch_" + std::to_string(B));
+            std::filesystem::remove_all(dir);
+            psitri::runtime_config cfg;
+            cfg.sync_mode               = sal::sync_type::none;
+            cfg.write_protect_on_commit = false;
+            cfg.checksum_on_commit      = false;
+            auto db  = psitri::database::create(dir.string(), cfg);
+            auto ses = db->start_write_session();
+            {
+               auto tx = ses->start_transaction(0);
+               for (uint64_t i = 0; i < N; ++i)
+               {
+                  uint64_t k = rand_key(i);
+                  tx.insert(psitri::key_view(reinterpret_cast<const char*>(&k), sizeof(k)),
+                            psitri::value_view(reinterpret_cast<const char*>(&i), sizeof(i)));
+               }
+               tx.commit();
+            }
+            std::mt19937_64 rng(42);
+            auto            t0 = now();
+            uint64_t        done = 0;
+            while (done < N)
+            {
+               auto           tx  = ses->start_transaction(0);
+               const uint64_t end = std::min(N, done + B);
+               for (; done < end; ++done)
+               {
+                  uint64_t j = rng() % N, k = rand_key(j);
+                  tx.upsert(psitri::key_view(reinterpret_cast<const char*>(&k), sizeof(k)),
+                            psitri::value_view(reinterpret_cast<const char*>(&j), sizeof(j)));
+               }
+               tx.commit();
+            }
+            std::printf("    B=%-8llu update %7.1f ns/txn\n", (unsigned long long)B,
+                        ns(t0, now(), N));
+         }
+      }
+      return 0;
+   }
+
    if (mode == "worst")  // WORST CASE: commit every BATCH updates (default 1 → COW-to-root every op).
    {                     // Head-to-head heart radix engine vs psitri (both on SAL), random keys.
       const uint64_t batch = (argc > 3) ? std::strtoull(argv[3], nullptr, 10) : 1;

@@ -32,7 +32,7 @@ namespace
       std::unique_ptr<char[]> mem;
       leaf_page*              pg = nullptr;
 
-      explicit page_buf(uint32_t asize = leaf_page::page_bytes)
+      explicit page_buf(uint32_t asize = leaf_page::page_bytes())
           : mem(new char[asize + 64])
       {
          char* base = mem.get();
@@ -81,7 +81,7 @@ namespace
       }
       if (!buf->rebuilt_fits(op))
          return false;
-      page_buf next(leaf_page::page_bytes, leaf_page::clone_insert_op{buf.pg, op});
+      page_buf next(leaf_page::page_bytes(), leaf_page::clone_insert_op{buf.pg, op});
       buf = std::move(next);
       return true;
    }
@@ -212,7 +212,7 @@ TEST_CASE("leaf_page clone insert splice equals in-place build", "[leaf_page]")
       REQUIRE(a->can_apply(op) == leaf_page::can_apply_mode::modify);
       a->apply(op);
       REQUIRE(bb->rebuilt_fits(op));
-      page_buf next(leaf_page::page_bytes, leaf_page::clone_insert_op{bb.pg, op});
+      page_buf next(leaf_page::page_bytes(), leaf_page::clone_insert_op{bb.pg, op});
       bb = std::move(next);
    }
    check_oracle(*a, m);
@@ -260,7 +260,7 @@ TEST_CASE("leaf_page update in place and via clone", "[leaf_page]")
       const int            idx = p->find(reinterpret_cast<const uint8_t*>("upd9"), 4);
       std::string          nv = "after-clone";
       leaf_page::update_op op{.index = uint16_t(idx), .value = b(nv)};
-      page_buf             q(leaf_page::page_bytes, leaf_page::clone_update_op{p.pg, op});
+      page_buf             q(leaf_page::page_bytes(), leaf_page::clone_update_op{p.pg, op});
       m["upd9"] = nv;
       check_oracle(*q, m);
    }
@@ -291,7 +291,7 @@ TEST_CASE("leaf_page remove in place and via clone", "[leaf_page]")
    {
       const int idx = p->find(reinterpret_cast<const uint8_t*>("rm1"), 3);
       REQUIRE(idx >= 0);
-      page_buf q(leaf_page::page_bytes, leaf_page::clone_remove_op{p.pg, uint16_t(idx)});
+      page_buf q(leaf_page::page_bytes(), leaf_page::clone_remove_op{p.pg, uint16_t(idx)});
       m.erase("rm1");
       check_oracle(*q, m);
    }
@@ -399,8 +399,8 @@ TEST_CASE("leaf_page split divider and halves", "[leaf_page]")
    REQUIRE(sp.index >= p->num_keys() * 3 / 8);
    REQUIRE(sp.index <= p->num_keys() * 5 / 8 + 1);
 
-   page_buf left(leaf_page::page_bytes, leaf_page::split_op{p.pg, 0, sp.index});
-   page_buf right(leaf_page::page_bytes, leaf_page::split_op{p.pg, sp.index, p->num_keys()});
+   page_buf left(leaf_page::page_bytes(), leaf_page::split_op{p.pg, 0, sp.index});
+   page_buf right(leaf_page::page_bytes(), leaf_page::split_op{p.pg, sp.index, p->num_keys()});
    REQUIRE(left->validate_invariants());
    REQUIRE(right->validate_invariants());
    REQUIRE(left->num_keys() + right->num_keys() == p->num_keys());
@@ -441,7 +441,7 @@ TEST_CASE("leaf_page reprefix on diverging insert", "[leaf_page]")
    page_buf src;
    for (int i = 0; i < 20; ++i)
       src->apply(ins_bytes("team" + std::to_string(100 + i), "v" + std::to_string(i)));
-   page_buf half(leaf_page::page_bytes, leaf_page::split_op{src.pg, 0, src->num_keys()});
+   page_buf half(leaf_page::page_bytes(), leaf_page::split_op{src.pg, 0, src->num_keys()});
    REQUIRE(half->common_prefix().size() >= 4);  // "team1.." factored
    std::map<std::string, std::string> m;
    for (uint32_t i = 0; i < half->num_keys(); ++i)
@@ -454,7 +454,7 @@ TEST_CASE("leaf_page reprefix on diverging insert", "[leaf_page]")
    REQUIRE(half->can_apply(op) == leaf_page::can_apply_mode::none);
    REQUIRE(half->rebuilt_fits(op));
    // ...but the rebuilding clone re-expands suffixes under a shorter cpfx
-   page_buf re(leaf_page::page_bytes, leaf_page::clone_insert_op{half.pg, op});
+   page_buf re(leaf_page::page_bytes(), leaf_page::clone_insert_op{half.pg, op});
    m["tax"] = "diverges";
    check_oracle(*re, m);
    REQUIRE(re->common_prefix().size() == 1);  // "t" ("tax" vs "team..." diverge at byte 1)
@@ -488,7 +488,7 @@ TEST_CASE("leaf_page compact roundtrip", "[leaf_page]")
    REQUIRE(p->validate_invariants());
 
    const uint32_t csize = p->compact_size();
-   REQUIRE(csize < leaf_page::page_bytes);  // churn means real shrink
+   REQUIRE(csize < leaf_page::page_bytes());  // churn means real shrink
    // compact destination the way SAL builds one: a header sized csize, content rebuilt
    page_buf dst(csize);  // empty-page ctor stamps the alloc_header at the compact size
    p->compact_to(dst.pg);
@@ -530,7 +530,7 @@ TEST_CASE("leaf_page fuzz vs std::map", "[leaf_page][fuzz]")
             }
             else if (p->rebuilt_fits(op))
             {
-               page_buf next(leaf_page::page_bytes, leaf_page::clone_update_op{p.pg, op});
+               page_buf next(leaf_page::page_bytes(), leaf_page::clone_update_op{p.pg, op});
                p    = std::move(next);
                m[k] = v;
             }
@@ -548,7 +548,7 @@ TEST_CASE("leaf_page fuzz vs std::map", "[leaf_page][fuzz]")
                p->apply(leaf_page::remove_op{uint16_t(idx)});
             else
             {
-               page_buf next(leaf_page::page_bytes,
+               page_buf next(leaf_page::page_bytes(),
                              leaf_page::clone_remove_op{p.pg, uint16_t(idx)});
                p = std::move(next);
             }

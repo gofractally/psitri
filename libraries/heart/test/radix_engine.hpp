@@ -2391,6 +2391,12 @@ namespace heart::radix
          _page_split         = sal::null_ptr_address;
          auto             pr = _ses->get_ref<leaf_page>(P);
          const leaf_page* pg = pr.obj();
+         if (pg->num_keys() < 2)  // a 1-entry page can never split — fail loudly in every build
+         {
+            std::fprintf(stderr, "heart: split of page %u with %u keys (size %u)\n", *P,
+                         unsigned(pg->num_keys()), pg->size());
+            std::abort();
+         }
          const auto       sp = pg->get_split_pos();
          ptr_address      L  = _ses->alloc<leaf_page>(sal::alloc_hint{},
                                                       leaf_page::split_op{pg, 0, sp.index});
@@ -2440,9 +2446,15 @@ namespace heart::radix
             return nr == base.address() ? base.take() : nr;
          }
          ptr_address cur = root;  // borrowed; intermediates are owned (released) in-loop
-         for ([[maybe_unused]] int pass = 0;; ++pass)
+         for (int pass = 0;; ++pass)
          {
-            assert(pass < 64 && "page split did not converge");
+            if (pass >= 64)  // hard guard in EVERY build — a silent livelock is the worst failure
+            {
+               std::fprintf(stderr,
+                            "heart: page split did not converge (key %u bytes, page %u)\n",
+                            unsigned(kb.size()), *_page_split);
+               std::abort();
+            }
             _page_split = sal::null_ptr_address;
             uint8_t     db[520];
             uint32_t    dl = 0;

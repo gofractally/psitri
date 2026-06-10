@@ -54,8 +54,23 @@ namespace heart
     */
    struct leaf_page : paged
    {
-      static constexpr sal::header_type type_id          = radix_type_ids::leaf_page;
-      static constexpr uint32_t         page_bytes       = 2048;
+      static constexpr sal::header_type type_id = radix_type_ids::leaf_page;
+      /// COW-unit page size (default 2KB; the design's chosen point). HEART_PAGE_BYTES
+      /// overrides it (512..8192) for size experiments — read once, constant per process.
+      /// u16 tail offsets and the 0xFF00 extern-code floor cap it well below 64KB.
+      static uint32_t page_bytes() noexcept
+      {
+         static const uint32_t v = [] {
+            if (const char* e = std::getenv("HEART_PAGE_BYTES"))
+            {
+               const long x = std::atol(e);
+               if (x >= 512 && x <= 8192)
+                  return uint32_t(x);
+            }
+            return 2048u;
+         }();
+         return v;
+      }
       static constexpr uint32_t         max_cbases       = 16;
       static constexpr int              max_inline_entry = 128;  // suffix+value > this => extern
       static constexpr uint16_t         ext_code_base    = 0xFF00;
@@ -121,28 +136,50 @@ namespace heart
       // ── SAL lifecycle ────────────────────────────────────────────────────────────
       static constexpr uint32_t head_bytes() noexcept { return uint32_t(sizeof(leaf_page)); }
       uint32_t head_size() const noexcept { return head_bytes() + (3u + _pfxw) * _cap; }
-      static uint32_t alloc_size() noexcept { return page_bytes; }
-      static uint32_t alloc_size(const clone_op&) noexcept { return page_bytes; }
-      static uint32_t alloc_size(const clone_insert_op&) noexcept { return page_bytes; }
-      static uint32_t alloc_size(const clone_update_op&) noexcept { return page_bytes; }
-      static uint32_t alloc_size(const clone_remove_op&) noexcept { return page_bytes; }
-      static uint32_t alloc_size(const split_op&) noexcept { return page_bytes; }
-      uint32_t        cow_size() const noexcept { return page_bytes; }
+      static uint32_t alloc_size() noexcept { return page_bytes(); }
+      static uint32_t alloc_size(const clone_op&) noexcept { return page_bytes(); }
+      static uint32_t alloc_size(const clone_insert_op&) noexcept { return page_bytes(); }
+      static uint32_t alloc_size(const clone_update_op&) noexcept { return page_bytes(); }
+      static uint32_t alloc_size(const clone_remove_op&) noexcept { return page_bytes(); }
+      static uint32_t alloc_size(const split_op&) noexcept { return page_bytes(); }
+      uint32_t        cow_size() const noexcept { return size(); }
       static uint16_t round_cap(uint32_t n) noexcept
       {
          return uint16_t(ucc::round_up_multiple<4>(n < 8 ? 8u : n));
       }
       uint32_t compact_size() const noexcept
       {
-         // must PREDICT the same prefix width compact_to's rebuild will choose
-         const uint32_t w = pick_pfx_width(live_min_suffix());
+         // must PREDICT the same prefix width compact_to's rebuild will choose: a compact
+         // rebuild is transform-free and patch-free, so this walk computes the identical
+         // (min suffix, max u16-stem run) inputs.
+         uint32_t min_sfx = UINT32_MAX, run = 1, max_run = 0, prev = 0;
+         for (uint32_t i = 0; i < _nkeys; ++i)
+         {
+            const inline_value* iv = record(i);
+            if (iv->suffix_len < min_sfx)
+               min_sfx = iv->suffix_len;
+            const uint32_t s2 = stemN(iv->data, iv->suffix_len, 2);
+            if (i && s2 == prev)
+            {
+               if (++run > max_run)
+                  max_run = run;
+            }
+            else
+               run = 1;
+            prev = s2;
+         }
+         // CLAMP to the current width: compaction must only ever SHRINK a page (a wider pick
+         // could exceed the page's birth size and overrun the next blit-clone's allocation).
+         uint32_t w = width_from(min_sfx == UINT32_MAX ? 2u : min_sfx, max_run);
+         if (w > _pfxw)
+            w = _pfxw;
          return ucc::round_up_multiple<sal::cacheline_size>(
              head_bytes() + (3u + w) * round_cap(_nkeys) + live_tail());
       }
       void compact_to(sal::alloc_header* dst) const noexcept
       {
          static_cast<leaf_page*>(dst)->init_from(this, 0, _nkeys, _cpfx_len, nullptr, 0, nullptr,
-                                                 nullptr);
+                                                 nullptr, /*drop=*/-1, /*max_w=*/_pfxw);
       }
       void copy_to(sal::alloc_header* dst) const noexcept { blit_head_tail(dst, head_size()); }
 
@@ -462,7 +499,7 @@ namespace heart
          const uint32_t content = head_bytes() + (3u + wb) * round_cap(_nkeys + 1u) + ncp +
                                   (live_tail() - _cpfx_len) +
                                   uint32_t(_cpfx_len - ncp) * _nkeys + record_bytes(sn, ins);
-         return content <= page_bytes;
+         return content <= page_bytes();
       }
 
       bool rebuilt_fits(const update_op& upd) const noexcept
@@ -473,10 +510,12 @@ namespace heart
             return false;
          if (upd.vtype == inline_value::vt_extern && live_cbase_count() + 1 > max_cbases)
             return false;
-         // suffixes are unchanged by an update rebuild → the chosen width never exceeds _pfxw
-         const uint32_t content = head_bytes() + (3u + _pfxw) * round_cap(_nkeys) + live_tail() +
+         // width upper bound for the rebuild (cold path: one walk) — the run rule can widen
+         // past the current _pfxw when in-place inserts have lengthened the u16 runs.
+         const uint32_t wb      = pick_pfx_width(live_min_suffix());
+         const uint32_t content = head_bytes() + (3u + wb) * round_cap(_nkeys) + live_tail() +
                                   npay - iv->value_len;
-         return content <= page_bytes;
+         return content <= page_bytes();
       }
 
       bool can_add_address(sal::ptr_address addr) const noexcept
@@ -676,11 +715,23 @@ namespace heart
          return v;
       }
       uint32_t stem(const uint8_t* s, size_t n) const noexcept { return stemN(s, n, _pfxw); }
-      /// Width chosen at rebuild time: serve the MIN post-cpfx suffix length, capped at 4
-      /// (rounded down to a SIMD-friendly 1/2/4).
+      /// UPPER BOUND on the rebuild width: the MIN post-cpfx suffix length, capped at 4
+      /// (rounded down to a SIMD-friendly 1/2/4). The actual pick (width_from) may choose
+      /// narrower — used by the fits checks, which need only an upper bound.
       static uint32_t pick_pfx_width(uint32_t min_suffix) noexcept
       {
          return min_suffix >= 4 ? 4u : (min_suffix >= 2 ? 2u : 1u);
+      }
+      /// The actual width rule: 1 only when forced (a <2-byte suffix exists); widen 2 → 4
+      /// only when the u16 stems leave LONG equal runs (the run walk would out-cost the
+      /// doubled column scan) — uniform keysets stay at u16, prefix-dense text gets u32.
+      static uint32_t width_from(uint32_t min_suffix, uint32_t max_u16_run) noexcept
+      {
+         if (min_suffix < 2)
+            return 1;
+         if (min_suffix < 4 || max_u16_run <= 3)
+            return 2;
+         return 4;
       }
       /// Smallest live suffix length (UINT32_MAX when empty) — the width input.
       uint32_t live_min_suffix() const noexcept
@@ -843,28 +894,66 @@ namespace heart
       // and dead cbases never survive a rebuild.
       void init_from(const leaf_page* src, uint32_t lo, uint32_t hi, uint16_t ncp,
                      const uint8_t* extra_src, uint32_t extra_n, const insert_op* ins,
-                     const update_op* upd, int drop = -1) noexcept
+                     const update_op* upd, int drop = -1, uint32_t max_w = 4) noexcept
       {
          init_empty();
          _version_history = src->_version_history;
          const uint32_t cnt = (hi - lo) + (ins ? 1u : 0u) - (drop >= 0 ? 1u : 0u);
          _cap               = round_cap(cnt);
-         // DYNAMIC PREFIX WIDTH: serve the min post-cpfx suffix length, capped at 4 — a
-         // rebuild is the only place the column layout changes, so it decides the width.
+         // DYNAMIC PREFIX WIDTH: a rebuild is the only place the column layout changes, so
+         // it decides the width — 1 when a short suffix forces it; 4 only when the u16 stems
+         // of the (post-transform, sorted) suffixes leave runs long enough that the run walk
+         // would out-cost the doubled column scan; else the u16 default.
          {
             const int prepend_d = int(src->_cpfx_len) - int(ncp);
-            uint32_t  min_sfx   = UINT32_MAX;
+            // first two bytes of entry si's POST-transform suffix as a u16 stem
+            auto tstem = [&](const inline_value* iv) -> uint32_t {
+               uint8_t b[2];
+               int     got = 0;
+               if (prepend_d > 0)
+               {
+                  const uint8_t* pre = src->cpfx_data() + ncp;
+                  for (; got < 2 && got < prepend_d; ++got)
+                     b[got] = pre[got];
+                  for (int j = 0; got < 2 && j < int(iv->suffix_len); ++j, ++got)
+                     b[got] = iv->data[j];
+               }
+               else
+               {
+                  const uint8_t* p   = iv->data - prepend_d;
+                  const int      len = int(iv->suffix_len) + prepend_d;
+                  for (; got < 2 && got < len; ++got)
+                     b[got] = p[got];
+               }
+               return stemN(b, size_t(got), 2);
+            };
+            uint32_t min_sfx = UINT32_MAX, run = 1, max_run = 0, prev = 0;
+            bool     have_prev = false;
             for (uint32_t si = lo; si < hi; ++si)
             {
                if (int(si) == drop)
                   continue;
-               const uint32_t sl = uint32_t(int(src->record(si)->suffix_len) + prepend_d);
+               const inline_value* iv = src->record(si);
+               const uint32_t      sl = uint32_t(int(iv->suffix_len) + prepend_d);
                if (sl < min_sfx)
                   min_sfx = sl;
+               const uint32_t s2 = tstem(iv);
+               if (have_prev && s2 == prev)
+               {
+                  if (++run > max_run)
+                     max_run = run;
+               }
+               else
+                  run = 1;
+               prev      = s2;
+               have_prev = true;
             }
             if (ins && uint32_t(ins->key.size()) - ncp < min_sfx)
                min_sfx = uint32_t(ins->key.size()) - ncp;
-            _pfxw = uint8_t(pick_pfx_width(min_sfx == UINT32_MAX ? 2u : min_sfx));
+            uint32_t w = width_from(min_sfx == UINT32_MAX ? 2u : min_sfx, max_run);
+            if (w > max_w)
+               w = max_w;  // compaction clamps to the source width (shrink-only)
+            _pfxw = uint8_t(w);
          }
          assert(head_bytes() + (3u + _pfxw) * _cap <= size());
 

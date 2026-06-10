@@ -491,7 +491,7 @@ set_target_properties(kv-u64-bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_
 
 # Engine-agnostic KV compatibility suite: one templated body run on heart AND psitri.
 add_executable(kv-compat-test programs/kv_compat_test.cpp)
-target_link_libraries(kv-compat-test PRIVATE psitri heart)
+target_link_libraries(kv-compat-test PRIVATE psitri heart part)
 target_include_directories(kv-compat-test PRIVATE ${CMAKE_SOURCE_DIR}/libraries/heart/test)
 target_compile_definitions(kv-compat-test PRIVATE XXH_INLINE_ALL)
 set_target_properties(kv-compat-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
@@ -822,6 +822,14 @@ target_compile_definitions(bank-bench-heart PRIVATE BANK_ENGINE_HEART=1)
 target_link_libraries(bank-bench-heart PRIVATE heart Boost::program_options hash)
 target_include_directories(bank-bench-heart PRIVATE ${CMAKE_SOURCE_DIR}/libraries/heart/test)
 set_target_properties(bank-bench-heart PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# Part bank bench — the part engine via its native psitri-shaped API
+# (depends only on sal + ucc + part; must NOT link psitri)
+add_executable(bank-bench-part programs/bank_bench.cpp)
+target_compile_definitions(bank-bench-part PRIVATE BANK_ENGINE_PART=1)
+target_link_libraries(bank-bench-part PRIVATE part Boost::program_options hash)
+set_target_properties(bank-bench-part PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 # PsiTriMDBX bank bench — uses the same MDBX C API but backed by psitrimdbx

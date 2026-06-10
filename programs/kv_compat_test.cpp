@@ -14,10 +14,19 @@
 
 #include "heart_kv.hpp"  // heart's native psitri-shaped API (heart::kv::database)
 
+#include <part/db_shape.hpp>  // the shape, as concepts — all three engines must pass
+#include <part/kv.hpp>        // part's native psitri-shaped API (part::kv::database)
+
 #include <psitri/cursor.hpp>
 #include <psitri/database.hpp>
 #include <psitri/transaction.hpp>
 #include <psitri/write_session_impl.hpp>
+
+// The harness shape is compiler-enforced (SPEC §12.3): a drift in any engine
+// fails HERE, by name, before a single test runs.
+static_assert(part::shape::kv_database<heart::kv::database>);
+static_assert(part::shape::kv_database<part::kv::database>);
+static_assert(part::shape::kv_database<psitri::database>);
 
 namespace
 {
@@ -217,6 +226,8 @@ int main()
    std::printf("KV compat suite — one templated body on each engine's NATIVE database type\n");
    bool h = run<heart::kv::database>("heart", tmp("kvcompat_heart"));
    bool p = run<psitri::database>("psitri", tmp("kvcompat_psitri"));
-   std::printf("RESULT: heart %s, psitri %s\n", h ? "PASS" : "FAIL", p ? "PASS" : "FAIL");
-   return (h && p) ? 0 : 1;
+   bool a = run<part::kv::database>("part", tmp("kvcompat_part"));
+   std::printf("RESULT: heart %s, psitri %s, part %s\n", h ? "PASS" : "FAIL",
+               p ? "PASS" : "FAIL", a ? "PASS" : "FAIL");
+   return (h && p && a) ? 0 : 1;
 }

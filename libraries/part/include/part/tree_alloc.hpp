@@ -60,17 +60,20 @@ namespace part
       using value_type = T;
       using hkv_handle = detail::line_ptr;
 
-      session* ses = nullptr;
+      arena*   a   = nullptr;  // deref base + refcounts (any thread)
+      session* ses = nullptr;  // allocation context (writer thread only);
+                               // null for read-only snapshot views
 
       part_alloc() = default;
-      explicit part_alloc(session* s) noexcept : ses(s) {}
-      explicit part_alloc(session& s) noexcept : ses(&s) {}
+      explicit part_alloc(session* s) noexcept : a(&s->store()), ses(s) {}
+      explicit part_alloc(session& s) noexcept : a(&s.store()), ses(&s) {}
+      explicit part_alloc(arena* ar) noexcept : a(ar) {}  // read-only views
       template <class U>
-      part_alloc(const part_alloc<U>& o) noexcept : ses(o.ses)
+      part_alloc(const part_alloc<U>& o) noexcept : a(o.a), ses(o.ses)
       {
       }
 
-      const std::byte* hkv_base() const noexcept { return ses ? ses->store().base() : nullptr; }
+      const std::byte* hkv_base() const noexcept { return a ? a->base() : nullptr; }
 
       static constexpr size_t lines_(size_t bytes) noexcept
       {
@@ -79,31 +82,37 @@ namespace part
       T* allocate(size_t n)
       {
          static_assert(alignof(T) <= line_bytes, "part lines are 128-byte aligned");
+         assert(ses && "read-only view allocators cannot allocate");
          const line_idx i = ses->alloc_lines(uint32_t(lines_(n * sizeof(T))));
-         return static_cast<T*>(ses->store().get(i));
+         return static_cast<T*>(a->get(i));
       }
       void deallocate(T* p, size_t n) noexcept
       {
-         const line_idx i = line_idx(
-             (reinterpret_cast<const std::byte*>(p) - ses->store().base()) / line_bytes);
-         ses->release_run(i, uint32_t(lines_(n * sizeof(T))));
+         const line_idx i =
+             line_idx((reinterpret_cast<const std::byte*>(p) - a->base()) / line_bytes);
+         if (ses)
+            ses->release_run(i, uint32_t(lines_(n * sizeof(T))));
+         else
+            a->release_run(i, uint32_t(lines_(n * sizeof(T))));
       }
 
       template <class U>
       bool operator==(const part_alloc<U>& o) const noexcept
       {
-         return ses == o.ses;
+         return a == o.a && ses == o.ses;
       }
 
       // ── COW refcount hooks (consumed by the tree's part-COW extension) ─────
+      // All arena-level: safe from any thread (cascades often run on a reader
+      // dropping the last snapshot reference).
       static constexpr bool hkv_cow = true;
-      uint8_t hkv_ref(uint32_t line) const noexcept { return ses->store().ref(line); }
-      bool    hkv_retain(uint32_t line) noexcept { return ses->store().retain(line); }
+      uint8_t hkv_ref(uint32_t line) const noexcept { return a->ref(line); }
+      bool    hkv_retain(uint32_t line) noexcept { return a->retain(line); }
       template <class D>
       bool hkv_release(uint32_t line, D&& d) noexcept(noexcept(d(line)))
       {
-         return ses->store().release(line, static_cast<D&&>(d));
+         return a->release(line, static_cast<D&&>(d));
       }
-      void hkv_free_run(uint32_t line, uint32_t n) noexcept { ses->release_run(line, n); }
+      void hkv_free_run(uint32_t line, uint32_t n) noexcept { a->release_run(line, n); }
    };
 }  // namespace part

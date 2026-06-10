@@ -1,10 +1,10 @@
 #pragma once
 // heart's NATIVE psitri-shaped public API: the same database → write_session → transaction
 // → cursor structure psitri exposes, so heart is a drop-in for psitri's transaction/session
-// API. This is heart's own API surface (not a per-engine test wrapper) — a templated
-// test/bench can drive psitri::* and heart::kv::* through identical calls, differing only in
-// which type names it names. Backed by the heart radix engine; commit() is the version/
-// snapshot boundary (after it, writes COW), matching a psitri transaction commit.
+// API. heart::radix::database already carries the shape natively (bank_bench drives it
+// directly); this header only papers over the two spelling gaps the templated harness
+// needs — DB::create(dir, runtime_config) over database::open(dir), and
+// transaction::get(key, lambda) over get<std::string> — and re-exports the rest.
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -30,69 +30,56 @@ namespace heart::kv
       bool           checksum_on_commit      = false;
    };
 
-   using engine = heart::radix::radix_tree;
+   using engine = heart::radix::database;
+   using cursor = heart::radix::radix_tree::cursor;
+   using tree   = heart::radix::radix_tree::tree;  // has snapshot_cursor()
 
-   // The cursor IS the engine's native ordered cursor — not a wrapper around it. heart::kv just
-   // names it. (Stateful path-stack iterator: seek_begin/lower_bound/upper_bound/find/next/
-   // key/value<T>/get_value/get, implemented directly on the nodes in the engine.)
-   using cursor = engine::cursor;
-
-   // A root handle (psitri::tree analogue) returned by get_root(); hands out the engine cursor.
-   class tree
-   {
-     public:
-      explicit tree(engine* t) noexcept : _t(t) {}
-      cursor   snapshot_cursor() const { return cursor(_t); }  // call seek_begin()/lower_bound() to position
-      explicit operator bool() const noexcept { return _t != nullptr; }
-
-     private:
-      engine* _t;
-   };
-
-   // A write transaction targeting one root. Mutations apply to the engine's working tree
-   // (COW-to-root); commit() publishes the version (snapshot boundary).
+   // Thin spelling adapter over the native transaction (adds get(key, lambda)).
    class transaction
    {
      public:
-      explicit transaction(engine* t) noexcept : _t(t) {}
-      void insert(key_view k, value_view v) { _t->upsert(k, v); }
-      void upsert(key_view k, value_view v) { _t->upsert(k, v); }
-      int  remove(key_view k) { return _t->remove(k) ? 0 : -1; }
-      void commit() { _t->commit(); }
-      void abort() noexcept {}
-      // psitri::transaction::get(key, lambda) analogue: invoke fn(value_view) on hit, return found.
-      template <class F>
-      bool get(key_view k, F&& fn) const
+      explicit transaction(heart::radix::radix_tree::transaction&& t) : _tx(std::move(t)) {}
+      void insert(key_view k, value_view v) { _tx.upsert(k, v); }
+      void upsert(key_view k, value_view v) { _tx.upsert(k, v); }
+      int  remove(key_view k) { return _tx.remove(k); }
+      void commit() { _tx.commit(); }
+      void abort() noexcept { _tx.abort(); }
+
+      template <class T = std::string>
+      std::optional<T> get(key_view k)
       {
-         value_view v;
-         if (!_t->find(k, v))
+         return _tx.template get<T>(k);
+      }
+      // psitri::transaction::get(key, lambda) analogue: fn(value_view) on hit, return found.
+      template <class F>
+      bool get(key_view k, F&& fn)
+      {
+         auto v = _tx.template get<std::string>(k);
+         if (!v)
             return false;
-         fn(v);
+         fn(value_view(*v));
          return true;
       }
 
      private:
-      engine* _t;
+      heart::radix::radix_tree::transaction _tx;
    };
 
    class write_session
    {
      public:
-      explicit write_session(engine* t) noexcept : _t(t) {}
-      // Single-root for now (root_index must be 0) — enough for the drop-in comparison.
+      explicit write_session(std::shared_ptr<heart::radix::write_session> ws)
+          : _ws(std::move(ws))
+      {
+      }
       transaction start_transaction(uint32_t root_index)
       {
-         (void)root_index;
-         return transaction(_t);
+         return transaction(_ws->start_transaction(root_index));
       }
-      tree get_root(uint32_t root_index)
-      {
-         (void)root_index;
-         return tree(_t);
-      }
+      tree get_root(uint32_t root_index) { return _ws->get_root(root_index); }
 
      private:
-      engine* _t;
+      std::shared_ptr<heart::radix::write_session> _ws;
    };
 
    class database
@@ -100,15 +87,16 @@ namespace heart::kv
      public:
       static std::shared_ptr<database> create(std::filesystem::path dir, runtime_config = {})
       {
-         return std::shared_ptr<database>(new database(std::move(dir)));
+         std::filesystem::create_directories(dir);
+         return std::shared_ptr<database>(new database(heart::radix::database::open(dir)));
       }
       std::shared_ptr<write_session> start_write_session()
       {
-         return std::make_shared<write_session>(&_engine);
+         return std::make_shared<write_session>(_db->start_write_session());
       }
 
      private:
-      explicit database(std::filesystem::path dir) : _engine(std::move(dir)) {}
-      engine _engine;  // heart radix engine (cfg: sync none, matching the comparison setup)
+      explicit database(std::shared_ptr<heart::radix::database> db) : _db(std::move(db)) {}
+      std::shared_ptr<heart::radix::database> _db;
    };
 }  // namespace heart::kv

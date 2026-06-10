@@ -292,6 +292,11 @@ namespace part::kv
          part::arena_config c;
          c.dir       = std::move(dir);
          c.sync_mode = cfg.sync_mode;
+         // COW churn frees whole generations but long-lived survivors pepper
+         // old segments; demanding 50%-in-8-contig before reuse lets the file
+         // grow without bound. 1/8 keeps the can-this-segment-serve-allocs
+         // guarantee while reclaiming aggressively.
+         c.reuse_threshold = 0.125;
          return c;
       }
 

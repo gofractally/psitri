@@ -362,6 +362,43 @@ namespace detail  // implementation types & node helpers — not part of the pub
          --f->rh.hdr.nbranch;
       }
    }
+   // part COW demotion target: the EXPLICIT full router (design5 implicit->
+   // explicit). One cacheline: header + per-line pointers to cline_direct lines
+   // that are INDIVIDUALLY refcounted and shareable. Created only by COW from a
+   // shared node_full; reads pay one extra dependent load (SPEC principle 7).
+   template <class Ptr>
+   struct node_fullx_t
+   {
+      router_hdr_t<Ptr> rh;
+      Ptr               lines[full_lines_v<Ptr>];  // tag bits unused (always node_full)
+   };
+
+   // part COW demotion target for the segmented routers: CL0 carries the
+   // per-segment line pointers (2/4/8 of them); each segment line keeps the
+   // cnode seg layout (presence bitmap + rank-dense branches) and is
+   // individually refcounted/shareable.
+   template <class Ptr>
+   struct node_cx_t
+   {
+      router_hdr_t<Ptr> rh;
+      uint8_t           lg;  // log2(NSEG): 1, 2, 3
+      uint8_t           pad0;
+      Ptr               seglines[8];  // first (1<<lg) used; tag bits unused
+   };
+   // runtime-geometry seg ops (the cnode<N> helpers are compile-time N)
+   inline unsigned cx_segw(unsigned lg) noexcept { return 256u >> lg; }
+   inline unsigned cx_maskb(unsigned lg) noexcept { return (256u >> lg) / 8; }
+   template <class Ptr>
+   inline unsigned cx_cap(unsigned lg) noexcept
+   {
+      return (cacheline_bytes - cx_maskb(lg)) / unsigned(sizeof(Ptr));
+   }
+   template <class Ptr>
+   inline Ptr* cx_branches(uint8_t* seg, unsigned lg) noexcept
+   {
+      return reinterpret_cast<Ptr*>(seg + cx_maskb(lg));
+   }
+
    template <class Ptr>
    inline void full_init(node_full_t<Ptr>* f) noexcept
    {
@@ -442,6 +479,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
       using setlist    = setlist_t<Ptr>;
       using setlist16  = setlist16_t<Ptr>;
       using node_full  = node_full_t<Ptr>;
+      using node_fullx = node_fullx_t<Ptr>;
+      using node_cx    = node_cx_t<Ptr>;
       template <int N>
       using cnode = cnode_t<N, Ptr>;
 
@@ -702,6 +741,73 @@ namespace detail  // implementation types & node helpers — not part of the pub
                ++count_;
                return true;
             }
+            if constexpr (cow_enabled)
+               if (k == K::full_x)
+               {
+                  // Explicit full router: same shape as node_full but the slot
+                  // lives in a (privatized) shared direct line.
+                  node_fullx* x = static_cast<node_fullx*>(deref_(cur));
+                  if (depth == key.size())
+                  {
+                     const bool ins = set_or_update_term<Assign>(&x->rh, std::forward<VF>(v));
+                     count_ += ins;
+                     return ins;
+                  }
+                  const uint8_t byte = uint8_t(key[depth]);
+                  unsigned      li, sl;
+                  full_index<Ptr>(byte, li, sl);
+                  cline_direct_t<Ptr>* L  = fx_line_(x, li);
+                  packed_ptr*          cs = &L->ptr[sl];
+                  if (!cs->is_null())
+                  {
+                     slot = cs;
+                     ++depth;
+                     continue;
+                  }
+                  *cs = make_value_at(key, depth + 1, std::forward<VF>(v));
+                  ++L->nset;
+                  ++x->rh.hdr.nbranch;
+                  ++count_;
+                  return true;
+               }
+            if constexpr (cow_enabled)
+               if (k == K::cx)
+               {
+                  node_cx* x = static_cast<node_cx*>(deref_(cur));
+                  if (depth == key.size())
+                  {
+                     const bool ins = set_or_update_term<Assign>(&x->rh, std::forward<VF>(v));
+                     count_ += ins;
+                     return ins;
+                  }
+                  const uint8_t byte = uint8_t(key[depth]);
+                  if (packed_ptr* cs = router_find_slot(x, byte))
+                  {
+                     slot = cs;
+                     ++depth;
+                     continue;
+                  }
+                  packed_ptr lf = make_value_at(key, depth + 1, std::forward<VF>(v));
+                  if (router_try_set(x, byte, lf))
+                  {
+                     ++count_;
+                     return true;
+                  }
+                  // Segment line full: re-promote to the implicit cnode form
+                  // (clone-forward, SPEC principle 7) and let the normal widen
+                  // ladder take it from there on re-descend.
+                  build_guard glf{this, &lf};
+                  *slot = cx_promote_(cur);
+                  glf.release();
+                  // lf not yet linked: retry the insert against the promoted node
+                  {
+                     bool sub = router_try_set(*slot, byte, lf);
+                     if (!sub)
+                        grow_router_(slot, *slot, byte, lf);
+                     ++count_;
+                     return true;
+                  }
+               }
             switch (k)
             {
                case K::value_ptr:
@@ -847,7 +953,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                // exhaustive (no default): node_full/bucket descend before the switch and
                // null inserts at the top of the loop, so these can't reach it — but a NEW
                // kind added to K must fail compilation here and get an explicit decision.
-               case K::node_full: case K::bucket: case K::null:
+               case K::node_full: case K::full_x: case K::cx: case K::bucket: case K::null:
                   assert(false && "handled before the switch");
                   __builtin_unreachable();
             }
@@ -884,6 +990,24 @@ namespace detail  // implementation types & node helpers — not part of the pub
    const char* p = HKV_PTR(raw); \
    if (depth == klen) return op.term(reinterpret_cast<const router_hdr*>(p)); \
    std::memcpy(&raw, p + full_offtab_v<Ptr>[uint8_t(kp[depth])], sizeof(Ptr)); HKV_NEXT(depth + 1); }
+#define HKV_BODY_FULLX { \
+   const char* p = HKV_PTR(raw); \
+   if (depth == klen) return op.term(reinterpret_cast<const router_hdr*>(p)); \
+   unsigned li_, sl_; full_index<Ptr>(uint8_t(kp[depth]), li_, sl_); \
+   uint64_t lraw = 0; std::memcpy(&lraw, p + sizeof(router_hdr) + li_ * sizeof(Ptr), sizeof(Ptr)); \
+   std::memcpy(&raw, HKV_PTR(lraw) + sl_ * sizeof(Ptr), sizeof(Ptr)); HKV_NEXT(depth + 1); }
+#define HKV_BODY_CX { \
+   const char* p = HKV_PTR(raw); \
+   if (depth == klen) return op.term(reinterpret_cast<const router_hdr*>(p)); \
+   const unsigned lg_ = uint8_t(p[sizeof(router_hdr)]); \
+   const uint8_t  by_ = uint8_t(kp[depth]); \
+   const unsigned sg_ = by_ >> (8 - lg_); \
+   const unsigned d_  = by_ & ((256u >> lg_) - 1); \
+   uint64_t lraw = 0; std::memcpy(&lraw, p + sizeof(router_hdr) + 2 + sg_ * sizeof(Ptr), sizeof(Ptr)); \
+   const uint8_t* m_ = reinterpret_cast<const uint8_t*>(HKV_PTR(lraw)); \
+   if (!bm_test(m_, int(d_))) return op.miss(); \
+   std::memcpy(&raw, m_ + ((256u >> lg_) / 8) + unsigned(bm_rank(m_, int(d_))) * sizeof(Ptr), sizeof(Ptr)); \
+   HKV_NEXT(depth + 1); }
 #define HKV_BODY_CN(N) { \
    const char* p = HKV_PTR(raw); \
    if (depth == klen) return op.term(reinterpret_cast<const router_hdr*>(p)); \
@@ -916,6 +1040,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                case K::c8:           HKV_BODY_CN(8)
                case K::bucket:       HKV_BODY_BUCKET
                case K::setlist_u16:  HKV_BODY_SETLIST16
+               case K::full_x:       HKV_BODY_FULLX
+               case K::cx:           HKV_BODY_CX
                case K::null:         return op.miss();
             }
             __builtin_unreachable();
@@ -929,6 +1055,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
 #undef HKV_BODY_SETLIST
 #undef HKV_BODY_SETLIST16
 #undef HKV_BODY_FULL
+#undef HKV_BODY_CX
+#undef HKV_BODY_FULLX
 #undef HKV_BODY_CN
 #undef HKV_BODY_BUCKET
 
@@ -1346,14 +1474,15 @@ namespace detail  // implementation types & node helpers — not part of the pub
          // once hid the lower_bound/u16 miss).
          packed_ptr router_child_(packed_ptr node, uint8_t byte) const
          {
-            return t_->with_router(node, [byte](auto* n) noexcept { return router_find(n, byte); });
+            return t_->with_router(node,
+                                   [&](auto* n) noexcept { return t_->router_find_d(n, byte); });
          }
          bool next_child_(packed_ptr node, int from, uint8_t& ob, packed_ptr& oc) const
          {
             if (from > 255)
                return false;
             return t_->with_router(node,
-                                   [&](auto* n) noexcept { return router_next(n, from, ob, oc); });
+                                   [&](auto* n) noexcept { return t_->router_next_d(n, from, ob, oc); });
          }
          // true → positioned at a terminal (sets val_ + suffix); false → pushed a frame.
          // `base` is the key length at this child's start; key_ is grown only when
@@ -2457,6 +2586,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                case K::c4:
                case K::c8:
                case K::node_full:
+               case K::full_x:  // explicit kinds: same descent via the slot
+               case K::cx:      // dispatchers; rm_shrink_ leaves them unshrunk
                {
                   if (cur.tag() == K::setlist_u8)
                   {
@@ -3137,6 +3268,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
             case K::c4:          return sizeof(cnode<4>);
             case K::c8:          return sizeof(cnode<8>);
             case K::node_full:   return sizeof(node_full);
+            case K::full_x:      return sizeof(node_fullx) <= 128 ? 128 : sizeof(node_fullx);
+            case K::cx:          return 128;
             // exhaustive (no default): a new node kind must declare its size here.
             case K::value_ptr: case K::value_inline: case K::prefix_node:
             case K::bucket: case K::null:
@@ -3162,6 +3295,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
             case K::c4:         return f(static_cast<cnode<4>*>(deref_(cur)));
             case K::c8:         return f(static_cast<cnode<8>*>(deref_(cur)));
             case K::node_full:  return f(static_cast<node_full*>(deref_(cur)));
+            case K::full_x:     return f(static_cast<node_fullx*>(deref_(cur)));
+            case K::cx:         return f(static_cast<node_cx*>(deref_(cur)));
             // exhaustive (no default): a new K must be decided here — and only here.
             case K::value_ptr: case K::value_inline: case K::prefix_node:
             case K::setlist_u16: case K::bucket: case K::null:
@@ -3236,6 +3371,199 @@ namespace detail  // implementation types & node helpers — not part of the pub
          return false;
       }
 
+      // ── node_fullx (explicit full) helpers: member, they deref line ptrs ─────
+      cline_direct_t<Ptr>* fx_line_(const node_fullx* x, unsigned li) const noexcept
+      {
+         return static_cast<cline_direct_t<Ptr>*>(deref_(x->lines[li]));
+      }
+      packed_ptr router_find(node_fullx* x, uint8_t byte) const noexcept
+      {
+         unsigned li, sl;
+         full_index<Ptr>(byte, li, sl);
+         return fx_line_(x, li)->ptr[sl];
+      }
+      bool router_next(node_fullx* x, int from, uint8_t& ob, packed_ptr& oc) const noexcept
+      {
+         unsigned li, sl;
+         full_index<Ptr>(uint8_t(from), li, sl);
+         for (; li < full_lines_v<Ptr>; ++li, sl = 0)
+         {
+            const cline_direct_t<Ptr>* ln = fx_line_(x, li);
+            if (ln->nset == 0)
+               continue;
+            for (; sl < full_per_line_v<Ptr>; ++sl)
+            {
+               const unsigned byte = li * full_per_line_v<Ptr> + sl;
+               if (byte > 255)
+                  return false;
+               if (!ln->ptr[sl].is_null())
+               {
+                  ob = uint8_t(byte);
+                  oc = ln->ptr[sl];
+                  return true;
+               }
+            }
+         }
+         return false;
+      }
+      packed_ptr* router_find_slot(node_fullx* x, uint8_t byte) const noexcept
+      {
+         unsigned li, sl;
+         full_index<Ptr>(byte, li, sl);
+         packed_ptr* p = &fx_line_(x, li)->ptr[sl];
+         return p->is_null() ? nullptr : p;
+      }
+      template <class F>
+      void router_for_each(node_fullx* x, F&& f) const
+      {
+         for (unsigned li = 0; li < full_lines_v<Ptr>; ++li)
+         {
+            cline_direct_t<Ptr>* ln = fx_line_(x, li);
+            if (ln->nset == 0)
+               continue;
+            for (unsigned sl = 0; sl < full_per_line_v<Ptr>; ++sl)
+            {
+               const unsigned byte = li * full_per_line_v<Ptr> + sl;
+               if (byte > 255)
+                  break;
+               if (!ln->ptr[sl].is_null())
+                  f(uint8_t(byte), ln->ptr[sl]);
+            }
+         }
+      }
+
+      template <class N>
+      packed_ptr router_find_d(N* n, uint8_t byte) const noexcept
+      {
+         return router_find(n, byte);
+      }
+      packed_ptr router_find_d(node_fullx* n, uint8_t byte) const noexcept
+      {
+         return router_find(n, byte);
+      }
+      template <class N>
+      bool router_next_d(N* n, int from, uint8_t& ob, packed_ptr& oc) const noexcept
+      {
+         return router_next(n, from, ob, oc);
+      }
+      bool router_next_d(node_fullx* n, int from, uint8_t& ob, packed_ptr& oc) const noexcept
+      {
+         return router_next(n, from, ob, oc);
+      }
+
+      // ── node_cx (explicit segmented) helpers: member, runtime geometry ───────
+      uint8_t* cx_seg_(const node_cx* x, unsigned sg) const noexcept
+      {
+         return static_cast<uint8_t*>(deref_(x->seglines[sg]));
+      }
+      packed_ptr router_find(node_cx* x, uint8_t byte) const noexcept
+      {
+         const unsigned sg = byte >> (8 - x->lg);
+         const unsigned d  = byte & (cx_segw(x->lg) - 1);
+         uint8_t*       m  = cx_seg_(x, sg);
+         return bm_test(m, int(d)) ? cx_branches<Ptr>(m, x->lg)[bm_rank(m, int(d))]
+                                   : packed_ptr::null();
+      }
+      packed_ptr* router_find_slot(node_cx* x, uint8_t byte) const noexcept
+      {
+         const unsigned sg = byte >> (8 - x->lg);
+         const unsigned d  = byte & (cx_segw(x->lg) - 1);
+         uint8_t*       m  = cx_seg_(x, sg);
+         return bm_test(m, int(d)) ? &cx_branches<Ptr>(m, x->lg)[bm_rank(m, int(d))] : nullptr;
+      }
+      // Update-or-insert; false when THIS segment line is full (promote signal).
+      bool router_try_set(node_cx* x, uint8_t byte, packed_ptr p) const noexcept
+      {
+         const unsigned sg  = byte >> (8 - x->lg);
+         const unsigned d   = byte & (cx_segw(x->lg) - 1);
+         uint8_t*       m   = cx_seg_(x, sg);
+         Ptr*           br  = cx_branches<Ptr>(m, x->lg);
+         const int      pos = bm_rank(m, int(d));
+         if (bm_test(m, int(d)))
+         {
+            br[pos] = p;
+            return true;
+         }
+         const int cnt = bm_count(m, int(cx_maskb(x->lg)));
+         if (unsigned(cnt) >= cx_cap<Ptr>(x->lg))
+            return false;
+         std::memmove(&br[pos + 1], &br[pos], size_t(cnt - pos) * sizeof(Ptr));
+         br[pos] = p;
+         bm_set(m, int(d));
+         ++x->rh.hdr.nbranch;
+         return true;
+      }
+      void router_remove(node_cx* x, uint8_t byte) const noexcept
+      {
+         const unsigned sg = byte >> (8 - x->lg);
+         const unsigned d  = byte & (cx_segw(x->lg) - 1);
+         uint8_t*       m  = cx_seg_(x, sg);
+         if (!bm_test(m, int(d)))
+            return;
+         Ptr*      br  = cx_branches<Ptr>(m, x->lg);
+         const int cnt = bm_count(m, int(cx_maskb(x->lg)));
+         const int pos = bm_rank(m, int(d));
+         std::memmove(&br[pos], &br[pos + 1], size_t(cnt - 1 - pos) * sizeof(Ptr));
+         m[d >> 3] &= uint8_t(~(1u << (d & 7)));
+         --x->rh.hdr.nbranch;
+      }
+      bool router_next(node_cx* x, int from, uint8_t& ob, packed_ptr& oc) const noexcept
+      {
+         const unsigned segw = cx_segw(x->lg), nseg = 1u << x->lg, maskb = cx_maskb(x->lg);
+         for (unsigned sg = unsigned(from) / segw; sg < nseg; ++sg)
+         {
+            uint8_t*       m  = cx_seg_(x, sg);
+            const unsigned lo = (sg == unsigned(from) / segw) ? unsigned(from) % segw : 0;
+            for (unsigned w = lo / 64; w < (maskb + 7) / 8; ++w)
+            {
+               uint64_t bits = bm_word(m, int(w));
+               if (maskb % 8 != 0)
+                  bits &= (1ull << (maskb * 8)) - 1;
+               if (w == lo / 64 && (lo & 63))
+                  bits &= ~0ull << (lo & 63);
+               if (bits)
+               {
+                  const int d = int(w) * 64 + std::countr_zero(bits);
+                  ob          = uint8_t(sg * segw + unsigned(d));
+                  oc          = cx_branches<Ptr>(m, x->lg)[bm_rank(m, d)];
+                  return true;
+               }
+            }
+         }
+         return false;
+      }
+      template <class F>
+      void router_for_each(node_cx* x, F&& f) const
+      {
+         const unsigned segw = cx_segw(x->lg), nseg = 1u << x->lg, maskb = cx_maskb(x->lg);
+         for (unsigned sg = 0; sg < nseg; ++sg)
+         {
+            uint8_t* m   = cx_seg_(x, sg);
+            int      idx = 0;
+            for (unsigned wo = 0; wo < maskb; wo += 8)
+            {
+               uint64_t       w  = 0;
+               const unsigned wb = maskb - wo < 8 ? maskb - wo : 8;
+               std::memcpy(&w, m + wo, size_t(wb));
+               while (w)
+               {
+                  const int b = std::countr_zero(w);
+                  w &= w - 1;
+                  f(uint8_t(sg * segw + wo * 8 + unsigned(b)),
+                    cx_branches<Ptr>(m, x->lg)[idx++]);
+               }
+            }
+         }
+      }
+      packed_ptr router_find_d(node_cx* n, uint8_t byte) const noexcept
+      {
+         return router_find(n, byte);
+      }
+      bool router_next_d(node_cx* n, int from, uint8_t& ob, packed_ptr& oc) const noexcept
+      {
+         return router_next(n, from, ob, oc);
+      }
+
       // The slot holding byte's child if present, else nullptr — ONE dispatch for the
       // insert descend (find-or-add), instead of a separate find + child_slot pair.
       static packed_ptr* router_find_slot(setlist* s, uint8_t byte) noexcept
@@ -3257,7 +3585,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       }
       packed_ptr* router_find_slot(packed_ptr cur, uint8_t byte) const noexcept
       {
-         return with_router(cur, [byte](auto* n) noexcept { return router_find_slot(n, byte); });
+         return with_router(cur, [&](auto* n) noexcept { return router_find_slot(n, byte); });
       }
 
       // Update-or-insert byte -> p; false when the tier is full (the widen signal).
@@ -3267,6 +3595,25 @@ namespace detail  // implementation types & node helpers — not part of the pub
       static bool router_try_set(node_full* f, uint8_t byte, packed_ptr p) noexcept
       {
          full_set(f, byte, p);  // node_full never overflows
+         return true;
+      }
+      bool router_try_set(node_fullx* x, uint8_t byte, packed_ptr p) const noexcept
+      {
+         unsigned li, sl;
+         full_index<Ptr>(byte, li, sl);
+         cline_direct_t<Ptr>* L        = fx_line_(x, li);
+         const bool           was_null = L->ptr[sl].is_null();
+         L->ptr[sl]                    = p;
+         if (was_null && !p.is_null())
+         {
+            ++L->nset;
+            ++x->rh.hdr.nbranch;
+         }
+         else if (!was_null && p.is_null())
+         {
+            --L->nset;
+            --x->rh.hdr.nbranch;
+         }
          return true;
       }
       bool router_try_set(packed_ptr cur, uint8_t byte, packed_ptr p) const noexcept
@@ -3280,9 +3627,20 @@ namespace detail  // implementation types & node helpers — not part of the pub
       template <int N>
       static void router_remove(cnode<N>* c, uint8_t byte) noexcept { cnode_remove(c, byte); }
       static void router_remove(node_full* f, uint8_t byte) noexcept { full_set(f, byte, packed_ptr::null()); }
+      void router_remove(node_fullx* x, uint8_t byte) const noexcept
+      {
+         unsigned li, sl;
+         full_index<Ptr>(byte, li, sl);
+         cline_direct_t<Ptr>* L = fx_line_(x, li);
+         if (L->ptr[sl].is_null())
+            return;
+         L->ptr[sl] = packed_ptr::null();
+         --L->nset;
+         --x->rh.hdr.nbranch;
+      }
       void router_remove(packed_ptr cur, uint8_t byte) const noexcept
       {
-         with_router(cur, [byte](auto* n) noexcept { router_remove(n, byte); });
+         with_router(cur, [&](auto* n) noexcept { router_remove(n, byte); });
       }
 
       // Visit (byte, branch) ascending, per tier; the dispatcher also accepts setlist_u16
@@ -3610,6 +3968,34 @@ namespace detail  // implementation types & node helpers — not part of the pub
                node_free_(b, sizeof(bucket));
                return;
             }
+            case K::full_x:
+            {
+               if constexpr (cow_enabled)
+               {
+                  node_fullx* x = static_cast<node_fullx*>(deref_(cur));
+                  free_all_(x->rh.term);
+                  for (unsigned li = 0; li < full_lines_v<Ptr>; ++li)
+                     fx_release_line_(x->lines[li]);
+                  node_free_(x, cacheline_bytes);
+               }
+               else
+                  assert(false && "full_x exists only under COW allocators");
+               return;
+            }
+            case K::cx:
+            {
+               if constexpr (cow_enabled)
+               {
+                  node_cx* x = static_cast<node_cx*>(deref_(cur));
+                  free_all_(x->rh.term);
+                  for (unsigned sg = 0; sg < (1u << x->lg); ++sg)
+                     cx_release_line_(x->seglines[sg], x->lg);
+                  node_free_(x, cacheline_bytes);
+               }
+               else
+                  assert(false && "cx exists only under COW allocators");
+               return;
+            }
             case K::null:
                return;
          }
@@ -3755,6 +4141,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
             case K::c4:
             case K::c8:
             case K::node_full:
+            case K::full_x:
+            case K::cx:
                return node_size(p.tag());
             case K::bucket:
                return sizeof(bucket);
@@ -3779,14 +4167,54 @@ namespace detail  // implementation types & node helpers — not part of the pub
                break;
             case K::setlist_u8:
             case K::setlist_u16:
-            case K::c2:
-            case K::c4:
-            case K::c8:
-            case K::node_full:
             {
                router_hdr* rh = static_cast<router_hdr*>(deref_(p));
                cow_release(rh->term);
                router_for_each(p, [&](unsigned, Ptr c) { cow_release(c); });
+               break;
+            }
+            // Implicit multi-line routers release their LINES, not the children
+            // inside them (design5: ownership of branches rides the line, which
+            // a demoted explicit node may share). A line that dies releases its
+            // own children; a shared line survives with its children intact.
+            case K::c2:
+            case K::c4:
+            case K::c8:
+            {
+               router_hdr* rh = static_cast<router_hdr*>(deref_(p));
+               cow_release(rh->term);
+               const unsigned lg = k == K::c2 ? 1 : k == K::c4 ? 2 : 3;
+               const uint32_t base_line = line_of(p) + 1;
+               for (unsigned sg = 0; sg < (1u << lg); ++sg)
+                  cx_release_line_(Ptr::from_off(size_t(base_line + sg) << 7, K::node_full),
+                                   lg);
+               // tail lines freed via their own refcounts — only CL0 remains
+               return;
+            }
+            case K::node_full:
+            {
+               router_hdr* rh = static_cast<router_hdr*>(deref_(p));
+               cow_release(rh->term);
+               const uint32_t base_line = line_of(p) + 1;
+               for (unsigned li = 0; li < full_lines_v<Ptr>; ++li)
+                  fx_release_line_(
+                      Ptr::from_off(size_t(base_line + li) << 7, K::node_full));
+               return;
+            }
+            case K::full_x:
+            {
+               node_fullx* x = static_cast<node_fullx*>(deref_(p));
+               cow_release(x->rh.term);
+               for (unsigned li = 0; li < full_lines_v<Ptr>; ++li)
+                  fx_release_line_(x->lines[li]);
+               break;
+            }
+            case K::cx:
+            {
+               node_cx* x = static_cast<node_cx*>(deref_(p));
+               cow_release(x->rh.term);
+               for (unsigned sg = 0; sg < (1u << x->lg); ++sg)
+                  cx_release_line_(x->seglines[sg], x->lg);
                break;
             }
             case K::value_inline:
@@ -3796,6 +4224,106 @@ namespace detail  // implementation types & node helpers — not part of the pub
          const uint32_t nl = uint32_t((bytes + 127) / 128);
          if (nl > 1)  // the head line is freed by the release that ran this hook
             alloc_.hkv_free_run(line_of(p) + 1, nl - 1);
+      }
+
+      // Release one reference to a shareable direct line of a full_x; when the
+      // line dies, the <=31 children packed inside it are released first.
+      void fx_release_line_(Ptr lp) noexcept
+      {
+         alloc_.hkv_release(line_of(lp),
+                            [&](uint32_t)
+                            {
+                               auto* L = static_cast<cline_direct_t<Ptr>*>(deref_(lp));
+                               for (unsigned sl = 0; sl < full_per_line_v<Ptr>; ++sl)
+                                  if (!L->ptr[sl].is_null())
+                                     cow_release(L->ptr[sl]);
+                            });
+      }
+      // Same for a cx segment line: a dying line releases the rank-dense
+      // branches recorded by its presence bitmap.
+      void cx_release_line_(Ptr lp, unsigned lg) noexcept
+      {
+         alloc_.hkv_release(line_of(lp),
+                            [&](uint32_t)
+                            {
+                               uint8_t*  m   = static_cast<uint8_t*>(deref_(lp));
+                               Ptr*      br  = cx_branches<Ptr>(m, lg);
+                               const int cnt = bm_count(m, int(cx_maskb(lg)));
+                               for (int i = 0; i < cnt; ++i)
+                                  cow_release(br[i]);
+                            });
+      }
+      void cx_own_line_(Ptr* slot, unsigned lg)
+      {
+         if (alloc_.hkv_retain(line_of(*slot)))
+            return;
+         *slot = cx_clone_line_(*slot, lg);
+      }
+      Ptr cx_clone_line_(Ptr lp, unsigned lg)
+      {
+         void* dst = node_alloc_(cacheline_bytes);
+         std::memcpy(dst, deref_(lp), cacheline_bytes);
+         uint8_t*  m   = static_cast<uint8_t*>(dst);
+         Ptr*      br  = cx_branches<Ptr>(m, lg);
+         const int cnt = bm_count(m, int(cx_maskb(lg)));
+         for (int i = 0; i < cnt; ++i)
+            cow_fix_child_(&br[i]);
+         return pack_(dst, K::node_full /*tag unused on seg lines*/);
+      }
+      // Re-promote an explicit cx to the implicit cnode<N> it came from (used
+      // when a segment line overflows: the implicit form re-materializes
+      // forward and the normal widen ladder continues from there).
+      Ptr cx_promote_(Ptr cur)
+      {
+         node_cx*       x  = static_cast<node_cx*>(deref_(cur));
+         const unsigned lg = x->lg;
+         Ptr            np;
+         auto           build = [&](auto* tag_null, auto nseg_c) -> Ptr
+         {
+            using CN = std::remove_pointer_t<decltype(tag_null)>;
+            CN* c    = static_cast<CN*>(node_alloc_(sizeof(CN)));
+            cnode_init(c);
+            c->rh = x->rh;
+            for (unsigned sg = 0; sg < nseg_c; ++sg)
+               std::memcpy(&c->segs[sg], deref_(x->seglines[sg]), cacheline_bytes);
+            // the copy shares no lines: re-own every branch
+            for (unsigned sg = 0; sg < nseg_c; ++sg)
+            {
+               auto*     seg = &c->segs[sg];
+               const int cnt = bm_count(seg->present, CN::MASKB);
+               for (int i = 0; i < cnt; ++i)
+                  cow_fix_child_(&seg->branch[i]);
+            }
+            cow_fix_child_(&c->rh.term);
+            return pack_(c, lg == 1 ? K::c2 : lg == 2 ? K::c4 : K::c8);
+         };
+         if (lg == 1)
+            np = build(static_cast<cnode<2>*>(nullptr), 2u);
+         else if (lg == 2)
+            np = build(static_cast<cnode<4>*>(nullptr), 4u);
+         else
+            np = build(static_cast<cnode<8>*>(nullptr), 8u);
+         cow_release(cur);  // the slot's reference to the cx
+         return np;
+      }
+
+      // Retain a direct line for a new owner; at the writer band, clone the
+      // 128B line forward instead (its <=31 children get retained).
+      void fx_own_line_(Ptr* slot)
+      {
+         if (alloc_.hkv_retain(line_of(*slot)))
+            return;
+         *slot = fx_clone_line_(*slot);
+      }
+      Ptr fx_clone_line_(Ptr lp)
+      {
+         void* dst = node_alloc_(sizeof(cline_direct_t<Ptr>));
+         std::memcpy(dst, deref_(lp), sizeof(cline_direct_t<Ptr>));
+         auto* L = static_cast<cline_direct_t<Ptr>*>(dst);
+         for (unsigned sl = 0; sl < full_per_line_v<Ptr>; ++sl)
+            if (!L->ptr[sl].is_null())
+               cow_fix_child_(&L->ptr[sl]);
+         return pack_(dst, K::node_full /*tag unused on direct lines*/);
       }
 
       // Re-own every child slot of a freshly memcpy'd clone: retain, or — at
@@ -3811,7 +4339,46 @@ namespace detail  // implementation types & node helpers — not part of the pub
 
       Ptr cow_clone_node_(Ptr cur)
       {
-         const K      k     = cur.tag();
+         const K k = cur.tag();
+         if (k == K::c2 || k == K::c4 || k == K::c8)
+         {
+            // design5 demotion for the segmented routers: 128B CL0 + NSEG line
+            // retains; the per-segment branches stay where they are.
+            auto* x = static_cast<node_cx*>(node_alloc_(cacheline_bytes));
+            auto* rh = static_cast<router_hdr*>(deref_(cur));
+            x->rh    = *rh;
+            x->lg    = k == K::c2 ? 1 : k == K::c4 ? 2 : 3;
+            x->pad0  = 0;
+            cow_fix_child_(&x->rh.term);
+            const uint32_t base_line = line_of(cur) + 1;  // segs follow CL0
+            for (unsigned sg = 0; sg < (1u << x->lg); ++sg)
+            {
+               x->seglines[sg] =
+                   Ptr::from_off(size_t(base_line + sg) << 7, K::node_full);
+               cx_own_line_(&x->seglines[sg], x->lg);
+            }
+            return pack_(x, K::cx);
+         }
+         if (k == K::node_full)
+         {
+            // design5 demotion (SPEC §2.7/§9): implicit -> explicit. One 128B
+            // CL0 + retains on the 9 direct LINES; the ~256 children are
+            // untouched — their references ride the shared lines.
+            static_assert(sizeof(node_fullx) <= cacheline_bytes,
+                          "full_x CL0 must tile one line at this handle width");
+            auto* x = static_cast<node_fullx*>(node_alloc_(cacheline_bytes));
+            auto* f = static_cast<node_full*>(deref_(cur));
+            x->rh   = f->rh;
+            cow_fix_child_(&x->rh.term);
+            const uint32_t base_line = line_of(cur) + 1;  // direct lines follow CL0
+            for (unsigned li = 0; li < full_lines_v<Ptr>; ++li)
+            {
+               x->lines[li] =
+                   Ptr::from_off(size_t(base_line + li) << 7, K::node_full);
+               fx_own_line_(&x->lines[li]);
+            }
+            return pack_(x, K::full_x);
+         }
          const size_t bytes = cow_node_bytes_(cur);
          void*        dst   = node_alloc_(bytes);
          std::memcpy(dst, deref_(cur), bytes);
@@ -3868,15 +4435,22 @@ namespace detail  // implementation types & node helpers — not part of the pub
                break;
             }
             case K::node_full:
+               assert(false && "node_full demotes in cow_clone_node_, not here");
+               break;
+            case K::full_x:
             {
-               char* f = static_cast<char*>(dst);
-               cow_fix_child_(&reinterpret_cast<router_hdr*>(f)->term);
-               for (unsigned b = 0; b < 256; ++b)
-               {
-                  Ptr* cs = reinterpret_cast<Ptr*>(f + full_offtab_v<Ptr>[b]);
-                  if (!cs->is_null())
-                     cow_fix_child_(cs);
-               }
+               node_fullx* x = static_cast<node_fullx*>(dst);
+               cow_fix_child_(&x->rh.term);
+               for (unsigned li = 0; li < full_lines_v<Ptr>; ++li)
+                  fx_own_line_(&x->lines[li]);
+               break;
+            }
+            case K::cx:
+            {
+               node_cx* x = static_cast<node_cx*>(dst);
+               cow_fix_child_(&x->rh.term);
+               for (unsigned sg = 0; sg < (1u << x->lg); ++sg)
+                  cx_own_line_(&x->seglines[sg], x->lg);
                break;
             }
             case K::value_inline:
@@ -4011,6 +4585,54 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   Ptr* cs = router_find_slot(cur, uint8_t(key[depth]));
                   if (!cs)
                      return;
+                  slot = cs;
+                  ++depth;
+                  break;
+               }
+               case K::full_x:
+               {
+                  node_fullx* x = static_cast<node_fullx*>(deref_(cur));
+                  if (depth == key.size())
+                  {
+                     cow_privatize_term_(&x->rh);
+                     return;
+                  }
+                  unsigned li, sl;
+                  full_index<Ptr>(uint8_t(key[depth]), li, sl);
+                  // The descent (or its writeback) mutates this direct line:
+                  // it must be exclusively owned too (per-line COW).
+                  if (alloc_.hkv_ref(line_of(x->lines[li])) >= 2)
+                  {
+                     const Ptr old = x->lines[li];
+                     x->lines[li]  = fx_clone_line_(old);
+                     fx_release_line_(old);  // the CL0 slot's former reference
+                  }
+                  packed_ptr* cs = &fx_line_(x, li)->ptr[sl];
+                  if (cs->is_null())
+                     return;  // insert adds in this (now private) line
+                  slot = cs;
+                  ++depth;
+                  break;
+               }
+               case K::cx:
+               {
+                  node_cx* x = static_cast<node_cx*>(deref_(cur));
+                  if (depth == key.size())
+                  {
+                     cow_privatize_term_(&x->rh);
+                     return;
+                  }
+                  const uint8_t  byte = uint8_t(key[depth]);
+                  const unsigned sg   = byte >> (8 - x->lg);
+                  if (alloc_.hkv_ref(line_of(x->seglines[sg])) >= 2)
+                  {
+                     const Ptr old   = x->seglines[sg];
+                     x->seglines[sg] = cx_clone_line_(old, x->lg);
+                     cx_release_line_(old, x->lg);
+                  }
+                  packed_ptr* cs = router_find_slot(x, byte);
+                  if (!cs)
+                     return;  // insert adds in this (now private) line
                   slot = cs;
                   ++depth;
                   break;

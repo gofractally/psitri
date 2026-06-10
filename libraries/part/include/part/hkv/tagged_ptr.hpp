@@ -29,17 +29,24 @@ namespace hkv::detail
       c8           = 7,  // 8x32  segmented bitset router (skip CL0, rank)
       setlist_u16  = 8,  // wide sparse router: 2-byte stems, 1 cacheline (R1)
       bucket       = 9,  // sorted (suffix,value) collector — the "last mile" terminal
+      cx           = 11, // EXPLICIT segmented router (part COW demotion of c2/c4/c8):
+                         // CL0 carries per-segment line pointers; segment lines
+                         // are individually refcounted and shareable
+      full_x       = 10, // EXPLICIT full router (part COW demotion of node_full):
+                         // CL0 holds per-line pointers to individually-refcounted
+                         // direct lines — COW of one branch shares the other lines
+                         // instead of copying them (design5 implicit-to-explicit)
       null         = 0xF,
    };
    // 4-bit tag contract: null is the all-ones nibble (an all-0xFF handle reads as null),
    // real kinds stay <= 0xE. An indexed handle has no spare bits — don't grow past this.
-   static_assert(unsigned(K::bucket) <= 0xE && unsigned(K::null) == 0xF, "tags fit 4 bits");
+   static_assert(unsigned(K::cx) <= 0xE && unsigned(K::null) == 0xF, "tags fit 4 bits");
    // Highest real tag. Bump this FIRST when adding a kind: the read descent hoists a
    // `tag > K_max → miss` guard ahead of its exhaustive switch (keeps the jump table
    // dense and rejects corrupt tags), so a kind above K_max would silently miss.
    // NOTE: tag values are free to renumber only until a persisted (WAL/disk) format
    // exists; after that they are frozen.
-   inline constexpr unsigned K_max = unsigned(K::bucket);
+   inline constexpr unsigned K_max = unsigned(K::cx);
 
    constexpr bool is_terminal(K k) noexcept { return k == K::value_ptr || k == K::value_inline; }
    static_assert(uint8_t(K::setlist_u16) == uint8_t(K::c8) + 1,

@@ -798,15 +798,20 @@ namespace part
          return g;
       }
       // Window fast path: zero shared-memory traffic. A free announced below
-      // the window's next handout (or below the cursor) flushes back to the
-      // exact first-fit slow path.
+      // the window's next handout flushes back to the exact first-fit slow
+      // path — UNLESS it is below the txn floor: those holes are unreachable
+      // until segment recycle (two-state page model) and must not defeat the
+      // window. Old-generation cascades from snapshot releases land there.
       if (_wmask && _wseg == _segment)
       {
          seg_freeset&   fs = _a->freeset_(_segment);
          const uint32_t lw = fs.low_water.load(std::memory_order_relaxed);
+         const line_idx seg_base = line_idx(_segment) * lines_per_segment;
+         const uint32_t floor_local =
+             _floor > seg_base ? uint32_t(_floor - seg_base) : 0u;
          const uint32_t next_local =
              uint32_t(_wbase % lines_per_segment) + uint32_t(std::countr_zero(_wmask));
-         if (lw >= next_local)
+         if (lw >= next_local || lw < floor_local)
          {
             const line_idx g = take_from_window_(n);
             if (g != null_idx)
@@ -851,8 +856,10 @@ namespace part
          const uint32_t local      = fs.alloc(n, local_from);
          if (local != UINT32_MAX)
          {
-            if (lw != UINT32_MAX && local > lw)
-            {  // didn't consume the announced hole — put the mark back
+            // Put the mark back only when the hole is reachable this txn
+            // (>= floor); below-floor marks are noise until segment recycle.
+            if (lw != UINT32_MAX && lw >= local_floor && local > lw)
+            {
                auto cur = fs.low_water.load(std::memory_order_relaxed);
                while (lw < cur && !fs.low_water.compare_exchange_weak(
                                       cur, lw, std::memory_order_relaxed))

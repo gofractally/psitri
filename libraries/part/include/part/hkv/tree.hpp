@@ -3655,6 +3655,374 @@ namespace detail  // implementation types & node helpers — not part of the pub
          void release() noexcept { armed = false; }
       };
 
+      // ════ part COW extension (part's copy only — not upstream hkv) ═══════════
+      // Strategy: privatize-then-mutate. cow_insert/cow_remove first clone every
+      // node on the key's path whose head-line refcount is >= 2 (top-down;
+      // cloning retains the clone's children, so sharedness propagates downward
+      // automatically), then run the UNCHANGED in-place mutation on what is now
+      // an exclusively-owned path. Old versions drain through cow_release
+      // cascades when snapshots/root slots drop their references. Enabled when
+      // the Allocator exposes per-line refcount hooks (part_alloc):
+      //   hkv_ref / hkv_retain / hkv_release(line, destroy) / hkv_free_run.
+     private:
+      template <class A, class = void>
+      struct cow_cap_ : std::false_type
+      {
+      };
+      template <class A>
+      struct cow_cap_<A, std::void_t<decltype(A::hkv_cow)>> : std::true_type
+      {
+      };
+
+     public:
+      static constexpr bool cow_enabled = cow_cap_<Allocator>::value && indexed;
+
+      Ptr    root_handle() const noexcept { return root_; }
+      size_t size_hint() const noexcept { return count_; }
+      // Non-owning view management (snapshot cursors): adopt a pinned root and
+      // null it back out before destruction so the dtor frees nothing.
+      void adopt_root(Ptr p, size_t n = 0) noexcept
+      {
+         root_  = p;
+         count_ = n;
+      }
+      uint32_t line_of(Ptr p) const noexcept { return uint32_t(p.raw() >> 4); }
+
+      // +1 on a subtree root (root-slot / snapshot bookkeeping). False would
+      // mean 190 state refs on one node — unreachable under sane root usage.
+      bool cow_retain(Ptr p)
+      {
+         if constexpr (cow_enabled)
+         {
+            if (p.is_null() || p.tag() == K::value_inline)
+               return true;
+            return alloc_.hkv_retain(line_of(p));
+         }
+         else
+            return true;
+      }
+
+      // Drop one reference to the subtree at p; on death free the node and
+      // cascade into its children.
+      void cow_release(Ptr p) noexcept
+      {
+         if constexpr (cow_enabled)
+         {
+            if (p.is_null() || p.tag() == K::value_inline)
+               return;
+            alloc_.hkv_release(line_of(p), [&](uint32_t) { cow_destroy_dead_(p); });
+         }
+      }
+
+      template <class V>
+      bool cow_insert(key_param k, V&& v)
+      {
+         static_assert(cow_enabled, "allocator has no refcount hooks");
+         static_assert(std::is_trivially_copyable_v<T>, "COW memcpy-clones leaf values");
+         {
+            scratch_t ks;
+            cow_privatize_(enc_(k, ks));
+         }
+         T tmp(std::forward<V>(v));
+         return insert_<true>(k, std::move(tmp));
+      }
+      // NOTE: remove()'s fusion paths free child nodes unconditionally; callers
+      // must not hold snapshots across cow_remove. Fusion-under-sharing is
+      // future work; the bank workload never removes.
+      bool cow_remove(key_param k)
+      {
+         static_assert(cow_enabled, "allocator has no refcount hooks");
+         {
+            scratch_t ks;
+            cow_privatize_(enc_(k, ks));
+         }
+         return remove(k);
+      }
+
+     private:
+      size_t cow_node_bytes_(Ptr p) const noexcept
+      {
+         char* n = static_cast<char*>(deref_(p));
+         switch (p.tag())
+         {
+            case K::value_ptr:
+               return leaf_alloc_size(n);
+            case K::prefix_node:
+               return pn_size<Ptr>(pn_plen(n));
+            case K::setlist_u8:
+            case K::setlist_u16:
+            case K::c2:
+            case K::c4:
+            case K::c8:
+            case K::node_full:
+               return node_size(p.tag());
+            case K::bucket:
+               return sizeof(bucket);
+            case K::value_inline:
+            case K::null:
+               return 0;
+         }
+         return 0;
+      }
+
+      void cow_destroy_dead_(Ptr p) noexcept
+      {
+         const K      k     = p.tag();
+         const size_t bytes = cow_node_bytes_(p);
+         switch (k)
+         {
+            case K::value_ptr:
+            case K::bucket:  // POD payloads (asserted in cow_insert): no dtors
+               break;
+            case K::prefix_node:
+               cow_release(pn_next<Ptr>(static_cast<char*>(deref_(p))));
+               break;
+            case K::setlist_u8:
+            case K::setlist_u16:
+            case K::c2:
+            case K::c4:
+            case K::c8:
+            case K::node_full:
+            {
+               router_hdr* rh = static_cast<router_hdr*>(deref_(p));
+               cow_release(rh->term);
+               router_for_each(p, [&](unsigned, Ptr c) { cow_release(c); });
+               break;
+            }
+            case K::value_inline:
+            case K::null:
+               return;
+         }
+         const uint32_t nl = uint32_t((bytes + 127) / 128);
+         if (nl > 1)  // the head line is freed by the release that ran this hook
+            alloc_.hkv_free_run(line_of(p) + 1, nl - 1);
+      }
+
+      // Re-own every child slot of a freshly memcpy'd clone: retain, or — at
+      // the writer-clone band (SPEC §9) — clone the child forward instead.
+      void cow_fix_child_(Ptr* cs)
+      {
+         const Ptr c = *cs;
+         if (c.is_null() || c.tag() == K::value_inline)
+            return;
+         if (!alloc_.hkv_retain(line_of(c)))
+            *cs = cow_clone_node_(c);
+      }
+
+      Ptr cow_clone_node_(Ptr cur)
+      {
+         const K      k     = cur.tag();
+         const size_t bytes = cow_node_bytes_(cur);
+         void*        dst   = node_alloc_(bytes);
+         std::memcpy(dst, deref_(cur), bytes);
+         const Ptr np = pack_(dst, k);
+         switch (k)
+         {
+            case K::value_ptr:
+            case K::bucket:
+               break;
+            case K::prefix_node:
+               cow_fix_child_(reinterpret_cast<Ptr*>(static_cast<char*>(dst) + 2));
+               break;
+            case K::setlist_u8:
+            {
+               setlist* s = static_cast<setlist*>(dst);
+               cow_fix_child_(&s->rh.term);
+               for (int i = 0; i < s->rh.hdr.nbranch; ++i)
+                  cow_fix_child_(&s->branch[i]);
+               break;
+            }
+            case K::setlist_u16:
+            {
+               setlist16* s = static_cast<setlist16*>(dst);
+               cow_fix_child_(&s->rh.term);
+               for (int i = 0; i < s->rh.hdr.nbranch; ++i)
+                  cow_fix_child_(&s->branch[i]);
+               break;
+            }
+            case K::c2:
+            {
+               auto* cn = static_cast<cnode<2>*>(dst);
+               cow_fix_child_(&cn->rh.term);
+               for (int sg = 0; sg < 2; ++sg)
+                  for (int i = 0, n = bm_count(cn->segs[sg].present, cnode<2>::MASKB); i < n; ++i)
+                     cow_fix_child_(&cn->segs[sg].branch[i]);
+               break;
+            }
+            case K::c4:
+            {
+               auto* cn = static_cast<cnode<4>*>(dst);
+               cow_fix_child_(&cn->rh.term);
+               for (int sg = 0; sg < 4; ++sg)
+                  for (int i = 0, n = bm_count(cn->segs[sg].present, cnode<4>::MASKB); i < n; ++i)
+                     cow_fix_child_(&cn->segs[sg].branch[i]);
+               break;
+            }
+            case K::c8:
+            {
+               auto* cn = static_cast<cnode<8>*>(dst);
+               cow_fix_child_(&cn->rh.term);
+               for (int sg = 0; sg < 8; ++sg)
+                  for (int i = 0, n = bm_count(cn->segs[sg].present, cnode<8>::MASKB); i < n; ++i)
+                     cow_fix_child_(&cn->segs[sg].branch[i]);
+               break;
+            }
+            case K::node_full:
+            {
+               char* f = static_cast<char*>(dst);
+               cow_fix_child_(&reinterpret_cast<router_hdr*>(f)->term);
+               for (unsigned b = 0; b < 256; ++b)
+               {
+                  Ptr* cs = reinterpret_cast<Ptr*>(f + full_offtab_v<Ptr>[b]);
+                  if (!cs->is_null())
+                     cow_fix_child_(cs);
+               }
+               break;
+            }
+            case K::value_inline:
+            case K::null:
+               break;
+         }
+         return np;
+      }
+
+      Ptr cow_clone_into_(Ptr* slot, Ptr cur)
+      {
+         const Ptr np = cow_clone_node_(cur);
+         *slot        = np;
+         cow_release(cur);  // the slot's former reference (handles a racing death)
+         return np;
+      }
+
+      bool cow_shared_(Ptr p) const noexcept
+      {
+         return alloc_.hkv_ref(line_of(p)) >= 2;
+      }
+
+      // Privatize the terminal leaf hanging off a router header (in-place value
+      // overwrite mutates it).
+      void cow_privatize_term_(router_hdr* rh)
+      {
+         const Ptr t = rh->term;
+         if (!t.is_null() && t.tag() == K::value_ptr && cow_shared_(t))
+            cow_clone_into_(&rh->term, t);
+      }
+
+      // Walk the key's path, cloning every shared node top-down. Stops where the
+      // descent stops: everything an in-place insert/remove can touch — path
+      // routers, the diverging prefix node, the terminal leaf/bucket, the router
+      // whose term gets overwritten — is exclusively owned afterwards.
+      void cow_privatize_(std::string_view key)
+      {
+         if (root_.is_null())
+            return;
+         Ptr*   slot  = &root_;
+         size_t depth = 0;
+         for (;;)
+         {
+            Ptr cur = *slot;
+            if (cur.is_null() || cur.tag() == K::value_inline)
+               return;
+            if (cow_shared_(cur))
+               cur = cow_clone_into_(slot, cur);
+            const K k = cur.tag();
+            switch (k)
+            {
+               case K::value_ptr:
+               case K::bucket:
+                  return;  // terminal reached and private
+               case K::prefix_node:
+               {
+                  char*            P = static_cast<char*>(deref_(cur));
+                  std::string_view PP(reinterpret_cast<const char*>(pn_pfx<Ptr>(P)), pn_plen(P));
+                  const size_t     c = lcp(PP, key.substr(depth));
+                  if (c < PP.size())
+                     return;  // insert splits THIS node (already private)
+                  slot = reinterpret_cast<Ptr*>(P + 2);
+                  depth += PP.size();
+                  break;
+               }
+               case K::setlist_u8:
+               {
+                  setlist*       s  = static_cast<setlist*>(deref_(cur));
+                  const unsigned pl = s->rh.hdr.prefix_len;
+                  if (pl)
+                  {
+                     const size_t c =
+                         lcp(std::string_view(reinterpret_cast<char*>(s->prefix), pl),
+                             key.substr(depth));
+                     if (c < pl)
+                        return;  // prefix split happens in this (private) node
+                     depth += pl;
+                  }
+                  if (depth == key.size())
+                  {
+                     cow_privatize_term_(&s->rh);
+                     return;
+                  }
+                  const int i = setlist_index(s, uint8_t(key[depth]));
+                  if (i < 0)
+                     return;  // insert adds a branch here
+                  slot = &s->branch[i];
+                  ++depth;
+                  break;
+               }
+               case K::setlist_u16:
+               {
+                  setlist16* s = static_cast<setlist16*>(deref_(cur));
+                  if (key.size() - depth < 2)
+                  {
+                     if (depth == key.size())
+                        cow_privatize_term_(&s->rh);
+                     return;  // term update or restride — both on this private node
+                  }
+                  Ptr* cs = sl16_find_slot(s, two_stem(key, depth));
+                  if (!cs)
+                     return;
+                  slot = cs;
+                  depth += 2;
+                  break;
+               }
+               case K::node_full:
+               {
+                  char* f = static_cast<char*>(deref_(cur));
+                  if (depth == key.size())
+                  {
+                     cow_privatize_term_(reinterpret_cast<router_hdr*>(f));
+                     return;
+                  }
+                  Ptr* cs =
+                      reinterpret_cast<Ptr*>(f + full_offtab_v<Ptr>[uint8_t(key[depth])]);
+                  if (cs->is_null())
+                     return;
+                  slot = cs;
+                  ++depth;
+                  break;
+               }
+               case K::c2:
+               case K::c4:
+               case K::c8:
+               {
+                  if (depth == key.size())
+                  {
+                     cow_privatize_term_(static_cast<router_hdr*>(deref_(cur)));
+                     return;
+                  }
+                  Ptr* cs = router_find_slot(cur, uint8_t(key[depth]));
+                  if (!cs)
+                     return;
+                  slot = cs;
+                  ++depth;
+                  break;
+               }
+               case K::value_inline:
+               case K::null:
+                  return;
+            }
+         }
+      }
+
+     private:
       [[no_unique_address]] Allocator alloc_{};  // element (T) allocator; rebound per-node for bytes
       [[no_unique_address]] std::conditional_t<indexed, const std::byte*, no_base_t> base_{};
       packed_ptr                      root_  = packed_ptr::null();

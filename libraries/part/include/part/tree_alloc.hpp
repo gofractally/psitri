@@ -94,5 +94,16 @@ namespace part
       {
          return ses == o.ses;
       }
+
+      // ── COW refcount hooks (consumed by the tree's part-COW extension) ─────
+      static constexpr bool hkv_cow = true;
+      uint8_t hkv_ref(uint32_t line) const noexcept { return ses->store().ref(line); }
+      bool    hkv_retain(uint32_t line) noexcept { return ses->store().retain(line); }
+      template <class D>
+      bool hkv_release(uint32_t line, D&& d) noexcept(noexcept(d(line)))
+      {
+         return ses->store().release(line, static_cast<D&&>(d));
+      }
+      void hkv_free_run(uint32_t line, uint32_t n) noexcept { ses->release_run(line, n); }
    };
 }  // namespace part

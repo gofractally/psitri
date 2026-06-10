@@ -99,6 +99,7 @@ struct BankConfig
    uint64_t    batch_size       = 1;
    uint64_t    sync_every       = 0;  // sync every N commits (0 = never)
    uint64_t    reads_per_tx     = 100; // point reads per reader "transaction"
+   uint64_t    num_readers      = 1;   // concurrent reader threads
    std::string read_mode        = "latest"; // buffered, latest, or direct
    std::string key_mode         = "names";  // names | xxh64 (keys = 8-byte XXH3-64 of the name)
 };
@@ -705,8 +706,8 @@ class HeartEngine : public BankEngine
 
    // Reader thread state — its own read_session (created ON the reader thread; one SAL
    // session per thread), handing out per-batch snapshot cursors.
-   std::shared_ptr<heart::radix::read_session> _reader_rs;
-   std::optional<heart::radix::cursor>         _reader_cur;
+   static inline thread_local std::shared_ptr<heart::radix::read_session> _reader_rs;
+   static inline thread_local std::optional<heart::radix::cursor>          _reader_cur;
 
    void reader_thread_init() override { _reader_rs = _db->start_read_session(); }
 
@@ -841,9 +842,9 @@ class PartEngine : public BankEngine
    }
 
    // Reader thread state — one part read-session slot per thread; one pinned
-   // snapshot cursor per batch.
-   std::shared_ptr<part::kv::read_session> _reader_rs;
-   std::optional<part::kv::cursor>         _reader_cur;
+   // snapshot cursor per batch. thread_local: N reader threads fan out.
+   static inline thread_local std::shared_ptr<part::kv::read_session> _reader_rs;
+   static inline thread_local std::optional<part::kv::cursor>         _reader_cur;
 
    void reader_thread_init() override { _reader_rs = _db->start_read_session(); }
 
@@ -1982,6 +1983,8 @@ int main(int argc, char** argv)
        "Sync to disk every N batch commits (0 = no periodic sync)");
    opt("reads-per-tx", po::value(&cfg.reads_per_tx)->default_value(100),
        "Point reads per reader thread read-transaction batch");
+   opt("num-readers", po::value(&cfg.num_readers)->default_value(1),
+       "Concurrent reader threads during the Write+Read / Reader phases");
    opt("read-mode", po::value(&cfg.read_mode)->default_value("latest"),
        "Read mode: buffered (RO+Tri), latest (RW+RO+Tri), trie (Tri only)");
    opt("key-mode", po::value(&cfg.key_mode)->default_value("names"),
@@ -2104,37 +2107,38 @@ int main(int argc, char** argv)
       std::atomic<uint64_t> reader_found{0};
       Clock::time_point  reader_start, reader_end;
 
-      // Launch reader thread if requested
-      std::thread reader_thread;
+      // Launch reader thread(s) if requested (engine reader state is
+      // thread_local in the adapters that support fan-out: part, heart)
+      std::vector<std::thread> reader_threads;
       if (with_reader)
       {
-         reader_thread = std::thread(
-             [&]()
-             {
-                engine->reader_thread_init();
-                std::mt19937_64 read_rng(seed + 999);
-                reader_start = Clock::now();
-                uint64_t local_count = 0;
-                uint64_t local_found = 0;
-                while (!stop_reader.load(std::memory_order_relaxed) && !bench::interrupted())
+         reader_start = Clock::now();
+         for (uint64_t t = 0; t < cfg.num_readers; ++t)
+            reader_threads.emplace_back(
+                [&, t]()
                 {
-                   // Each "read transaction" does N point lookups under one snapshot
-                   engine->reader_batch_begin();
-                   for (uint64_t r = 0; r < cfg.reads_per_tx; ++r)
+                   engine->reader_thread_init();
+                   std::mt19937_64 read_rng(seed + 999 + t * 7919);
+                   uint64_t local_count = 0;
+                   uint64_t local_found = 0;
+                   while (!stop_reader.load(std::memory_order_relaxed) && !bench::interrupted())
                    {
-                      uint64_t idx = pick_account(read_rng, cfg.num_accounts);
-                      uint64_t bal;
-                      if (engine->read_account(accounts[idx], bal))
-                         ++local_found;
-                      ++local_count;
+                      // Each "read transaction" does N point lookups under one snapshot
+                      engine->reader_batch_begin();
+                      for (uint64_t r = 0; r < cfg.reads_per_tx; ++r)
+                      {
+                         uint64_t idx = pick_account(read_rng, cfg.num_accounts);
+                         uint64_t bal;
+                         if (engine->read_account(accounts[idx], bal))
+                            ++local_found;
+                         ++local_count;
+                      }
+                      engine->reader_batch_end();
                    }
-                   engine->reader_batch_end();
-                }
-                reader_count.store(local_count, std::memory_order_relaxed);
-                reader_found.store(local_found, std::memory_order_relaxed);
-                reader_end = Clock::now();
-                engine->reader_thread_teardown();
-             });
+                   reader_count.fetch_add(local_count, std::memory_order_relaxed);
+                   reader_found.fetch_add(local_found, std::memory_order_relaxed);
+                   engine->reader_thread_teardown();
+                });
       }
 
       auto p_start = Clock::now();
@@ -2183,10 +2187,13 @@ int main(int argc, char** argv)
       if (batch_counter > 0)
          engine->commit_batch();
 
-      // Stop reader
+      // Stop readers
       stop_reader.store(true, std::memory_order_relaxed);
-      if (reader_thread.joinable())
-         reader_thread.join();
+      for (auto& rt : reader_threads)
+         if (rt.joinable())
+            rt.join();
+      if (with_reader)
+         reader_end = Clock::now();
 
       auto p_secs = elapsed_sec(p_start);
       double reader_secs = with_reader

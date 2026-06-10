@@ -278,6 +278,10 @@ add_subdirectory(libraries/art)
 # heart: alternative radix-tree engine (depends only on sal + ucc, not psitri)
 add_subdirectory(libraries/heart)
 
+# part: persistent ART — non-relocating line allocator + headerless-dispatch
+# tree (depends only on sal + ucc, not psitri). See libraries/part/SPEC.md.
+add_subdirectory(libraries/part)
+
 # PsiTriLevelDB: LevelDB-compatible wrapper around psitri (Bitcoin Core target)
 # Always built — small, header-light, and the primary external integration target.
 add_subdirectory(libraries/psitrileveldb)

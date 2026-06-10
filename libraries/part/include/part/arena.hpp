@@ -291,7 +291,9 @@ namespace part
          auto& r   = _ref_base[i];
          auto  cur = r.load(std::memory_order_relaxed);
          if (long(i) == trace_line_())
-            fprintf(stderr, "TRACE line %u retain from=%u\n", i, cur);
+            fprintf(stderr, "TRACE line %u retain from=%u ra0=%p ra1=%p ra2=%p\n", i, cur,
+                    __builtin_return_address(0), __builtin_return_address(1),
+                    __builtin_return_address(2));
          while (cur < writer_clone_at)
             if (r.compare_exchange_weak(cur, uint8_t(cur + 1), std::memory_order_relaxed))
                return true;

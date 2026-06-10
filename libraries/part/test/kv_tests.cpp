@@ -129,7 +129,13 @@ TEST_CASE("kv battery: batched commits, updates, removes vs oracle")
       {
          REQUIRE(oit != oracle.end());
          REQUIRE(std::string(c.key()) == oit->first);
-         REQUIRE(*c.value<std::string>() == oit->second);
+         {
+            auto got = *c.value<std::string>();
+            INFO("scan key='" << oit->first << "' klen=" << oit->first.size()
+                              << " got.len=" << got.size()
+                              << " want.len=" << oit->second.size());
+            REQUIRE(got == oit->second);
+         }
          c.next();
          ++oit;
       }

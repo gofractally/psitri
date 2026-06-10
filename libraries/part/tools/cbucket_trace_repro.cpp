@@ -4,6 +4,7 @@
 #include <filesystem>
 extern "C" __attribute__((noinline)) void wp_anchor(void* p){ asm volatile(""::"r"(p)); }
 int main(){
+  fprintf(stderr,"ANCHORADDR %p\n",(void*)&wp_anchor);
   auto dir = std::filesystem::temp_directory_path()/"cbw"; std::filesystem::remove_all(dir);
   auto db = part::kv::database::create(dir); auto ses = db->start_write_session();
   auto& a = db->store();
@@ -24,6 +25,9 @@ int main(){
     for(int i=0;i<1200;++i){ fprintf(stderr,"OP rm %d\n",i); tx.remove(keys[i]); }
     tx.commit(); }
   state("end",-1);
+  { auto c=ses->get_root(0).snapshot_cursor(); c.seek_begin();
+    while(!c.is_end()){ auto k=c.key(); printf("SURVIVOR len=%zu '",k.size());
+      for(char ch:k) printf("%c", (ch>=32&&ch<127)?ch:'.'); printf("'\n"); c.next(); } }
   for(uint32_t s2=0;s2<a.num_segments();++s2){ auto& fs=a.freeset_of(s2);
     for(uint32_t l=0;l<part::lines_per_segment;++l) if(!fs.is_free(l)){
       uint32_t g=s2*part::lines_per_segment+l; const uint8_t* p=(const uint8_t*)a.get(g);

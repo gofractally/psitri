@@ -841,7 +841,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
                         count_ += (r == 1);
                         return r == 1;
                      }
-                     *slot = cb_split_(cur);  // full: burst and retry
+                     // Full: burst and retry. The burst re-encodes the bucket's
+                     // prefix in a prefix_node wrapper, so the re-descent must
+                     // start BEFORE the prefix we just consumed — without the
+                     // rewind the key lands pl bytes off (find-unreachable).
+                     depth -= pl;
+                     *slot = cb_split_(cur);
                      continue;
                   }
                   else
@@ -1553,10 +1558,16 @@ namespace detail  // implementation types & node helpers — not part of the pub
          // Non-inline T: point at the real stored object (no copy → value() is a true
          // reference into the tree). Inline T: keep a local copy (no addressable object).
          std::conditional_t<inlineable, T, const T*> val_{};
-         bool                                        end_ = true;
+         // val_ points into the TREE (stable). Bucket-cell values are materialized
+         // into cvalbuf_ instead; a self-pointer would dangle under the defaulted
+         // copy/move, so a flag marks "value lives in cvalbuf_" and value() rebases
+         // off `this`.
+         bool                                        val_local_ = false;
+         bool                                        end_       = true;
 
          void set_ptr_(const T* p)
          {
+            val_local_ = false;
             if constexpr (inlineable)
                copy_value(val_, p);
             else
@@ -1604,9 +1615,10 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   return true;
                }
                case K::value_inline:
-                  sfx_      = nullptr;
-                  sfxlen_   = 0;
-                  full_str_ = nullptr;
+                  sfx_       = nullptr;
+                  sfxlen_    = 0;
+                  full_str_  = nullptr;
+                  val_local_ = false;
                   if constexpr (inlineable)
                      unpack_inline(child, val_);
                   if (maintain_) key_.len = base;
@@ -1712,9 +1724,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
                         sfx_      = reinterpret_cast<const uint8_t*>(c.p + 3);
                         sfxlen_   = c.p[0];
                         full_str_ = nullptr;
-                        T* cv     = reinterpret_cast<T*>(cvalbuf_);
-                        *cv       = T::from_bytes(c.value());  // trivially copyable by cb contract
-                        set_ptr_(cv);
+                        T* cv      = reinterpret_cast<T*>(cvalbuf_);
+                        *cv        = T::from_bytes(c.value());  // trivially copyable by cb contract
+                        val_local_ = true;
                         if (maintain_)
                         {
                            key_.len = f.cbase;
@@ -1970,7 +1982,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             if constexpr (inlineable)
                return val_;
             else
-               return *val_;
+               return val_local_ ? *reinterpret_cast<const T*>(cvalbuf_) : *val_;
          }
          // Adaptive key materialization. Until key() is first read, ++ does NO key work
          // (value-only iteration pays nothing). The first read replays the whole path,
@@ -2010,6 +2022,18 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   fr.cbase = uint32_t(key_.len);
                   if (fr.cur >= 1)
                   { const uint16_t st = s->stems[fr.cur - 1]; key_.push(uint8_t(st >> 8)); key_.push(uint8_t(st & 0xFF)); }
+               }
+               else if (k == K::cbucket)  // composed bucket: replay its prefix
+
+               {
+                  if constexpr (kv_tree::cb_enabled)
+                  {
+                     const auto* h =
+                         reinterpret_cast<const typename kv_tree::cb_hdr*>(t_->deref_(fr.node));
+                     if (h->rh.hdr.prefix_len)
+                        key_.append(h->prefix, h->rh.hdr.prefix_len);
+                  }
+                  fr.cbase = uint32_t(key_.len);
                }
                else  // bucket (no prefix/edge) or c2/c4/c8/node_full (edge only)
                {
@@ -4669,7 +4693,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
       };
 #ifndef PART_CBUCKET
-#define PART_CBUCKET 0  // composed bucket: unit-suite green; tree-level leak hunt in STATUS.md
+#define PART_CBUCKET 1  // composed bucket ON: unit suite + tree battery green
                         // WIP: 3 oracle-found bugs fixed (run-spanning lookup,
                         // recursive split, burst capacity); a duplicate-update
                         // edge remains — needs the BUCKET_SPEC TDD pass before
@@ -4677,6 +4701,24 @@ namespace detail  // implementation types & node helpers — not part of the pub
 #endif
       static constexpr bool cb_enabled = cow_enabled && cb_cap_<T>::value;
       static constexpr bool cb_create  = cb_enabled && (PART_CBUCKET != 0);
+
+      // Leaf for a bucket-relative SUFFIX: make_value_at would record the
+      // suffix as the leaf's zero-copy FULL key (the path prefix is not in
+      // scope here), so clear LEAF_FULL — layout is identical at plen==0 and
+      // the iterator reconstructs the key from the frame stack instead.
+      Ptr cb_leaf_(std::string_view sfx, T&& v)
+      {
+         Ptr p = make_value_at(sfx, 0, std::move(v));
+         if (p.tag() == K::value_ptr)
+         {
+            char*    L = static_cast<char*>(deref_(p));
+            uint16_t f;
+            std::memcpy(&f, L + 2, 2);
+            f &= uint16_t(~LEAF_FULL);
+            std::memcpy(L + 2, &f, 2);
+         }
+         return p;
+      }
 
       // create a bucket from two colliding entries (the leaf-split replacement):
       // CL0 + FP + SP0 + one page = 5 lines
@@ -4705,7 +4747,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          {
             if (sfx.empty())
             {
-               h->rh.term         = make_value_at(std::string_view{}, 0, T::from_bytes(val));
+               h->rh.term         = cb_leaf_(std::string_view{}, T::from_bytes(val));
                h->rh.hdr.has_term = 1;
             }
             else
@@ -4934,7 +4976,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          if (hi - lo == 1)
          {
             T tmp = T::from_bytes(es[lo].val);
-            return make_value_at(std::string_view(es[lo].sfx), 0, std::move(tmp));
+            return cb_leaf_(std::string_view(es[lo].sfx), std::move(tmp));
          }
          // strip the run of shared leading bytes into a wrapper prefix
          std::string shared;
@@ -4978,7 +5020,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                else
                {
                   T tmp = T::from_bytes(es[first].val);
-                  bp    = make_value_at(std::string_view(es[first].sfx), 0, std::move(tmp));
+                  bp    = cb_leaf_(std::string_view(es[first].sfx), std::move(tmp));
                }
             }
             else
@@ -4995,7 +5037,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                if (has_term)
                {
                   T tmp = T::from_bytes(tval);
-                  ch->rh.term = make_value_at(std::string_view{}, 0, std::move(tmp));
+                  ch->rh.term = cb_leaf_(std::string_view{}, std::move(tmp));
                   ch->rh.hdr.has_term = 1;
                }
             }
@@ -5033,7 +5075,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             if (es[i].sfx.empty())
             {
                T tmp = T::from_bytes(es[i].val);
-               rh2->term         = make_value_at(std::string_view{}, 0, std::move(tmp));
+               rh2->term         = cb_leaf_(std::string_view{}, std::move(tmp));
                rh2->hdr.has_term = 1;
                ++i;
             }

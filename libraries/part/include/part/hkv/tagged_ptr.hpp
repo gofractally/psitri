@@ -29,6 +29,9 @@ namespace hkv::detail
       c8           = 7,  // 8x32  segmented bitset router (skip CL0, rank)
       setlist_u16  = 8,  // wide sparse router: 2-byte stems, 1 cacheline (R1)
       bucket       = 9,  // sorted (suffix,value) collector — the "last mile" terminal
+      cbucket      = 13, // composed last-mile collector (BUCKET_SPEC.md): CL0 +
+                         // FP line + 4 stem/ref lines + <=12 sub-pages, every
+                         // piece an independently refcounted, shareable line
       cx           = 11, // EXPLICIT segmented router (part COW demotion of c2/c4/c8):
                          // CL0 carries per-segment line pointers; segment lines
                          // are individually refcounted and shareable
@@ -46,7 +49,7 @@ namespace hkv::detail
    // dense and rejects corrupt tags), so a kind above K_max would silently miss.
    // NOTE: tag values are free to renumber only until a persisted (WAL/disk) format
    // exists; after that they are frozen.
-   inline constexpr unsigned K_max = unsigned(K::cx);
+   inline constexpr unsigned K_max = unsigned(K::cbucket);
 
    constexpr bool is_terminal(K k) noexcept { return k == K::value_ptr || k == K::value_inline; }
    static_assert(uint8_t(K::setlist_u16) == uint8_t(K::c8) + 1,

@@ -57,6 +57,9 @@ namespace part::kv
          return p;
       }
       value_view view() const noexcept { return value_view(b, len); }
+      // composed-bucket bridge: cells store live bytes, T converts at the edge
+      static pval       from_bytes(value_view v) { return from(v); }
+      value_view        to_bytes() const noexcept { return view(); }
    };
    static_assert(std::is_trivially_copyable_v<pval> && sizeof(pval) == 80);
 

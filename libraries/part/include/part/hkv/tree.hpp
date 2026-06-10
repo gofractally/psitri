@@ -808,11 +808,83 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      return true;
                   }
                }
+            if constexpr (cb_enabled)
+               if (k == K::cbucket)
+               {
+                  if constexpr (std::is_same_v<std::decay_t<VF>, T>)
+                  {
+                     cb_hdr*        h  = static_cast<cb_hdr*>(deref_(cur));
+                     const unsigned pl = h->rh.hdr.prefix_len;
+                     if (pl)
+                     {
+                        const size_t c =
+                            lcp(std::string_view(reinterpret_cast<char*>(h->prefix), pl),
+                                key.substr(depth));
+                        if (c < pl)
+                        {  // prefix diverges: burst; the setlist split path takes over
+                           *slot = cb_split_(cur);
+                           continue;
+                        }
+                        depth += pl;
+                     }
+                     if (depth == key.size())
+                     {
+                        const bool ins = set_or_update_term<Assign>(&h->rh, std::forward<VF>(v));
+                        count_ += ins;
+                        return ins;
+                     }
+                     const auto bytes = v.to_bytes();
+                     const int  r = cb_insert_<Assign>(h, key.substr(depth),
+                                                       std::string_view(bytes.data(), bytes.size()));
+                     if (r >= 0)
+                     {
+                        count_ += (r == 1);
+                        return r == 1;
+                     }
+                     *slot = cb_split_(cur);  // full: burst and retry
+                     continue;
+                  }
+                  else
+                  {
+                     assert(false && "cbucket paths take a materialized T");
+                     __builtin_unreachable();
+                  }
+               }
             switch (k)
             {
                case K::value_ptr:
                case K::value_inline:
                {
+                  if constexpr (cb_create)
+                     if (k == K::value_ptr && std::is_same_v<std::decay_t<VF>, T>)
+                     {
+                        // collision under COW: collect both entries into a fresh
+                        // composed bucket when both fit sub-page cells
+                        char*            L  = static_cast<char*>(deref_(cur));
+                        std::string_view ls(reinterpret_cast<const char*>(leaf_suf(L)),
+                                            leaf_slen(L));
+                        std::string_view ks = key.substr(depth);
+                        if (ls != ks)
+                        {
+                           const auto       nb = v.to_bytes();
+                           const T*         ov = leaf_val(L);
+                           const auto       ob = ov->to_bytes();
+                           const size_t     c  = lcp(ls, ks);
+                           if (c <= 36 && 3 + (ls.size() - c) + ob.size() <= CB_CELLMAX &&
+                               3 + (ks.size() - c) + nb.size() <= CB_CELLMAX)
+                           {
+                              std::string_view pfx = ks.substr(0, c);
+                              Ptr nbk = cb_make2_(pfx, ls.substr(c),
+                                                  std::string_view(ob.data(), ob.size()),
+                                                  ks.substr(c),
+                                                  std::string_view(nb.data(), nb.size()));
+                              *slot = nbk;
+                              node_free_(L, leaf_alloc_size(L));  // exclusive (privatized)
+                              ++count_;
+                              return true;
+                           }
+                        }
+                     }
                   bool inserted;
                   if constexpr (Adaptive)
                      if (lowfan >= 2)  // deep-narrow leaf collision → bucket
@@ -953,7 +1025,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                // exhaustive (no default): node_full/bucket descend before the switch and
                // null inserts at the top of the loop, so these can't reach it — but a NEW
                // kind added to K must fail compilation here and get an explicit decision.
-               case K::node_full: case K::full_x: case K::cx: case K::bucket: case K::null:
+               case K::node_full: case K::full_x: case K::cx: case K::bucket:
+               case K::cbucket: case K::null:
                   assert(false && "handled before the switch");
                   __builtin_unreachable();
             }
@@ -996,6 +1069,15 @@ namespace detail  // implementation types & node helpers — not part of the pub
    unsigned li_, sl_; full_index<Ptr>(uint8_t(kp[depth]), li_, sl_); \
    uint64_t lraw = 0; std::memcpy(&lraw, p + sizeof(router_hdr) + li_ * sizeof(Ptr), sizeof(Ptr)); \
    std::memcpy(&raw, HKV_PTR(lraw) + sl_ * sizeof(Ptr), sizeof(Ptr)); HKV_NEXT(depth + 1); }
+#define HKV_BODY_CBUCKET { \
+   if constexpr (cb_enabled) { \
+   const cb_hdr* h = reinterpret_cast<const cb_hdr*>(HKV_PTR(raw)); \
+   const unsigned pl = h->rh.hdr.prefix_len; \
+   if (pl) { if (klen - depth < pl || std::memcmp(h->prefix, kp + depth, pl) != 0) return op.miss(); depth += pl; } \
+   if (depth == klen) return op.term(&h->rh); \
+   const uint8_t* c = cb_find_(h, std::string_view(kp + depth, klen - depth)); \
+   return c ? op.cbkt(c) : op.miss(); \
+   } else return op.miss(); }
 #define HKV_BODY_CX { \
    const char* p = HKV_PTR(raw); \
    if (depth == klen) return op.term(reinterpret_cast<const router_hdr*>(p)); \
@@ -1042,6 +1124,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                case K::setlist_u16:  HKV_BODY_SETLIST16
                case K::full_x:       HKV_BODY_FULLX
                case K::cx:           HKV_BODY_CX
+               case K::cbucket:      HKV_BODY_CBUCKET
                case K::null:         return op.miss();
             }
             __builtin_unreachable();
@@ -1055,6 +1138,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
 #undef HKV_BODY_SETLIST
 #undef HKV_BODY_SETLIST16
 #undef HKV_BODY_FULL
+#undef HKV_BODY_CBUCKET
 #undef HKV_BODY_CX
 #undef HKV_BODY_FULLX
 #undef HKV_BODY_CN
@@ -1091,6 +1175,16 @@ namespace detail  // implementation types & node helpers — not part of the pub
             }
             bool term(const router_hdr* rh) const { return self->read_term(rh, *out); }
             bool miss() const { return false; }
+            bool cbkt(const uint8_t* c) const
+            {
+               if constexpr (cb_enabled)
+               {
+                  *out = T::from_bytes(cb_cell{const_cast<uint8_t*>(c)}.value());
+                  return true;
+               }
+               else
+                  return false;
+            }
          };
          return descend_read(key, op_t{this, &out});
       }
@@ -1121,6 +1215,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             }
             bool term(const router_hdr* rh) const { return !rh->term.is_null(); }
             bool miss() const { return false; }
+            bool cbkt(const uint8_t*) const { return true; }
          };
          return descend_read(key, op_t{});
       }
@@ -1165,6 +1260,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   return op.leaf(slot, static_cast<char*>(deref_(cur)), key.substr(depth), parent, pbyte, pstem);
                case K::value_inline: return op.inl(slot, depth == key.size(), parent, pbyte, pstem);
                case K::bucket:       return op.bkt(slot, cur, key.substr(depth));
+               case K::cbucket:      return op.miss();  // at()/[] unsupported over cbuckets
                case K::prefix_node:
                {
                   char*          P  = static_cast<char*>(deref_(cur));
@@ -1441,6 +1537,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
          };
 
          const kv_tree*       t_ = nullptr;  // owning tree: deref base for indexed handles
+         // composed-bucket entry values are raw bytes, materialized here per
+         // yield (raw storage: T's name isn't needed at declaration parse time)
+         alignas(alignof(T)) mutable unsigned char cvalbuf_[sizeof(T)];
          mutable frame_stack  stk_;  // mutable: first key() primes plen/cbase
          std::vector<int>           bord_;    // sorted entry order for the CURRENT bucket (top frame)
          // Shadows the tree's deref_ so every handle resolution below routes through t_.
@@ -1527,6 +1626,41 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   stk_.push_back(Frame{child, 0, uint32_t(base), uint32_t(base)});
                   return false;
                }
+               case K::cbucket:
+               {
+                  if constexpr (kv_tree::cb_enabled)
+                  {
+                     const auto* h =
+                         reinterpret_cast<const typename kv_tree::cb_hdr*>(t_->deref_(child));
+                     uint32_t cb = uint32_t(base);
+                     if (maintain_)
+                     {
+                        key_.len = base;
+                        key_.append(h->prefix, h->rh.hdr.prefix_len);
+                        cb = uint32_t(key_.len);
+                     }
+                     bord_.clear();  // (li<<8|i), sorted by (stem, suffix)
+                     for (unsigned li = 0; li < 4; ++li)
+                        for (unsigned i = 0; i < h->cnt[li]; ++i)
+                           bord_.push_back(uint16_t((li << 8) | i));
+                     std::sort(bord_.begin(), bord_.end(),
+                               [&](uint16_t x, uint16_t y)
+                               {
+                                  const auto* sx = t_->cb_spl_(h, x >> 8);
+                                  const auto* sy = t_->cb_spl_(h, y >> 8);
+                                  const uint16_t stx = sx->stems[x & 255];
+                                  const uint16_t sty = sy->stems[y & 255];
+                                  if (stx != sty)
+                                     return stx < sty;
+                                  return t_->cb_cell_at_(h, sx->lref[x & 255]).suffix() <
+                                         t_->cb_cell_at_(h, sy->lref[y & 255]).suffix();
+                               });
+                     stk_.push_back(Frame{child, -1, uint32_t(base), cb});
+                     return false;
+                  }
+                  else
+                     return false;
+               }
                default:  // routers (setlist / c2 / c4 / c8 / node_full)
                {
                   const router_hdr* rh = static_cast<const router_hdr*>(deref_(child));
@@ -1559,6 +1693,40 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   else { if (maintain_) key_.len = f.plen; stk_.pop_back(); }
                   continue;
                }
+               if constexpr (kv_tree::cb_enabled)
+                  if (k == K::cbucket)
+                  {
+                     const auto* h =
+                         reinterpret_cast<const typename kv_tree::cb_hdr*>(t_->deref_(f.node));
+                     if (f.cur == -1)
+                     {
+                        f.cur = 0;
+                        if (!h->rh.term.is_null() && descend_(h->rh.term, f.cbase))
+                           return;
+                     }
+                     if (f.cur < int32_t(h->rh.hdr.nbranch))
+                     {
+                        const uint16_t e  = bord_[size_t(f.cur++)];
+                        const auto*    sp = t_->cb_spl_(h, e >> 8);
+                        auto           c  = t_->cb_cell_at_(h, sp->lref[e & 255]);
+                        sfx_      = reinterpret_cast<const uint8_t*>(c.p + 3);
+                        sfxlen_   = c.p[0];
+                        full_str_ = nullptr;
+                        T* cv     = reinterpret_cast<T*>(cvalbuf_);
+                        *cv       = T::from_bytes(c.value());  // trivially copyable by cb contract
+                        set_ptr_(cv);
+                        if (maintain_)
+                        {
+                           key_.len = f.cbase;
+                           key_.append(sfx_, sfxlen_);
+                        }
+                        return;
+                     }
+                     if (maintain_)
+                        key_.len = f.plen;
+                     stk_.pop_back();
+                     continue;
+                  }
                if constexpr (Buckets || Adaptive)  // bucket frames exist only under these modes
                   if (k == K::bucket)
                   {
@@ -2642,6 +2810,37 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   }
                   continue;
                }
+               case K::cbucket:
+               {
+                  if constexpr (cb_enabled)
+                  {
+                     cb_hdr*        h  = static_cast<cb_hdr*>(deref_(*slot));
+                     const unsigned pl = h->rh.hdr.prefix_len;
+                     if (pl)
+                     {
+                        if (key.size() - depth < pl ||
+                            std::memcmp(h->prefix, key.data() + depth, pl) != 0)
+                           return false;
+                        depth += pl;
+                     }
+                     if (depth == key.size())
+                        goto rm_term;
+                     if (!cb_remove_(h, key.substr(depth)))
+                        return false;
+                     --count_;
+                     if (h->rh.hdr.nbranch == 0 && h->rh.term.is_null())
+                     {  // emptied: release line-wise and cascade up
+                        cow_release(*slot);
+                        if (n >= 2)
+                           rm_unwind_(path, n, n - 2);
+                        else
+                           root_ = packed_ptr::null();
+                     }
+                     return true;
+                  }
+                  else
+                     return false;
+               }
                case K::setlist_u8:
                case K::c2:
                case K::c4:
@@ -3331,6 +3530,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             case K::node_full:   return sizeof(node_full);
             case K::full_x:      return sizeof(node_fullx) <= 128 ? 128 : sizeof(node_fullx);
             case K::cx:          return 128;
+            case K::cbucket:     return 128;  // CL0 only; pieces are separate
             // exhaustive (no default): a new node kind must declare its size here.
             case K::value_ptr: case K::value_inline: case K::prefix_node:
             case K::bucket: case K::null:
@@ -3360,7 +3560,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             case K::cx:         return f(static_cast<node_cx*>(deref_(cur)));
             // exhaustive (no default): a new K must be decided here — and only here.
             case K::value_ptr: case K::value_inline: case K::prefix_node:
-            case K::setlist_u16: case K::bucket: case K::null:
+            case K::setlist_u16: case K::bucket: case K::cbucket: case K::null:
                assert(false && "byte-routers only"); __builtin_unreachable();
          }
       }
@@ -4057,6 +4257,17 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   assert(false && "cx exists only under COW allocators");
                return;
             }
+            case K::cbucket:
+            {
+               if constexpr (cb_enabled)
+               {
+                  cow_destroy_dead_(cur);  // releases term + every piece
+                  node_free_(deref_(cur), cacheline_bytes);
+               }
+               else
+                  assert(false && "cbucket needs the bytes bridge");
+               return;
+            }
             case K::null:
                return;
          }
@@ -4186,6 +4397,720 @@ namespace detail  // implementation types & node helpers — not part of the pub
          return remove(k);
       }
 
+     public:
+      // ════ composed bucket (BUCKET_SPEC.md) ═══════════════════════════════════
+      // CL0 + FP line + 4 ragged stem/lref lines + <=12 sub-pages (2 lines,
+      // bump-only, free_space dead ledger) + dedicated lines for big entries.
+      // Cells store LIVE value bytes (self-describing, vtype.has_cap capacity
+      // record in the shrink gap) — variable-length values, sized to user data.
+      struct cb_hdr
+      {
+         router_hdr rh;  // offset 0: term machinery reused verbatim
+         uint8_t    open_spi;
+         uint8_t    open_off8;
+         uint8_t    cnt[4];
+         uint16_t   stem_lo[4];
+         uint8_t    nbig;
+         uint8_t    rsv[3];
+         Ptr        fp_line;
+         Ptr        sp_line[4];
+         Ptr        page_line[12];
+         uint8_t    prefix[36];
+      };
+      struct cb_sp
+      {
+         uint16_t stems[16];
+         uint16_t lref[16];
+         uint8_t  rsv[64];
+      };
+      static constexpr unsigned CB_MAX     = 64;   // entries
+      static constexpr unsigned CB_PAGES   = 12;   // sub-page table slots
+      static constexpr unsigned CB_PGCAP8  = 31;   // payload 8B units per page (248B)
+      static constexpr unsigned CB_CELLMAX = 64;   // bytes; bigger -> dedicated lines
+      static constexpr uint8_t  VT_HASCAP  = 0x80;
+
+      static constexpr uint16_t cb_lref(unsigned big, unsigned spi, unsigned off8,
+                                        unsigned len8) noexcept
+      {
+         return uint16_t((big << 15) | (spi << 11) | (off8 << 6) | len8);
+      }
+      static constexpr unsigned cb_big(uint16_t r) noexcept { return r >> 15; }
+      static constexpr unsigned cb_spi(uint16_t r) noexcept { return (r >> 11) & 15; }
+      static constexpr unsigned cb_off8(uint16_t r) noexcept { return (r >> 6) & 31; }
+      static constexpr unsigned cb_len8(uint16_t r) noexcept { return r & 63; }
+
+      // cell: [klen u8][vlen u8][vtype u8][suffix][value][cap u8 if has_cap]
+      static unsigned cb_cell_cap_(const uint8_t* c) noexcept
+      {
+         return (c[2] & VT_HASCAP) ? c[3 + c[0] + c[1]] : c[1];
+      }
+      static unsigned cb_cell_alloc8_(const uint8_t* c) noexcept
+      {
+         return (3u + c[0] + cb_cell_cap_(c) + 7) / 8;
+      }
+
+      uint8_t* cb_page_(const cb_hdr* h, unsigned spi) const noexcept
+      {
+         return static_cast<uint8_t*>(deref_(h->page_line[spi]));
+      }
+      cb_sp* cb_spl_(const cb_hdr* h, unsigned li) const noexcept
+      {
+         return static_cast<cb_sp*>(deref_(h->sp_line[li]));
+      }
+      uint8_t* cb_fpl_(const cb_hdr* h) const noexcept
+      {
+         return static_cast<uint8_t*>(deref_(h->fp_line));
+      }
+      static uint16_t cb_stem_(std::string_view sfx) noexcept
+      {
+         const uint8_t a = sfx.size() > 0 ? uint8_t(sfx[0]) : 0;
+         const uint8_t b = sfx.size() > 1 ? uint8_t(sfx[1]) : 0;
+         return uint16_t((a << 8) | b);
+      }
+      static uint8_t cb_fp_(std::string_view sfx) noexcept
+      {
+         uint32_t h = 2166136261u;
+         for (char ch : sfx)
+            h = (h ^ uint8_t(ch)) * 16777619u;
+         return uint8_t(h ^ (h >> 8));
+      }
+
+      struct cb_cell
+      {
+         uint8_t*         p;
+         std::string_view suffix() const
+         {
+            return std::string_view(reinterpret_cast<const char*>(p + 3), p[0]);
+         }
+         std::string_view value() const
+         {
+            return std::string_view(reinterpret_cast<const char*>(p + 3 + p[0]), p[1]);
+         }
+      };
+      cb_cell cb_cell_at_(const cb_hdr* h, uint16_t lr) const noexcept
+      {
+         uint8_t* base = cb_big(lr)
+                             ? static_cast<uint8_t*>(deref_(h->page_line[cb_spi(lr)]))
+                             : cb_page_(h, cb_spi(lr)) + cb_off8(lr) * 8;
+         return cb_cell{base};
+      }
+
+      static unsigned cb_pick_line_(const cb_hdr* h, uint16_t stem) noexcept
+      {
+         unsigned li = 0;
+         while (li + 1 < 4 && h->cnt[li + 1] && stem >= h->stem_lo[li + 1])
+            ++li;
+         return li;
+      }
+      static unsigned cb_lb_(const cb_sp* sp, unsigned n, uint16_t stem) noexcept
+      {
+         unsigned i = 0;
+         while (i < n && sp->stems[i] < stem)
+            ++i;
+         return i;
+      }
+
+      const uint8_t* cb_find_(const cb_hdr* h, std::string_view sfx) const noexcept
+      {
+         const uint16_t stem = cb_stem_(sfx);
+         const uint8_t  want = cb_fp_(sfx);
+         const uint8_t* fp   = nullptr;
+         for (unsigned li = 0; li < 4; ++li)
+         {
+            if (!h->cnt[li] || h->sp_line[li].is_null())
+               continue;
+            if (h->stem_lo[li] > stem)
+               break;  // lines ascend by stem_lo: the run cannot start later
+            const cb_sp* sp = cb_spl_(h, li);
+            if (sp->stems[h->cnt[li] - 1] < stem)
+               continue;  // whole line below the stem
+            for (unsigned i = cb_lb_(sp, h->cnt[li], stem);
+                 i < h->cnt[li] && sp->stems[i] == stem; ++i)
+            {
+               if (!fp)
+                  fp = cb_fpl_(h);
+               if (fp[li * 16 + i] != want)
+                  continue;
+               cb_cell c = cb_cell_at_(h, sp->lref[i]);
+               if (c.suffix() == sfx)
+                  return c.p;
+            }
+         }
+         return nullptr;
+      }
+
+      // bump-only payload allocation per BUCKET_SPEC §4/§5.
+      // Returns lref, or 0xFFFF when the page table is exhausted (split signal).
+      uint16_t cb_alloc_cell_(cb_hdr* h, std::string_view sfx, std::string_view val)
+      {
+         const unsigned bytes = 3 + unsigned(sfx.size()) + unsigned(val.size());
+         const unsigned u8s   = (bytes + 7) / 8;
+         if (bytes > CB_CELLMAX)
+         {
+            unsigned spi = CB_PAGES;
+            for (unsigned i = 0; i < CB_PAGES; ++i)
+               if (h->page_line[i].is_null())
+               {
+                  spi = i;
+                  break;
+               }
+            if (spi == CB_PAGES)
+               return 0xFFFF;
+            const unsigned nl = (bytes + 127) / 128;
+            void*          d  = node_alloc_(nl * 128ull);
+            h->page_line[spi] = pack_(d, K::node_full);  // tag unused on payload lines
+            ++h->nbig;
+            uint8_t* c = static_cast<uint8_t*>(d);
+            c[0]       = uint8_t(sfx.size());
+            c[1]       = uint8_t(val.size());
+            c[2]       = 0;
+            std::memcpy(c + 3, sfx.data(), sfx.size());
+            std::memcpy(c + 3 + sfx.size(), val.data(), val.size());
+            return cb_lref(1, spi, 0, nl & 63);
+         }
+         for (int attempt = 0; attempt < 2; ++attempt)
+         {
+            if (!h->page_line[h->open_spi].is_null() &&
+                h->open_off8 + u8s <= 1 + CB_PGCAP8)
+            {
+               cb_own_(&h->page_line[h->open_spi], 2);
+               uint8_t*       pg = cb_page_(h, h->open_spi);
+               uint8_t*       c  = pg + h->open_off8 * 8;
+               const uint16_t lr = cb_lref(0, h->open_spi, h->open_off8, u8s);
+               h->open_off8      = uint8_t(h->open_off8 + u8s);
+               c[0]              = uint8_t(sfx.size());
+               c[1]              = uint8_t(val.size());
+               c[2]              = 0;
+               std::memcpy(c + 3, sfx.data(), sfx.size());
+               std::memcpy(c + 3 + sfx.size(), val.data(), val.size());
+               return lr;
+            }
+            if (!h->page_line[h->open_spi].is_null())
+            {  // close the open page: fold its untouched tail into free_space
+               cb_own_(&h->page_line[h->open_spi], 2);
+               uint8_t* pg = cb_page_(h, h->open_spi);
+               pg[0]       = uint8_t(pg[0] + (1 + CB_PGCAP8 - h->open_off8));
+            }
+            unsigned spi = CB_PAGES;
+            for (unsigned i = 0; i < CB_PAGES; ++i)
+               if (h->page_line[i].is_null())
+               {
+                  spi = i;
+                  break;
+               }
+            if (spi == CB_PAGES)
+               return 0xFFFF;
+            void* d = node_alloc_(256);
+            std::memset(d, 0, 8);
+            h->page_line[spi] = pack_(d, K::node_full);
+            h->open_spi       = uint8_t(spi);
+            h->open_off8      = 1;
+         }
+         return 0xFFFF;
+      }
+
+      void cb_free_cell_(cb_hdr* h, uint16_t lr)
+      {
+         if (cb_big(lr))
+         {
+            const unsigned spi = cb_spi(lr);
+            cb_release_lines_(h->page_line[spi], cb_len8(lr) ? cb_len8(lr) : 1);
+            h->page_line[spi] = Ptr::null();
+            --h->nbig;
+            return;
+         }
+         const unsigned spi = cb_spi(lr);
+         cb_own_(&h->page_line[spi], 2);  // the free_space ledger write
+         uint8_t* pg = cb_page_(h, spi);
+         cb_cell  c  = cb_cell_at_(h, lr);
+         pg[0]       = uint8_t(pg[0] + cb_cell_alloc8_(c.p));
+         if (spi != h->open_spi && pg[0] >= CB_PGCAP8)
+         {  // fully dead page: release; the table slot becomes reusable
+            cb_release_lines_(h->page_line[spi], 2);
+            h->page_line[spi] = Ptr::null();
+         }
+      }
+
+      // ── self-privatization: bucket ops own (clone-if-shared) exactly the
+      // lines they are about to write; CL0 is privatized by the descent.
+      Ptr cb_clone_lines_(Ptr lp, unsigned nl)
+      {
+         void* d = node_alloc_(nl * 128ull);
+         std::memcpy(d, deref_(lp), nl * 128ull);
+         return pack_(d, K::node_full);
+      }
+      void cb_release_lines_(Ptr lp, unsigned nl) noexcept
+      {
+         alloc_.hkv_release(line_of(lp),
+                            [&](uint32_t head)
+                            {
+                               if (nl > 1)
+                                  alloc_.hkv_free_run(head + 1, nl - 1);
+                            });
+      }
+      void cb_own_(Ptr* lp, unsigned nl)
+      {
+         if (lp->is_null() || alloc_.hkv_ref(line_of(*lp)) < 2)
+            return;
+         const Ptr old = *lp;
+         *lp           = cb_clone_lines_(old, nl);
+         cb_release_lines_(old, nl);
+      }
+
+      // T <-> raw cell bytes bridge: cbucket activates only when T opts in.
+      template <class X, class = void>
+      struct cb_cap_ : std::false_type
+      {
+      };
+      template <class X>
+      struct cb_cap_<X, std::void_t<decltype(X::from_bytes(std::string_view{})),
+                                    decltype(std::declval<const X&>().to_bytes())>>
+          : std::true_type
+      {
+      };
+#ifndef PART_CBUCKET
+#define PART_CBUCKET 0  // composed bucket: machinery compiled, creation gated.
+                        // WIP: 3 oracle-found bugs fixed (run-spanning lookup,
+                        // recursive split, burst capacity); a duplicate-update
+                        // edge remains — needs the BUCKET_SPEC TDD pass before
+                        // default-on.
+#endif
+      static constexpr bool cb_enabled = cow_enabled && cb_cap_<T>::value;
+      static constexpr bool cb_create  = cb_enabled && (PART_CBUCKET != 0);
+
+      // create a bucket from two colliding entries (the leaf-split replacement):
+      // CL0 + FP + SP0 + one page = 5 lines
+      Ptr cb_make2_(std::string_view pfx, std::string_view s1, std::string_view v1,
+                    std::string_view s2, std::string_view v2)
+      {
+         cb_hdr* h = static_cast<cb_hdr*>(node_alloc_(128));
+         std::memset(h, 0, 128);
+         h->rh.term = Ptr::null();
+         for (auto& pl : h->page_line)
+            pl = Ptr::null();
+         for (auto& sl : h->sp_line)
+            sl = Ptr::null();
+         h->rh.hdr.prefix_len = uint16_t(pfx.size() & 63);
+         std::memcpy(h->prefix, pfx.data(), std::min<size_t>(pfx.size(), 36));
+         h->fp_line    = pack_(node_alloc_(128), K::node_full);
+         h->sp_line[0] = pack_(node_alloc_(128), K::node_full);
+         std::memset(deref_(h->fp_line), 0, 128);
+         std::memset(deref_(h->sp_line[0]), 0, 128);
+         h->open_spi  = 0;
+         h->open_off8 = 0;  // page_line[0] null: first alloc opens it
+         const Ptr hp = pack_(h, K::cbucket);
+         // a key that IS the common prefix has an empty suffix: it lives in
+         // the term (lookups for it end at depth == key.size())
+         auto put = [&](std::string_view sfx, std::string_view val)
+         {
+            if (sfx.empty())
+            {
+               h->rh.term         = make_value_at(std::string_view{}, 0, T::from_bytes(val));
+               h->rh.hdr.has_term = 1;
+            }
+            else
+               cb_insert_(h, sfx, val);
+         };
+         put(s1, v1);
+         put(s2, v2);
+         return hp;
+      }
+
+      // insert-or-update. Returns: 0 updated, 1 inserted, -1 needs split.
+      template <bool Assign = true>
+      int cb_insert_(cb_hdr* h, std::string_view sfx, std::string_view val)
+      {
+         const uint16_t stem = cb_stem_(sfx);
+         const uint8_t  fpb  = cb_fp_(sfx);
+         cb_own_(&h->fp_line, 1);
+         // update path: equal-stem runs may span SP lines
+         for (unsigned uli = 0; uli < 4; ++uli)
+         {
+            if (!h->cnt[uli] || h->sp_line[uli].is_null())
+               continue;
+            if (h->stem_lo[uli] > stem)
+               break;
+            cb_sp* usp = cb_spl_(h, uli);
+            if (usp->stems[h->cnt[uli] - 1] < stem)
+               continue;
+            for (unsigned i = cb_lb_(usp, h->cnt[uli], stem);
+                 i < h->cnt[uli] && usp->stems[i] == stem; ++i)
+            {
+               if (cb_fpl_(h)[uli * 16 + i] != fpb)
+                  continue;
+               cb_cell c = cb_cell_at_(h, usp->lref[i]);
+               if (c.suffix() != sfx)
+                  continue;
+               cb_own_(&h->sp_line[uli], 1);
+               usp           = cb_spl_(h, uli);
+               const unsigned li = uli;
+               cb_sp*         sp = usp;
+               (void)li;
+               (void)sp;
+            if constexpr (!Assign)
+               return 0;  // present: emplace semantics leave it untouched
+            const unsigned cap = cb_cell_cap_(c.p);
+            if (val.size() <= cap)
+            {  // in place — own the cell's page first
+               cb_own_(&h->page_line[cb_spi(sp->lref[i])], cb_big(sp->lref[i])
+                                                               ? std::max(1u, cb_len8(sp->lref[i]))
+                                                               : 2u);
+               c = cb_cell_at_(h, sp->lref[i]);
+               c.p[1] = uint8_t(val.size());
+               std::memcpy(c.p + 3 + c.p[0], val.data(), val.size());
+               if (val.size() < cap)
+               {
+                  c.p[2] |= VT_HASCAP;
+                  c.p[3 + c.p[0] + c.p[1]] = uint8_t(cap);
+               }
+               else
+                  c.p[2] &= uint8_t(~VT_HASCAP);
+               return 0;
+            }
+            const uint16_t nlr = cb_alloc_cell_(h, sfx, val);
+            if (nlr == 0xFFFF)
+               return -1;
+            cb_free_cell_(h, cb_spl_(h, uli)->lref[i]);
+            cb_spl_(h, uli)->lref[i] = nlr;
+            return 0;
+            }
+         }
+         // insert path
+         if (h->rh.hdr.nbranch >= CB_MAX)
+            return -1;
+         unsigned li = cb_pick_line_(h, stem);
+         if (!h->sp_line[li].is_null())
+            cb_own_(&h->sp_line[li], 1);
+         cb_sp* sp = cb_spl_(h, li);
+         if (h->cnt[li] == 16)
+         {  // rebalance: own every index line, then redistribute evenly
+            for (unsigned l2 = 0; l2 < 4; ++l2)
+               if (!h->sp_line[l2].is_null())
+                  cb_own_(&h->sp_line[l2], 1);
+            cb_rebalance_(h);
+            li = cb_pick_line_(h, stem);
+            sp = cb_spl_(h, li);
+            if (h->cnt[li] == 16)
+               return -1;  // pathological all-equal stems: split
+         }
+         const uint16_t lr = cb_alloc_cell_(h, sfx, val);
+         if (lr == 0xFFFF)
+            return -1;
+         if (h->sp_line[li].is_null())
+         {
+            h->sp_line[li] = pack_(node_alloc_(128), K::node_full);
+            std::memset(deref_(h->sp_line[li]), 0, 128);
+            sp = cb_spl_(h, li);
+         }
+         const unsigned pos = cb_lb_(sp, h->cnt[li], stem);
+         uint8_t*       fp  = cb_fpl_(h);
+         std::memmove(&sp->stems[pos + 1], &sp->stems[pos],
+                      (h->cnt[li] - pos) * sizeof(uint16_t));
+         std::memmove(&sp->lref[pos + 1], &sp->lref[pos],
+                      (h->cnt[li] - pos) * sizeof(uint16_t));
+         std::memmove(&fp[li * 16 + pos + 1], &fp[li * 16 + pos], h->cnt[li] - pos);
+         sp->stems[pos]    = stem;
+         sp->lref[pos]     = lr;
+         fp[li * 16 + pos] = fpb;
+         ++h->cnt[li];
+         h->stem_lo[li] = sp->stems[0];
+         ++h->rh.hdr.nbranch;
+         return 1;
+      }
+
+      // spread entries evenly across the 4 SP lines (keeps global stem order;
+      // all index lines are private when this runs)
+      void cb_rebalance_(cb_hdr* h)
+      {
+         uint16_t st[CB_MAX], lr[CB_MAX];
+         uint8_t  fb[CB_MAX];
+         unsigned n   = 0;
+         uint8_t* fpl = cb_fpl_(h);
+         for (unsigned li = 0; li < 4; ++li)
+         {
+            if (h->cnt[li] == 0)
+               continue;
+            cb_sp* sp = cb_spl_(h, li);
+            for (unsigned i = 0; i < h->cnt[li]; ++i, ++n)
+            {
+               st[n] = sp->stems[i];
+               lr[n] = sp->lref[i];
+               fb[n] = fpl[li * 16 + i];
+            }
+         }
+         const unsigned per = (n + 3) / 4;
+         unsigned       k   = 0;
+         for (unsigned li = 0; li < 4; ++li)
+         {
+            const unsigned take = std::min(per, n - k);
+            if (take && h->sp_line[li].is_null())
+            {
+               h->sp_line[li] = pack_(node_alloc_(128), K::node_full);
+               std::memset(deref_(h->sp_line[li]), 0, 128);
+            }
+            h->cnt[li] = uint8_t(take);
+            if (!take)
+            {
+               h->stem_lo[li] = 0xFFFF;
+               continue;
+            }
+            cb_sp* sp = cb_spl_(h, li);
+            std::memcpy(sp->stems, st + k, take * sizeof(uint16_t));
+            std::memcpy(sp->lref, lr + k, take * sizeof(uint16_t));
+            std::memcpy(fpl + li * 16, fb + k, take);
+            h->stem_lo[li] = sp->stems[0];
+            k += take;
+         }
+      }
+
+      bool cb_remove_(cb_hdr* h, std::string_view sfx)
+      {
+         const uint16_t stem = cb_stem_(sfx);
+         cb_own_(&h->fp_line, 1);
+         uint8_t* fp = cb_fpl_(h);
+         for (unsigned li = 0; li < 4; ++li)
+         {
+         if (!h->cnt[li] || h->sp_line[li].is_null())
+            continue;
+         if (h->stem_lo[li] > stem)
+            break;
+         {
+            cb_sp* probe = cb_spl_(h, li);
+            if (probe->stems[h->cnt[li] - 1] < stem)
+               continue;
+         }
+         cb_own_(&h->sp_line[li], 1);
+         cb_sp* sp = cb_spl_(h, li);
+         for (unsigned i = cb_lb_(sp, h->cnt[li], stem);
+              i < h->cnt[li] && sp->stems[i] == stem; ++i)
+         {
+            if (fp[li * 16 + i] != cb_fp_(sfx))
+               continue;
+            cb_cell c = cb_cell_at_(h, sp->lref[i]);
+            if (c.suffix() != sfx)
+               continue;
+            cb_free_cell_(h, sp->lref[i]);
+            std::memmove(&sp->stems[i], &sp->stems[i + 1],
+                         (h->cnt[li] - 1 - i) * sizeof(uint16_t));
+            std::memmove(&sp->lref[i], &sp->lref[i + 1],
+                         (h->cnt[li] - 1 - i) * sizeof(uint16_t));
+            std::memmove(&fp[li * 16 + i], &fp[li * 16 + i + 1], h->cnt[li] - 1 - i);
+            --h->cnt[li];
+            h->stem_lo[li] = h->cnt[li] ? sp->stems[0] : 0xFFFF;
+            --h->rh.hdr.nbranch;
+            return true;
+         }
+         }
+         return false;
+      }
+
+      // visit (suffix, value bytes) for every entry, stem-ordered (equal-stem
+      // runs suffix-sorted by the caller when full order matters)
+      template <class F>
+      void cb_for_each_(const cb_hdr* h, F&& f) const
+      {
+         for (unsigned li = 0; li < 4; ++li)
+         {
+            if (!h->cnt[li])
+               continue;
+            const cb_sp* sp = cb_spl_(h, li);
+            for (unsigned i = 0; i < h->cnt[li]; ++i)
+            {
+               cb_cell c = cb_cell_at_(h, sp->lref[i]);
+               f(c.suffix(), c.value());
+            }
+         }
+      }
+
+      // overflow: burst into children keyed by the next byte; groups bigger
+      // than a comfortable bucket recurse (strip shared bytes into prefix
+      // wrappers), so no entry is ever dropped regardless of skew.
+      struct cb_ent_
+      {
+         std::string sfx, val;
+      };
+      Ptr cb_build_(std::vector<cb_ent_>& es, size_t lo, size_t hi)
+      {
+         if (hi - lo == 1)
+         {
+            T tmp = T::from_bytes(es[lo].val);
+            return make_value_at(std::string_view(es[lo].sfx), 0, std::move(tmp));
+         }
+         // strip the run of shared leading bytes into a wrapper prefix
+         std::string shared;
+         for (;;)
+         {
+            if (es[lo].sfx.empty())
+               break;
+            const char b   = es[lo].sfx[0];
+            bool       all = true;
+            for (size_t i = lo + 1; i < hi && all; ++i)
+               all = !es[i].sfx.empty() && es[i].sfx[0] == b;
+            if (!all)
+               break;
+            shared.push_back(b);
+            for (size_t i = lo; i < hi; ++i)
+               es[i].sfx.erase(0, 1);
+         }
+         Ptr out;
+         if (hi - lo <= 48)
+         {
+            // fits one bucket comfortably (equal stems spread across 4 lines)
+            size_t      first = lo;
+            std::string tval;
+            bool        has_term = false;
+            if (es[lo].sfx.empty())
+            {
+               tval     = es[lo].val;
+               has_term = true;
+               ++first;
+            }
+            assert(hi - first >= 1);
+            Ptr bp;
+            if (hi - first == 1)
+            {
+               T tmp = T::from_bytes(es[first].val);
+               bp    = make_value_at(std::string_view(es[first].sfx), 0, std::move(tmp));
+               if (has_term)
+               {  // wrap: a 1-entry group with a term becomes a tiny bucket
+                  bp = cb_make2_(std::string_view{}, std::string_view{}, tval,
+                                 es[first].sfx, es[first].val);
+                  has_term = false;
+               }
+            }
+            else
+            {
+               bp = cb_make2_(std::string_view{}, es[first].sfx, es[first].val,
+                              es[first + 1].sfx, es[first + 1].val);
+               cb_hdr* ch = static_cast<cb_hdr*>(deref_(bp));
+               for (size_t k2 = first + 2; k2 < hi; ++k2)
+               {
+                  const int r = cb_insert_(ch, es[k2].sfx, es[k2].val);
+                  assert(r >= 0 && "<=48 entries must fit a fresh bucket");
+                  (void)r;
+               }
+               if (has_term)
+               {
+                  T tmp = T::from_bytes(tval);
+                  ch->rh.term = make_value_at(std::string_view{}, 0, std::move(tmp));
+                  ch->rh.hdr.has_term = 1;
+               }
+            }
+            out = bp;
+         }
+         else
+         {
+            // count distinct lead bytes: a setlist only when it fits, else a
+            // node_full (a dropped branch was the silent-loss bug)
+            size_t   groups = 0;
+            for (size_t i = lo + (es[lo].sfx.empty() ? 1 : 0); i < hi;)
+            {
+               const uint8_t b = uint8_t(es[i].sfx[0]);
+               while (i < hi && !es[i].sfx.empty() && uint8_t(es[i].sfx[0]) == b)
+                  ++i;
+               ++groups;
+            }
+            router_hdr* rh2;
+            Ptr         rp;
+            const bool  use_full = groups > size_t(setlist::CAP);
+            if (use_full)
+            {
+               node_full* f = static_cast<node_full*>(node_alloc_(sizeof(node_full)));
+               full_init(f);
+               rh2 = &f->rh;
+               rp  = pack_(f, K::node_full);
+            }
+            else
+            {
+               setlist* s2 = new_setlist();
+               rh2         = &s2->rh;
+               rp          = pack_(s2, K::setlist_u8);
+            }
+            size_t i = lo;
+            if (es[i].sfx.empty())
+            {
+               T tmp = T::from_bytes(es[i].val);
+               rh2->term         = make_value_at(std::string_view{}, 0, std::move(tmp));
+               rh2->hdr.has_term = 1;
+               ++i;
+            }
+            while (i < hi)
+            {
+               const uint8_t b = uint8_t(es[i].sfx[0]);
+               size_t        j = i;
+               while (j < hi && !es[j].sfx.empty() && uint8_t(es[j].sfx[0]) == b)
+                  ++j;
+               for (size_t k2 = i; k2 < j; ++k2)
+                  es[k2].sfx.erase(0, 1);
+               const Ptr child = cb_build_(es, i, j);
+               if (use_full)
+                  full_set(static_cast<node_full*>(deref_(rp)), b, child);
+               else
+               {
+                  const bool ok = setlist_set(static_cast<setlist*>(deref_(rp)), b, child);
+                  assert(ok && "group count pre-checked against setlist CAP");
+                  (void)ok;
+               }
+               i = j;
+            }
+            out = rp;
+         }
+         if (!shared.empty())
+            out = make_prefix(std::string_view(shared), out);
+         return out;
+      }
+      Ptr cb_split_(Ptr cur)
+      {
+         cb_hdr* h = static_cast<cb_hdr*>(deref_(cur));
+         std::vector<cb_ent_> es;
+         es.reserve(CB_MAX + 1);
+         cb_for_each_(h, [&](std::string_view s2, std::string_view v2)
+                      { es.push_back({std::string(s2), std::string(v2)}); });
+         std::sort(es.begin(), es.end(),
+                   [](const cb_ent_& a, const cb_ent_& b) { return a.sfx < b.sfx; });
+         const std::string pfx(reinterpret_cast<const char*>(h->prefix),
+                               h->rh.hdr.prefix_len);
+         Ptr np = cb_build_(es, 0, es.size());
+         // re-attach the bucket's own term and prefix
+         if (!h->rh.term.is_null())
+         {
+            // np is bucket/leaf/setlist/prefix; only routers/buckets carry terms.
+            // Build guarantees a router or bucket at top when >1 entry; for the
+            // 1-entry edge wrap in a tiny bucket via make2 semantics upstream.
+            router_hdr* rh2 = static_cast<router_hdr*>(deref_(np));
+            if (np.tag() == K::setlist_u8 || np.tag() == K::cbucket)
+            {
+               rh2->term = h->rh.term;
+               rh2->hdr.has_term = 1;
+               cow_fix_child_(&rh2->term);
+            }
+            else
+            {  // prefix/leaf top: wrap with a 0-prefix setlist carrying the term
+               setlist* sw = new_setlist();
+               sw->rh.term = h->rh.term;
+               sw->rh.hdr.has_term = 1;
+               cow_fix_child_(&sw->rh.term);
+               if (np.tag() == K::prefix_node)
+               {
+                  // descend one level: keep wrapper above the prefix node by
+                  // moving the prefix into the setlist? simplest: setlist with
+                  // single branch on the prefix node's first byte is wrong —
+                  // instead attach via term-only setlist + branch for np's
+                  // first byte is unknowable here; fall back: tiny bucket
+                  // cannot hold a subtree. Practical rule: buckets with a term
+                  // never burst into a bare prefix/leaf top because the term
+                  // plus >=64 entries guarantees the setlist path above.
+                  assert(false && "term bucket burst to non-router top");
+               }
+            }
+         }
+         Ptr out = np;
+         if (!pfx.empty())
+            out = make_prefix(std::string_view(pfx), out);
+         cow_release(cur);  // line-wise: shared pieces survive
+         return out;
+      }
+
      private:
       size_t cow_node_bytes_(Ptr p) const noexcept
       {
@@ -4204,6 +5129,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             case K::node_full:
             case K::full_x:
             case K::cx:
+            case K::cbucket:
                return node_size(p.tag());
             case K::bucket:
                return sizeof(bucket);
@@ -4276,6 +5202,43 @@ namespace detail  // implementation types & node helpers — not part of the pub
                cow_release(x->rh.term);
                for (unsigned sg = 0; sg < (1u << x->lg); ++sg)
                   cx_release_line_(x->seglines[sg], x->lg);
+               break;
+            }
+            case K::cbucket:
+            {
+               if constexpr (cb_enabled)
+               {
+                  cb_hdr* h = static_cast<cb_hdr*>(deref_(p));
+                  cow_release(h->rh.term);
+                  uint16_t big_seen = 0;
+                  for (unsigned li = 0; li < 4; ++li)
+                  {
+                     if (!h->cnt[li])
+                        continue;
+                     const cb_sp* sp = cb_spl_(h, li);
+                     for (unsigned i = 0; i < h->cnt[li]; ++i)
+                        if (cb_big(sp->lref[i]))
+                        {
+                           const unsigned spi = cb_spi(sp->lref[i]);
+                           if (!(big_seen & (1u << spi)))
+                           {
+                              big_seen |= uint16_t(1u << spi);
+                              cb_release_lines_(h->page_line[spi],
+                                                cb_len8(sp->lref[i])
+                                                    ? cb_len8(sp->lref[i])
+                                                    : 1);
+                           }
+                        }
+                  }
+                  for (unsigned spi = 0; spi < CB_PAGES; ++spi)
+                     if (!h->page_line[spi].is_null() && !(big_seen & (1u << spi)))
+                        cb_release_lines_(h->page_line[spi], 2);
+                  for (unsigned li = 0; li < 4; ++li)
+                     if (!h->sp_line[li].is_null())
+                        cb_release_lines_(h->sp_line[li], 1);
+                  if (!h->fp_line.is_null())
+                     cb_release_lines_(h->fp_line, 1);
+               }
                break;
             }
             case K::value_inline:
@@ -4514,6 +5477,41 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   cx_own_line_(&x->seglines[sg], x->lg);
                break;
             }
+            case K::cbucket:
+            {
+               if constexpr (cb_enabled)
+               {
+                  cb_hdr* h = static_cast<cb_hdr*>(dst);
+                  cow_fix_child_(&h->rh.term);
+                  auto own_piece = [&](Ptr* lp, unsigned nl)
+                  {
+                     if (lp->is_null())
+                        return;
+                     if (!alloc_.hkv_retain(line_of(*lp)))
+                        *lp = cb_clone_lines_(*lp, nl);
+                  };
+                  own_piece(&h->fp_line, 1);
+                  for (unsigned li = 0; li < 4; ++li)
+                     own_piece(&h->sp_line[li], 1);
+                  // spi -> line count map for big entries
+                  uint8_t nl_of[CB_PAGES];
+                  for (auto& x2 : nl_of)
+                     x2 = 2;
+                  for (unsigned li = 0; li < 4; ++li)
+                  {
+                     if (!h->cnt[li])
+                        continue;
+                     const cb_sp* sp = cb_spl_(h, li);
+                     for (unsigned i = 0; i < h->cnt[li]; ++i)
+                        if (cb_big(sp->lref[i]))
+                           nl_of[cb_spi(sp->lref[i])] =
+                               uint8_t(cb_len8(sp->lref[i]) ? cb_len8(sp->lref[i]) : 1);
+                  }
+                  for (unsigned spi = 0; spi < CB_PAGES; ++spi)
+                     own_piece(&h->page_line[spi], nl_of[spi]);
+               }
+               break;
+            }
             case K::value_inline:
             case K::null:
                break;
@@ -4566,6 +5564,25 @@ namespace detail  // implementation types & node helpers — not part of the pub
                case K::value_ptr:
                case K::bucket:
                   return;  // terminal reached and private
+               case K::cbucket:
+                  if constexpr (cb_enabled)
+                  {  // CL0 is private; ops own their lines; term may need a clone
+                     cb_hdr*        h  = static_cast<cb_hdr*>(deref_(cur));
+                     const unsigned pl = h->rh.hdr.prefix_len;
+                     size_t         d2 = depth;
+                     if (pl)
+                     {
+                        const size_t c =
+                            lcp(std::string_view(reinterpret_cast<char*>(h->prefix), pl),
+                                key.substr(d2));
+                        if (c < pl)
+                           return;
+                        d2 += pl;
+                     }
+                     if (d2 == key.size())
+                        cow_privatize_term_(&h->rh);
+                  }
+                  return;
                case K::prefix_node:
                {
                   char*            P = static_cast<char*>(deref_(cur));

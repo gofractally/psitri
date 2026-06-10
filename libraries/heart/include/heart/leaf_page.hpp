@@ -84,6 +84,12 @@ namespace heart
       uint16_t         _dead;       // dead tail-heap bytes (orphaned records)
       tail_ptr<>       _cpfx_pos;   // common prefix bytes in the tail heap (0 = none)
       sal::ptr_address _cbases[max_cbases];
+      // CACHELINE INDEX (the wtree lesson): the FIRST stem of every (stride-th) prefix-column
+      // cacheline, sampled HERE in the header — resident from reading the fields above, so the
+      // probe is free — letting lower_bound scan ONE column cacheline instead of all of them.
+      // Width-W samples, unused slots 0xFF-filled (compare >= every real stem). Rebuilt after
+      // any column splice (the touched cachelines are still hot).
+      uint8_t _clidx[64];
 
       // ── op tickets ───────────────────────────────────────────────────────────────
       struct insert_op
@@ -425,6 +431,7 @@ namespace heart
          pfx_set(pos, stem(s, sn));
          vals()[pos] = off;
          ++_nkeys;
+         rebuild_clidx();  // the spliced column cachelines are still hot
          return pos;
       }
 
@@ -478,6 +485,7 @@ namespace heart
          _dead += uint16_t(record(rm.index)->byte_size());
          close_gap(rm.index);
          --_nkeys;
+         rebuild_clidx();
       }
 
       // ── rebuild-fit checks (clone vs split decision) ─────────────────────────────
@@ -617,6 +625,22 @@ namespace heart
                return false;
             if (pfx_get(i) != stem(iv->data, iv->suffix_len))
                return false;
+            if (use_clidx())  // every sampled block start must match its header sample
+            {
+               const uint32_t block = cl_stride() * cl_entries();
+               if (i % block == 0)
+               {
+                  uint32_t sv;
+                  switch (_pfxw)
+                  {
+                     case 1: sv = _clidx[i / block]; break;
+                     case 2: sv = reinterpret_cast<const uint16_t*>(_clidx)[i / block]; break;
+                     default: sv = reinterpret_cast<const uint32_t*>(_clidx)[i / block]; break;
+                  }
+                  if (sv != pfx_get(i))
+                     return false;
+               }
+            }
             const uint32_t klen = full_key(i, kbuf);
             if (fp()[i] != fingerprint_of(kbuf, klen))
                return false;
@@ -672,19 +696,86 @@ namespace heart
             default: reinterpret_cast<uint32_t*>(pfxb())[i] = v; break;
          }
       }
-      /// SIMD lower-bound over the prefix column: first index whose stem >= v.
+      // ── cacheline index geometry ─────────────────────────────────────────────────
+      // entries per column cacheline / samples the 64B header row can hold at width W
+      uint32_t cl_entries() const noexcept { return 64u / _pfxw; }
+      // sample stride in CLs: 1 until the column outgrows the 64B sample row (W=4 + big caps)
+      uint32_t cl_stride() const noexcept
+      {
+         const uint32_t col_cls = (uint32_t(_cap) * _pfxw + 63u) / 64u;  // column footprint
+         const uint32_t avail   = cl_entries();                          // row holds 64/W samples
+         return (col_cls + avail - 1u) / avail;
+      }
+      bool use_clidx() const noexcept { return uint32_t(_nkeys) * _pfxw > 128u; }  // column > 2 CLs
+
+      /// Rebuild the header cacheline-index: sample the FIRST stem of every stride-th column
+      /// cacheline (the blocks the query scans). Called after any column splice — those
+      /// cachelines are still hot, so this is ~a dozen resident reads.
+      void rebuild_clidx() noexcept
+      {
+         std::memset(_clidx, 0xFF, sizeof(_clidx));  // unused slots compare >= every real stem
+         if (!use_clidx())
+            return;
+         const uint32_t block = cl_stride() * cl_entries();  // entries per sampled block
+         const uint32_t nsamp = (uint32_t(_nkeys) + block - 1u) / block;
+         for (uint32_t j = 0; j < nsamp; ++j)
+         {
+            const uint32_t v = pfx_get(j * block);
+            switch (_pfxw)
+            {
+               case 1: _clidx[j] = uint8_t(v); break;
+               case 2: reinterpret_cast<uint16_t*>(_clidx)[j] = uint16_t(v); break;
+               default: reinterpret_cast<uint32_t*>(_clidx)[j] = v; break;
+            }
+         }
+      }
+
+      /// SIMD lower-bound over the prefix column: first index whose stem >= v. When the
+      /// column exceeds 2 cachelines, probe the header-resident cacheline index first and
+      /// scan ONE sampled block instead of the whole column (the wtree lesson).
       int pfx_lower_bound(uint32_t v) const noexcept
       {
+         uint32_t start = 0, len = _nkeys;
+         if (use_clidx())
+         {
+            const uint32_t block = cl_stride() * cl_entries();
+            const uint32_t nsamp = (uint32_t(_nkeys) + block - 1u) / block;
+            uint32_t       cnt;  // samples STRICTLY below v (a block starting == v may have
+                                 // equal stems spilling back into the previous block)
+            switch (_pfxw)
+            {
+               case 1: cnt = uint32_t(ucc::lower_bound_padded(_clidx, nsamp, uint8_t(v))); break;
+               case 2:
+                  cnt = uint32_t(ucc::lower_bound_u16_padded(
+                      reinterpret_cast<const uint16_t*>(_clidx), int(nsamp), uint16_t(v)));
+                  break;
+               default:
+                  cnt = uint32_t(ucc::lower_bound_u32_padded(
+                      reinterpret_cast<const uint32_t*>(_clidx), int(nsamp), v));
+                  break;
+            }
+            const uint32_t cl = cnt ? cnt - 1u : 0u;
+            start             = cl * block;
+            len               = uint32_t(_nkeys) - start;
+            if (len > block)
+               len = block;  // landing at block-end == the next block's first entry: exact
+         }
+         int r;
          switch (_pfxw)
          {
-            case 1: return int(ucc::lower_bound_padded(pfxb(), _nkeys, uint8_t(v)));
+            case 1:
+               r = int(ucc::lower_bound_padded(pfxb() + start, len, uint8_t(v)));
+               break;
             case 2:
-               return ucc::lower_bound_u16_padded(reinterpret_cast<const uint16_t*>(pfxb()),
-                                                  _nkeys, uint16_t(v));
+               r = ucc::lower_bound_u16_padded(reinterpret_cast<const uint16_t*>(pfxb()) + start,
+                                               int(len), uint16_t(v));
+               break;
             default:
-               return ucc::lower_bound_u32_padded(reinterpret_cast<const uint32_t*>(pfxb()),
-                                                  _nkeys, v);
+               r = ucc::lower_bound_u32_padded(reinterpret_cast<const uint32_t*>(pfxb()) + start,
+                                               int(len), v);
+               break;
          }
+         return int(start) + r;
       }
       uint16_t*       vals() noexcept
       {
@@ -870,6 +961,9 @@ namespace heart
          std::memmove(base + (1u + w) * nc, base + (1u + w) * _cap, 2u * _nkeys);  // vals
          std::memmove(base + nc, base + _cap, w * _nkeys);                          // pfx
          _cap = nc;
+         // capacity feeds the sample-block geometry (stride can cross at W=4) and the column
+         // base moved — the header index must match before the caller's lower_bound runs.
+         rebuild_clidx();
       }
 
       void init_empty() noexcept
@@ -884,6 +978,7 @@ namespace heart
          _cpfx_pos      = tail_ptr<>{0};
          for (auto& b : _cbases)
             b = sal::null_ptr_address;
+         std::memset(_clidx, 0xFF, sizeof(_clidx));
       }
 
       // ── the ONE rebuild engine (shared splice) ───────────────────────────────────
@@ -1045,6 +1140,7 @@ namespace heart
          _nkeys = uint16_t(w);
          assert(w == cnt);
          assert(head_size() + tail_used() <= size());
+         rebuild_clidx();
          clear_checksum();  // compact path: dst keeps its own SAL header, content is fresh
       }
 
@@ -1060,5 +1156,5 @@ namespace heart
       }
    } __attribute__((packed));
 
-   static_assert(sizeof(leaf_page) == 96, "paged(22) + fields(10) + cbases(64)");
+   static_assert(sizeof(leaf_page) == 160, "paged(22) + fields(10) + cbases(64) + clidx(64)");
 }  // namespace heart

@@ -38,6 +38,7 @@
 
 #include <heart/bucket_node.hpp>
 #include <heart/leaf_node.hpp>
+#include <heart/key_val_node.hpp>
 #include <heart/leaf_page.hpp>
 #include <heart/radix_nodes.hpp>
 
@@ -153,6 +154,7 @@ namespace heart::radix
          _alloc->register_type_ops<full_radix_node>();
          _alloc->register_type_ops<bucket_node>();
          _alloc->register_type_ops<leaf_page>();
+         _alloc->register_type_ops<key_val_node>();
          // NULL IS A VALID EMPTY TREE — everywhere. No eager root: the direct-API working root
          // (`_root`, an OWNING smart_ptr — psitri tree_context's discipline) starts empty and
          // upsert_raw lazily creates on first write; an emptied tree returns to null. (The
@@ -693,6 +695,48 @@ namespace heart::radix
          _root   = std::move(s);  // assignment releases the displaced working root
       }
       ptr_address working_root() const { return _root.address(); }
+      // [testing] the page-model route's owning divider for `key` (diagnostics).
+      std::string route_divider_for(key_view key)
+      {
+         auto     lk = _ses->lock();
+         uint8_t  db[1056];
+         uint32_t dl = 0;
+         if (!_root || is_page(*_ses, _root.address()))
+            return {};
+         route_to_page(*_ses, _root.address(), as_bytes(key), db, &dl);
+         return std::string(reinterpret_cast<const char*>(db), dl);
+      }
+      // [testing] dump the routed page's entries for `key` (diagnostics).
+      void debug_route_page_dump(key_view key)
+      {
+         auto     lk = _ses->lock();
+         uint8_t  db[1056];
+         uint32_t dl = 0;
+         if (!_root)
+            return;
+         const leaf_page* pg = is_page(*_ses, _root.address())
+                                   ? page_at(_root.address())
+                                   : route_to_page(*_ses, _root.address(), as_bytes(key), db, &dl);
+         std::printf("  routed page: nkeys=%u cpfx_len=%u divlen=%u\n", pg->num_keys(),
+                     unsigned(pg->common_prefix().size()), dl);
+         const kv_resolver R = kvres(*_ses);
+         for (uint32_t i = 0; i < pg->num_keys(); ++i)
+         {
+            const inline_value* iv = pg->record(i);
+            if (iv->value_type == inline_value::vt_extern)
+            {
+               auto kk = R(pg->external_addr(i));
+               std::printf("    [%2u] EXT frag=%u realkeylen=%zu\n", i, unsigned(iv->suffix_len),
+                           kk.size());
+            }
+            else
+               std::printf("    [%2u] inl sfx=%u keylen=%zu\n", i, unsigned(iv->suffix_len),
+                           pg->common_prefix().size() + iv->suffix_len);
+         }
+         const int fi = pg->find(reinterpret_cast<const uint8_t*>(key.data()),
+                                 uint32_t(key.size()), R);
+         std::printf("  in-page find -> %d\n", fi);
+      }
       // [testing] read a key from an ARBITRARY (pinned) root — used to test snapshot isolation.
       bool find_at(ptr_address root, key_view key, value_view& out)
       {
@@ -1851,14 +1895,27 @@ namespace heart::radix
       // COW unit — no node copies at all on this path). Returns the page's successor (== page
       // when in-place/untouched). When the entry can't fit even via a rebuild, sets _page_split
       // and leaves the page untouched — the caller splits and retries.
+      // FULL-KEY fetch for extern fragments (the page compares call back through this when a
+      // fragment ties) — session-parametric so reader-session cursors share it.
+      static kv_resolver kvres(sal::allocator_session& ses) noexcept
+      {
+         return {&ses, [](const void* c, ptr_address a) -> std::span<const uint8_t> {
+                    auto& s = *const_cast<sal::allocator_session*>(
+                        static_cast<const sal::allocator_session*>(c));
+                    return s.get_ref<key_val_node>(a).obj()->key();
+                 }};
+      }
+
       ptr_address page_apply_upsert(ptr_address page, bool parent_shared, bytes kb, bytes val)
       {
          auto             ref    = _ses->get_ref<leaf_page>(page);
          const leaf_page* pg     = ref.obj();
          const bool       shared = parent_shared || ref.ref() > 1;
-         assert(kb.size() <= leaf_page::max_suffix_len && "page-model keys are <= 255 bytes");
-         // Classify inline vs external by the would-be suffix (post-cpfx). A rebuild can only
-         // shorten cpfx to common(cpfx, key), which is exactly what we compute → stable.
+         assert(kb.size() <= key_val_node::max_key_len && "keys are <= 1024 bytes (psitri parity)");
+         // Classify by the would-be suffix (post-cpfx). A rebuild can only shorten cpfx to
+         // common(cpfx, key), which is exactly what we compute → stable. ANY item whose
+         // suffix+payload exceeds the 128-byte in-page cap — big value OR big key, any value
+         // type — moves WHOLE into its own key_val_node; the page keeps a fragment + code.
          auto     cp  = pg->common_prefix();
          uint32_t ncp = 0;
          {
@@ -1867,18 +1924,27 @@ namespace heart::radix
                ++ncp;
          }
          const uint32_t       slen = uint32_t(kb.size()) - ncp;
-         leaf_page::insert_op ins{
-             .key = kb, .value = val, .vtype = _ins_value_type, .ext = sal::null_ptr_address};
-         if (ins.vtype == inline_value::vt_bytes &&
-             int(slen + val.size()) > leaf_page::max_inline_entry)
+         leaf_page::insert_op ins{.key   = kb,
+                                  .value = val,
+                                  .vtype = _ins_value_type,
+                                  .ext   = sal::null_ptr_address,
+                                  .res   = kvres(*_ses)};
+         const uint32_t pay0 = _ins_value_type == inline_value::vt_bytes ? uint32_t(val.size())
+                                                                         : 4u /*subtree root*/;
+         const int idx = pg->find(kb.data(), uint32_t(kb.size()), ins.res);
+         // ONCE EXTERNAL, STAYS EXTERNAL: an extern record's in-page fragment may be a
+         // truncated prefix of the real key — inlining it on a shrinking update would lose
+         // key bytes. (Fresh classification: any item whose suffix+payload exceeds the
+         // 128-byte in-page cap moves whole into its own key_val_node.)
+         const bool old_ext =
+             idx >= 0 && pg->record(uint32_t(idx))->value_type == inline_value::vt_extern;
+         if (old_ext || int(slen + pay0) > leaf_page::max_inline_entry)
          {
-            assert(val.size() <= 255 && "external value cap (leaf_node u8 length)");
+            // the key_val_node stores the FULL key + value (+ the REAL value type)
+            ins.ext   = _ses->alloc<key_val_node>(sal::alloc_hint{}, kb, val, _ins_value_type);
             ins.vtype = inline_value::vt_extern;
             ins.value = {};
-            // the external object holds ONLY the value — the suffix stays in-page for compares
-            ins.ext = _ses->alloc<leaf_node>(sal::alloc_hint{}, bytes{}, val);
          }
-         const int idx = pg->find(kb.data(), uint32_t(kb.size()));
          if (idx >= 0)  // UPDATE — capture the displaced record's identity first
          {
             const inline_value* old       = pg->record(uint32_t(idx));
@@ -1887,7 +1953,7 @@ namespace heart::radix
             {
                old_child = pg->external_addr(uint32_t(idx));
                _old_value_size =
-                   int(_ses->get_ref<leaf_node>(old_child).obj()->value_bytes().size());
+                   int(_ses->get_ref<key_val_node>(old_child).obj()->value_bytes().size());
             }
             else
             {
@@ -1919,7 +1985,7 @@ namespace heart::radix
                // The slot swap's release of `page` balances the retains — and (unique) destroys
                // the old page, releasing every child including the replaced one.
                ptr_address np =
-                   _ses->alloc<leaf_page>(sal::alloc_hint{}, leaf_page::clone_update_op{pg, upd});
+                   _ses->alloc<leaf_page>(sal::alloc_hint{}, leaf_page::clone_update_op{pg, upd, kvres(*_ses)});
                retain_page_children(pg, idx);
                return np;
             }
@@ -1965,7 +2031,7 @@ namespace heart::radix
       {
          auto             ref = _ses->get_ref<leaf_page>(page);
          const leaf_page* pg  = ref.obj();
-         const int        idx = pg->find(kb.data(), uint32_t(kb.size()));
+         const int        idx = pg->find(kb.data(), uint32_t(kb.size()), kvres(*_ses));
          if (idx < 0)
          {
             _removed = false;
@@ -2126,17 +2192,35 @@ namespace heart::radix
          }
          __builtin_unreachable();
       }
-      // The divider's tail past `depth` compresses into ONE fresh child: a setlist with
-      // prefix = D[depth+1..) whose term is the page — or the page itself when b is D's last
-      // byte. Returns the branch target for byte D[depth].
+      // The divider's tail past `depth` compresses into a CHAIN of fresh children: each
+      // node holds up to prefix_capacity tail bytes (long dividers — deep nested-prefix
+      // keysets — need several), the deepest holds the page as its term. Returns the
+      // branch target for byte D[depth]. Built bottom-up so every link is set on a node
+      // this op just created.
       smart_address make_divider_tail(bytes D, uint32_t depth, ptr_address page,
                                       sal::alloc_hint hint)
       {
          if (depth + 1 == D.size())
             return smart_address::from_pointer(page);
-         ptr_address chain = make_node<setlist_u8>(D.subspan(depth + 1), hint);
-         mut<setlist_u8>(chain)->set_term_value(smart_address::from_pointer(page));
-         return smart_address::from_pointer(chain);
+         constexpr int cap = setlist_u8::prefix_capacity;
+         const int     lo  = int(depth) + 1;
+         int           end = int(D.size());
+         int           start = end - cap > lo ? end - cap : lo;
+         ptr_address   node = make_node<setlist_u8>(D.subspan(size_t(start), size_t(end - start)),
+                                                    hint);
+         mut<setlist_u8>(node)->set_term_value(smart_address::from_pointer(page));
+         while (start > lo)
+         {
+            const int   bpos = start - 1;  // this link's branch byte
+            const int   s2   = bpos - cap > lo ? bpos - cap : lo;
+            ptr_address up = make_node<setlist_u8>(D.subspan(size_t(s2), size_t(bpos - s2)), hint);
+            [[maybe_unused]] bool okb =
+                mut<setlist_u8>(up)->set_branch(D[size_t(bpos)], smart_address::from_pointer(node));
+            assert(okb && "fresh single-entry setlist always fits");
+            node  = up;
+            start = s2;
+         }
+         return smart_address::from_pointer(node);
       }
       template <upsert_mode mode, class N>
       ptr_address divider_insert_in(ptr_address addr, bytes D, uint32_t depth, ptr_address page)
@@ -2397,12 +2481,12 @@ namespace heart::radix
                          unsigned(pg->num_keys()), pg->size());
             std::abort();
          }
-         const auto       sp = pg->get_split_pos();
+         const auto       sp = pg->get_split_pos(kvres(*_ses));
          ptr_address      L  = _ses->alloc<leaf_page>(sal::alloc_hint{},
-                                                      leaf_page::split_op{pg, 0, sp.index});
+                                                      leaf_page::split_op{pg, 0, sp.index, kvres(*_ses)});
          _ses->get_ref<leaf_page>(L).obj()->for_each_child([&](ptr_address c) { _ses->retain(c); });
          ptr_address R = _ses->alloc<leaf_page>(
-             sal::alloc_hint{}, leaf_page::split_op{pg, sp.index, uint16_t(pg->num_keys())});
+             sal::alloc_hint{}, leaf_page::split_op{pg, sp.index, uint16_t(pg->num_keys()), kvres(*_ses)});
          _ses->get_ref<leaf_page>(R).obj()->for_each_child([&](ptr_address c) { _ses->retain(c); });
          ++_cc.page_splits;
          if (cur == P)  // the root IS the page → grow a radix above it
@@ -2561,15 +2645,18 @@ namespace heart::radix
                                value_view& out)
       {
          const leaf_page* pg = route_to_page(ses, root, kb, nullptr, nullptr);
-         const int idx = pg->find(kb.data(), uint32_t(kb.size()));
+         const int idx = pg->find(kb.data(), uint32_t(kb.size()), kvres(ses));
          if (idx < 0)
             return false;
          const inline_value* iv = pg->record(uint32_t(idx));
          if (iv->value_type == inline_value::vt_extern)
          {
-            const leaf_node* ln = ses.get_ref<leaf_node>(pg->external_addr(uint32_t(idx))).obj();
-            bytes            v  = ln->value_bytes();
-            out = value_view(reinterpret_cast<const char*>(v.data()), v.size());
+            const key_val_node* kn =
+                ses.get_ref<key_val_node>(pg->external_addr(uint32_t(idx))).obj();
+            if (kn->is_subtree())
+               return false;  // subtree values read as not-found (use is_subtree/get_subtree)
+            bytes v = kn->value_bytes();
+            out     = value_view(reinterpret_cast<const char*>(v.data()), v.size());
             return true;
          }
          if (iv->is_subtree())
@@ -2589,19 +2676,26 @@ namespace heart::radix
          kb2.append(cp.data(), cp.size());
          for (uint32_t i = 0; i < pg->num_keys(); ++i)
          {
-            kb2.truncate(uint32_t(cp.size()));
-            auto sfx = pg->suffix(i);
-            kb2.append(sfx.data(), sfx.size());
             const inline_value* iv = pg->record(i);
             value_view          v;
             if (iv->value_type == inline_value::vt_extern)
             {
-               bytes vb = _ses->get_ref<leaf_node>(pg->external_addr(i)).obj()->value_bytes();
+               // the key_val_node holds the FULL key and the real value
+               const key_val_node* kn =
+                   _ses->get_ref<key_val_node>(pg->external_addr(i)).obj();
+               kb2.truncate(0);
+               kb2.append(kn->key().data(), kn->key().size());
+               bytes vb = kn->value_bytes();
                v        = value_view(reinterpret_cast<const char*>(vb.data()), vb.size());
             }
             else
+            {
+               kb2.truncate(uint32_t(cp.size()));
+               auto sfx = pg->suffix(i);
+               kb2.append(sfx.data(), sfx.size());
                v = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len),
                               iv->value_len);
+            }
             cb(key_view(reinterpret_cast<const char*>(kb2.buf), kb2.len), v);
          }
       }
@@ -2776,38 +2870,46 @@ namespace heart::radix
             // LEAN PATH: one lower-bound route + one in-page SIMD lower_bound — no cursor
             // construction, no second descent. Falls back to the cursor only when the query
             // lands past the routed page's last entry (a page-boundary seek, the rare case).
-            bytes            q  = as_bytes(key);
-            const leaf_page* pg = route_to_page(*_ses, _root.address(), q, nullptr, nullptr);
-            int              lb = pg->lower_bound(q.data(), uint32_t(q.size()));
-            if (strict)  // upper_bound: skip the (single possible) exact match
-            {
-               if (lb < int(pg->num_keys()))
+            bytes             q  = as_bytes(key);
+            const kv_resolver R  = kvres(*_ses);
+            const leaf_page*  pg = route_to_page(*_ses, _root.address(), q, nullptr, nullptr);
+            int               lb = pg->lower_bound(q.data(), uint32_t(q.size()), R);
+            // does entry lb's FULL key equal q? (extern keys live whole in the key_val_node)
+            auto entry_equals = [&](uint32_t i) {
+               const inline_value* iv = pg->record(i);
+               if (iv->value_type == inline_value::vt_extern)
                {
-                  auto cp  = pg->common_prefix();
-                  auto sfx = pg->suffix(uint32_t(lb));
-                  if (cp.size() + sfx.size() == q.size() &&
-                      std::memcmp(cp.data(), q.data(), cp.size()) == 0 &&
-                      std::memcmp(sfx.data(), q.data() + cp.size(), sfx.size()) == 0)
-                     ++lb;
+                  auto kk = R(pg->external_addr(i));
+                  return kk.size() == q.size() &&
+                         (q.empty() || std::memcmp(kk.data(), q.data(), q.size()) == 0);
                }
-            }
+               auto cp  = pg->common_prefix();
+               auto sfx = pg->suffix(i);
+               return cp.size() + sfx.size() == q.size() &&
+                      std::memcmp(cp.data(), q.data(), cp.size()) == 0 &&
+                      std::memcmp(sfx.data(), q.data() + cp.size(), sfx.size()) == 0;
+            };
+            if (strict && lb < int(pg->num_keys()) && entry_equals(uint32_t(lb)))
+               ++lb;  // upper_bound: skip the (single possible) exact match
             if (lb < int(pg->num_keys()))
             {
+               const inline_value* iv = pg->record(uint32_t(lb));
+               if (iv->value_type == inline_value::vt_extern)
+               {
+                  const key_val_node* kn =
+                      _ses->get_ref<key_val_node>(pg->external_addr(uint32_t(lb))).obj();
+                  out_key.assign(reinterpret_cast<const char*>(kn->key().data()),
+                                 kn->key().size());
+                  bytes vb = kn->value_bytes();
+                  out_val  = value_view(reinterpret_cast<const char*>(vb.data()), vb.size());
+                  return true;
+               }
                auto cp  = pg->common_prefix();
                auto sfx = pg->suffix(uint32_t(lb));
                out_key.assign(reinterpret_cast<const char*>(cp.data()), cp.size());
                out_key.append(reinterpret_cast<const char*>(sfx.data()), sfx.size());
-               const inline_value* iv = pg->record(uint32_t(lb));
-               if (iv->value_type == inline_value::vt_extern)
-               {
-                  bytes vb = _ses->get_ref<leaf_node>(pg->external_addr(uint32_t(lb)))
-                                 .obj()
-                                 ->value_bytes();
-                  out_val = value_view(reinterpret_cast<const char*>(vb.data()), vb.size());
-               }
-               else
-                  out_val = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len),
-                                       iv->value_len);
+               out_val = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len),
+                                    iv->value_len);
                return true;
             }
             // Spill: the answer is the NEXT page's first entry — the cursor frame walk finds it.
@@ -3150,25 +3252,37 @@ namespace heart::radix
          const leaf_page* as_page(ptr_address a) const { return radix_tree::page_at(ses(), a); }
          void             take_page_entry(const leaf_page* pg, int i)
          {
-            _klen   = 0;
+            _klen                  = 0;
+            const inline_value* iv = pg->record(uint32_t(i));
+            if (iv->value_type == inline_value::vt_extern)
+            {
+               // big item: the key_val_node holds the FULL key + the REAL value type
+               const key_val_node* kn =
+                   ses().get_ref<key_val_node>(pg->external_addr(uint32_t(i))).obj();
+               append(kn->key().data(), kn->key().size());
+               if (kn->is_subtree())
+               {
+                  _is_subtree = true;
+                  _subtree    = kn->subtree_root();
+                  _val        = {};
+               }
+               else
+               {
+                  _is_subtree = false;
+                  auto v      = kn->value_bytes();
+                  _val        = value_view(reinterpret_cast<const char*>(v.data()), v.size());
+               }
+               return;
+            }
             auto cp = pg->common_prefix();
             append(cp.data(), cp.size());
             auto sfx = pg->suffix(uint32_t(i));
             append(sfx.data(), sfx.size());
-            const inline_value* iv = pg->record(uint32_t(i));
             if (iv->is_subtree())
             {
                _is_subtree = true;
                _subtree    = iv->subtree_root();
                _val        = {};
-            }
-            else if (iv->value_type == inline_value::vt_extern)
-            {
-               _is_subtree = false;
-               const leaf_node* ln =
-                   ses().get_ref<leaf_node>(pg->external_addr(uint32_t(i))).obj();
-               auto v = ln->value_bytes();
-               _val   = value_view(reinterpret_cast<const char*>(v.data()), v.size());
             }
             else
             {
@@ -3558,7 +3672,7 @@ namespace heart::radix
          void enter_page_at(const leaf_page* pg, bytes q)
          {
             frame&    f  = _fr[_depth - 1];
-            const int lb = pg->lower_bound(q.data(), uint32_t(q.size()));
+            const int lb = pg->lower_bound(q.data(), uint32_t(q.size()), kvres(ses()));
             if (lb < int(pg->num_keys()))
             {
                f.pos = int16_t(lb);
@@ -5945,7 +6059,7 @@ namespace heart::radix
       auto check_child = [&](ptr_address c) -> bool /*descend?*/ {
          auto     ref  = _ses->get_ref<sal::alloc_header>(c);
          uint32_t rc   = ref.ref();
-         bool     leaf = ref->type() == leaf_node::type_id;
+         bool     leaf = ref->type() == leaf_node::type_id || ref->type() == key_val_node::type_id;
          ++(leaf ? ra.leaves : ra.nodes);
          if (rc != 1)
          {
@@ -5960,12 +6074,23 @@ namespace heart::radix
          }
          return !leaf;
       };
-      // page model: a page's children are external value leaves + nested subtree roots; the
-      // roots get the full recursive audit (their trees must be exactly singly-owned too).
+      // page model: a page's children are key_val_nodes + nested subtree roots; subtree
+      // roots (direct or inside a key_val_node) get the full recursive audit.
       if (const leaf_page* pg = page_at(a))
       {
          pg->for_each_child([&](ptr_address c) {
-            if (check_child(c))
+            const bool descend = check_child(c);
+            auto       ref     = _ses->get_ref<sal::alloc_header>(c);
+            if (ref->type() == key_val_node::type_id)
+            {
+               const key_val_node* kn = _ses->get_ref<key_val_node>(c).obj();
+               if (kn->is_subtree() && kn->subtree_root() != sal::null_ptr_address)
+               {
+                  if (check_child(kn->subtree_root()))
+                     audit_walk(kn->subtree_root(), depth + 2, ra, max_print);
+               }
+            }
+            else if (descend)
                audit_walk(c, depth + 1, ra, max_print);
          });
          return;

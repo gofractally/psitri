@@ -32,6 +32,10 @@ namespace heart
       // radix-indexed-leaf-pages model: the radix above stores DIVIDERS whose branch
       // targets / term_values point directly at pages.
       inline constexpr sal::header_type leaf_page = sal::header_type(base + 12);
+      // Standalone (key,value) record (key_val_node.hpp): a page item whose suffix+value
+      // exceed the 128-byte in-page cap lives in its own allocation; the page keeps a
+      // comparison fragment + cbase code. NOT in radix_kind (never dispatched as a router).
+      inline constexpr sal::header_type key_val = sal::header_type(base + 13);
 
       // The same taxonomy as a STRONG enum (enumerator order == the header_type offsets above).
       // Engine dispatch switches on this — never on a raw int — so -Wswitch flags any switch that

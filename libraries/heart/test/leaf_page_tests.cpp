@@ -53,9 +53,30 @@ namespace
    {
       return {.key = b(k), .value = b(v), .vtype = inline_value::vt_bytes};
    }
+   // Test-side key_val_node registry: extern records resolve their FULL key through this
+   // (the standalone tests fabricate addresses; the engine resolves via real key_val_nodes).
+   std::map<uint32_t, std::string>& kv_registry()
+   {
+      static std::map<uint32_t, std::string> m;
+      return m;
+   }
+   heart::kv_resolver test_resolver()
+   {
+      return {&kv_registry(), [](const void* c, ptr_address a) -> bytes {
+                 auto& m  = *static_cast<const std::map<uint32_t, std::string>*>(c);
+                 auto  it = m.find(*a);
+                 REQUIRE(it != m.end());
+                 return b(it->second);
+              }};
+   }
    leaf_page::insert_op ins_ext(const std::string& k, ptr_address a)
    {
-      return {.key = b(k), .value = {}, .vtype = inline_value::vt_extern, .ext = a};
+      kv_registry()[*a] = k;  // the fabricated key_val_node holds the full key
+      return {.key   = b(k),
+              .value = {},
+              .vtype = inline_value::vt_extern,
+              .ext   = a,
+              .res   = test_resolver()};
    }
 
    std::string get_key(const leaf_page& p, uint32_t i)
@@ -86,7 +107,8 @@ namespace
       return true;
    }
 
-   void check_oracle(const leaf_page& p, const std::map<std::string, std::string>& m)
+   void check_oracle(const leaf_page& p, const std::map<std::string, std::string>& m,
+                     heart::kv_resolver R = {})
    {
       REQUIRE(p.num_keys() == m.size());
       REQUIRE(p.validate_invariants());
@@ -95,10 +117,11 @@ namespace
       {
          REQUIRE(get_key(p, i) == k);  // in-order iteration matches the map
          REQUIRE(get_val(p, i) == v);
-         const int fi = p.find(reinterpret_cast<const uint8_t*>(k.data()), uint32_t(k.size()));
+         const int fi =
+             p.find(reinterpret_cast<const uint8_t*>(k.data()), uint32_t(k.size()), R);
          REQUIRE(fi == int(i));
-         REQUIRE(p.lower_bound(reinterpret_cast<const uint8_t*>(k.data()), uint32_t(k.size())) ==
-                 int(i));
+         REQUIRE(p.lower_bound(reinterpret_cast<const uint8_t*>(k.data()), uint32_t(k.size()),
+                               R) == int(i));
          ++i;
       }
    }
@@ -315,7 +338,8 @@ TEST_CASE("leaf_page external values cbase coding", "[leaf_page]")
    REQUIRE(p->validate_invariants());
    for (auto& [k, addr] : ext)
    {
-      const int i = p->find(reinterpret_cast<const uint8_t*>(k.data()), uint32_t(k.size()));
+      const int i = p->find(reinterpret_cast<const uint8_t*>(k.data()), uint32_t(k.size()),
+                            test_resolver());
       REQUIRE(i >= 0);
       REQUIRE(p->is_external(uint32_t(i)));
       REQUIRE(*p->external_addr(uint32_t(i)) == addr);
@@ -568,4 +592,60 @@ TEST_CASE("leaf_page fuzz vs std::map", "[leaf_page][fuzz]")
       }
    }
    check_oracle(*p, m);
+}
+
+TEST_CASE("leaf_page big items: truncated fragments resolve through key_val records",
+          "[leaf_page]")
+{
+   // Keys far past ext_frag_cap sharing a long common prefix: fragments tie and every
+   // compare must extend through the resolver — exactly the kv-compat adversarial shape
+   // (200-deep nested prefixes) that SIGABRT'd the engine before key_val_node.
+   page_buf                           p;
+   std::map<std::string, std::string> m;
+   std::string                        nest(200, 'q');  // shared 200-byte prefix
+   uint32_t                           next_addr = 0x5000;
+   for (int i = 0; i < 24; ++i)
+   {
+      std::string k = nest + std::string(1 + (i % 7), char('a' + i));  // 201..207 bytes
+      if (m.count(k))
+         continue;
+      auto op = ins_ext(k, ptr_address(next_addr++));  // big item -> own allocation
+      if (p->can_apply(op) != leaf_page::can_apply_mode::modify)
+         break;  // page full of 128-byte capped records (the cap is the point)
+      p->apply(op);
+      m[k] = "";  // extern: value lives in the key_val record (empty via value())
+   }
+   REQUIRE(m.size() >= 10);  // capped records keep big items dense per page
+   REQUIRE(p->validate_invariants());
+   // every key finds + positions exactly through fragment-tie resolution
+   uint32_t i = 0;
+   for (auto& [k, v] : m)
+   {
+      const uint8_t* kd = reinterpret_cast<const uint8_t*>(k.data());
+      REQUIRE(p->find(kd, uint32_t(k.size()), test_resolver()) == int(i));
+      REQUIRE(p->lower_bound(kd, uint32_t(k.size()), test_resolver()) == int(i));
+      REQUIRE(p->is_external(i));
+      ++i;
+   }
+   // a miss sharing the whole prefix resolves and lands at the right position
+   std::string miss = nest + "zz";
+   REQUIRE(p->find(reinterpret_cast<const uint8_t*>(miss.data()), uint32_t(miss.size()),
+                   test_resolver()) == -1);
+   // split with truncated boundary fragments: divider math resolves the real suffixes
+   const auto sp = p->get_split_pos(test_resolver());
+   REQUIRE(sp.index > 0);
+   REQUIRE(sp.index < p->num_keys());
+   page_buf bl(leaf_page::page_bytes(), leaf_page::split_op{p.pg, 0, sp.index, test_resolver()});
+   page_buf br2(leaf_page::page_bytes(),
+                leaf_page::split_op{p.pg, sp.index, p->num_keys(), test_resolver()});
+   REQUIRE(bl->validate_invariants());
+   REQUIRE(br2->validate_invariants());
+   REQUIRE(bl->num_keys() + br2->num_keys() == p->num_keys());
+   std::string div(reinterpret_cast<const char*>(sp.div), sp.div_len);
+   auto        it = m.begin();
+   std::advance(it, sp.index - 1);
+   const std::string left = it->first;
+   ++it;
+   REQUIRE(left < div);
+   REQUIRE(div <= it->first);
 }

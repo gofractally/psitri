@@ -52,6 +52,21 @@ namespace heart
     * shrinks via compact_size()/compact_to(), which REBUILDS — dropping dead tail
     * bytes, excess capacity, and dead cbases. Same lifecycle as bucket_node/psitri.
     */
+   /// Type-erased fetch of a key_val_node's FULL KEY by address — threaded into page
+   /// compares that may need to extend an extern record's fragment. Null is valid when
+   /// no big items can be involved (asserts if a resolve is ever needed).
+   struct kv_resolver
+   {
+      const void* ctx                                               = nullptr;
+      std::span<const uint8_t> (*fn)(const void*, sal::ptr_address) = nullptr;
+      std::span<const uint8_t> operator()(sal::ptr_address a) const
+      {
+         assert(fn && "extern-fragment compare needs a kv_resolver");
+         return fn(ctx, a);
+      }
+      explicit operator bool() const noexcept { return fn != nullptr; }
+   };
+
    struct leaf_page : paged
    {
       static constexpr sal::header_type type_id = radix_type_ids::leaf_page;
@@ -71,10 +86,13 @@ namespace heart
          }();
          return v;
       }
-      static constexpr uint32_t         max_cbases       = 16;
-      static constexpr int              max_inline_entry = 128;  // suffix+value > this => extern
-      static constexpr uint16_t         ext_code_base    = 0xFF00;
-      static constexpr uint16_t         max_suffix_len   = 255;  // inline_value u8 field
+      static constexpr uint32_t max_cbases       = 16;
+      static constexpr int      max_inline_entry = 128;  // suffix+value > this => key_val_node
+      static constexpr uint16_t ext_code_base    = 0xFF00;
+      static constexpr uint16_t max_suffix_len   = 255;  // inline_value u8 field (inline records)
+      // An extern record keeps a comparison FRAGMENT of the suffix, capped so the record
+      // honors the 128-byte item limit: 3 (header) + fragment + 2 (cbase code) <= 128.
+      static constexpr uint16_t ext_frag_cap = 123;
 
       uint16_t         _nkeys;
       uint16_t         _cap;        // column capacity, always a multiple of 4
@@ -97,7 +115,8 @@ namespace heart
          std::span<const uint8_t> key;    // FULL key as the page sees it
          std::span<const uint8_t> value;  // vt_bytes payload / vt_subtree 4-byte root
          uint8_t                  vtype = inline_value::vt_bytes;
-         sal::ptr_address         ext   = sal::null_ptr_address;  // vt_extern target
+         sal::ptr_address         ext   = sal::null_ptr_address;  // vt_extern key_val_node
+         kv_resolver              res{};  // fragment extension for position compares
       };
       struct update_op  // value rewrite at an existing index, key unchanged
       {
@@ -127,16 +146,19 @@ namespace heart
       {
          const leaf_page* src;
          update_op        upd;
+         kv_resolver      res{};
       };
       struct clone_remove_op
       {
          const leaf_page* src;
          uint16_t         index;
+         kv_resolver      res{};
       };
       struct split_op  // one half of a split: src entries [lo,hi)
       {
          const leaf_page* src;
          uint16_t         lo, hi;
+         kv_resolver      res{};
       };
 
       // ── SAL lifecycle ────────────────────────────────────────────────────────────
@@ -184,6 +206,8 @@ namespace heart
       }
       void compact_to(sal::alloc_header* dst) const noexcept
       {
+         // compaction never changes cpfx (prepend == 0): fragments copy verbatim, already
+         // maximal — no resolver needed (SAL's passive compactor has no session).
          static_cast<leaf_page*>(dst)->init_from(this, 0, _nkeys, _cpfx_len, nullptr, 0, nullptr,
                                                  nullptr, /*drop=*/-1, /*max_w=*/_pfxw);
       }
@@ -234,18 +258,20 @@ namespace heart
          // factoring only ever LOOSENS here: cpfx may shrink to admit a diverging key
          const uint16_t ncp = uint16_t(
              shared_prefix(op.ins.key.data(), op.ins.key.size(), s->cpfx_data(), s->_cpfx_len));
-         init_from(s, 0, s->_nkeys, ncp, nullptr, 0, &op.ins, nullptr);
+         init_from(s, 0, s->_nkeys, ncp, nullptr, 0, &op.ins, nullptr, -1, 4,
+                   op.ins.res);
       }
       leaf_page(uint32_t asize, sal::ptr_address_seq seq, const clone_update_op& op) noexcept
       {
          this->init_page(asize, type_id, seq);
-         init_from(op.src, 0, op.src->_nkeys, op.src->_cpfx_len, nullptr, 0, nullptr, &op.upd);
+         init_from(op.src, 0, op.src->_nkeys, op.src->_cpfx_len, nullptr, 0, nullptr, &op.upd,
+                   -1, 4, op.res);
       }
       leaf_page(uint32_t asize, sal::ptr_address_seq seq, const clone_remove_op& op) noexcept
       {
          this->init_page(asize, type_id, seq);
          init_from(op.src, 0, op.src->_nkeys, op.src->_cpfx_len, nullptr, 0, nullptr, nullptr,
-                   int(op.index));
+                   int(op.index), 4, op.res);
       }
       leaf_page(uint32_t asize, sal::ptr_address_seq seq, const split_op& op) noexcept
       {
@@ -258,7 +284,7 @@ namespace heart
          auto       b     = s->suffix(op.hi - 1);
          const auto extra = shared_prefix(a.data(), a.size(), b.data(), b.size());
          init_from(s, op.lo, op.hi, uint16_t(s->_cpfx_len + extra), a.data(), uint32_t(extra),
-                   nullptr, nullptr);
+                   nullptr, nullptr, -1, 4, op.res);
       }
 
       // ── accessors ────────────────────────────────────────────────────────────────
@@ -337,7 +363,7 @@ namespace heart
       /// cachelines — is touched only for a candidate that survives both, and the page cpfx
       /// is compared exactly once, inside that verify (a fingerprint-less miss never touches
       /// the tail at all).
-      int find(const uint8_t* k, uint32_t n) const noexcept
+      int find(const uint8_t* k, uint32_t n, const kv_resolver& R = {}) const noexcept
       {
          if (n < _cpfx_len)
             return -1;
@@ -356,7 +382,19 @@ namespace heart
             if (pfx_get(i) == q2)  // column pre-screen: kills fp collisions without a tail touch
             {
                const inline_value* iv = record(i);
-               if (iv->suffix_len == sn && (sn == 0 || std::memcmp(iv->data, s, sn) == 0))
+               if (iv->value_type == inline_value::vt_extern)
+               {
+                  // the fragment must prefix-match before paying the dereference; the
+                  // key_val_node stores the FULL key, so the final compare covers cpfx too
+                  const uint32_t fl = iv->suffix_len;
+                  if (fl <= sn && (fl == 0 || std::memcmp(iv->data, s, fl) == 0))
+                  {
+                     auto kk = R(decode_extern(iv));
+                     if (kk.size() == n && (n == 0 || std::memcmp(kk.data(), k, n) == 0))
+                        return int(i);
+                  }
+               }
+               else if (iv->suffix_len == sn && (sn == 0 || std::memcmp(iv->data, s, sn) == 0))
                {
                   // suffix matched → the only possible entry; settle the cpfx part once
                   if (_cpfx_len && std::memcmp(k, cpfx_data(), _cpfx_len) != 0)
@@ -371,7 +409,7 @@ namespace heart
 
       // ── lower_bound: SIMD prefix-column scan + equal-run compare ─────────────────
       /// @return smallest index whose full key >= (k,n); _nkeys if none.
-      int lower_bound(const uint8_t* k, uint32_t n) const noexcept
+      int lower_bound(const uint8_t* k, uint32_t n, const kv_resolver& R = {}) const noexcept
       {
          if (_cpfx_len)
          {
@@ -385,7 +423,7 @@ namespace heart
          const uint8_t* s  = k + _cpfx_len;
          const uint32_t sn = n - _cpfx_len;
          int i = pfx_lower_bound(stem(s, sn));
-         while (i < int(_nkeys) && cmp_suffix(uint32_t(i), s, sn) < 0)
+         while (i < int(_nkeys) && cmp_suffix(uint32_t(i), s, sn, R) < 0)
             ++i;
          return i;
       }
@@ -402,8 +440,8 @@ namespace heart
          const uint32_t n = uint32_t(ins.key.size());
          if (n < _cpfx_len || (_cpfx_len && std::memcmp(ins.key.data(), cpfx_data(), _cpfx_len)))
             return can_apply_mode::none;  // diverges from cpfx => rebuilding clone
-         if (n - _cpfx_len > max_suffix_len)
-            return can_apply_mode::none;
+         if (ins.vtype != inline_value::vt_extern && n - _cpfx_len > max_suffix_len)
+            return can_apply_mode::none;  // big items must arrive classified vt_extern
          if (ins.vtype == inline_value::vt_bytes &&
              int(n - _cpfx_len + ins.value.size()) > max_inline_entry)
             return can_apply_mode::none;  // engine should have externalized this entry
@@ -419,13 +457,14 @@ namespace heart
       uint16_t apply(const insert_op& ins) noexcept
       {
          assert(can_apply(ins) == can_apply_mode::modify);
-         assert(find(ins.key.data(), uint32_t(ins.key.size())) < 0);
+         assert(find(ins.key.data(), uint32_t(ins.key.size()), ins.res) < 0);
          if (_nkeys == _cap)
             grow_cap();
          const uint8_t* s   = ins.key.data() + _cpfx_len;
          const uint32_t sn  = uint32_t(ins.key.size()) - _cpfx_len;
          const uint16_t off = alloc_record(s, sn, ins);
-         const uint16_t pos = uint16_t(lower_bound(ins.key.data(), uint32_t(ins.key.size())));
+         const uint16_t pos =
+             uint16_t(lower_bound(ins.key.data(), uint32_t(ins.key.size()), ins.res));
          open_gap(pos);
          fp()[pos] = fingerprint_of(ins.key.data(), ins.key.size());
          pfx_set(pos, stem(s, sn));
@@ -494,8 +533,10 @@ namespace heart
          const uint32_t n   = uint32_t(ins.key.size());
          const uint32_t ncp = shared_prefix(ins.key.data(), n, cpfx_data(), _cpfx_len);
          const uint32_t sn  = n - ncp;
-         if (sn > max_suffix_len || uint32_t(_cpfx_len - ncp) + max_live_suffix() > max_suffix_len)
-            return false;
+         if (ins.vtype != inline_value::vt_extern && sn > max_suffix_len)
+            return false;  // big items must arrive classified vt_extern
+         if (uint32_t(_cpfx_len - ncp) + max_live_suffix() > max_suffix_len)
+            return false;  // re-expanding INLINE suffixes must stay within the u8 bound
          uint32_t cb = live_cbase_count();
          if (ins.vtype == inline_value::vt_extern)
             cb += 1;  // conservative: may need a fresh base
@@ -544,12 +585,22 @@ namespace heart
       {
          uint16_t index;    // right half = [index, nkeys)
          uint16_t div_len;  // full-key-space divider length
-         uint8_t  div[520];  // cpfx(<=255) + separator(<=256)
+         uint8_t  div[1056];  // a divider never exceeds a max-length key + 1
          std::span<const uint8_t> divider() const noexcept { return {div, div_len}; }
       };
-      split_pos get_split_pos() const noexcept
+      split_pos get_split_pos(const kv_resolver& R = {}) const noexcept
       {
          assert(_nkeys >= 2);
+         // Separator math needs the REAL suffix of an extern record (its in-page fragment can
+         // tie); splits are cold, so resolving boundary candidates through the key_val_node
+         // is fine.
+         auto real_suffix = [&](uint32_t i) -> std::span<const uint8_t> {
+            const inline_value* iv = record(i);
+            if (iv->value_type != inline_value::vt_extern)
+               return {iv->data, iv->suffix_len};
+            auto kk = R(decode_extern(iv));
+            return {kk.data() + _cpfx_len, kk.size() - _cpfx_len};
+         };
          const uint32_t n  = _nkeys;
          uint32_t       lo = (n * 3) / 8, hi = (n * 5) / 8;
          if (lo < 1)
@@ -562,7 +613,7 @@ namespace heart
          uint8_t  best_byte = 0;
          for (uint32_t i = lo; i <= hi; ++i)
          {
-            auto     a = suffix(i - 1), b = suffix(i);
+            auto     a = real_suffix(i - 1), b = real_suffix(i);
             uint32_t p = shared_prefix(a.data(), a.size(), b.data(), b.size());
             assert(p < b.size());  // strict order: b can't be a prefix of a
             // separator = b[0..p] + v, valid v in (a[p], b[p]] — or [0, b[p]] when a
@@ -595,7 +646,7 @@ namespace heart
          }
          split_pos r;
          r.index = uint16_t(best_i);
-         auto b  = suffix(best_i);
+         auto b  = real_suffix(best_i);
          std::memcpy(r.div, cpfx_data(), _cpfx_len);
          std::memcpy(r.div + _cpfx_len, b.data(), best_len - 1);
          r.div[_cpfx_len + best_len - 1] = best_byte;
@@ -613,7 +664,8 @@ namespace heart
          uint32_t live = _cpfx_len;
          uint8_t  kbuf[520];
          uint8_t  pbuf[520];
-         uint32_t plen = 0;
+         uint32_t plen     = 0;
+         bool     prev_ext = false;
          for (uint32_t i = 0; i < _nkeys; ++i)
          {
             const uint16_t v = vals()[i];
@@ -642,12 +694,21 @@ namespace heart
                }
             }
             const uint32_t klen = full_key(i, kbuf);
-            if (fp()[i] != fingerprint_of(kbuf, klen))
+            const bool     ext  = iv->value_type == inline_value::vt_extern;
+            // extern records: full_key() yields cpfx + FRAGMENT (the real key lives in the
+            // key_val_node, unreachable without a session) — the fingerprint hashes the real
+            // key and adjacent fragments may tie, so both checks weaken to what is provable.
+            if (!ext && fp()[i] != fingerprint_of(kbuf, klen))
                return false;
-            if (i && lex_cmp(pbuf, plen, kbuf, klen) >= 0)
-               return false;  // strict ascending, no dups
+            if (i)
+            {
+               const int c = lex_cmp(pbuf, plen, kbuf, klen);
+               if ((ext || prev_ext) ? c > 0 : c >= 0)
+                  return false;  // strict ascending for inline pairs; fragments may tie
+            }
             std::memcpy(pbuf, kbuf, klen);
-            plen = klen;
+            plen     = klen;
+            prev_ext = ext;
             if (iv->value_type == inline_value::vt_extern)
             {
                if (iv->value_len != 2)
@@ -850,10 +911,25 @@ namespace heart
             return c;
          return an == bn ? 0 : (an < bn ? -1 : 1);
       }
-      int cmp_suffix(uint32_t i, const uint8_t* s, uint32_t sn) const noexcept
+      /// Suffix order of entry i vs (s,sn). An extern record holds only a FRAGMENT (a
+      /// prefix of the real suffix): any comparison decided strictly within the fragment
+      /// bytes is decided for the real suffix too; a prefix-tie (the fragment ran out at
+      /// or before s's end) resolves through the key_val_node's full key.
+      int cmp_suffix(uint32_t i, const uint8_t* s, uint32_t sn, const kv_resolver& R) const
+          noexcept
       {
          const inline_value* iv = record(i);
-         return lex_cmp(iv->data, iv->suffix_len, s, sn);
+         const uint32_t      fl = iv->suffix_len;
+         const uint32_t      m  = fl < sn ? fl : sn;
+         const int           c  = m ? std::memcmp(iv->data, s, m) : 0;
+         if (c)
+            return c < 0 ? -1 : 1;
+         if (iv->value_type != inline_value::vt_extern)
+            return fl == sn ? 0 : (fl < sn ? -1 : 1);
+         if (sn < fl)
+            return 1;  // s is a proper prefix of the fragment → s < fragment <= real suffix
+         auto kk = R(decode_extern(iv));  // fragment exhausted → extend via the full key
+         return lex_cmp(kk.data() + _cpfx_len, kk.size() - _cpfx_len, s, sn);
       }
       static uint32_t payload_bytes(size_t vlen, uint8_t vtype) noexcept
       {
@@ -861,15 +937,21 @@ namespace heart
       }
       static uint32_t record_bytes(uint32_t sn, const insert_op& ins) noexcept
       {
+         if (ins.vtype == inline_value::vt_extern)  // fragment + cbase code, item cap 128
+            return 3u + (sn < ext_frag_cap ? sn : uint32_t(ext_frag_cap)) + 2u;
          return 3u + sn + payload_bytes(ins.value.size(), ins.vtype);
       }
-      /// Largest live suffix length (rebuild prepend must keep every suffix <= 255).
+      /// Largest live INLINE suffix length (rebuild prepend must keep them <= 255; extern
+      /// fragments re-cap at ext_frag_cap during the rebuild, so they never constrain).
       uint32_t max_live_suffix() const noexcept
       {
          uint32_t m = 0;
          for (uint32_t i = 0; i < _nkeys; ++i)
-            if (record(i)->suffix_len > m)
-               m = record(i)->suffix_len;
+         {
+            const inline_value* iv = record(i);
+            if (iv->value_type != inline_value::vt_extern && iv->suffix_len > m)
+               m = iv->suffix_len;
+         }
          return m;
       }
       uint32_t live_cbase_count() const noexcept
@@ -925,6 +1007,8 @@ namespace heart
       {
          assert(ins.vtype != inline_value::vt_bytes || int(sn + ins.value.size()) <=
                     max_inline_entry);
+         if (ins.vtype == inline_value::vt_extern && sn > ext_frag_cap)
+            sn = ext_frag_cap;  // store the comparison fragment; the key_val_node has the rest
          auto* iv = reinterpret_cast<inline_value*>(
              alloc_tail(uint16_t(record_bytes(sn, ins))));
          iv->suffix_len = uint8_t(sn);
@@ -989,7 +1073,8 @@ namespace heart
       // and dead cbases never survive a rebuild.
       void init_from(const leaf_page* src, uint32_t lo, uint32_t hi, uint16_t ncp,
                      const uint8_t* extra_src, uint32_t extra_n, const insert_op* ins,
-                     const update_op* upd, int drop = -1, uint32_t max_w = 4) noexcept
+                     const update_op* upd, int drop = -1, uint32_t max_w = 4,
+                     const kv_resolver& R = {}) noexcept
       {
          init_empty();
          _version_history = src->_version_history;
@@ -1071,9 +1156,30 @@ namespace heart
          uint32_t w = 0;
          auto     emit_src = [&](uint32_t si)
          {
-            const inline_value* iv  = src->record(si);
-            const uint32_t      sn  = (prepend >= 0) ? iv->suffix_len + uint32_t(prepend)
-                                                     : iv->suffix_len - uint32_t(-prepend);
+            const inline_value* iv = src->record(si);
+            uint32_t            sn = (prepend >= 0) ? iv->suffix_len + uint32_t(prepend)
+                                                    : iv->suffix_len - uint32_t(-prepend);
+            const bool is_ext      = (upd && si == upd->index)
+                                         ? (upd->vtype == inline_value::vt_extern)
+                                         : (iv->value_type == inline_value::vt_extern);
+            // INVARIANT: an extern record's fragment is always MAXIMAL — min(real suffix,
+            // ext_frag_cap) bytes of the real key in the CURRENT cpfx space — so the pfx
+            // stem column always reflects the real suffix's first bytes (a short fragment
+            // would zero-pad its stem and break the find pre-screen). When the transform
+            // changes the suffix space (prepend != 0), re-derive from the full key.
+            const uint8_t* ext_src = nullptr;  // fragment source when re-deriving
+            if (is_ext)
+            {
+               if (prepend != 0 && iv->value_type == inline_value::vt_extern)
+               {
+                  auto kk = R(src->decode_extern(iv));
+                  assert(kk.size() >= ncp);
+                  ext_src = kk.data() + ncp;
+                  sn      = uint32_t(kk.size()) - ncp;
+               }
+               if (sn > ext_frag_cap)
+                  sn = ext_frag_cap;
+            }
             uint8_t pay = iv->value_len;
             if (upd && si == upd->index)
                pay = uint8_t(payload_bytes(upd->value.size(), upd->vtype));
@@ -1081,10 +1187,14 @@ namespace heart
             auto* nv = reinterpret_cast<inline_value*>(alloc_tail(uint16_t(3u + sn + pay)));
             nv->suffix_len = uint8_t(sn);
             nv->value_len  = pay;
-            if (prepend > 0)
+            if (ext_src)
+               std::memcpy(nv->data, ext_src, sn);  // maximal fragment off the real key
+            else if (prepend > 0)
             {
-               std::memcpy(nv->data, src->cpfx_data() + ncp, uint32_t(prepend));
-               std::memcpy(nv->data + prepend, iv->data, iv->suffix_len);
+               const uint32_t a = uint32_t(prepend) < sn ? uint32_t(prepend) : sn;
+               std::memcpy(nv->data, src->cpfx_data() + ncp, a);
+               if (sn > a)
+                  std::memcpy(nv->data + a, iv->data, sn - a);
             }
             else
                std::memcpy(nv->data, iv->data - prepend, sn);  // -prepend = strip count
@@ -1114,8 +1224,9 @@ namespace heart
          uint32_t ipos = hi;
          if (ins)
          {
-            ipos = uint32_t(src->lower_bound(ins->key.data(), uint32_t(ins->key.size())));
-            assert(src->find(ins->key.data(), uint32_t(ins->key.size())) < 0);
+            ipos = uint32_t(
+                src->lower_bound(ins->key.data(), uint32_t(ins->key.size()), ins->res));
+            assert(src->find(ins->key.data(), uint32_t(ins->key.size()), ins->res) < 0);
             if (ipos < lo)
                ipos = lo;
             if (ipos > hi)

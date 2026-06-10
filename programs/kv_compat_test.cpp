@@ -124,7 +124,13 @@ namespace
    {
       std::filesystem::remove_all(dir);
       long checks = 0, fails = 0;
-      auto ok = [&](bool c) { ++checks; fails += !c; };
+      auto ok = [&](bool c)
+      {
+         ++checks;
+         if (!c && fails < 8 && std::getenv("KV_TRACE"))
+            std::fprintf(stderr, "  [%s] CHECK FAILED at ordinal %ld\n", g_engine, checks);
+         fails += !c;
+      };
 
       g_engine = name;
       g_engine_order.push_back(name);
@@ -136,13 +142,20 @@ namespace
       const int                          N = 20000, B = 2048;
 
       // present-with-value / absent checks against the latest committed state, via a read txn.
+      int  vp_seq         = 0;
       auto verify_present = [&]() {
+         if (std::getenv("KV_TRACE"))
+            std::fprintf(stderr, "  [%s] verify_present #%d (ordinal base %ld)\n", g_engine,
+                         ++vp_seq, checks);
          auto         tx = ses->start_transaction(0);
          const double t0 = now_s();
          for (auto& [k, v] : oracle)
          {
             bool match = false;
             bool found = tx.get(k, [&](std::string_view got) { match = (got == v); });
+            if (!(found && match) && std::getenv("KV_TRACE"))
+               std::fprintf(stderr, "  [%s] get-hit MISMATCH key len=%zu found=%d first=%02x\n",
+                            g_engine, k.size(), int(found), k.empty() ? 0 : uint8_t(k[0]));
             ok(found && match);
          }
          rec("get-hit", oracle.size(), now_s() - t0);
@@ -302,11 +315,11 @@ namespace
       {
          std::vector<std::pair<std::string, std::string>> adv;
          std::string nest;
-         // NOTE: nest depth 200 / key length ~580B abort HEART (silent SIGABRT
-         // after a 1-key page split) — a real finding for the generic suite;
-         // bounds reduced here so the x3 comparison still runs end to end.
-         for (int i = 0; i < 64; ++i)
-         {  // "a", "aa", "aaa", ... every key a prefix of the next
+         // Original harsher bounds RESTORED: heart's 1-key-page-split SIGABRT is fixed —
+         // items whose suffix+value exceed the 128-byte in-page cap now live whole in
+         // their own key_val_node (the page keeps a comparison fragment + cbase code).
+         for (int i = 0; i < 200; ++i)
+         {  // "a", "aa", "aaa", ... every key a prefix of the next (200-deep nesting)
             nest += char('a' + (i % 3));
             adv.emplace_back(nest, mkval(uint64_t(i)));
          }
@@ -319,7 +332,7 @@ namespace
             k += std::to_string(i);
             adv.emplace_back(k, mkval(uint64_t(i) + 7));
          }
-         for (int i = 0; i < 32; ++i)  // long keys (deep descent, long suffixes)
+         for (int i = 0; i < 188; ++i)  // long keys to ~580B (deep descent, big items)
             adv.emplace_back(std::string(20 + i * 3, char('A' + i % 23)) + std::to_string(i),
                              mkval(uint64_t(i) + 100));
          for (int i = 0; i < 512; ++i)  // tight sequential run (BE counter keys)

@@ -102,13 +102,20 @@ Bank 1M acct / 10M transfers, batch=1 (bucket ON vs OFF / vs heart):
 | file end / live end | 2747 / 1792MB | 2359 / 1837MB | 1120 / 663MB |
 | file load / live load | 130 / 109MB | 194 / 154MB | 320 / 31MB |
 
-Dictionary probe (236k words, value=word, ×3 get sweeps, ×5 scans):
+Dictionary probe (236k words, value=word, ×3 get sweeps, ×5 scans),
+AFTER the ordered-storage change (2026-06-10, no std::sort anywhere on
+part's paths — cb_place_ keeps (stem,suffix) total order at insert; the
+iterator walks rank->(line,slot) off the cnt bytes; bursts consume
+cb_for_each_ directly; the missing descend_lb_ cbucket arm added):
 | metric | ON | OFF |
 |---|---|---|
-| insert | 4.79M/s | 5.95M/s |
-| point get | 18.4M/s | 19.7M/s |
-| scan | 25.6M/s | **45.9M/s** |
+| insert | 4.85M/s | 6.39M/s |
+| point get | 18.7M/s | 20.4M/s |
+| scan | 38.0M/s (was 25.6 with the sort) | 43.5M/s |
 | live | **33.7MB** | 56.1MB |
+Bank re-run: scan 13.57M vs 13.20M OFF (+2.5%), writes ~flat
+(346.6k/343.9k ON vs 363.5k/345.9k OFF), live-at-load −29%, end file
+still +16% (COW write-amp, not iteration).
 
 **Reading:** the space win at rest is real (−40% dict live, −29% bank
 load live). Everything else went the wrong way, and the original
@@ -120,16 +127,20 @@ scan barely moves (+4%) because 93% of scanned keys are log entries
 buckets: a bucket COW touch retires ~5 lines (CL0+FP+SP+subpage) vs 1–2
 for leaf+router, so batch=1 churn carries more outstanding garbage.
 
-**Levers if the space win should keep the gate on:**
-- iterator: replace the per-descend bord_ std::sort (64-entry sort with
-  SP/cell-deref comparator) with the natural 4-line merge (stems already
-  sorted per line; only equal-stem runs need suffix ordering) — the scan
-  regression is mostly this sort.
+**Done: the sort lever** — ordered storage took the dict scan 25.6 →
+38.0M/s; the remaining −13% vs the leaf model is per-yield work, and the
+ordering change also FIXED a latent cross-line misorder (cb_pick_line_
+stopped at remove-emptied lines and appended out of order — masked by
+the read-time sort) and lower_bound-on-bucket (no descend_lb_ arm).
+
+**Remaining levers:**
 - yield: lazy value materialization (store cell ptr/len; from_bytes only
   when value() is read) — scans that only touch keys skip the 80B copy.
 - COW: clone CL0+SP+FP as one 3-line ALLOC (1 alloc + 1 refcount line
-  instead of 3) and/or revisit writer_clone_at for bucket lines.
-Decision pending: space (−30..40%) vs scan (−44%) and writes (−3..6%).
+  instead of 3) and/or revisit writer_clone_at for bucket lines — this is
+  the end-file +16% under batch=1 churn.
+Decision pending: space (−30..40% at rest) vs insert −24%/get −8%/scan
+−13% (dict); bank ~flat on everything but load (−15%) and end file.
 
 ## Composed bucket — correctness session 2 findings (gate still 0, HISTORICAL)
 

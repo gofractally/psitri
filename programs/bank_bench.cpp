@@ -77,6 +77,10 @@
 #include <part/kv.hpp>  // part engine — psitri-shaped API over the part arena
 #endif
 
+#if defined(BANK_ENGINE_VPART)
+#include <vpart/kv.hpp>  // vpart engine — part with STAMP liveness (no refcounts)
+#endif
+
 #if defined(BANK_ENGINE_WALART)
 #include <walart/walart.hpp>  // part-backed delta WAL over a heart base
 #endif
@@ -874,6 +878,137 @@ class PartEngine : public BankEngine
    // snapshot cursor per batch. thread_local: N reader threads fan out.
    static inline thread_local std::shared_ptr<part::kv::read_session> _reader_rs;
    static inline thread_local std::optional<part::kv::cursor>         _reader_cur;
+
+   void reader_thread_init() override { _reader_rs = _db->start_read_session(); }
+
+   void reader_thread_teardown() override
+   {
+      _reader_cur.reset();
+      _reader_rs.reset();
+   }
+
+   void reader_batch_begin() override { _reader_cur.emplace(_reader_rs->create_cursor(0)); }
+   void reader_batch_end() override { _reader_cur.reset(); }
+
+   bool read_account(const std::string& key, uint64_t& balance_out) override
+   {
+      auto val = _reader_cur->get<std::string>(key);
+      if (!val)
+         return false;
+      balance_out = decode_balance(*val);
+      return true;
+   }
+
+   uint64_t scan_all(std::function<void(const std::string&, uint64_t)> visitor) override
+   {
+      auto     cur   = _ses->get_root(0).snapshot_cursor();
+      uint64_t count = 0;
+      cur.seek_begin();
+      while (!cur.is_end())
+      {
+         auto val = cur.value<std::string>();
+         if (val)
+         {
+            auto k = cur.key();
+            visitor(std::string(k.data(), k.size()), decode_balance(*val));
+            ++count;
+         }
+         cur.next();
+      }
+      return count;
+   }
+};
+#endif
+
+#if defined(BANK_ENGINE_VPART)
+class VPartEngine : public BankEngine
+{
+   std::shared_ptr<vpart::kv::database>      _db;
+   std::shared_ptr<vpart::kv::write_session> _ses;
+   std::optional<vpart::kv::transaction>     _tx;
+
+  public:
+   const char* name() const override { return "VPart"; }
+
+   void open(const std::string& path, const std::string& sync_mode) override
+   {
+      std::filesystem::remove_all(path);
+      vpart::kv::runtime_config cfg;
+      if (sync_mode == "async")
+         cfg.sync_mode = sal::sync_type::msync_async;
+      else if (sync_mode == "sync")
+         cfg.sync_mode = sal::sync_type::msync_sync;
+      else
+         cfg.sync_mode = sal::sync_type::none;
+      _db  = vpart::kv::database::create(path, cfg);
+      _ses = _db->start_write_session();
+   }
+
+   void close() override
+   {
+      _tx.reset();
+      _ses.reset();
+      _db.reset();
+   }
+
+   void bulk_load(const std::vector<std::string>& accounts, uint64_t balance) override
+   {
+      auto bal = encode_balance(balance);
+      auto tx  = _ses->start_transaction(0);
+      for (auto& acct : accounts)
+         tx.upsert(acct, bal);
+      tx.commit();
+   }
+
+   void begin_batch() override { _tx.emplace(_ses->start_transaction(0)); }
+
+   bool transfer(const std::string& src,
+                 const std::string& dst,
+                 uint64_t           amount,
+                 uint64_t           seq) override
+   {
+      auto src_val = _tx->get<std::string>(src);
+      if (!src_val)
+         return false;
+      uint64_t src_bal = decode_balance(*src_val);
+      if (src_bal < amount)
+         return false;
+
+      auto dst_val = _tx->get<std::string>(dst);
+      if (!dst_val)
+         return false;
+      uint64_t dst_bal = decode_balance(*dst_val);
+
+      _tx->upsert(src, encode_balance(src_bal - amount));
+      _tx->upsert(dst, encode_balance(dst_bal + amount));
+
+      // Transaction log entry
+      _tx->upsert(encode_log_key(seq), encode_log_value(src, dst, amount));
+      return true;
+   }
+
+   void commit_batch() override
+   {
+      _tx->commit();
+      _tx.reset();
+   }
+
+   void sync() override {}  // commits sync per cfg.sync_mode already
+
+   SizeReport report_size(const std::string& db_path) override
+   {
+      const auto& st = _db->store().stats();
+      SizeReport  r;
+      r.file_size = measure_db_size(db_path);
+      r.live_size = st.bytes_allocated.load() - st.bytes_freed.load();
+      r.free_size = r.file_size > r.live_size ? r.file_size - r.live_size : 0;
+      return r;
+   }
+
+   // Reader thread state — one part read-session slot per thread; one pinned
+   // snapshot cursor per batch. thread_local: N reader threads fan out.
+   static inline thread_local std::shared_ptr<vpart::kv::read_session> _reader_rs;
+   static inline thread_local std::optional<vpart::kv::cursor>         _reader_cur;
 
    void reader_thread_init() override { _reader_rs = _db->start_read_session(); }
 
@@ -2581,6 +2716,8 @@ int main(int argc, char** argv)
    engine = std::make_unique<HeartEngine>();
 #elif defined(BANK_ENGINE_PART)
    engine = std::make_unique<PartEngine>();
+#elif defined(BANK_ENGINE_VPART)
+   engine = std::make_unique<VPartEngine>();
 #elif defined(BANK_ENGINE_WALART)
    engine = std::make_unique<WalartEngine>();
 #elif defined(BANK_ENGINE_DWAL) || defined(BANK_ENGINE_DWAL_HEART)

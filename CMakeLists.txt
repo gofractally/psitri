@@ -281,6 +281,7 @@ add_subdirectory(libraries/heart)
 # part: persistent ART — non-relocating line allocator + headerless-dispatch
 # tree (depends only on sal + ucc, not psitri). See libraries/part/SPEC.md.
 add_subdirectory(libraries/part)
+add_subdirectory(libraries/vpart)
 
 # PsiTriLevelDB: LevelDB-compatible wrapper around psitri (Bitcoin Core target)
 # Always built — small, header-light, and the primary external integration target.
@@ -896,6 +897,13 @@ add_executable(bank-bench-part programs/bank_bench.cpp)
 target_compile_definitions(bank-bench-part PRIVATE BANK_ENGINE_PART=1)
 target_link_libraries(bank-bench-part PRIVATE part Boost::program_options hash)
 set_target_properties(bank-bench-part PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# vpart bank bench — part with stamp liveness (docs/unified_tier_design.md L1a)
+add_executable(bank-bench-vpart programs/bank_bench.cpp)
+target_compile_definitions(bank-bench-vpart PRIVATE BANK_ENGINE_VPART=1)
+target_link_libraries(bank-bench-vpart PRIVATE vpart Boost::program_options hash)
+set_target_properties(bank-bench-vpart PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 # PsiTriMDBX bank bench — uses the same MDBX C API but backed by psitrimdbx

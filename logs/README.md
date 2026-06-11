@@ -32,3 +32,4 @@ Conventions:
 | 2026-06-11 | [hkv-scale-550M-in-memory](2026-06-11_hkv-scale-550M-in-memory/) | u48 hkv in-memory: rd 130-235ns flat to 450M (fastest measured); ~165B/key caps 128GB RAM at ~550M — 2B needs 330GB |
 | 2026-06-11 | [walart-v1-bank-100k](2026-06-11_walart-v1-bank-100k/) | walart v1 validates: 461k tx/s b=1 (≈part native, 1.6× heart); dwal incumbent still ahead (754k) on bump-arena delta |
 | 2026-06-12 | [dwal-engine-templating](2026-06-12_dwal-engine-templating/) | dwal templated on kv_engine: Heart-DWAL first run 633k tx/s PASS; delta A/B: hkv +17% foreground, art_map 2× drain — swap not worth it |
+- 2026-06-11_vpart-bank-1m/ — vpart L1a stamp-liveness first matrix: beats heart on every metric (+31% writes, +79% conc reads); part A/B reads +9..14%, writes −7.5%

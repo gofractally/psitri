@@ -5185,6 +5185,40 @@ namespace detail  // implementation types & node helpers — not part of the pub
          return false;
       }
 
+      // debug: assert a page's storage is totally ordered (stem, then suffix)
+      void pg_validate_(Ptr pg, const char* tag) const
+      {
+         if (!getenv("PG_VAL"))
+            return;
+         const auto* h = static_cast<const cb_hdr*>(deref_(pg));
+         std::string prev;
+         bool        first = true;
+         cb_for_each_(h, [&](std::string_view s2, std::string_view) {
+            if (!first && !(prev < std::string(s2)))
+            {
+               fprintf(stderr, "PGVAL %s ORDER plen=%u nbr=%u cnt=[%u %u %u %u]:\n", tag,
+                       unsigned(h->rh.hdr.prefix_len), unsigned(h->rh.hdr.nbranch), h->cnt[0],
+                       h->cnt[1], h->cnt[2], h->cnt[3]);
+               for (unsigned li = 0; li < 4; ++li)
+               {
+                  if (!h->cnt[li] || h->sp_line[li].is_null())
+                     continue;
+                  const cb_sp* sp = cb_spl_(h, li);
+                  for (unsigned i2 = 0; i2 < h->cnt[li]; ++i2)
+                  {
+                     cb_cell c2 = cb_cell_at_(h, sp->lref[i2]);
+                     fprintf(stderr, "  [%u:%u] stem=%04x lref=%04x slen=%u s=%.6s\n", li, i2,
+                             sp->stems[i2], sp->lref[i2], c2.p[0],
+                             reinterpret_cast<const char*>(c2.p + 3));
+                  }
+               }
+               abort();
+            }
+            prev  = std::string(s2);
+            first = false;
+         });
+      }
+
       // ── page-mode entry points ──────────────────────────────────────────────
       bool pg_find(std::string_view key, T& out) const
       {
@@ -5208,7 +5242,19 @@ namespace detail  // implementation types & node helpers — not part of the pub
             }
             const uint8_t* c = cb_find_(h, sfx);
             if (!c)
+            {
+               if (getenv("PG_DBG2"))
+               {
+                  fprintf(stderr, "PGFIND miss: page nbr=%u plen=%u sfx.len=%zu sfx0=%02x cnt=[%u %u %u %u]\n",
+                          unsigned(h->rh.hdr.nbranch), unsigned(h->rh.hdr.prefix_len),
+                          sfx.size(), uint8_t(sfx[0]), h->cnt[0], h->cnt[1], h->cnt[2], h->cnt[3]);
+                  cb_for_each_(h, [&](std::string_view s2, std::string_view) {
+                     fprintf(stderr, "  entry slen=%zu s0=%02x%02x\n", s2.size(),
+                             s2.size() > 0 ? uint8_t(s2[0]) : 0, s2.size() > 1 ? uint8_t(s2[1]) : 0);
+                  });
+               }
                return false;
+            }
             out = T::from_bytes(cb_cell{const_cast<uint8_t*>(c)}.value());
             return true;
          }
@@ -5229,16 +5275,21 @@ namespace detail  // implementation types & node helpers — not part of the pub
             {
                assert(pass < 64 && "page split did not converge");
                div.len = 0;
-               const Ptr routed = pg_route_(key, &div);
+               pg_route_(key, &div);
                assert(key >= div.view() && "floor route: divider must not exceed the key");
-               Ptr* slot = pg_path_mut_(div.view());
-               assert(slot->raw() == routed.raw() &&
-                      "collected divider must re-reach the routed page");
+               Ptr* slot = pg_path_mut_(div.view());  // may CLONE the page (COW)
+               if (getenv("PG_OPS"))
+                  fprintf(stderr, "OP pass=%d page=%u div.len=%u dtail=%02x%02x\n", pass,
+                          unsigned(slot->raw() >> 4), div.len,
+                          div.len > 1 ? div.b[div.len - 2] : 0,
+                          div.len ? div.b[div.len - 1] : 0);
+               assert(slot->tag() == K::cbucket && "divider path must end at a page");
                if (cow_shared_(*slot))
                   cow_clone_into_(slot, *slot);
                cb_hdr*          h = static_cast<cb_hdr*>(deref_(*slot));
                std::string_view pfx(reinterpret_cast<const char*>(h->prefix),
                                     h->rh.hdr.prefix_len);
+               pg_validate_(*slot, "pre-op");
                bool must_split = false;
                if (key.size() < pfx.size() || key.compare(0, pfx.size(), pfx) != 0)
                {  // loosen the page LCP, then re-run against the rebuilt page;
@@ -5253,6 +5304,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      h     = static_cast<cb_hdr*>(deref_(*slot));
                      pfx   = std::string_view(reinterpret_cast<const char*>(h->prefix),
                                               h->rh.hdr.prefix_len);
+                     pg_validate_(*slot, "post-reprefix");
                   }
                }
                if (!must_split)
@@ -5278,8 +5330,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
                const auto bytes = v.to_bytes();
                const int  r     = cb_insert_<Assign>(
                    h, sfx, std::string_view(bytes.data(), bytes.size()));
+               if (getenv("PG_OPS"))
+                  fprintf(stderr, "OP   r=%d nbr=%u\n", r, unsigned(h->rh.hdr.nbranch));
                if (r >= 0)
                {
+                  pg_validate_(*slot, "post-insert");
                   count_ += unsigned(r == 1);
                   return r == 1;
                }
@@ -5291,8 +5346,23 @@ namespace detail  // implementation types & node helpers — not part of the pub
                pg_div         nd;  // divider = page prefix + separator
                nd.append(pfx.data(), pfx.size());
                nd.append(sp.b, sp.len);
+               if (getenv("PG_DBG"))
+               {
+                  auto hx = [](const void* p, size_t n2) {
+                     std::string o;
+                     for (size_t j = 0; j < n2; ++j)
+                     { char b2[4]; snprintf(b2, 4, "%02x", ((const uint8_t*)p)[j]); o += b2; }
+                     return o;
+                  };
+                  fprintf(stderr, "SPLIT div=%s pfx.len=%zu n=%u at=%u sep=%s s0=%s sN=%s\n",
+                          hx(div.b, div.len).c_str(), pfx.size(), n, sp.index,
+                          hx(sp.b, sp.len).c_str(), hx(refs[0].sfx, refs[0].slen).c_str(),
+                          hx(refs[n - 1].sfx, refs[n - 1].slen).c_str());
+               }
                const Ptr L = cb_build_page_refs_(pfx, refs, 0, sp.index);
                const Ptr R = cb_build_page_refs_(pfx, refs, sp.index, n);
+               pg_validate_(L, "split-L");
+               pg_validate_(R, "split-R");
                // L/R built from views into the OLD page: release it only now
                if (slot == &root_)
                {  // the root page grows a radix above it (the "" divider = term)
@@ -5330,11 +5400,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   return false;
             }
             pg_div div;
-            const Ptr routed = pg_route_(key, &div);
-            Ptr*      slot   = pg_path_mut_(div.view());
-            assert(slot->raw() == routed.raw() &&
-                   "collected divider must re-reach the routed page");
-            (void)routed;
+            pg_route_(key, &div);
+            Ptr* slot = pg_path_mut_(div.view());  // may CLONE the page (COW)
+            assert(slot->tag() == K::cbucket && "divider path must end at a page");
             if (cow_shared_(*slot))
                cow_clone_into_(slot, *slot);
             cb_hdr*                h = static_cast<cb_hdr*>(deref_(*slot));
@@ -5616,7 +5684,10 @@ namespace detail  // implementation types & node helpers — not part of the pub
                return 0xFFFF;
             const unsigned nl = (bytes + 127) / 128;
             void*          d  = node_alloc_(nl * 128ull);
-            h->page_line[spi] = pack_(d, K::node_full);  // tag unused on payload lines
+            // BUCKET_SPEC: the spare tag bits distinguish {subpage | bigval} —
+            // the small-cell bump path must never treat a dedicated big line
+            // as a sub-page (open_spi can name a slot a big alloc claimed)
+            h->page_line[spi] = pack_(d, K::value_ptr);  // bigval slot
             ++h->nbig;
             uint8_t* c = static_cast<uint8_t*>(d);
             c[0]       = uint8_t(sfx.size());
@@ -5628,8 +5699,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
          }
          for (int attempt = 0; attempt < 2; ++attempt)
          {
-            if (!h->page_line[h->open_spi].is_null() &&
-                h->open_off8 + u8s <= 1 + CB_PGCAP8)
+            const bool open_is_sub = !h->page_line[h->open_spi].is_null() &&
+                                     h->page_line[h->open_spi].tag() == K::node_full;
+            if (open_is_sub && h->open_off8 + u8s <= 1 + CB_PGCAP8)
             {
                cb_own_(&h->page_line[h->open_spi], 2);
                uint8_t*       pg = cb_page_(h, h->open_spi);
@@ -5643,7 +5715,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                std::memcpy(c + 3 + sfx.size(), val.data(), val.size());
                return lr;
             }
-            if (!h->page_line[h->open_spi].is_null())
+            if (open_is_sub)
             {  // close the open page: fold its untouched tail into free_space
                cb_own_(&h->page_line[h->open_spi], 2);
                uint8_t* pg = cb_page_(h, h->open_spi);
@@ -5695,7 +5767,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
          void* d = node_alloc_(nl * 128ull);
          std::memcpy(d, deref_(lp), nl * 128ull);
-         return pack_(d, K::node_full);
+         return pack_(d, lp.tag());  // preserve the {subpage|bigval} slot tag
       }
       void cb_release_lines_(Ptr lp, unsigned nl) noexcept
       {

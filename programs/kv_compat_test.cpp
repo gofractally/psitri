@@ -381,6 +381,78 @@ namespace
          verify_present();
       }
 
+      // ── Phase 4.7 (CONTRACT, engine-templated — Dan 2026-06-11): behaviors
+      // every engine must enforce; new variants inherit these gates for free.
+      {
+         // (a) cursor-path depth at the key contract's limit: 600-deep nested
+         // prefixes (one radix level per byte) — point find + full iteration.
+         // psitri's cursor held a 128-frame path array and walked past it
+         // (the find_impl SEGV); the contract is keys <= 1024 bytes, so the
+         // path must survive ~1024 levels.
+         if (!std::getenv("SKIP_DEEP"))
+         {
+            std::map<std::string, std::string> deep_oracle;
+            std::string                        nest2;
+            {
+               auto tx = ses->start_transaction(0);
+               for (int i = 0; i < 600; ++i)
+               {
+                  nest2 += char('a' + (i % 7));
+                  std::string v = mkval(uint64_t(i) * 7);
+                  tx.upsert(nest2, v);
+                  deep_oracle[nest2] = v;
+               }
+               tx.commit();
+            }
+            {
+               auto tx = ses->start_transaction(0);
+               for (auto& [k, v] : deep_oracle)
+                  ok(tx.template get<std::string>(k) == v);
+               tx.abort();
+            }
+            {  // full iteration survives the 600-deep chain (path depth on ++)
+               auto   c = ses->get_root(0).snapshot_cursor();
+               size_t n = 0;
+               c.seek_begin();
+               while (!c.is_end())
+               {
+                  ++n;
+                  c.next();
+               }
+               ok(n >= deep_oracle.size());
+            }
+            {
+               auto tx = ses->start_transaction(0);
+               for (auto& [k, v] : deep_oracle)
+                  tx.remove(k);
+               tx.commit();
+            }
+         }
+         // (b) destroying an OPEN transaction must roll back, never abort the
+         // process; the engine stays usable and the writes are absent.
+         if (!std::getenv("SKIP_DTOR"))
+         {
+            const std::string ghost = "contract/uncommitted";
+            {
+               auto tx = ses->start_transaction(0);
+               tx.upsert(ghost, "must-vanish");
+               // dropped without commit
+            }
+            {
+               auto tx = ses->start_transaction(0);
+               ok(!tx.template get<std::string>(ghost).has_value());
+               tx.upsert(ghost, "second-life");  // engine remains writable
+               tx.commit();
+            }
+            {
+               auto tx = ses->start_transaction(0);
+               ok(tx.template get<std::string>(ghost) == std::string("second-life"));
+               tx.remove(ghost);
+               tx.commit();
+            }
+         }
+      }
+
       // ── Phase 5: remove everything → all miss
       {
          std::vector<std::string> keys;
@@ -394,6 +466,8 @@ namespace
       // makes that checkable exactly: every line must be back in the freeset.
       if constexpr (requires(DB& d) { d.store(); })
       {
+         if constexpr (requires(DB& d) { d.flush_releases(); })
+            db->flush_releases();  // SPEC §19: the drain gate waits for the releaser
          auto&    arena      = db->store();
          uint64_t free_total = 0;
          for (uint32_t sg = 0; sg < arena.num_segments(); ++sg)

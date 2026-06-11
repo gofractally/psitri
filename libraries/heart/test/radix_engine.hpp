@@ -2546,7 +2546,7 @@ namespace heart::radix
                std::abort();
             }
             _page_split = sal::null_ptr_address;
-            uint8_t     db[520];
+            uint8_t     db[1056];  // divider <= max key + 1 (the 520 smashed at deep keys)
             uint32_t    dl = 0;
             ptr_address nxt;
             if (is_page(*_ses, cur))
@@ -2590,7 +2590,7 @@ namespace heart::radix
                return sal::null_ptr_address;  // mutate_root releases the pre-image page
             return np;
          }
-         uint8_t  db[520];
+         uint8_t  db[1056];  // divider <= max key + 1
          uint32_t dl = 0;
          route_to_page(*_ses, root, kb, db, &dl);
          // The leftmost ("" divider) page is never dropped, so an emptying remove there must
@@ -3652,7 +3652,7 @@ namespace heart::radix
                {
                   // lower-bound route to the owning page, then exact-build the divider path so
                   // next()/prev() walk neighboring pages from these frames.
-                  uint8_t  db[520];
+                  uint8_t  db[1056];  // divider <= max key + 1
                   uint32_t dl = 0;
                   route_to_page(ses(), root, q, db, &dl);
                   build_to_page(bytes{db, dl}, q);

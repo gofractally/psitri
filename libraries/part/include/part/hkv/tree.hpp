@@ -2665,7 +2665,35 @@ namespace detail  // implementation types & node helpers — not part of the pub
          packed_ptr* slot;
          uint16_t    edge;  // byte (u8 routers/full/cN), 2-byte stem (u16); unused for pn/root
       };
-      static constexpr uint32_t RM_LVN     = 64;  // shrink window: deeper ancestors stay unshrunk
+      static constexpr uint32_t RM_LVN = 64;  // inline frames; deeper paths heap-spill
+      // Full-depth removal path: inline for the common case, heap past it.
+      // (The old fixed ring CUT the upward collapse at the window edge and
+      // orphaned every empty ancestor above — the compat drain gate caught
+      // 7 leaked lines on a 600-deep chain.)
+      struct rm_stack
+      {
+         rm_lvl  sbo[RM_LVN];
+         rm_lvl* d   = sbo;
+         uint32_t cap = RM_LVN;
+         ~rm_stack()
+         {
+            if (d != sbo)
+               ::operator delete(d);
+         }
+         rm_lvl& operator[](uint32_t i) noexcept { return d[i]; }
+         void    ensure(uint32_t n)
+         {
+            if (n < cap) [[likely]]
+               return;
+            const uint32_t ncap = cap * 2;
+            auto* nd = static_cast<rm_lvl*>(::operator new(size_t(ncap) * sizeof(rm_lvl)));
+            std::memcpy(nd, d, size_t(cap) * sizeof(rm_lvl));
+            if (d != sbo)
+               ::operator delete(d);
+            d   = nd;
+            cap = ncap;
+         }
+      };
       static constexpr int      SHRINK_MAX = setlist::CAP - 4;  // de-widen full/cN below the
                                                                 // setlist CAP with hysteresis
                                                                 // against widen/shrink ping-pong
@@ -2867,12 +2895,13 @@ namespace detail  // implementation types & node helpers — not part of the pub
 
       // Walk the recorded path upward: drop the freed child's edge from its parent, then
       // shrink each ancestor until one survives. `j` starts at the freed node's parent.
-      void rm_unwind_(rm_lvl* path, uint32_t n, uint32_t j) noexcept
+      void rm_unwind_(rm_stack& path, uint32_t n, uint32_t j) noexcept
       {
+         (void)n;
          bool unlink = true;
          for (;; --j)
          {
-            rm_lvl&          L  = path[j % RM_LVN];
+            rm_lvl&          L  = path[j];
             const packed_ptr nd = *L.slot;
             const K          k  = nd.tag();
             if (unlink)
@@ -2882,10 +2911,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   char* P = static_cast<char*>(deref_(nd));
                   node_free_(P, pn_size<Ptr>(pn_plen(P)));
                   if (j == 0) break;
-                  if (n - j >= RM_LVN) { *L.slot = packed_ptr::null(); return; }  // window edge
                   continue;
                }
-               const uint16_t edge = path[(j + 1) % RM_LVN].edge;
+               const uint16_t edge = path[j + 1].edge;
                if (k == K::setlist_u16)
                   sl16_remove(static_cast<setlist16*>(deref_(nd)), edge);
                else
@@ -2894,8 +2922,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             }
             if (!rm_shrink_(L.slot))
                return;  // node survived (possibly replaced in *L.slot)
-            if (j == 0) break;                                          // root died
-            if (n - j >= RM_LVN) { *L.slot = packed_ptr::null(); return; }  // window edge
+            if (j == 0) break;  // root died
             unlink = true;
          }
          root_ = packed_ptr::null();
@@ -2916,11 +2943,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
          scratch_t        ks_;
          std::string_view key = enc_(k, ks_);
-         rm_lvl           path[RM_LVN];
+         rm_stack         path;
          uint32_t         n    = 0;  // levels recorded (path[0] = root)
          packed_ptr*      slot = &root_;
          size_t           depth = 0;
-         path[n++ % RM_LVN]     = {&root_, 0};
+         path.ensure(n + 1);
+         path[n++] = {&root_, 0};
          auto free_leaf         = [&](char* L) {
             if constexpr (!raw_vals)
                v_destroy(alloc_, leaf_val(L));
@@ -2982,7 +3010,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   if (key.size() - depth < pl || std::memcmp(pn_pfx<Ptr>(P), key.data() + depth, pl) != 0)
                      return false;
                   slot = reinterpret_cast<packed_ptr*>(P + 2);
-                  path[n++ % RM_LVN] = {slot, 0};
+                  path.ensure(n + 1);
+                  path[n++] = {slot, 0};
                   depth += pl;
                   continue;
                }
@@ -3001,7 +3030,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      if (!cs)
                         return false;
                      slot               = cs;
-                     path[n++ % RM_LVN] = {slot, q};
+                     path.ensure(n + 1);
+                     path[n++] = {slot, q};
                      depth += 2;
                   }
                   continue;
@@ -3065,7 +3095,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      if (!cs)
                         return false;
                      slot               = cs;
-                     path[n++ % RM_LVN] = {slot, byte};
+                     path.ensure(n + 1);
+                     path[n++] = {slot, byte};
                      ++depth;
                   }
                   continue;

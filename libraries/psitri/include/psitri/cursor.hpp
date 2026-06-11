@@ -323,7 +323,11 @@ namespace psitri
 
       sal::smart_ptr<sal::alloc_header> _node;
       std::array<char, 1024>            _key_buf;
-      std::array<path_entry, 128>       _path;
+      // Sized for the key contract: a <=1024-byte key over 1-byte-per-level
+      // inner nodes legitimately needs ~1024 frames; 128 let deep-nested key
+      // sets walk _path_back past the array (the find_impl SEGV — garbage
+      // frames, sign-extended deref). +2 = root + leaf slack.
+      std::array<path_entry, 1026>      _path;
       path_entry*                       _path_back;
       uint32_t                          _key_len;
       branch_number                     _root_end_branch;
@@ -815,6 +819,8 @@ namespace psitri
 
    inline void cursor::push(ptr_address adr) noexcept
    {
+      assert(size_t(_path_back - _path.data()) + 1 < _path.size() &&
+             "cursor path overflow: deeper than the key contract allows");
       _path_back++;
       _path_back->adr        = adr;
       _path_back->branch     = branch_number(-1);

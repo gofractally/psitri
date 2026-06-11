@@ -98,8 +98,12 @@ namespace heart
       uint16_t         _cap;        // column capacity, always a multiple of 4
       uint8_t          _ncb : 5;    // used cbases (<= 16)
       uint8_t          _pfxw : 3;   // prefix-column width (1, 2 or 4 bytes per entry)
-      uint8_t          _cpfx_len;   // factored common prefix length
+      uint8_t          _rsv0;       // (was the u8 _cpfx_len — see below)
       uint16_t         _dead;       // dead tail-heap bytes (orphaned records)
+      // u16: the key contract is <=1024 bytes and a deep-nested key set
+      // legitimately factors a >255-byte common prefix; the old u8 WRAPPED and
+      // silently lost every key whose length crossed 256 (contract test 4.7a)
+      uint16_t         _cpfx_len;   // factored common prefix length
       tail_ptr<>       _cpfx_pos;   // common prefix bytes in the tail heap (0 = none)
       sal::ptr_address _cbases[max_cbases];
       // CACHELINE INDEX (the wtree lesson): the FIRST stem of every (stride-th) prefix-column
@@ -662,8 +666,8 @@ namespace heart
          if (head_size() + tail_used() > size())
             return false;
          uint32_t live = _cpfx_len;
-         uint8_t  kbuf[520];
-         uint8_t  pbuf[520];
+         uint8_t  kbuf[1056];  // full key <= 1024 (+slack)
+         uint8_t  pbuf[1056];
          uint32_t plen     = 0;
          bool     prev_ext = false;
          for (uint32_t i = 0; i < _nkeys; ++i)
@@ -1138,7 +1142,7 @@ namespace heart
          assert(head_bytes() + (3u + _pfxw) * _cap <= size());
 
          // new common prefix bytes: src's cpfx truncated-or-extended
-         _cpfx_len = uint8_t(ncp);
+         _cpfx_len = uint16_t(ncp);
          if (ncp)
          {
             uint8_t* d = reinterpret_cast<uint8_t*>(alloc_tail(uint16_t(ncp)));
@@ -1267,5 +1271,5 @@ namespace heart
       }
    } __attribute__((packed));
 
-   static_assert(sizeof(leaf_page) == 160, "paged(22) + fields(10) + cbases(64) + clidx(64)");
+   static_assert(sizeof(leaf_page) == 162, "paged(22) + fields(12) + cbases(64) + clidx(64)");
 }  // namespace heart

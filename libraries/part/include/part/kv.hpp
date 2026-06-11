@@ -200,7 +200,20 @@ namespace part::kv
       void upsert(key_view k, value_view v);
       int  remove(key_view k);
       void commit();
-      void abort() noexcept {}
+      // CONTRACT (kv-compat 4.7b): dropping or aborting an uncommitted
+      // transaction ROLLS BACK — the session tree returns to the txn-start
+      // root and the diverged generation is released (shared nodes keep the
+      // committed generation's references).
+      void abort() noexcept;
+      ~transaction() { abort(); }
+      transaction(transaction&& o) noexcept
+          : _ws(o._ws), _tx(std::move(o._tx)), _start_root(o._start_root),
+            _start_count(o._start_count), _done(o._done)
+      {
+         o._done = true;  // moved-from: nothing to roll back
+      }
+      transaction(const transaction&)            = delete;
+      transaction& operator=(const transaction&) = delete;
 
       template <class F>
       bool get(key_view k, F&& fn) const;
@@ -209,9 +222,12 @@ namespace part::kv
 
      private:
       friend class write_session;
-      transaction(write_session* ws, part::transaction&& tx) : _ws(ws), _tx(std::move(tx)) {}
+      transaction(write_session* ws, part::transaction&& tx);
       write_session*    _ws;
       part::transaction _tx;
+      root_ptr          _start_root;
+      size_t            _start_count = 0;
+      bool              _done        = false;
    };
 
    // Root handle for read-only access through the write session (kv_compat's
@@ -545,8 +561,28 @@ namespace part::kv
       return S(out.v.data(), out.v.size());
    }
 
+   inline transaction::transaction(write_session* ws, part::transaction&& tx)
+       : _ws(ws), _tx(std::move(tx)), _start_root(ws->_t.root_handle()),
+         _start_count(ws->_t.size_hint())
+   {
+   }
+   inline void transaction::abort() noexcept
+   {
+      if (_done)
+         return;
+      _done   = true;
+      auto& t = _ws->_t;
+      if (t.root_handle().raw() != _start_root.raw())
+      {
+         t.cow_retain(_start_root);  // the tree takes an owned reference
+         const root_ptr diverged = t.root_handle();
+         t.adopt_root(_start_root, _start_count);
+         t.cow_release(diverged);  // drop the uncommitted generation
+      }
+   }
    inline void transaction::commit()
    {
+      _done = true;
       _tx.commit();  // data msync + floor advance (layer 1)
       database* db = _ws->_db;
       root_ptr  nr = _ws->_t.root_handle();

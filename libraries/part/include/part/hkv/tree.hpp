@@ -5411,7 +5411,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       }
 
       // ── page-mode entry points ──────────────────────────────────────────────
-      bool pg_find(std::string_view key, T& out) const
+      bool pg_find(std::string_view key, std::string_view& out) const
       {
          if constexpr (cb_enabled)
          {
@@ -5428,7 +5428,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
             {
                if (h->rh.term.is_null())
                   return false;
-               out = *leaf_val(static_cast<const char*>(deref_(h->rh.term)));
+               const auto b = leaf_val(static_cast<const char*>(deref_(h->rh.term)))->to_bytes();
+               out          = std::string_view(b.data(), b.size());
                return true;
             }
             const uint8_t* c = cb_find_(h, sfx);
@@ -5446,14 +5447,14 @@ namespace detail  // implementation types & node helpers — not part of the pub
                }
                return false;
             }
-            out = T::from_bytes(cb_cell{const_cast<uint8_t*>(c)}.value());
+            out = cb_cell{const_cast<uint8_t*>(c)}.value();  // view into the page
             return true;
          }
          else
             return false;
       }
       template <bool Assign = true>
-      bool pg_upsert(std::string_view key, T&& v)
+      bool pg_upsert(std::string_view key, std::string_view vbytes)
       {
          if constexpr (!cb_enabled)
             return false;
@@ -5504,7 +5505,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                {  // key == page prefix: the page's own term
                   if (h->rh.term.is_null())
                   {
-                     h->rh.term         = cb_leaf_(std::string_view{}, std::move(v));
+                     h->rh.term         = cb_leaf_(std::string_view{}, T::from_bytes(vbytes));
                      h->rh.hdr.has_term = 1;
                      ++count_;
                      return true;
@@ -5512,14 +5513,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   if constexpr (Assign)
                   {
                      const Ptr old = h->rh.term;
-                     h->rh.term    = cb_leaf_(std::string_view{}, std::move(v));
+                     h->rh.term    = cb_leaf_(std::string_view{}, T::from_bytes(vbytes));
                      cow_release(old);
                   }
                   return false;
                }
-               const auto bytes = v.to_bytes();
-               const int  r     = cb_insert_<Assign>(
-                   h, sfx, std::string_view(bytes.data(), bytes.size()));
+               const int r = cb_insert_<Assign>(h, sfx, vbytes);  // bytes straight in
                if (getenv("PG_OPS"))
                   fprintf(stderr, "OP   r=%d nbr=%u\n", r, unsigned(h->rh.hdr.nbranch));
                if (r >= 0)
@@ -5603,7 +5602,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             if (root_.is_null())
                return false;
             {  // const miss-check first: no privatization on misses
-               T tmp;
+               std::string_view tmp;
                if (!pg_find(key, tmp))
                   return false;
             }
@@ -5724,8 +5723,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
          uint8_t    cnt[4];
          uint16_t   stem_lo[4];
          uint8_t    nbig;
-         uint8_t    rsv[3];
-         Ptr        fp_line;
+         uint8_t    rsv[3];  // (fp line removed: stems gate to an equal-stem
+                             // run; the suffix compare is the verifier)
          Ptr        sp_line[4];
          Ptr        page_line[12];
          uint8_t    prefix[36];
@@ -5770,22 +5769,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
          return static_cast<cb_sp*>(deref_(h->sp_line[li]));
       }
-      uint8_t* cb_fpl_(const cb_hdr* h) const noexcept
-      {
-         return static_cast<uint8_t*>(deref_(h->fp_line));
-      }
       static uint16_t cb_stem_(std::string_view sfx) noexcept
       {
          const uint8_t a = sfx.size() > 0 ? uint8_t(sfx[0]) : 0;
          const uint8_t b = sfx.size() > 1 ? uint8_t(sfx[1]) : 0;
          return uint16_t((a << 8) | b);
-      }
-      static uint8_t cb_fp_(std::string_view sfx) noexcept
-      {
-         uint32_t h = 2166136261u;
-         for (char ch : sfx)
-            h = (h ^ uint8_t(ch)) * 16777619u;
-         return uint8_t(h ^ (h >> 8));
       }
 
       struct cb_cell
@@ -5846,8 +5834,6 @@ namespace detail  // implementation types & node helpers — not part of the pub
       const uint8_t* cb_find_(const cb_hdr* h, std::string_view sfx) const noexcept
       {
          const uint16_t stem = cb_stem_(sfx);
-         const uint8_t  want = cb_fp_(sfx);
-         const uint8_t* fp   = nullptr;
          for (unsigned li = 0; li < 4; ++li)
          {
             if (!h->cnt[li] || h->sp_line[li].is_null())
@@ -5860,10 +5846,6 @@ namespace detail  // implementation types & node helpers — not part of the pub
             for (unsigned i = cb_lb_(sp, h->cnt[li], stem);
                  i < h->cnt[li] && sp->stems[i] == stem; ++i)
             {
-               if (!fp)
-                  fp = cb_fpl_(h);
-               if (fp[li * 16 + i] != want)
-                  continue;
                cb_cell c = cb_cell_at_(h, sp->lref[i]);
                if (c.suffix() == sfx)
                   return c.p;
@@ -5910,7 +5892,6 @@ namespace detail  // implementation types & node helpers — not part of the pub
                                      h->page_line[h->open_spi].tag() == K::node_full;
             if (open_is_sub && h->open_off8 + u8s <= 1 + CB_PGCAP8)
             {
-               cb_own_(&h->page_line[h->open_spi], 2);
                uint8_t*       pg = cb_page_(h, h->open_spi);
                uint8_t*       c  = pg + h->open_off8 * 8;
                const uint16_t lr = cb_lref(0, h->open_spi, h->open_off8, u8s);
@@ -5924,7 +5905,6 @@ namespace detail  // implementation types & node helpers — not part of the pub
             }
             if (open_is_sub)
             {  // close the open page: fold its untouched tail into free_space
-               cb_own_(&h->page_line[h->open_spi], 2);
                uint8_t* pg = cb_page_(h, h->open_spi);
                pg[0]       = uint8_t(pg[0] + (1 + CB_PGCAP8 - h->open_off8));
             }
@@ -5957,8 +5937,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             return;
          }
          const unsigned spi = cb_spi(lr);
-         cb_own_(&h->page_line[spi], 2);  // the free_space ledger write
-         uint8_t* pg = cb_page_(h, spi);
+         uint8_t* pg = cb_page_(h, spi);  // page private with its CL0 (COW unit)
          cb_cell  c  = cb_cell_at_(h, lr);
          pg[0]       = uint8_t(pg[0] + cb_cell_alloc8_(c.p));
          if (spi != h->open_spi && pg[0] >= CB_PGCAP8)
@@ -5970,6 +5949,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
 
       // ── self-privatization: bucket ops own (clone-if-shared) exactly the
       // lines they are about to write; CL0 is privatized by the descent.
+      Ptr cb_copy_lines_(Ptr lp, unsigned nl)
+      {
+         void* d = node_alloc_(nl * 128ull);
+         std::memcpy(d, deref_(lp), nl * 128ull);
+         return pack_(d, lp.tag());
+      }
       Ptr cb_clone_lines_(Ptr lp, unsigned nl)
       {
          void* d = node_alloc_(nl * 128ull);
@@ -5984,14 +5969,6 @@ namespace detail  // implementation types & node helpers — not part of the pub
                                if (nl > 1)
                                   alloc_.hkv_free_run(head + 1, nl - 1);
                             });
-      }
-      void cb_own_(Ptr* lp, unsigned nl)
-      {
-         if (lp->is_null() || alloc_.hkv_ref(line_of(*lp)) < 2)
-            return;
-         const Ptr old = *lp;
-         *lp           = cb_clone_lines_(old, nl);
-         cb_release_lines_(old, nl);
       }
 
       // T <-> raw cell bytes bridge: cbucket activates only when T opts in.
@@ -6052,9 +6029,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             sl = Ptr::null();
          h->rh.hdr.prefix_len = uint16_t(std::min<size_t>(pfx.size(), 36));
          std::memcpy(h->prefix, pfx.data(), std::min<size_t>(pfx.size(), 36));
-         h->fp_line    = pack_(node_alloc_(128), K::node_full);
          h->sp_line[0] = pack_(node_alloc_(128), K::node_full);
-         std::memset(deref_(h->fp_line), 0, 128);
          std::memset(deref_(h->sp_line[0]), 0, 128);
          h->open_spi  = 0;
          h->open_off8 = 0;  // page_line[0] null: first alloc opens it
@@ -6143,7 +6118,6 @@ namespace detail  // implementation types & node helpers — not part of the pub
             // it — report overflow so the caller splits the original first
             if (!h->rh.term.is_null())
                cow_release(h->rh.term);
-            cb_release_lines_(h->fp_line, 1);
             cb_release_lines_(h->sp_line[0], 1);
             node_free_(h, 128);
             return Ptr::null();
@@ -6151,7 +6125,6 @@ namespace detail  // implementation types & node helpers — not part of the pub
          // single sequential pass: cells bump-copied, index written in order
          uint16_t stems[CB_MAX];
          uint16_t lrefs[CB_MAX];
-         uint8_t  fps[CB_MAX];
          uint8_t  slot_nl[CB_PAGES];  // true line count per slot (failure cleanup)
          unsigned open = ~0u, next_slot = 0;
          uint8_t  off8 = 1;
@@ -6163,7 +6136,6 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   cb_release_lines_(h->page_line[t], slot_nl[t]);
             if (!h->rh.term.is_null())
                cow_release(h->rh.term);
-            cb_release_lines_(h->fp_line, 1);
             for (unsigned li = 0; li < 4; ++li)
                if (!h->sp_line[li].is_null())
                   cb_release_lines_(h->sp_line[li], 1);
@@ -6217,13 +6189,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
             std::memcpy(c + 3 + slen, e.val, e.vlen);
             const std::string_view sv(reinterpret_cast<const char*>(c + 3), slen);
             stems[i] = cb_stem_(sv);
-            fps[i]   = cb_fp_(sv);
          }
          h->open_spi  = uint8_t(open == ~0u ? 0 : open);
          h->open_off8 = open == ~0u ? 0 : off8;
          // SP/FP written once, spread evenly (the rebalance layout)
          const unsigned per = (n + 3) / 4;
-         uint8_t*       fpl = cb_fpl_(h);
          unsigned       k2  = 0;
          for (unsigned li = 0; li < 4 && k2 < n; ++li)
          {
@@ -6236,7 +6206,6 @@ namespace detail  // implementation types & node helpers — not part of the pub
             cb_sp* sp = cb_spl_(h, li);
             std::memcpy(sp->stems, stems + k2, take * sizeof(uint16_t));
             std::memcpy(sp->lref, lrefs + k2, take * sizeof(uint16_t));
-            std::memcpy(fpl + li * 16, fps + k2, take);
             h->cnt[li]     = uint8_t(take);
             h->stem_lo[li] = sp->stems[0];
             k2 += take;
@@ -6343,8 +6312,6 @@ namespace detail  // implementation types & node helpers — not part of the pub
       int cb_insert_(cb_hdr* h, std::string_view sfx, std::string_view val)
       {
          const uint16_t stem = cb_stem_(sfx);
-         const uint8_t  fpb  = cb_fp_(sfx);
-         cb_own_(&h->fp_line, 1);
          // update path: equal-stem runs may span SP lines
          for (unsigned uli = 0; uli < 4; ++uli)
          {
@@ -6358,12 +6325,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
             for (unsigned i = cb_lb_(usp, h->cnt[uli], stem);
                  i < h->cnt[uli] && usp->stems[i] == stem; ++i)
             {
-               if (cb_fpl_(h)[uli * 16 + i] != fpb)
-                  continue;
                cb_cell c = cb_cell_at_(h, usp->lref[i]);
                if (c.suffix() != sfx)
                   continue;
-               cb_own_(&h->sp_line[uli], 1);
                usp           = cb_spl_(h, uli);
                const unsigned li = uli;
                cb_sp*         sp = usp;
@@ -6374,9 +6338,6 @@ namespace detail  // implementation types & node helpers — not part of the pub
             const unsigned cap = cb_cell_cap_(c.p);
             if (val.size() <= cap)
             {  // in place — own the cell's page first
-               cb_own_(&h->page_line[cb_spi(sp->lref[i])], cb_big(sp->lref[i])
-                                                               ? std::max(1u, cb_len8(sp->lref[i]))
-                                                               : 2u);
                c = cb_cell_at_(h, sp->lref[i]);
                c.p[1] = uint8_t(val.size());
                std::memcpy(c.p + 3 + c.p[0], val.data(), val.size());
@@ -6401,14 +6362,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
          if (h->rh.hdr.nbranch >= CB_MAX)
             return -1;
          auto [li, pos] = cb_place_(h, stem, sfx);
-         if (!h->sp_line[li].is_null())
-            cb_own_(&h->sp_line[li], 1);
-         cb_sp* sp = cb_spl_(h, li);
+         cb_sp* sp = h->sp_line[li].is_null() ? nullptr : cb_spl_(h, li);
          if (h->cnt[li] == 16)
-         {  // rebalance: own every index line, then redistribute evenly
-            for (unsigned l2 = 0; l2 < 4; ++l2)
-               if (!h->sp_line[l2].is_null())
-                  cb_own_(&h->sp_line[l2], 1);
+         {  // rebalance: redistribute evenly (page already private)
             cb_rebalance_(h);
             std::tie(li, pos) = cb_place_(h, stem, sfx);  // entries moved
             sp                = cb_spl_(h, li);
@@ -6424,15 +6380,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
             std::memset(deref_(h->sp_line[li]), 0, 128);
             sp = cb_spl_(h, li);
          }
-         uint8_t* fp = cb_fpl_(h);
          std::memmove(&sp->stems[pos + 1], &sp->stems[pos],
                       (h->cnt[li] - pos) * sizeof(uint16_t));
          std::memmove(&sp->lref[pos + 1], &sp->lref[pos],
                       (h->cnt[li] - pos) * sizeof(uint16_t));
-         std::memmove(&fp[li * 16 + pos + 1], &fp[li * 16 + pos], h->cnt[li] - pos);
-         sp->stems[pos]    = stem;
-         sp->lref[pos]     = lr;
-         fp[li * 16 + pos] = fpb;
+         sp->stems[pos] = stem;
+         sp->lref[pos]  = lr;
          ++h->cnt[li];
          h->stem_lo[li] = sp->stems[0];
          ++h->rh.hdr.nbranch;
@@ -6444,9 +6397,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       void cb_rebalance_(cb_hdr* h)
       {
          uint16_t st[CB_MAX], lr[CB_MAX];
-         uint8_t  fb[CB_MAX];
          unsigned n   = 0;
-         uint8_t* fpl = cb_fpl_(h);
          for (unsigned li = 0; li < 4; ++li)
          {
             if (h->cnt[li] == 0)
@@ -6456,7 +6407,6 @@ namespace detail  // implementation types & node helpers — not part of the pub
             {
                st[n] = sp->stems[i];
                lr[n] = sp->lref[i];
-               fb[n] = fpl[li * 16 + i];
             }
          }
          const unsigned per = (n + 3) / 4;
@@ -6478,7 +6428,6 @@ namespace detail  // implementation types & node helpers — not part of the pub
             cb_sp* sp = cb_spl_(h, li);
             std::memcpy(sp->stems, st + k, take * sizeof(uint16_t));
             std::memcpy(sp->lref, lr + k, take * sizeof(uint16_t));
-            std::memcpy(fpl + li * 16, fb + k, take);
             h->stem_lo[li] = sp->stems[0];
             k += take;
          }
@@ -6487,8 +6436,6 @@ namespace detail  // implementation types & node helpers — not part of the pub
       bool cb_remove_(cb_hdr* h, std::string_view sfx)
       {
          const uint16_t stem = cb_stem_(sfx);
-         cb_own_(&h->fp_line, 1);
-         uint8_t* fp = cb_fpl_(h);
          for (unsigned li = 0; li < 4; ++li)
          {
          if (!h->cnt[li] || h->sp_line[li].is_null())
@@ -6500,13 +6447,10 @@ namespace detail  // implementation types & node helpers — not part of the pub
             if (probe->stems[h->cnt[li] - 1] < stem)
                continue;
          }
-         cb_own_(&h->sp_line[li], 1);
          cb_sp* sp = cb_spl_(h, li);
          for (unsigned i = cb_lb_(sp, h->cnt[li], stem);
               i < h->cnt[li] && sp->stems[i] == stem; ++i)
          {
-            if (fp[li * 16 + i] != cb_fp_(sfx))
-               continue;
             cb_cell c = cb_cell_at_(h, sp->lref[i]);
             if (c.suffix() != sfx)
                continue;
@@ -6515,7 +6459,6 @@ namespace detail  // implementation types & node helpers — not part of the pub
                          (h->cnt[li] - 1 - i) * sizeof(uint16_t));
             std::memmove(&sp->lref[i], &sp->lref[i + 1],
                          (h->cnt[li] - 1 - i) * sizeof(uint16_t));
-            std::memmove(&fp[li * 16 + i], &fp[li * 16 + i + 1], h->cnt[li] - 1 - i);
             --h->cnt[li];
             h->stem_lo[li] = h->cnt[li] ? sp->stems[0] : 0xFFFF;
             --h->rh.hdr.nbranch;
@@ -6816,7 +6759,6 @@ namespace detail  // implementation types & node helpers — not part of the pub
                {
                   const cb_hdr* h = static_cast<const cb_hdr*>(deref_(cur));
                   refwalk_(h->rh.term, exp);
-                  refadd_(exp, h->fp_line);
                   for (unsigned li = 0; li < 4; ++li)
                      if (!h->sp_line[li].is_null())
                         refadd_(exp, h->sp_line[li]);
@@ -6951,7 +6893,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                if constexpr (cb_enabled)
                {
                   const cb_hdr* h  = static_cast<const cb_hdr*>(deref_(cur));
-                  uint32_t      ln = 2;  // CL0 + FP
+                  uint32_t      ln = 1;  // CL0 (fp line removed)
                   for (unsigned li = 0; li < 4; ++li)
                      ln += !h->sp_line[li].is_null();
                   bool big[CB_PAGES] = {};
@@ -7106,8 +7048,6 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   for (unsigned li = 0; li < 4; ++li)
                      if (!h->sp_line[li].is_null())
                         cb_release_lines_(h->sp_line[li], 1);
-                  if (!h->fp_line.is_null())
-                     cb_release_lines_(h->fp_line, 1);
                }
                break;
             }
@@ -7649,19 +7589,15 @@ namespace detail  // implementation types & node helpers — not part of the pub
             {
                if constexpr (cb_enabled)
                {
+                  // page = ONE COW unit (Dan): clone every piece into fresh
+                  // lines in one pass — no per-line retains, and every later
+                  // mutation in the generation is a plain in-place write.
                   cb_hdr* h = static_cast<cb_hdr*>(dst);
                   cow_fix_child_(&h->rh.term);
-                  auto own_piece = [&](Ptr* lp, unsigned nl)
-                  {
-                     if (lp->is_null())
-                        return;
-                     if (!alloc_.hkv_retain(line_of(*lp)))
-                        *lp = cb_clone_lines_(*lp, nl);
-                  };
-                  own_piece(&h->fp_line, 1);
                   for (unsigned li = 0; li < 4; ++li)
-                     own_piece(&h->sp_line[li], 1);
-                  // spi -> line count map for big entries
+                     if (!h->sp_line[li].is_null())
+                        h->sp_line[li] = cb_copy_lines_(h->sp_line[li], 1);
+                  // spi -> line count for big slots (from the cloned index)
                   uint8_t nl_of[CB_PAGES];
                   for (auto& x2 : nl_of)
                      x2 = 2;
@@ -7676,11 +7612,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
                                uint8_t(cb_len8(sp->lref[i]) ? cb_len8(sp->lref[i]) : 1);
                   }
                   for (unsigned spi = 0; spi < CB_PAGES; ++spi)
-                     own_piece(&h->page_line[spi], nl_of[spi]);
+                     if (!h->page_line[spi].is_null())
+                        h->page_line[spi] = cb_copy_lines_(h->page_line[spi], nl_of[spi]);
                }
                break;
             }
-            case K::value_inline:
+                        case K::value_inline:
             case K::null:
                break;
          }

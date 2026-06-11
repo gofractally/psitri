@@ -139,18 +139,31 @@ namespace part::kv
       template <class S = std::string>
       std::optional<S> get(key_view k) const
       {
+         if constexpr (engine_t::cb_create)
+         {
+            std::string_view out;
+            if (!_view.pg_find(k, out))
+               return std::nullopt;
+            return S(out.data(), out.size());
+         }
          pval out;
-         const bool hit = engine_t::cb_create ? _view.pg_find(k, out) : _view.find(k, out);
-         if (!hit)
+         if (!_view.find(k, out))
             return std::nullopt;
          return S(out.b, out.len);
       }
       template <class F>
       bool get(key_view k, F&& f) const
       {
+         if constexpr (engine_t::cb_create)
+         {
+            std::string_view out;
+            if (!_view.pg_find(k, out))
+               return false;
+            f(out);
+            return true;
+         }
          pval out;
-         const bool hit = engine_t::cb_create ? _view.pg_find(k, out) : _view.find(k, out);
-         if (!hit)
+         if (!_view.find(k, out))
             return false;
          f(out.view());
          return true;
@@ -408,7 +421,7 @@ namespace part::kv
    inline void transaction::upsert(key_view k, value_view v)
    {
       if constexpr (engine_t::cb_create)
-         _ws->_t.pg_upsert(k, pval::from(v));  // diver rule: keys live in pages
+         _ws->_t.pg_upsert(k, v);  // bytes straight to the page — no pval round-trip
       else
          _ws->_t.cow_insert(k, pval::from(v));
    }
@@ -422,9 +435,16 @@ namespace part::kv
    template <class F>
    inline bool transaction::get(key_view k, F&& fn) const
    {
+      if constexpr (engine_t::cb_create)
+      {
+         std::string_view out;
+         if (!_ws->_t.pg_find(k, out))
+            return false;
+         fn(out);
+         return true;
+      }
       pval out;
-      const bool hit = engine_t::cb_create ? _ws->_t.pg_find(k, out) : _ws->_t.find(k, out);
-      if (!hit)
+      if (!_ws->_t.find(k, out))
          return false;
       fn(out.view());
       return true;
@@ -432,9 +452,15 @@ namespace part::kv
    template <class S>
    inline std::optional<S> transaction::get(key_view k) const
    {
+      if constexpr (engine_t::cb_create)
+      {
+         std::string_view out;
+         if (!_ws->_t.pg_find(k, out))
+            return std::nullopt;
+         return S(out.data(), out.size());
+      }
       pval out;
-      const bool hit = engine_t::cb_create ? _ws->_t.pg_find(k, out) : _ws->_t.find(k, out);
-      if (!hit)
+      if (!_ws->_t.find(k, out))
          return std::nullopt;
       return S(out.b, out.len);
    }

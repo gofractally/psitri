@@ -4933,12 +4933,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
          for (;;)
          {
+            if (slot->tag() == K::cbucket)
+               return slot;  // pages are NOT privatized here: ops decide
             if (cow_shared_(*slot))
                cow_clone_into_(slot, *slot);
             Ptr     cur = *slot;
             const K k   = cur.tag();
-            if (k == K::cbucket)
-               return slot;
             if (k == K::prefix_node)
             {
                char* P = static_cast<char*>(deref_(cur));
@@ -4996,12 +4996,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
          size_t fb_dlen = 0;
          for (;;)
          {
+            if (slot->tag() == K::cbucket)
+               return slot;  // pages are NOT privatized here: ops decide
             if (cow_shared_(*slot))
                cow_clone_into_(slot, *slot);
             Ptr     cur = *slot;
             const K k   = cur.tag();
-            if (k == K::cbucket)
-               return slot;
             if (k == K::prefix_node)
             {
                char*            P = static_cast<char*>(deref_(cur));
@@ -5092,15 +5092,15 @@ namespace detail  // implementation types & node helpers — not part of the pub
          size_t depth = 0;
          for (;;)
          {
+            if (slot->tag() == K::cbucket)
+            {
+               assert(depth == D.size());
+               return slot;  // the page itself is NOT privatized here
+            }
             if (cow_shared_(*slot))
                cow_clone_into_(slot, *slot);
             Ptr     cur = *slot;
             const K k   = cur.tag();
-            if (k == K::cbucket)
-            {
-               assert(depth == D.size());
-               return slot;
-            }
             if (k == K::prefix_node)
             {
                char* P = static_cast<char*>(deref_(cur));
@@ -5475,9 +5475,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                           div.len > 1 ? div.b[div.len - 2] : 0,
                           div.len ? div.b[div.len - 1] : 0);
                assert(slot->tag() == K::cbucket && "divider path must end at a page");
-               if (cow_shared_(*slot))
-                  cow_clone_into_(slot, *slot);
-               cb_hdr*          h = static_cast<cb_hdr*>(deref_(*slot));
+               bool    shared = cow_shared_(*slot);
+               cb_hdr* h      = static_cast<cb_hdr*>(deref_(*slot));
                std::string_view pfx(reinterpret_cast<const char*>(h->prefix),
                                     h->rh.hdr.prefix_len);
                pg_validate_(*slot, "pre-op");
@@ -5501,6 +5500,28 @@ namespace detail  // implementation types & node helpers — not part of the pub
                if (!must_split)
                {
                const std::string_view sfx = key.substr(pfx.size());
+               if (shared && !sfx.empty() && !cb_find_(h, sfx) &&
+                   h->rh.hdr.nbranch < CB_MAX)
+               {  // SHARED page, NEW key: clone-with-the-gap in ONE pass — no
+                  // verbatim clone followed by an index memmove (Dan)
+                  const Ptr np = cb_clone_insert_(h, sfx, vbytes);
+                  if (!np.is_null())
+                  {
+                     const Ptr old = *slot;
+                     *slot         = np;
+                     cow_release(old);  // one ref; other generations keep theirs
+                     ++count_;
+                     return true;
+                  }
+                  // no room in this shape: canonicalize-with-key / split below
+                  // build from the SHARED source directly (no pre-clone)
+               }
+               else if (shared)
+               {  // shared + update/term path: verbatim clone, mutate in place
+                  cow_clone_into_(slot, *slot);
+                  h      = static_cast<cb_hdr*>(deref_(*slot));
+                  shared = false;  // private now: the normal insert path applies
+               }
                if (sfx.empty())
                {  // key == page prefix: the page's own term
                   if (h->rh.term.is_null())
@@ -5518,17 +5539,53 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   }
                   return false;
                }
-               int r = cb_insert_<Assign>(h, sfx, vbytes);  // bytes straight in
-               if (r == -2 && h->dead8 &&
+               int r = shared ? -3 : cb_insert_<Assign>(h, sfx, vbytes);
+               if ((r == -2 || r == -3) &&
                    cb_reformat_fits_(h, sfx.size(), vbytes.size()))
-               {  // reformat reclaims enough: clone+canonicalize, retry in place
-                  const Ptr np = cb_canonicalize_(*slot);
-                  if (!np.is_null())
+               {  // a dense rebuild WITH the new key folded in — built straight
+                  // from the (possibly shared) source, one pass, no pre-clone
+                  cb_eref  refs[CB_MAX + 2];
+                  unsigned n = cb_collect_refs_(h, refs);
+                  // splice the new entry at its rank (refs are sorted)
+                  unsigned at = 0;
+                  while (at < n)
                   {
-                     *slot = np;
-                     h     = static_cast<cb_hdr*>(deref_(*slot));
-                     r     = cb_insert_<Assign>(h, sfx, vbytes);
+                     const std::string_view es(reinterpret_cast<const char*>(refs[at].sfx),
+                                               refs[at].slen);
+                     if (es >= sfx)
+                        break;
+                     ++at;
                   }
+                  const bool dup = at < n && refs[at].slen == sfx.size() &&
+                                   std::memcmp(refs[at].sfx, sfx.data(), sfx.size()) == 0;
+                  if (dup)
+                  {  // update-grow landed here: REPLACE, never duplicate
+                     refs[at].val  = reinterpret_cast<const uint8_t*>(vbytes.data());
+                     refs[at].vlen = uint8_t(vbytes.size());
+                  }
+                  else
+                  {
+                     std::memmove(refs + at + 1, refs + at, (n - at) * sizeof(cb_eref));
+                     refs[at] = cb_eref{reinterpret_cast<const uint8_t*>(sfx.data()),
+                                        reinterpret_cast<const uint8_t*>(vbytes.data()),
+                                        uint8_t(sfx.size()), uint8_t(vbytes.size())};
+                     ++n;
+                  }
+                  if (n <= CB_MAX + (refs[0].slen == 0 ? 1 : 0))
+                  {
+                     const std::string_view pfx2(reinterpret_cast<const char*>(h->prefix),
+                                                 h->rh.hdr.prefix_len);
+                     const Ptr np = cb_build_page_bulk_(pfx2, {}, refs, 0, n, 0);
+                     if (!np.is_null())
+                     {
+                        const Ptr old = *slot;
+                        *slot         = np;
+                        cow_release(old);
+                        count_ += unsigned(!dup);
+                        return !dup;
+                     }
+                  }
+                  r = -1;  // fall to split
                }
                if (getenv("PG_OPS"))
                   fprintf(stderr, "OP   r=%d nbr=%u\n", r, unsigned(h->rh.hdr.nbranch));
@@ -6044,8 +6101,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
             sl = Ptr::null();
          h->rh.hdr.prefix_len = uint16_t(std::min<size_t>(pfx.size(), 36));
          std::memcpy(h->prefix, pfx.data(), std::min<size_t>(pfx.size(), 36));
-         h->sp_line[0] = pack_(node_alloc_(128), K::node_full);
-         std::memset(deref_(h->sp_line[0]), 0, 128);
+         h->sp_line[0] = pack_(node_alloc_(128), K::node_full);  // no memset:
+         // stems/lrefs beyond cnt are never read
          h->open_spi  = 0;
          h->open_off8 = 0;  // page_line[0] null: first alloc opens it
          return pack_(h, K::cbucket);
@@ -6214,10 +6271,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          {
             const unsigned take = std::min(per, n - k2);
             if (h->sp_line[li].is_null())
-            {
                h->sp_line[li] = pack_(node_alloc_(128), K::node_full);
-               std::memset(deref_(h->sp_line[li]), 0, 128);
-            }
             cb_sp* sp = cb_spl_(h, li);
             std::memcpy(sp->stems, stems + k2, take * sizeof(uint16_t));
             std::memcpy(sp->lref, lrefs + k2, take * sizeof(uint16_t));
@@ -6300,6 +6354,157 @@ namespace detail  // implementation types & node helpers — not part of the pub
          }
          r.index = uint16_t(idx);
          return r;
+      }
+      // fused shared-page INSERT: build the private successor with the new
+      // entry already in place — one pass, partial copies only (used SP
+      // prefixes with the gap pre-made, used open-subpage prefix, full closed
+      // pieces; no rsv halves, no memset of unallocated space, no memmove).
+      // Returns null when the layout needs more (full SP line / table): the
+      // caller canonicalizes-with-key or splits — both from the SHARED source.
+      Ptr cb_clone_insert_(const cb_hdr* h, std::string_view sfx, std::string_view val)
+      {
+         const unsigned bytes = 3 + unsigned(sfx.size()) + unsigned(val.size());
+         const unsigned u8s   = (bytes + 7) / 8;
+         const bool     big   = bytes > CB_CELLMAX;
+         auto [li, pos]       = cb_place_(h, cb_stem_(sfx), sfx);
+         if (h->cnt[li] >= 16)
+            return Ptr::null();  // needs a rebalance: rebuild path handles it
+         // where does the new cell go?
+         unsigned tgt = CB_PAGES;  // table slot for {big | new subpage}
+         bool     into_open = false;
+         const bool open_is_sub = !h->page_line[h->open_spi].is_null() &&
+                                  h->page_line[h->open_spi].tag() == K::node_full;
+         if (!big && open_is_sub && h->open_off8 + u8s <= 1 + CB_PGCAP8)
+            into_open = true;
+         else
+         {
+            for (unsigned i = 0; i < CB_PAGES; ++i)
+               if (h->page_line[i].is_null())
+               {
+                  tgt = i;
+                  break;
+               }
+            if (tgt == CB_PAGES)
+               return Ptr::null();  // table exhausted: reformat/split decides
+         }
+         cb_hdr* d = static_cast<cb_hdr*>(node_alloc_(128));
+         std::memcpy(d, h, 128);
+         cow_fix_child_(&d->rh.term);
+         // SP lines: used halves only; the insertion line gets the gap pre-made
+         for (unsigned l2 = 0; l2 < 4; ++l2)
+         {
+            if (d->sp_line[l2].is_null())
+               continue;
+            const cb_sp* src = cb_spl_(h, l2);
+            const unsigned n2 = h->cnt[l2];
+            if (n2 == 0 && l2 != li)
+            {
+               d->sp_line[l2] = Ptr::null();  // hole: nothing to carry
+               continue;
+            }
+            cb_sp* ns      = static_cast<cb_sp*>(node_alloc_(128));
+            d->sp_line[l2] = pack_(ns, K::node_full);
+            if (l2 == li)
+            {
+               std::memcpy(ns->stems, src->stems, pos * 2);
+               std::memcpy(ns->stems + pos + 1, src->stems + pos, (n2 - pos) * 2);
+               std::memcpy(ns->lref, src->lref, pos * 2);
+               std::memcpy(ns->lref + pos + 1, src->lref + pos, (n2 - pos) * 2);
+               ns->stems[pos] = cb_stem_(sfx);
+               // lref written below once the cell lands
+            }
+            else
+            {
+               std::memcpy(ns->stems, src->stems, n2 * 2);
+               std::memcpy(ns->lref, src->lref, n2 * 2);
+            }
+         }
+         if (d->sp_line[li].is_null())
+         {  // first entry of a fresh line
+            cb_sp* ns      = static_cast<cb_sp*>(node_alloc_(128));
+            d->sp_line[li] = pack_(ns, K::node_full);
+            ns->stems[0]   = cb_stem_(sfx);
+         }
+         // payload pieces: closed verbatim; the open subpage copies its USED
+         // prefix only (the dead tail past alloc_pos is never carried)
+         uint8_t nl_of[CB_PAGES];
+         for (auto& x2 : nl_of)
+            x2 = 2;
+         for (unsigned l2 = 0; l2 < 4; ++l2)
+         {
+            if (!h->cnt[l2] || h->sp_line[l2].is_null())
+               continue;
+            const cb_sp* sp = cb_spl_(h, l2);
+            for (unsigned i = 0; i < h->cnt[l2]; ++i)
+               if (cb_big(sp->lref[i]))
+                  nl_of[cb_spi(sp->lref[i])] =
+                      uint8_t(cb_len8(sp->lref[i]) ? cb_len8(sp->lref[i]) : 1);
+         }
+         for (unsigned spi = 0; spi < CB_PAGES; ++spi)
+         {
+            if (h->page_line[spi].is_null())
+               continue;
+            const bool sub = h->page_line[spi].tag() == K::node_full;
+            if (sub && spi == h->open_spi && open_is_sub)
+            {  // open page: copy [0, alloc_pos) only
+               void* nd = node_alloc_(256);
+               std::memcpy(nd, deref_(h->page_line[spi]), size_t(h->open_off8) * 8);
+               d->page_line[spi] = pack_(nd, K::node_full);
+            }
+            else
+               d->page_line[spi] = cb_copy_lines_(h->page_line[spi], sub ? 2 : nl_of[spi]);
+         }
+         // land the new cell
+         uint16_t lr;
+         if (into_open)
+         {
+            uint8_t* pg = static_cast<uint8_t*>(deref_(d->page_line[d->open_spi])) +
+                          size_t(d->open_off8) * 8;
+            lr = cb_lref(0, d->open_spi, d->open_off8, u8s);
+            d->open_off8 = uint8_t(d->open_off8 + u8s);
+            pg[0]        = uint8_t(sfx.size());
+            pg[1]        = uint8_t(val.size());
+            pg[2]        = 0;
+            std::memcpy(pg + 3, sfx.data(), sfx.size());
+            std::memcpy(pg + 3 + sfx.size(), val.data(), val.size());
+         }
+         else if (big)
+         {
+            const unsigned nl = (bytes + 127) / 128;
+            uint8_t*       c2 = static_cast<uint8_t*>(node_alloc_(nl * 128ull));
+            d->page_line[tgt] = pack_(c2, K::value_ptr);
+            ++d->nbig;
+            c2[0] = uint8_t(sfx.size());
+            c2[1] = uint8_t(val.size());
+            c2[2] = 0;
+            std::memcpy(c2 + 3, sfx.data(), sfx.size());
+            std::memcpy(c2 + 3 + sfx.size(), val.data(), val.size());
+            lr = cb_lref(1, tgt, 0, nl & 63);
+         }
+         else
+         {  // fresh subpage (close the old open one's tail into free_space)
+            if (open_is_sub)
+            {
+               uint8_t* opg = static_cast<uint8_t*>(deref_(d->page_line[d->open_spi]));
+               opg[0]       = uint8_t(opg[0] + (1 + CB_PGCAP8 - d->open_off8));
+            }
+            uint8_t* nd = static_cast<uint8_t*>(node_alloc_(256));
+            std::memset(nd, 0, 8);
+            d->page_line[tgt] = pack_(nd, K::node_full);
+            d->open_spi       = uint8_t(tgt);
+            d->open_off8      = uint8_t(1 + u8s);
+            nd[8]             = uint8_t(sfx.size());
+            nd[9]             = uint8_t(val.size());
+            nd[10]            = 0;
+            std::memcpy(nd + 11, sfx.data(), sfx.size());
+            std::memcpy(nd + 11 + sfx.size(), val.data(), val.size());
+            lr = cb_lref(0, tgt, 1, u8s);
+         }
+         cb_spl_(d, li)->lref[pos] = lr;
+         ++d->cnt[li];
+         d->stem_lo[li] = cb_spl_(d, li)->stems[0];
+         ++d->rh.hdr.nbranch;
+         return pack_(d, K::cbucket);
       }
       // would a compact reformat make room for one more (slen, vlen) cell?
       // Exact scan of live extents — runs only at the would-split decision.
@@ -6433,8 +6638,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          if (h->sp_line[li].is_null())
          {
             h->sp_line[li] = pack_(node_alloc_(128), K::node_full);
-            std::memset(deref_(h->sp_line[li]), 0, 128);
-            sp = cb_spl_(h, li);
+            sp             = cb_spl_(h, li);
          }
          std::memmove(&sp->stems[pos + 1], &sp->stems[pos],
                       (h->cnt[li] - pos) * sizeof(uint16_t));

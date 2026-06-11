@@ -451,6 +451,46 @@ namespace
                tx.commit();
             }
          }
+         // (c) a key beyond an engine's contract must be REJECTED as input (a
+         // structured throw, engine stays usable) or stored faithfully — never
+         // trusted as a debug-only invariant. Heart's 1024-byte contract was an
+         // assert: under NDEBUG an oversized key routed through fixed stack
+         // buffers (silent smash). Part/psitri store it; heart now throws.
+         if (!std::getenv("SKIP_BIGKEY"))
+         {
+            const std::string big(1500, 'K');
+            bool              stored = false;
+            try
+            {
+               auto tx = ses->start_transaction(0);
+               tx.upsert(big, "big-key-value");
+               tx.commit();
+               stored = true;
+            }
+            catch (const std::exception&)
+            {
+               // structured rejection — usability is checked below
+            }
+            if (stored)
+            {
+               auto tx = ses->start_transaction(0);
+               ok(tx.template get<std::string>(big) == std::string("big-key-value"));
+               tx.remove(big);
+               tx.commit();
+            }
+            {
+               const std::string canary = "contract/after-bigkey";
+               {
+                  auto tx = ses->start_transaction(0);
+                  tx.upsert(canary, "alive");
+                  tx.commit();
+               }
+               auto tx = ses->start_transaction(0);
+               ok(tx.template get<std::string>(canary) == std::string("alive"));
+               tx.remove(canary);
+               tx.commit();
+            }
+         }
       }
 
       // ── Phase 5: remove everything → all miss

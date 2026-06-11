@@ -199,6 +199,7 @@ namespace heart::radix
          // a smart_ptr.
          if (_bucket_mode)
          {
+            check_key_contract(key.size());  // bkt_insert recurses — enforce at the entry
             auto        lock = _ses->lock();
             ptr_address w    = _root.take();
             _root = sal::smart_ptr<sal::alloc_header>(_ses, bkt_insert(w, as_bytes(key), 0,
@@ -294,12 +295,24 @@ namespace heart::radix
             root = std::move(old);  // unchanged / mutated in place — put it back
       }
 
+      // The 1024-byte key contract is load-bearing: route/divider/rebuild buffers throughout
+      // the engine are sized to max_key_len + 1. Enforced in EVERY build at the mutating
+      // descents — under NDEBUG an oversized key would overflow those buffers (silent stack
+      // corruption), so it is rejected as bad input, never trusted as an invariant. The throw
+      // is safe at every call site: mutate_root restores the root on exception.
+      static void check_key_contract(size_t klen)
+      {
+         if (klen > key_val_node::max_key_len) [[unlikely]]
+            throw std::invalid_argument("heart: key exceeds max_key_len (1024 bytes)");
+      }
+
       // Shared insert descent for upsert/upsert_subtree/subtree::upsert (value-type already
       // stashed). BORROWS `root` (the caller owns the pre-image; see mutate_root) and returns
       // the post-image root — never releases the pre-image. A null root is the valid empty
       // tree: the descent creates the first node lazily.
       [[nodiscard]] ptr_address upsert_step(ptr_address root, bytes kb, bytes val)
       {
+         check_key_contract(kb.size());
          auto lock       = _ses->lock();
          _old_value_size = -1;
          if (_page_mode)  // radix-indexed leaf pages (the default data layout)
@@ -452,6 +465,7 @@ namespace heart::radix
       {
          if (_bucket_mode)
          {
+            check_key_contract(key.size());
             auto lock = _ses->lock();
             return bkt_remove(as_bytes(key));
          }
@@ -466,6 +480,7 @@ namespace heart::radix
       // is released here.
       [[nodiscard]] ptr_address remove_step(ptr_address root, bytes kb, bool& removed)
       {
+         check_key_contract(kb.size());
          auto lock = _ses->lock();
          _removed  = false;
          _emptied  = false;
@@ -2481,11 +2496,18 @@ namespace heart::radix
          _page_split         = sal::null_ptr_address;
          auto             pr = _ses->get_ref<leaf_page>(P);
          const leaf_page* pg = pr.obj();
-         if (pg->num_keys() < 2)  // a 1-entry page can never split — fail loudly in every build
+         if (pg->num_keys() < 2)  // a 1-entry page can never split — fail loudly in every build.
          {
-            std::fprintf(stderr, "heart: split of page %u with %u keys (size %u)\n", *P,
-                         unsigned(pg->num_keys()), pg->size());
-            std::abort();
+            // Structurally unreachable while the key contract holds (max_inline_entry caps any
+            // entry's in-page footprint, so a page always fits >= 2), i.e. reaching here means
+            // a logic bug or corruption — but observable > UB and a server must not die on one
+            // bad tree: throw instead of abort. Nothing is allocated yet at this point and the
+            // page still hangs off its slot, so unwinding is clean (mutate_root restores the
+            // root; page_upsert_step releases its working claim on the way out).
+            throw std::runtime_error("heart: split invariant violated — page " +
+                                     std::to_string(*P) + " holds " +
+                                     std::to_string(unsigned(pg->num_keys())) +
+                                     " key(s) (size " + std::to_string(pg->size()) + ")");
          }
          const auto       sp = pg->get_split_pos(kvres(*_ses));
          ptr_address      L  = _ses->alloc<leaf_page>(sal::alloc_hint{},
@@ -2540,10 +2562,15 @@ namespace heart::radix
          {
             if (pass >= 64)  // hard guard in EVERY build — a silent livelock is the worst failure
             {
-               std::fprintf(stderr,
-                            "heart: page split did not converge (key %u bytes, page %u)\n",
-                            unsigned(kb.size()), *_page_split);
-               std::abort();
+               // Every completed pass was a split (a content no-op), so the working generation
+               // is a CONSISTENT tree holding all pre-existing keys; release it if we own it
+               // and throw — mutate_root restores the pre-image root. (The old abort here also
+               // printed *_page_split, which is always null at the loop head — split_and_attach
+               // consumes the stash — so that diagnostic was itself dead.)
+               if (cur != root)
+                  _ses->release(cur);
+               throw std::runtime_error("heart: page split did not converge after 64 passes (key " +
+                                        std::to_string(kb.size()) + " bytes)");
             }
             _page_split = sal::null_ptr_address;
             uint8_t     db[1056];  // divider <= max key + 1 (the 520 smashed at deep keys)
@@ -2564,7 +2591,16 @@ namespace heart::radix
                   _ses->release(cur);
                return nxt == cur ? cur : nxt;
             }
-            cur = page_split_and_attach(cur, root, bytes{db, dl});
+            try
+            {
+               cur = page_split_and_attach(cur, root, bytes{db, dl});
+            }
+            catch (...)
+            {
+               if (cur != root)  // the loop owns its intermediate generations — don't leak one
+                  _ses->release(cur);
+               throw;
+            }
          }
       }
 

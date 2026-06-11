@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <stdexcept>
 #include <vector>
 #include <psitri/count_keys.hpp>
 #include <psitri/node/inner.hpp>
@@ -227,10 +228,24 @@ namespace psitri
          assert(result == -1);
       }
 
+      /// Keys are <= 1024 bytes by contract; cursor::_key_buf, leaf cprefix
+      /// handling and the fixed path arrays are all sized to it. Previously a
+      /// debug-only assert — under NDEBUG an oversized key silently smashed
+      /// the cursor's key buffer — so enforce it as INPUT validation in every
+      /// build. The check runs before any tree state is touched (in
+      /// particular before _root.take()), so the throw cannot strand a root.
+      static constexpr size_t max_key_len = 1024;
+      static void             check_key_contract(key_view key)
+      {
+         if (key.size() > max_key_len) [[unlikely]]
+            throw std::invalid_argument("psitri: key exceeds the 1024-byte contract");
+      }
+
       /// @return the size of the prior value, or -1 if the value was inserted.
       template <upsert_mode mode = upsert_mode::unique_upsert>
       int upsert(key_view key, value_type value)
       {
+         check_key_contract(key);
          auto op_scope =
              _session.record_operation(sal::mapped_memory::session_operation::tree_upsert);
          _old_value_size     = -1;
@@ -274,6 +289,7 @@ namespace psitri
       /// @return the size of the prior value, or -1 if the value was not found.
       int remove(key_view key)
       {
+         check_key_contract(key);
          auto op_scope =
              _session.record_operation(sal::mapped_memory::session_operation::tree_remove);
          if (not _root)

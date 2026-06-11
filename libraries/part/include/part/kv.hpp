@@ -290,6 +290,29 @@ namespace part::kv
       {
          return create(std::move(dir), cfg);
       }
+      // Unified open semantics (kv_engine concept construction clause).
+      static std::shared_ptr<database> open(std::filesystem::path dir,
+                                            sal::open_mode        mode,
+                                            runtime_config        cfg = {})
+      {
+         const bool exists = std::filesystem::exists(dir / "data.part");
+         switch (mode)
+         {
+            case sal::open_mode::create_only:
+               if (exists)
+                  throw std::runtime_error("database already exists: " + dir.generic_string());
+               break;
+            case sal::open_mode::open_existing:
+               if (!exists)
+                  throw std::runtime_error("database does not exist: " + dir.generic_string());
+               break;
+            case sal::open_mode::read_only:
+               throw std::runtime_error("part: read-only opens not implemented yet");
+            case sal::open_mode::create_or_open:
+               break;
+         }
+         return create(std::move(dir), cfg);
+      }
 
       std::shared_ptr<write_session> start_write_session()
       {

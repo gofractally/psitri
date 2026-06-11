@@ -24,6 +24,7 @@
 #include <psitri/lock_policy.hpp>
 
 #include <concepts>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -39,6 +40,12 @@ namespace psitri::dwal
           typename E::read_session;
           typename E::transaction;
           typename E::cursor;
+          typename E::config;
+       } &&
+       requires(const std::filesystem::path& p, sal::open_mode m, const typename E::config& cfg) {
+          // unified construction: identical shape AND semantics across engines
+          { E::database::open(p, m, cfg) }
+             -> std::convertible_to<std::shared_ptr<typename E::database>>;
        } &&
        requires(typename E::database& db) {
           { db.start_write_session() } -> std::convertible_to<std::shared_ptr<typename E::write_session>>;
@@ -80,5 +87,6 @@ namespace psitri::dwal
       using read_session  = psitri::basic_read_session<LockPolicy>;
       using transaction   = psitri::transaction;
       using cursor        = psitri::cursor;
+      using config        = psitri::runtime_config;
    };
 }  // namespace psitri::dwal

@@ -208,6 +208,7 @@ namespace psitri
    {
       bool exists = detail::database_exists(dir);
 
+      runtime_config effective_cfg = cfg;
       switch (mode)
       {
          case open_mode::create_only:
@@ -224,13 +225,16 @@ namespace psitri
             break;
 
          case open_mode::read_only:
-            throw std::runtime_error("read_only mode not yet implemented");
+            if (!exists)
+               throw std::runtime_error("database does not exist: " + dir.generic_string());
+            effective_cfg.read_only = true;
+            break;
       }
 
       if (!exists)
          std::filesystem::create_directories(dir / "data");
 
-      auto db = std::make_shared<basic_database<LockPolicy>>(dir, cfg, recovery);
+      auto db = std::make_shared<basic_database<LockPolicy>>(dir, effective_cfg, recovery);
       db->_allocator.init_shared_ownership(db);
       return db;
    }

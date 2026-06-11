@@ -6248,9 +6248,34 @@ namespace heart::radix
           : _engine(dir, wipe, read_only)
       {
       }
-      static std::shared_ptr<database> open(const std::filesystem::path& dir)
+      // Unified open semantics (the kv_engine concept's construction clause —
+      // identical shape and behavior across psitri/heart/part):
+      //   open(path, open_mode, config) -> shared_ptr<database>
+      // NOTE: open() no longer wipes; benches that want a fresh database
+      // remove_all() themselves (they all already did).
+      static std::shared_ptr<database> open(const std::filesystem::path& dir,
+                                            sal::open_mode mode = sal::open_mode::create_or_open,
+                                            const sal::runtime_config& = {})
       {
-         return std::make_shared<database>(dir);
+         const bool exists = std::filesystem::exists(dir / "roots");
+         switch (mode)
+         {
+            case sal::open_mode::create_only:
+               if (exists)
+                  throw std::runtime_error("database already exists: " + dir.generic_string());
+               break;
+            case sal::open_mode::open_existing:
+            case sal::open_mode::read_only:
+               if (!exists)
+                  throw std::runtime_error("database does not exist: " + dir.generic_string());
+               break;
+            case sal::open_mode::create_or_open:
+               break;
+         }
+         if (!exists)
+            std::filesystem::create_directories(dir);
+         return std::make_shared<database>(dir, /*wipe=*/false,
+                                           mode == sal::open_mode::read_only);
       }
       // Open an EXISTING database (no wipe). read_only=true: no background
       // threads, data PROT_READ, control pages copy-on-write (file pristine),
@@ -6258,7 +6283,8 @@ namespace heart::radix
       static std::shared_ptr<database> open_existing(const std::filesystem::path& dir,
                                                      bool read_only = false)
       {
-         return std::make_shared<database>(dir, /*wipe=*/false, read_only);
+         return open(dir, read_only ? sal::open_mode::read_only
+                                    : sal::open_mode::open_existing);
       }
       std::shared_ptr<write_session> start_write_session()
       {

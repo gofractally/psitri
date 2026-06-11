@@ -21,6 +21,7 @@ namespace heart::radix
       using read_session  = heart::radix::read_session;
       using transaction   = heart::radix::transaction;
       using cursor        = heart::radix::cursor;
+      using config        = sal::runtime_config;
    };
    static_assert(psitri::dwal::kv_engine<dwal_engine>,
                  "heart's public API must satisfy the DWAL base-tier concept");

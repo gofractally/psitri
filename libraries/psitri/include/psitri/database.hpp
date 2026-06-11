@@ -44,21 +44,8 @@ namespace psitri
    static constexpr uint32_t num_top_roots = 512;
 
    /// Controls how database::open() handles existing vs. new databases.
-   enum class open_mode
-   {
-      /// Open an existing database or create a new one.
-      create_or_open,
-
-      /// Create a new database. Fails if the database already exists.
-      create_only,
-
-      /// Open an existing database. Fails if the database does not exist.
-      open_existing,
-
-      /// Open an existing database in read-only mode.
-      /// Not yet implemented — reserved for future use.
-      read_only,
-   };
+   /// Unified open semantics — shared vocabulary across engines (sal).
+   using open_mode = sal::open_mode;
 
    namespace detail
    {

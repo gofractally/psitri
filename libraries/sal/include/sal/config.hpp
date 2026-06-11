@@ -119,6 +119,17 @@ namespace sal
       return is;
    }
 
+   /// Unified database-open semantics across every engine (the kv_engine
+   /// concept validates the open(path, open_mode, config) shape).
+   enum class open_mode
+   {
+      create_or_open,  ///< open an existing database or create a new one
+      create_only,     ///< create new; fails if the database already exists
+      open_existing,   ///< open existing; fails if the database is missing
+      read_only,       ///< open_existing + runtime read-only (no threads,
+                       ///< PROT_READ data, copy-on-write control pages)
+   };
+
    enum class access_mode
    {
       read_only  = 0,

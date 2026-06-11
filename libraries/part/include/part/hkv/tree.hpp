@@ -5723,8 +5723,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
          uint8_t    cnt[4];
          uint16_t   stem_lo[4];
          uint8_t    nbig;
-         uint8_t    rsv[3];  // (fp line removed: stems gate to an equal-stem
-                             // run; the suffix compare is the verifier)
+         uint8_t    dead8;   // saturating dead-byte ledger (8B units): >0 means
+                             // the next COW clone COMPACTS instead of memcpy
+         uint8_t    rsv[2];  // (fp line removed: stems verify by suffix)
          Ptr        sp_line[4];
          Ptr        page_line[12];
          uint8_t    prefix[36];
@@ -5934,12 +5935,15 @@ namespace detail  // implementation types & node helpers — not part of the pub
             cb_release_lines_(h->page_line[spi], cb_len8(lr) ? cb_len8(lr) : 1);
             h->page_line[spi] = Ptr::null();
             --h->nbig;
+            h->dead8 = uint8_t(std::min(255u, unsigned(h->dead8) + 1));  // slot churn
             return;
          }
          const unsigned spi = cb_spi(lr);
          uint8_t* pg = cb_page_(h, spi);  // page private with its CL0 (COW unit)
          cb_cell  c  = cb_cell_at_(h, lr);
-         pg[0]       = uint8_t(pg[0] + cb_cell_alloc8_(c.p));
+         const unsigned a8 = cb_cell_alloc8_(c.p);
+         pg[0]             = uint8_t(pg[0] + a8);
+         h->dead8          = uint8_t(std::min(255u, unsigned(h->dead8) + a8));
          if (spi != h->open_spi && pg[0] >= CB_PGCAP8)
          {  // fully dead page: release; the table slot becomes reusable
             cb_release_lines_(h->page_line[spi], 2);
@@ -7511,6 +7515,50 @@ namespace detail  // implementation types & node helpers — not part of the pub
             }
             return pack_(x, K::full_x);
          }
+         if constexpr (cb_enabled)
+            if (k == K::cbucket)
+            {
+               // page = one COW unit AND the clone is the compactor: rebuild
+               // the page through the bulk builder — dead sub-page bytes
+               // (removed cells, outgrown values) vanish at every generation
+               // instead of riding the verbatim copy forever.
+               cb_hdr* h = static_cast<cb_hdr*>(deref_(cur));
+               if (h->dead8)
+               {  // dirty page: the clone IS the compactor
+                  cb_eref        refs[CB_MAX + 1];
+                  const unsigned n = cb_collect_refs_(h, refs);
+                  const std::string_view pfx(reinterpret_cast<const char*>(h->prefix),
+                                             h->rh.hdr.prefix_len);
+                  const Ptr np = n ? cb_build_page_bulk_(pfx, {}, refs, 0, n, 0)
+                                   : cb_make0_(pfx);
+                  assert(!np.is_null() && "a compacted page never exceeds its source");
+                  return np;
+               }
+               // clean page: verbatim piece copy (no dead bytes to reclaim)
+               cb_hdr* d2 = static_cast<cb_hdr*>(node_alloc_(128));
+               std::memcpy(d2, h, 128);
+               cow_fix_child_(&d2->rh.term);
+               for (unsigned li = 0; li < 4; ++li)
+                  if (!d2->sp_line[li].is_null())
+                     d2->sp_line[li] = cb_copy_lines_(d2->sp_line[li], 1);
+               uint8_t nl_of[CB_PAGES];
+               for (auto& x2 : nl_of)
+                  x2 = 2;
+               for (unsigned li = 0; li < 4; ++li)
+               {
+                  if (!d2->cnt[li])
+                     continue;
+                  const cb_sp* sp = cb_spl_(d2, li);
+                  for (unsigned i = 0; i < d2->cnt[li]; ++i)
+                     if (cb_big(sp->lref[i]))
+                        nl_of[cb_spi(sp->lref[i])] =
+                            uint8_t(cb_len8(sp->lref[i]) ? cb_len8(sp->lref[i]) : 1);
+               }
+               for (unsigned spi = 0; spi < CB_PAGES; ++spi)
+                  if (!d2->page_line[spi].is_null())
+                     d2->page_line[spi] = cb_copy_lines_(d2->page_line[spi], nl_of[spi]);
+               return pack_(d2, K::cbucket);
+            }
          const size_t bytes = cow_node_bytes_(cur);
          void*        dst   = node_alloc_(bytes);
          std::memcpy(dst, deref_(cur), bytes);
@@ -7586,37 +7634,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                break;
             }
             case K::cbucket:
-            {
-               if constexpr (cb_enabled)
-               {
-                  // page = ONE COW unit (Dan): clone every piece into fresh
-                  // lines in one pass — no per-line retains, and every later
-                  // mutation in the generation is a plain in-place write.
-                  cb_hdr* h = static_cast<cb_hdr*>(dst);
-                  cow_fix_child_(&h->rh.term);
-                  for (unsigned li = 0; li < 4; ++li)
-                     if (!h->sp_line[li].is_null())
-                        h->sp_line[li] = cb_copy_lines_(h->sp_line[li], 1);
-                  // spi -> line count for big slots (from the cloned index)
-                  uint8_t nl_of[CB_PAGES];
-                  for (auto& x2 : nl_of)
-                     x2 = 2;
-                  for (unsigned li = 0; li < 4; ++li)
-                  {
-                     if (!h->cnt[li])
-                        continue;
-                     const cb_sp* sp = cb_spl_(h, li);
-                     for (unsigned i = 0; i < h->cnt[li]; ++i)
-                        if (cb_big(sp->lref[i]))
-                           nl_of[cb_spi(sp->lref[i])] =
-                               uint8_t(cb_len8(sp->lref[i]) ? cb_len8(sp->lref[i]) : 1);
-                  }
-                  for (unsigned spi = 0; spi < CB_PAGES; ++spi)
-                     if (!h->page_line[spi].is_null())
-                        h->page_line[spi] = cb_copy_lines_(h->page_line[spi], nl_of[spi]);
-               }
+               assert(false && "pages clone via the compacting bulk builder above");
                break;
-            }
                         case K::value_inline:
             case K::null:
                break;

@@ -51,27 +51,12 @@ namespace part::kv
    // ONE 128 B line — at 128 B every 8-byte bank balance burned a 2-line leaf,
    // which alone doubled resident memory. Variable-length leaf values (design5
    // val_len) are the real fix and live in the tree layer's future.
-   struct pval
-   {
-      uint16_t len = 0;
-      char     b[78];
-      static pval from(value_view v)
-      {
-         if (v.size() > sizeof(b))
-            throw std::length_error("part::kv value exceeds 78 bytes");
-         pval p;
-         p.len = uint16_t(v.size());
-         std::memcpy(p.b, v.data(), v.size());
-         return p;
-      }
-      value_view view() const noexcept { return value_view(b, len); }
-      // composed-bucket bridge: cells store live bytes, T converts at the edge
-      static pval       from_bytes(value_view v) { return from(v); }
-      value_view        to_bytes() const noexcept { return view(); }
-   };
-   static_assert(std::is_trivially_copyable_v<pval> && sizeof(pval) == 80);
+   // (pval[80] retired: values are raw bytes in the leaf — hkv::bytes_value)
 
-   using engine_t = hkv::kv_tree<std::string_view, pval, hkv::mode::none, part_alloc<pval>>;
+   // ELEGANT value mode: the leaf IS the value (raw bytes sized to the data);
+   // reads hand back views — pval[80] retired.
+   using bval     = hkv::bytes_value;
+   using engine_t = hkv::kv_tree<std::string_view, bval, hkv::mode::none, part_alloc<bval>>;
    using root_ptr = part::detail::line_ptr;
 
    class database;
@@ -130,7 +115,7 @@ namespace part::kv
       {
          if (is_end())
             return std::nullopt;
-         const value_view v = (*_it).second.view();
+         const value_view v = (*_it).second.v;
          return S(v.data(), v.size());
       }
       template <class F>
@@ -138,7 +123,7 @@ namespace part::kv
       {
          if (is_end())
             return false;
-         f((*_it).second.view());
+         f((*_it).second.v);
          return true;
       }
 
@@ -153,10 +138,10 @@ namespace part::kv
                return std::nullopt;
             return S(out.data(), out.size());
          }
-         pval out;
+         bval out;
          if (!_view.find(k, out))
             return std::nullopt;
-         return S(out.b, out.len);
+         return S(out.v.data(), out.v.size());
       }
       template <class F>
       bool get(key_view k, F&& f) const
@@ -169,10 +154,10 @@ namespace part::kv
             f(out);
             return true;
          }
-         pval out;
+         bval out;
          if (!_view.find(k, out))
             return false;
-         f(out.view());
+         f(out.v);
          return true;
       }
 
@@ -180,7 +165,7 @@ namespace part::kv
       friend class database;
       friend class read_session;
       cursor(part::arena* a, root_ptr root, std::atomic<uint64_t>* hp = nullptr)
-          : _a(a), _hp(hp), _root(root), _view(part_alloc<pval>(a)), _it(_view.end())
+          : _a(a), _hp(hp), _root(root), _view(part_alloc<bval>(a)), _it(_view.end())
       {
          _view.adopt_root(_root);
       }
@@ -318,12 +303,12 @@ namespace part::kv
             root_ptr       p;
             const uint32_t r32 = uint32_t(raw);
             std::memcpy(p.b, &r32, 4);
-            engine_t v{part_alloc<pval>(&_arena)};
+            engine_t v{part_alloc<bval>(&_arena)};
             v.cow_release(p);
          }
          if (!_live_root.is_null())
          {
-            engine_t v{part_alloc<pval>(&_arena)};
+            engine_t v{part_alloc<bval>(&_arena)};
             v.cow_release(_live_root);
          }
       }
@@ -389,7 +374,7 @@ namespace part::kv
       }
       void rel_loop_() noexcept
       {
-         engine_t v{part_alloc<pval>(&_arena, /*defer=*/false)};  // inline worker
+         engine_t v{part_alloc<bval>(&_arena, /*defer=*/false)};  // inline worker
          for (;;)
          {
             const uint32_t t = _rel_tail.load(std::memory_order_relaxed);
@@ -440,7 +425,7 @@ namespace part::kv
             root_ptr p;
             const uint32_t r32 = uint32_t(_retired[i]);
             std::memcpy(p.b, &r32, 4);
-            engine_t v{part_alloc<pval>(&_arena, /*defer=*/true)};
+            engine_t v{part_alloc<bval>(&_arena, /*defer=*/true)};
             v.cow_release(p);  // big generations route to the releaser
             _retired[i] = _retired.back();
             _retired.pop_back();
@@ -478,7 +463,7 @@ namespace part::kv
 
    // ── bodies ────────────────────────────────────────────────────────────────
    inline write_session::write_session(database* db)
-       : _db(db), _ses(db->_arena.start_session()), _t(part_alloc<pval>(&_ses))
+       : _db(db), _ses(db->_arena.start_session()), _t(part_alloc<bval>(&_ses))
    {
    }
 
@@ -516,9 +501,9 @@ namespace part::kv
    inline void transaction::upsert(key_view k, value_view v)
    {
       if constexpr (engine_t::cb_create)
-         _ws->_t.pg_upsert(k, v);  // bytes straight to the page — no pval round-trip
+         _ws->_t.pg_upsert(k, v);  // bytes straight to the page
       else
-         _ws->_t.cow_insert(k, pval::from(v));
+         _ws->_t.cow_insert(k, bval{v});  // view in; the leaf copies once
    }
    inline int transaction::remove(key_view k)
    {
@@ -538,10 +523,10 @@ namespace part::kv
          fn(out);
          return true;
       }
-      pval out;
+      bval out;
       if (!_ws->_t.find(k, out))
          return false;
-      fn(out.view());
+      fn(out.v);
       return true;
    }
    template <class S>
@@ -554,10 +539,10 @@ namespace part::kv
             return std::nullopt;
          return S(out.data(), out.size());
       }
-      pval out;
+      bval out;
       if (!_ws->_t.find(k, out))
          return std::nullopt;
-      return S(out.b, out.len);
+      return S(out.v.data(), out.v.size());
    }
 
    inline void transaction::commit()

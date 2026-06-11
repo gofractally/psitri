@@ -458,6 +458,16 @@ namespace detail  // implementation types & node helpers — not part of the pub
    // discarded). Defaults = plain adaptive-radix. Buckets: terminals are last-mile buckets
    // from the root. Adaptive: radix that collapses deep-narrow leaf-splits to buckets.
    // DenseTiers: allow the segmented-bitset cnode routers between setlist and node_full.
+   // The ELEGANT value mode: T = bytes_value makes the LEAF the value — raw
+   // bytes sized to the data, stored after a u16 vlen; find/iterate hand back
+   // VIEWS into the leaf (zero tree-side copies, one copy at the API edge).
+   struct bytes_value
+   {
+      std::string_view v;
+      static bytes_value from_bytes(std::string_view b) noexcept { return {b}; }
+      std::string_view  to_bytes() const noexcept { return v; }
+   };
+
    template <class Key, class T, mode Mode = mode::none, class Allocator = std::allocator<T>>
    class kv_tree
    {
@@ -531,7 +541,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
       // API and the iterator's value storage (constraints / conditional types parsed before
       // the rest of the class).
       static constexpr size_t inline_cap   = sizeof(Ptr) - 1;
-      static constexpr bool   inlineable   = std::is_trivially_copyable_v<T> && sizeof(T) <= inline_cap;
+      static constexpr bool   raw_vals     = std::is_same_v<T, bytes_value>;
+      static constexpr bool   inlineable   = !raw_vals &&
+                                           std::is_trivially_copyable_v<T> && sizeof(T) <= inline_cap;
       // Clamped so pack/unpack are instantiation-safe even for non-inlineable T (dead
       // code under the runtime guard); == sizeof(T) on the path that actually inlines.
       static constexpr size_t inline_bytes = sizeof(T) <= inline_cap ? sizeof(T) : inline_cap;
@@ -1167,7 +1179,10 @@ namespace detail  // implementation types & node helpers — not part of the pub
                if (std::string_view(reinterpret_cast<const char*>(leaf_suf(p)), leaf_slen(p)) !=
                    std::string_view(rem, rl))
                   return false;
-               self->copy_value(*out, leaf_val(p));
+               if constexpr (raw_vals)
+                  *out = T{leaf_bytes(p)};  // VIEW into the leaf: zero copy
+               else
+                  self->copy_value(*out, leaf_val(p));
                return true;
             }
             bool inl(uint64_t raw, bool at_end) const
@@ -1580,7 +1595,14 @@ namespace detail  // implementation types & node helpers — not part of the pub
          {
             if constexpr (inlineable)
                if (p.tag() == K::value_inline) { unpack_inline(p, val_); return; }
-            set_ptr_(leaf_val(static_cast<const char*>(deref_(p))));
+            if constexpr (kv_tree::raw_vals)
+            {
+               *reinterpret_cast<T*>(cvalbuf_) =
+                   T{leaf_bytes(static_cast<const char*>(deref_(p)))};
+               val_local_ = true;
+            }
+            else
+               set_ptr_(leaf_val(static_cast<const char*>(deref_(p))));
          }
          // Byte-routers only — u16 (2-byte) and non-routers must be handled by the caller
          // BEFORE this (with_router asserts on them; a silent default here is exactly what
@@ -1611,7 +1633,13 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   sfxlen_       = leaf_slen(L);
                   if (leaf_has_full(L)) { full_str_ = leaf_str(L); full_len_ = leaf_strlen(L); }
                   else                    full_str_ = nullptr;
-                  set_ptr_(leaf_val(L));
+                  if constexpr (kv_tree::raw_vals)
+                  {
+                     *reinterpret_cast<T*>(cvalbuf_) = T{leaf_bytes(L)};
+                     val_local_ = true;
+                  }
+                  else
+                     set_ptr_(leaf_val(L));
                   // maintain the path in key_ for the NEXT non-full terminal; skip the suffix
                   // append here when this leaf is full (key() will return its zero-copy view).
                   if (maintain_) { key_.len = base; if (!full_str_) key_.append(sfx_, sfxlen_); }
@@ -2894,7 +2922,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
          size_t           depth = 0;
          path[n++ % RM_LVN]     = {&root_, 0};
          auto free_leaf         = [&](char* L) {
-            v_destroy(alloc_, leaf_val(L));
+            if constexpr (!raw_vals)
+               v_destroy(alloc_, leaf_val(L));
             node_free_(L, leaf_alloc_size(L));
          };
          for (;;)
@@ -3164,10 +3193,37 @@ namespace detail  // implementation types & node helpers — not part of the pub
       static constexpr uint16_t LEAF_FULL = 0x8000;
       static constexpr size_t   leaf_value_off() noexcept
       {
-         constexpr size_t a = alignof(T);
-         return (2 * sizeof(uint16_t) + a - 1) / a * a;
+         if constexpr (raw_vals)
+            return 3 * sizeof(uint16_t);  // [slen][pfx_field][vlen]
+         else
+         {
+            constexpr size_t a = alignof(T);
+            return (2 * sizeof(uint16_t) + a - 1) / a * a;
+         }
       }
-      static size_t leaf_size(size_t strlen) noexcept { return leaf_value_off() + sizeof(T) + strlen; }
+      static size_t leaf_size(size_t strlen, size_t vlen = sizeof(T)) noexcept
+      {
+         if constexpr (raw_vals)
+            return leaf_value_off() + vlen + strlen;
+         else
+            return leaf_value_off() + sizeof(T) + strlen;
+      }
+      static uint16_t leaf_vlen(const char* p) noexcept
+      {
+         if constexpr (raw_vals)
+         {
+            uint16_t v;
+            std::memcpy(&v, p + 4, 2);
+            return v;
+         }
+         else
+            return uint16_t(sizeof(T));
+      }
+      static std::string_view leaf_bytes(const char* p) noexcept
+         requires raw_vals
+      {
+         return std::string_view(p + leaf_value_off(), leaf_vlen(p));
+      }
       static uint16_t leaf_slen(const char* p) noexcept { uint16_t v; std::memcpy(&v, p, 2); return v; }
       static uint16_t leaf_pfxfield(const char* p) noexcept { uint16_t v; std::memcpy(&v, p + 2, 2); return v; }
       static bool     leaf_has_full(const char* p) noexcept { return leaf_pfxfield(p) & LEAF_FULL; }
@@ -3177,14 +3233,28 @@ namespace detail  // implementation types & node helpers — not part of the pub
          const uint16_t f = leaf_pfxfield(p);
          return uint16_t(leaf_slen(p) + ((f & LEAF_FULL) ? (f & 0x7FFF) : 0));
       }
-      static size_t   leaf_alloc_size(const char* p) noexcept { return leaf_size(leaf_strlen(p)); }
-      static T*       leaf_val(char* p) noexcept { return reinterpret_cast<T*>(p + leaf_value_off()); }
+      static size_t leaf_alloc_size(const char* p) noexcept
+      {
+         return leaf_size(leaf_strlen(p), leaf_vlen(p));
+      }
+      static T* leaf_val(char* p) noexcept
+         requires(!raw_vals)
+      {
+         return reinterpret_cast<T*>(p + leaf_value_off());
+      }
       static const T* leaf_val(const char* p) noexcept
+         requires(!raw_vals)
       {
          return reinterpret_cast<const T*>(p + leaf_value_off());
       }
-      static char*       leaf_str(char* p) noexcept { return p + leaf_value_off() + sizeof(T); }
-      static const char* leaf_str(const char* p) noexcept { return p + leaf_value_off() + sizeof(T); }
+      static char* leaf_str(char* p) noexcept
+      {
+         return p + leaf_value_off() + leaf_vlen(p);
+      }
+      static const char* leaf_str(const char* p) noexcept
+      {
+         return p + leaf_value_off() + leaf_vlen(p);
+      }
       // Full key as a contiguous view — valid ONLY when leaf_has_full(p).
       static std::string_view leaf_fullview(const char* p) noexcept
       {
@@ -3447,6 +3517,15 @@ namespace detail  // implementation types & node helpers — not part of the pub
             std::forward<VF>(vf).construct(alloc_, dst);
       }
       template <class VF>
+      static std::string_view vf_peek_(const VF& vf) noexcept
+         requires raw_vals
+      {
+         if constexpr (std::is_same_v<std::remove_cvref_t<VF>, T>)
+            return vf.v;
+         else
+            return vf.make().v;
+      }
+      template <class VF>
       static T vf_make(VF&& vf)  // materialize (the inline-packing path; small trivial T)
       {
          if constexpr (std::is_same_v<std::remove_cvref_t<VF>, T>)
@@ -3477,6 +3556,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
          if (v.tag() == K::value_inline)
             unpack_inline(v, out);
+         else if constexpr (raw_vals)
+            out = T{leaf_bytes(static_cast<const char*>(deref_(v)))};
          else
             copy_value(out, leaf_val(static_cast<const char*>(deref_(v))));
       }
@@ -3496,21 +3577,51 @@ namespace detail  // implementation types & node helpers — not part of the pub
       template <class VF>
       packed_ptr make_leaf(std::string_view suf, VF&& val)  // suffix-only (compressed) leaf
       {
-         char* p = static_cast<char*>(node_alloc_(leaf_size(suf.size())));
-         leaf_set_hdr(p, uint16_t(suf.size()), 0);
-         std::memcpy(leaf_str(p), suf.data(), suf.size());
-         vf_construct(std::forward<VF>(val), leaf_val(p));
-         return pack_(p, K::value_ptr);
+         if constexpr (raw_vals)
+         {
+            const std::string_view b = vf_make(std::forward<VF>(val)).v;
+            char* p = static_cast<char*>(node_alloc_(leaf_size(suf.size(), b.size())));
+            leaf_set_hdr(p, uint16_t(suf.size()), 0);
+            const uint16_t vl = uint16_t(b.size());
+            std::memcpy(p + 4, &vl, 2);
+            std::memcpy(p + leaf_value_off(), b.data(), b.size());
+            std::memcpy(leaf_str(p), suf.data(), suf.size());
+            return pack_(p, K::value_ptr);
+         }
+         else
+         {
+            char* p = static_cast<char*>(node_alloc_(leaf_size(suf.size())));
+            leaf_set_hdr(p, uint16_t(suf.size()), 0);
+            std::memcpy(leaf_str(p), suf.data(), suf.size());
+            vf_construct(std::forward<VF>(val), leaf_val(p));
+            return pack_(p, K::value_ptr);
+         }
       }
       template <class VF>
       packed_ptr make_leaf_full(std::string_view pfx, std::string_view suf, VF&& val)  // whole key
       {
-         char* p = static_cast<char*>(node_alloc_(leaf_size(pfx.size() + suf.size())));
-         leaf_set_hdr(p, uint16_t(suf.size()), uint16_t(LEAF_FULL | pfx.size()));
-         std::memcpy(leaf_str(p), pfx.data(), pfx.size());
-         std::memcpy(leaf_str(p) + pfx.size(), suf.data(), suf.size());
-         vf_construct(std::forward<VF>(val), leaf_val(p));
-         return pack_(p, K::value_ptr);
+         if constexpr (raw_vals)
+         {
+            const std::string_view b = vf_make(std::forward<VF>(val)).v;
+            char* p = static_cast<char*>(
+                node_alloc_(leaf_size(pfx.size() + suf.size(), b.size())));
+            leaf_set_hdr(p, uint16_t(suf.size()), uint16_t(LEAF_FULL | pfx.size()));
+            const uint16_t vl = uint16_t(b.size());
+            std::memcpy(p + 4, &vl, 2);
+            std::memcpy(p + leaf_value_off(), b.data(), b.size());
+            std::memcpy(leaf_str(p), pfx.data(), pfx.size());
+            std::memcpy(leaf_str(p) + pfx.size(), suf.data(), suf.size());
+            return pack_(p, K::value_ptr);
+         }
+         else
+         {
+            char* p = static_cast<char*>(node_alloc_(leaf_size(pfx.size() + suf.size())));
+            leaf_set_hdr(p, uint16_t(suf.size()), uint16_t(LEAF_FULL | pfx.size()));
+            std::memcpy(leaf_str(p), pfx.data(), pfx.size());
+            std::memcpy(leaf_str(p) + pfx.size(), suf.data(), suf.size());
+            vf_construct(std::forward<VF>(val), leaf_val(p));
+            return pack_(p, K::value_ptr);
+         }
       }
       // A terminal value with key suffix `suf`: inline in the pointer when the suffix
       // is empty and T fits (no allocation), else a suffix-only leaf.
@@ -3534,8 +3645,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
             if (suf.empty())
                return pack_inline(vf_make(std::forward<VF>(val)));
          const std::string_view pfx = key.substr(0, depth);
-         if (depth < 0x8000 &&
-             nblocks_(leaf_size(pfx.size() + suf.size())) == nblocks_(leaf_size(suf.size())))
+         size_t                 vsz = sizeof(T);
+         if constexpr (raw_vals)
+            vsz = vf_peek_(val).size();
+         if (depth < 0x8000 && nblocks_(leaf_size(pfx.size() + suf.size(), vsz)) ==
+                                   nblocks_(leaf_size(suf.size(), vsz)))
             return make_leaf_full(pfx, suf, std::forward<VF>(val));
          return make_leaf(suf, std::forward<VF>(val));
       }
@@ -4399,8 +4513,26 @@ namespace detail  // implementation types & node helpers — not part of the pub
                else
                {
                   char* tl = static_cast<char*>(deref_(rh->term));
-                  v_destroy(alloc_, leaf_val(tl));
-                  vf_construct(std::forward<VF>(val), leaf_val(tl));
+                  if constexpr (raw_vals)
+                  {  // same-size: bytes in place; else rebuild the term leaf
+                     const std::string_view nb = vf_peek_(val);
+                     if (nb.size() == leaf_vlen(tl))
+                        std::memcpy(tl + leaf_value_off(), nb.data(), nb.size());
+                     else
+                     {
+                        const Ptr old = rh->term;
+                        rh->term      = make_leaf(
+                            std::string_view(reinterpret_cast<const char*>(leaf_suf(tl)),
+                                             leaf_slen(tl)),
+                            std::forward<VF>(val));
+                        cow_release(old);
+                     }
+                  }
+                  else
+                  {
+                     v_destroy(alloc_, leaf_val(tl));
+                     vf_construct(std::forward<VF>(val), leaf_val(tl));
+                  }
                }
             }
             return false;
@@ -4440,8 +4572,36 @@ namespace detail  // implementation types & node helpers — not part of the pub
          {
             if constexpr (Assign)
             {
-               v_destroy(alloc_, leaf_val(L));
-               vf_construct(std::forward<VF>(val), leaf_val(L));
+               if constexpr (raw_vals)
+               {
+                  const std::string_view nb = vf_peek_(val);
+                  if (nb.size() == leaf_vlen(L))
+                     std::memcpy(L + leaf_value_off(), nb.data(), nb.size());
+                  else
+                  {  // size changed: rebuild the leaf verbatim around new bytes
+                     const size_t Lsz = leaf_alloc_size(L);
+                     const Ptr    np  = leaf_has_full(L)
+                                            ? make_leaf_full(
+                                                  std::string_view(leaf_str(L), leaf_plen(L)),
+                                                  std::string_view(
+                                                      reinterpret_cast<const char*>(leaf_suf(L)),
+                                                      leaf_slen(L)),
+                                                  std::forward<VF>(val))
+                                            : make_leaf(
+                                                  std::string_view(
+                                                      reinterpret_cast<const char*>(leaf_suf(L)),
+                                                      leaf_slen(L)),
+                                                  std::forward<VF>(val));
+                     node_free_(L, Lsz);
+                     inserted = false;
+                     return np;
+                  }
+               }
+               else
+               {
+                  v_destroy(alloc_, leaf_val(L));
+                  vf_construct(std::forward<VF>(val), leaf_val(L));
+               }
             }
             inserted = false;
             return cur;
@@ -4463,14 +4623,28 @@ namespace detail  // implementation types & node helpers — not part of the pub
          else
             setlist_set(r, uint8_t(R[c]), make_value_at(key, depth + c + 1, std::forward<VF>(val)));
          partial = apply_prefix(r, key.substr(depth, c));             // (3) shared prefix (== S[0..c])
-         if (c == S.size())                                           // (4) old value, LAST
-            set_term(&r->rh, std::move(*leaf_val(L)));
-         else if (oldfull)  // reuse the old leaf's contiguous full key so the child stays full
-            setlist_set(r, uint8_t(S[c]), make_value_at(ofv, depth + c + 1, std::move(*leaf_val(L))));
+         if constexpr (raw_vals)
+         {  // bytes copy out of the OLD leaf into the new one, then free
+            const T ov{leaf_bytes(L)};
+            if (c == S.size())  // (4) old value, LAST
+               set_term(&r->rh, ov);
+            else if (oldfull)
+               setlist_set(r, uint8_t(S[c]), make_value_at(ofv, depth + c + 1, ov));
+            else
+               setlist_set(r, uint8_t(S[c]), make_value(S.substr(c + 1), ov));
+            node_free_(L, Lsize);
+         }
          else
-            setlist_set(r, uint8_t(S[c]), make_value(S.substr(c + 1), std::move(*leaf_val(L))));
-         v_destroy(alloc_, leaf_val(L));  // old value moved out → destroy moved-from + free
-         node_free_(L, Lsize);
+         {
+            if (c == S.size())                                           // (4) old value, LAST
+               set_term(&r->rh, std::move(*leaf_val(L)));
+            else if (oldfull)  // reuse the old leaf's contiguous full key so the child stays full
+               setlist_set(r, uint8_t(S[c]), make_value_at(ofv, depth + c + 1, std::move(*leaf_val(L))));
+            else
+               setlist_set(r, uint8_t(S[c]), make_value(S.substr(c + 1), std::move(*leaf_val(L))));
+            v_destroy(alloc_, leaf_val(L));  // old value moved out → destroy moved-from + free
+            node_free_(L, Lsize);
+         }
          g.release();  // committed: the caller adopts `partial`
          inserted = true;
          return partial;
@@ -6940,8 +7114,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
             }
             if (h->rh.term.tag() == K::value_ptr)
             {
-               const auto b =
-                   leaf_val(static_cast<const char*>(deref_(h->rh.term)))->to_bytes();
+               const char* tl = static_cast<const char*>(deref_(h->rh.term));
+               std::string_view b;
+               if constexpr (raw_vals)
+                  b = leaf_bytes(tl);
+               else
+                  b = leaf_val(tl)->to_bytes();
                te.val.assign(b.data(), b.size());
             }
             es.push_back(std::move(te));
@@ -8138,5 +8316,6 @@ namespace detail  // implementation types & node helpers — not part of the pub
    };
 }  // namespace detail
 
+using detail::bytes_value;
 using detail::kv_tree;  // re-export only the public class; impl stays in hkv::detail
 }  // namespace hkv

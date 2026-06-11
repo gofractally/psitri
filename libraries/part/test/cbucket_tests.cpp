@@ -14,7 +14,7 @@
 using namespace part;
 namespace fs = std::filesystem;
 using tree_t = part::kv::engine_t;
-using pval   = part::kv::pval;
+using pval   = part::kv::bval;  // raw-bytes value mode
 
 namespace
 {

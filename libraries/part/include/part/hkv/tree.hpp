@@ -4893,6 +4893,197 @@ namespace detail  // implementation types & node helpers — not part of the pub
             return rh->term;
          }
       }
+      // ── fused privatizing floor walk: ONE descent for writes (route and
+      // privatize together; the old route-then-path_mut double walk is gone).
+      // Nodes are privatized on entry and branch LINES before descending
+      // through them; rare fallback turns may clone a node the final route
+      // abandons — correct, marginal waste. Collects the divider.
+      void pg_own_line_(Ptr cur, uint8_t byte)
+      {
+         if constexpr (cow_enabled)
+         {
+            const K k = cur.tag();
+            if (k == K::full_x)
+            {
+               node_fullx* x = static_cast<node_fullx*>(deref_(cur));
+               unsigned    li, sl2;
+               full_index<Ptr>(byte, li, sl2);
+               if (!x->lines[li].is_null() && alloc_.hkv_ref(line_of(x->lines[li])) >= 2)
+               {
+                  const Ptr old = x->lines[li];
+                  x->lines[li]  = fx_clone_line_(old);
+                  fx_release_line_(old);
+               }
+            }
+            else if (k == K::cx)
+            {
+               node_cx*       x  = static_cast<node_cx*>(deref_(cur));
+               const unsigned sg = byte >> (8 - x->lg);
+               if (!x->seglines[sg].is_null() &&
+                   alloc_.hkv_ref(line_of(x->seglines[sg])) >= 2)
+               {
+                  const Ptr old   = x->seglines[sg];
+                  x->seglines[sg] = cx_clone_line_(old, x->lg);
+                  cx_release_line_(old, x->lg);
+               }
+            }
+         }
+      }
+      Ptr* pg_max_mut_(Ptr* slot, pg_div* div, bool skip_prefix = false)
+      {
+         for (;;)
+         {
+            if (cow_shared_(*slot))
+               cow_clone_into_(slot, *slot);
+            Ptr     cur = *slot;
+            const K k   = cur.tag();
+            if (k == K::cbucket)
+               return slot;
+            if (k == K::prefix_node)
+            {
+               char* P = static_cast<char*>(deref_(cur));
+               if (div)
+                  div->append(pn_pfx<Ptr>(P), pn_plen(P));
+               slot = reinterpret_cast<Ptr*>(P + 2);
+               continue;
+            }
+            router_hdr* rh = static_cast<router_hdr*>(deref_(cur));
+            if (k == K::setlist_u8 && rh->hdr.prefix_len && !skip_prefix && div)
+               div->append(static_cast<const setlist*>(deref_(cur))->prefix,
+                           rh->hdr.prefix_len);
+            skip_prefix = false;
+            uint8_t ob;
+            Ptr     oc;
+            if (router_prev_d(cur, 256, ob, oc))
+            {
+               pg_own_line_(cur, ob);
+               Ptr* cs = with_router(cur, [&](auto* n) noexcept { return router_find_slot(n, ob); });
+               if (div)
+                  div->push(ob);
+               slot = cs;
+               continue;
+            }
+            assert(!rh->term.is_null() && "a routers-only subtree must hold a page");
+            return &rh->term;
+         }
+      }
+      Ptr* pg_fb_mut_(Ptr* fb_slot, int fb_from, size_t fb_dlen, pg_div* div)
+      {
+         assert(fb_slot && "the radix root always holds the \"\" divider");
+         if (div)
+            div->len = uint16_t(fb_dlen);
+         Ptr     cur = *fb_slot;  // already privatized on the way down
+         uint8_t ob;
+         Ptr     oc;
+         if (router_prev_d(cur, fb_from, ob, oc))
+         {
+            pg_own_line_(cur, ob);
+            Ptr* cs = with_router(cur, [&](auto* n) noexcept { return router_find_slot(n, ob); });
+            if (div)
+               div->push(ob);
+            return pg_max_mut_(cs, div);
+         }
+         router_hdr* rh = static_cast<router_hdr*>(deref_(cur));
+         assert(!rh->term.is_null());
+         return &rh->term;
+      }
+      Ptr* pg_route_mut_(std::string_view key, pg_div* div)
+      {
+         Ptr*   slot    = &root_;
+         size_t depth   = 0;
+         Ptr*   fb_slot = nullptr;
+         int    fb_from = -1;
+         size_t fb_dlen = 0;
+         for (;;)
+         {
+            if (cow_shared_(*slot))
+               cow_clone_into_(slot, *slot);
+            Ptr     cur = *slot;
+            const K k   = cur.tag();
+            if (k == K::cbucket)
+               return slot;
+            if (k == K::prefix_node)
+            {
+               char*            P = static_cast<char*>(deref_(cur));
+               std::string_view PP(reinterpret_cast<const char*>(pn_pfx<Ptr>(P)), pn_plen(P));
+               std::string_view R = key.substr(depth);
+               const size_t     c = lcp(PP, R);
+               if (c < PP.size())
+               {
+                  if (c == R.size() || uint8_t(R[c]) < uint8_t(PP[c]))
+                     return pg_fb_mut_(fb_slot, fb_from, fb_dlen, div);
+                  if (div)
+                     div->append(PP.data(), PP.size());
+                  return pg_max_mut_(reinterpret_cast<Ptr*>(P + 2), div);
+               }
+               if (div)
+                  div->append(PP.data(), PP.size());
+               depth += PP.size();
+               slot = reinterpret_cast<Ptr*>(P + 2);
+               continue;
+            }
+            router_hdr* rh = static_cast<router_hdr*>(deref_(cur));
+            if (k == K::setlist_u8 && rh->hdr.prefix_len)
+            {
+               const setlist*   sl = static_cast<const setlist*>(deref_(cur));
+               std::string_view PP(reinterpret_cast<const char*>(sl->prefix), rh->hdr.prefix_len);
+               std::string_view R = key.substr(depth);
+               const size_t     c = lcp(PP, R);
+               if (c < PP.size())
+               {
+                  if (c == R.size() || uint8_t(R[c]) < uint8_t(PP[c]))
+                     return pg_fb_mut_(fb_slot, fb_from, fb_dlen, div);
+                  if (div)
+                     div->append(PP.data(), PP.size());
+                  return pg_max_mut_(slot, div, /*skip_prefix=*/true);
+               }
+               if (div)
+                  div->append(PP.data(), PP.size());
+               depth += PP.size();
+            }
+            if (depth == key.size())
+            {
+               if (!rh->term.is_null())
+                  return &rh->term;
+               return pg_fb_mut_(fb_slot, fb_from, fb_dlen, div);
+            }
+            const uint8_t byte = uint8_t(key[depth]);
+            Ptr           child =
+                with_router(cur, [&](auto* n) noexcept { return router_find_d(n, byte); });
+            if (!child.is_null())
+            {
+               uint8_t ob;
+               Ptr     oc;
+               if (!rh->term.is_null() || router_prev_d(cur, byte, ob, oc))
+               {
+                  fb_slot = slot;
+                  fb_from = byte;
+                  fb_dlen = div ? div->len : 0;
+               }
+               pg_own_line_(cur, byte);
+               Ptr* cs = with_router(cur, [&](auto* n) noexcept { return router_find_slot(n, byte); });
+               if (div)
+                  div->push(byte);
+               slot = cs;
+               ++depth;
+               continue;
+            }
+            uint8_t ob;
+            Ptr     oc;
+            if (router_prev_d(cur, byte, ob, oc))
+            {
+               pg_own_line_(cur, ob);
+               Ptr* cs = with_router(cur, [&](auto* n) noexcept { return router_find_slot(n, ob); });
+               if (div)
+                  div->push(ob);
+               return pg_max_mut_(cs, div);
+            }
+            if (!rh->term.is_null())
+               return &rh->term;
+            return pg_fb_mut_(fb_slot, fb_from, fb_dlen, div);
+         }
+      }
+
       // equality re-descent by a collected divider, PRIVATIZING the path; returns
       // the slot holding the routed page (a router's term slot, or root_ itself).
       Ptr* pg_path_mut_(std::string_view D)
@@ -5275,9 +5466,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
             {
                assert(pass < 64 && "page split did not converge");
                div.len = 0;
-               pg_route_(key, &div);
+               Ptr* slot = pg_route_mut_(key, &div);  // ONE privatizing descent
                assert(key >= div.view() && "floor route: divider must not exceed the key");
-               Ptr* slot = pg_path_mut_(div.view());  // may CLONE the page (COW)
                if (getenv("PG_OPS"))
                   fprintf(stderr, "OP pass=%d page=%u div.len=%u dtail=%02x%02x\n", pass,
                           unsigned(slot->raw() >> 4), div.len,
@@ -5359,8 +5549,26 @@ namespace detail  // implementation types & node helpers — not part of the pub
                           hx(sp.b, sp.len).c_str(), hx(refs[0].sfx, refs[0].slen).c_str(),
                           hx(refs[n - 1].sfx, refs[n - 1].slen).c_str());
                }
-               const Ptr L = cb_build_page_refs_(pfx, refs, 0, sp.index);
-               const Ptr R = cb_build_page_refs_(pfx, refs, sp.index, n);
+               // tighten each half's prefix by its own suffix-LCP (cap 36 total)
+               auto half_pfx = [&](unsigned l2, unsigned h2, unsigned& scl) {
+                  scl = es_scl_(refs, l2, h2);
+                  scl = std::min<size_t>(scl, pfx.size() < 36 ? 36 - pfx.size() : 0);
+                  return scl;
+               };
+               uint8_t  pb[36];
+               unsigned sclL, sclR;
+               half_pfx(0, sp.index, sclL);
+               std::memcpy(pb, pfx.data(), pfx.size());
+               std::memcpy(pb + pfx.size(), refs[0].sfx, sclL);
+               const Ptr L = cb_build_page_bulk_(
+                   std::string_view(reinterpret_cast<const char*>(pb), pfx.size() + sclL),
+                   {}, refs, 0, sp.index, sclL);
+               half_pfx(sp.index, n, sclR);
+               std::memcpy(pb + pfx.size(), refs[sp.index].sfx, sclR);
+               const Ptr R = cb_build_page_bulk_(
+                   std::string_view(reinterpret_cast<const char*>(pb), pfx.size() + sclR),
+                   {}, refs, sp.index, n, sclR);
+               assert(!L.is_null() && !R.is_null() && "split halves fit by construction");
                pg_validate_(L, "split-L");
                pg_validate_(R, "split-R");
                // L/R built from views into the OLD page: release it only now
@@ -5400,8 +5608,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   return false;
             }
             pg_div div;
-            pg_route_(key, &div);
-            Ptr* slot = pg_path_mut_(div.view());  // may CLONE the page (COW)
+            Ptr*   slot = pg_route_mut_(key, &div);  // ONE privatizing descent
             assert(slot->tag() == K::cbucket && "divider path must end at a page");
             if (cow_shared_(*slot))
                cow_clone_into_(slot, *slot);
@@ -5902,48 +6109,154 @@ namespace detail  // implementation types & node helpers — not part of the pub
          }
          return n;
       }
-      // ONE page from ref entries [lo,hi): new prefix = old prefix + the range's
-      // suffix-space LCP (capped at 36 total) — splits only TIGHTEN, so suffixes
-      // slice without concatenation.
-      Ptr cb_build_page_refs_(std::string_view old_pfx, const cb_eref* es, unsigned lo,
-                              unsigned hi)
+      // ONE page from ref entries [lo,hi), built by SEQUENTIAL COPY — the
+      // entries are already sorted, so cells bump straight into fresh
+      // sub-pages/dedicated lines and the SP/FP index is written once, in
+      // order, spread evenly across the four lines (no per-entry search, no
+      // memmove, no cb_insert_). `prepend` rides in front of every suffix
+      // (reprefix loosening); splits pass "". New prefix = old_pfx + prepend?
+      // — callers state the page prefix explicitly. Returns null when the
+      // entry mix exhausts the 12-slot table (caller splits first).
+      Ptr cb_build_page_bulk_(std::string_view pfx, std::string_view prepend,
+                              const cb_eref* es, unsigned lo, unsigned hi, unsigned strip)
       {
-         assert(hi > lo && hi - lo <= CB_MAX);
-         size_t scl = es[lo].slen;  // suffix-space LCP over the range
+         assert(hi > lo && hi - lo <= CB_MAX + 1);
+         const Ptr hp = cb_make0_(pfx);
+         cb_hdr*   h  = static_cast<cb_hdr*>(deref_(hp));
+         unsigned  b0 = lo;
+         {  // an entry that IS the page prefix becomes the term
+            const unsigned el = unsigned(prepend.size()) + es[lo].slen - strip;
+            if (el == 0)
+            {
+               const std::string_view val(reinterpret_cast<const char*>(es[lo].val),
+                                          es[lo].vlen);
+               h->rh.term         = cb_leaf_(std::string_view{}, T::from_bytes(val));
+               h->rh.hdr.has_term = 1;
+               ++b0;
+            }
+         }
+         const unsigned n = hi - b0;
+         if (n == 0)
+            return hp;
+         if (n > CB_MAX)
+         {  // a reprefix can grow the term into a 65th CELL: page can't hold
+            // it — report overflow so the caller splits the original first
+            if (!h->rh.term.is_null())
+               cow_release(h->rh.term);
+            cb_release_lines_(h->fp_line, 1);
+            cb_release_lines_(h->sp_line[0], 1);
+            node_free_(h, 128);
+            return Ptr::null();
+         }
+         // single sequential pass: cells bump-copied, index written in order
+         uint16_t stems[CB_MAX];
+         uint16_t lrefs[CB_MAX];
+         uint8_t  fps[CB_MAX];
+         uint8_t  slot_nl[CB_PAGES];  // true line count per slot (failure cleanup)
+         unsigned open = ~0u, next_slot = 0;
+         uint8_t  off8 = 1;
+         // a partial page has NO lrefs in its index yet: the generic destroy
+         // cannot size its big slots, so failure releases pieces by hand
+         auto fail = [&]() noexcept {
+            for (unsigned t = 0; t < next_slot; ++t)
+               if (!h->page_line[t].is_null())
+                  cb_release_lines_(h->page_line[t], slot_nl[t]);
+            if (!h->rh.term.is_null())
+               cow_release(h->rh.term);
+            cb_release_lines_(h->fp_line, 1);
+            for (unsigned li = 0; li < 4; ++li)
+               if (!h->sp_line[li].is_null())
+                  cb_release_lines_(h->sp_line[li], 1);
+            node_free_(h, 128);
+            return Ptr::null();
+         };
+         for (unsigned i = 0; i < n; ++i)
+         {
+            const cb_eref& e    = es[b0 + i];
+            const unsigned slen = unsigned(prepend.size()) + e.slen - strip;
+            const unsigned bytes = 3 + slen + e.vlen;
+            const unsigned u8s   = (bytes + 7) / 8;
+            uint8_t*       c;
+            if (bytes > CB_CELLMAX)
+            {  // dedicated line(s)
+               if (next_slot >= CB_PAGES)
+                  return fail();
+               const unsigned nl = (bytes + 127) / 128;
+               void*          d  = node_alloc_(nl * 128ull);
+               slot_nl[next_slot]      = uint8_t(nl);
+               h->page_line[next_slot] = pack_(d, K::value_ptr);  // bigval slot
+               ++h->nbig;
+               c        = static_cast<uint8_t*>(d);
+               lrefs[i] = cb_lref(1, next_slot++, 0, nl & 63);
+            }
+            else
+            {
+               if (open == ~0u || off8 + u8s > 1 + CB_PGCAP8)
+               {
+                  if (open != ~0u)  // close: fold the untouched tail
+                     cb_page_(h, open)[0] =
+                         uint8_t(cb_page_(h, open)[0] + (1 + CB_PGCAP8 - off8));
+                  if (next_slot >= CB_PAGES)
+                     return fail();
+                  void* d = node_alloc_(256);
+                  std::memset(d, 0, 8);
+                  slot_nl[next_slot]      = 2;
+                  h->page_line[next_slot] = pack_(d, K::node_full);  // subpage
+                  open                    = next_slot++;
+                  off8                    = 1;
+               }
+               c        = cb_page_(h, open) + off8 * 8;
+               lrefs[i] = cb_lref(0, open, off8, u8s);
+               off8     = uint8_t(off8 + u8s);
+            }
+            c[0] = uint8_t(slen);
+            c[1] = e.vlen;
+            c[2] = 0;
+            std::memcpy(c + 3, prepend.data(), prepend.size());
+            std::memcpy(c + 3 + prepend.size(), e.sfx + strip, e.slen - strip);
+            std::memcpy(c + 3 + slen, e.val, e.vlen);
+            const std::string_view sv(reinterpret_cast<const char*>(c + 3), slen);
+            stems[i] = cb_stem_(sv);
+            fps[i]   = cb_fp_(sv);
+         }
+         h->open_spi  = uint8_t(open == ~0u ? 0 : open);
+         h->open_off8 = open == ~0u ? 0 : off8;
+         // SP/FP written once, spread evenly (the rebalance layout)
+         const unsigned per = (n + 3) / 4;
+         uint8_t*       fpl = cb_fpl_(h);
+         unsigned       k2  = 0;
+         for (unsigned li = 0; li < 4 && k2 < n; ++li)
+         {
+            const unsigned take = std::min(per, n - k2);
+            if (h->sp_line[li].is_null())
+            {
+               h->sp_line[li] = pack_(node_alloc_(128), K::node_full);
+               std::memset(deref_(h->sp_line[li]), 0, 128);
+            }
+            cb_sp* sp = cb_spl_(h, li);
+            std::memcpy(sp->stems, stems + k2, take * sizeof(uint16_t));
+            std::memcpy(sp->lref, lrefs + k2, take * sizeof(uint16_t));
+            std::memcpy(fpl + li * 16, fps + k2, take);
+            h->cnt[li]     = uint8_t(take);
+            h->stem_lo[li] = sp->stems[0];
+            k2 += take;
+         }
+         h->rh.hdr.nbranch = uint16_t(n);
+         return hp;
+      }
+
+      static unsigned es_scl_(const cb_eref* es, unsigned lo, unsigned hi) noexcept
+      {
+         unsigned scl = es[lo].slen;
          for (unsigned i = lo + 1; i < hi && scl; ++i)
          {
-            const size_t m = std::min<size_t>(scl, es[i].slen);
-            size_t       c = 0;
+            const unsigned m = std::min<unsigned>(scl, es[i].slen);
+            unsigned       c = 0;
             while (c < m && es[lo].sfx[c] == es[i].sfx[c])
                ++c;
             scl = c;
          }
-         scl = std::min<size_t>(scl, old_pfx.size() < 36 ? 36 - old_pfx.size() : 0);
-         uint8_t pfxb[36];
-         std::memcpy(pfxb, old_pfx.data(), old_pfx.size());
-         if (scl)
-            std::memcpy(pfxb + old_pfx.size(), es[lo].sfx, scl);
-         const Ptr hp = cb_make0_(
-             std::string_view(reinterpret_cast<const char*>(pfxb), old_pfx.size() + scl));
-         cb_hdr* h = static_cast<cb_hdr*>(deref_(hp));
-         for (unsigned i = lo; i < hi; ++i)
-         {
-            const std::string_view sfx(reinterpret_cast<const char*>(es[i].sfx) + scl,
-                                       es[i].slen - scl);
-            const std::string_view val(reinterpret_cast<const char*>(es[i].val), es[i].vlen);
-            if (sfx.empty())
-            {
-               h->rh.term         = cb_leaf_(std::string_view{}, T::from_bytes(val));
-               h->rh.hdr.has_term = 1;
-            }
-            else
-            {
-               const int r = cb_insert_(h, sfx, val);
-               assert(r >= 0 && "<= CB_MAX sorted entries always fit a fresh page");
-               (void)r;
-            }
-         }
-         return hp;
+         return scl;
       }
       // heart's split rule in SUFFIX space: candidates in the middle window
       // [3n/8, 5n/8]; the separator between neighbours a,b is b[0..p]+v with
@@ -6015,26 +6328,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
          const unsigned n = cb_collect_refs_(h, refs);
          const std::string_view old_pfx(reinterpret_cast<const char*>(h->prefix),
                                         h->rh.hdr.prefix_len);
-         const size_t strip = old_pfx.size() - new_plen;
-         const Ptr    np    = cb_make0_(old_pfx.substr(0, new_plen));
-         cb_hdr*      nh    = static_cast<cb_hdr*>(deref_(np));
-         uint8_t      kb[36 + 256];
-         std::memcpy(kb, old_pfx.data() + new_plen, strip);
-         for (unsigned i = 0; i < n; ++i)
-         {
-            std::memcpy(kb + strip, refs[i].sfx, refs[i].slen);
-            const std::string_view sfx(reinterpret_cast<const char*>(kb),
-                                       strip + refs[i].slen);
-            const std::string_view val(reinterpret_cast<const char*>(refs[i].val),
-                                       refs[i].vlen);
-            const int r = cb_insert_(nh, sfx, val);  // strip>0: never empty
-            if (r < 0)
-            {  // longer suffixes can exceed the page heap even at <=64
-               // entries: abandon — the caller SPLITS the original first
-               cow_release(np);
-               return Ptr::null();
-            }
-         }
+         // stripped prefix bytes ride in front of every suffix — ONE sequential
+         // copy into the new page, no per-entry machinery
+         const Ptr np = cb_build_page_bulk_(old_pfx.substr(0, new_plen),
+                                            old_pfx.substr(new_plen), refs, 0, n, 0);
+         if (np.is_null())
+            return np;  // caller splits the original first
          cow_release(cur);
          return np;
       }

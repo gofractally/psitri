@@ -183,3 +183,76 @@ freeset changes needed.
 5. (resolved 2026-06-11: explicit composed form is the only bucket; no
    implicit variant, no allocator tier.)
 ```
+
+
+# v2 — heart's diver rule adopted (Dan, 2026-06-10): pages + divider radix
+
+Supersedes the v1 FORMATION rule (leaf-collision cb_make2_) and the v1
+burst-by-lead-byte split. The composed line-refcounted LAYOUT (§1–§7)
+stays verbatim; what changes is WHERE buckets come from, how they split,
+and how the radix above them routes.
+
+## v2.1 The diver rule (formation)
+
+Keys terminate in a bucket from the FIRST insert: an empty tree's root
+is one bucket; every insert dives into exactly one bucket (floor-routed,
+v2.3) and lands there. Buckets therefore only ever appear by SPLITTING a
+full bucket — every bucket starts at ~half capacity and fills until it
+splits. No leaf terminals exist in page mode (router terms hold buckets;
+big values still ride dedicated lines inside the bucket per §4).
+
+Buckets are SELF-CONTAINED: an entry's full key = bucket.prefix +
+cell.suffix, where bucket.prefix = the LCP of its entries (<=36B, longer
+LCPs simply truncate and ride the suffixes). The radix path ABOVE a
+bucket is its divider, NOT its prefix — key reconstruction never reads
+the radix path. A key that lands in a bucket without sharing its current
+LCP re-prefixes the bucket (rebuild with the shorter LCP — heart's
+"factoring only ever loosens").
+
+## v2.2 The split rule (shortest round divider near the median)
+
+On overflow (65th entry or page table exhausted), entries are already
+totally ordered (cb_place_). Candidates are the boundaries in the middle
+window [3n/8, 5n/8]; for the boundary between entries a,b with shared
+prefix p, the separator is full_key(b)[0..p] + v where v ∈ (a[p], b[p]]
+is chosen to MAXIMIZE TRAILING ZEROS (snap toward a power of two). Pick
+the candidate with (shortest separator, then most trailing zeros, then
+closest to the median). Entries [0,i) rebuild as bucket L, [i,n) as R
+(each with its own LCP); the old slot points at L and the divider D is
+inserted into the radix mapping to R. The root case grows a setlist
+whose TERM is L (the "" divider) — the radix root always carries the ""
+divider. Dividers are short and round by construction: radix keys stay
+short (Dan's constraint), and the radix above pages stays shallow.
+
+## v2.3 Floor routing (the lower-bound radix walk)
+
+The radix maps divider -> bucket with FLOOR semantics: route(key) = the
+bucket of the largest divider <= key. The walk (heart's route_to_page):
+descend the equality path; at each node remember the deepest fallback
+(a node passed with a term or a branch below the taken one). On byte
+mismatch: take the largest branch BELOW the key byte and descend to that
+subtree's MAX divider; if none, the node's term; else unwind to the
+remembered fallback. Key exhausting inside a prefix routes below every
+divider through it (fallback); key above a node's whole prefix routes to
+the subtree's max. Point ops floor-route then run the §5 bucket ops with
+FULL keys (prefix verified in the bucket). The iterator walks the radix
+in lex order (terms before branches — divider order IS bucket order) and
+yields self-contained bucket entries; ++ crosses buckets exactly like
+v1 frames.
+
+## v2.4 Remove / collapse
+
+Bucket empties: non-root bucket -> remove its divider from the radix
+(ordinary term removal + rm_shrink_ collapse) and release the bucket.
+The "" bucket may sit empty while other dividers remain (floor still
+routes to it; finds miss). When the LAST divider goes, a root reduced to
+a term-only router with an EMPTY "" bucket nulls the root — remove-all
+drains the arena to zero, same gate as v1.
+
+## v2.5 COW
+
+Unchanged from v1 §6: privatize the radix path to the bucket slot
+(floor-aware walk), then the bucket self-privatizes per piece (cb_own_).
+Splits run on the privatized bucket; L/R are fresh; the divider insert
+privatizes the (already private) path. Line-granular sharing, demotions,
+and the occupancy ladder (phase 1) apply to the divider radix verbatim.

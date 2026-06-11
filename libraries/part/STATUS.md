@@ -111,6 +111,55 @@ direct-when-dense top tier or offtab-style c2 would close it. (c) bulk
 load ladder churn: sequential fill walks every rung — could jump
 setlist -> full_x when the insert pattern is recognizably dense.
 
+## Phase 2 LANDED: diver rule + floor radix (2026-06-10, gate default ON)
+
+BUCKET_SPEC v2 implemented end-to-end: keys live in self-contained pages
+from the first insert; pages fill to 64 / table-capacity then split by
+heart's separator rule (middle window, trailing-zero snap → shortest
+round divider near the median); the radix above maps divider→page with
+FLOOR routing (route + remembered fallback + max-descent); page entries
+reconstruct from page prefix + suffix only. All split/rebuild temporaries
+are stack ref arrays + fixed buffers (no vectors/strings on write paths).
+
+Census: pages average 32 (dict) / 34 (bank) entries — the v1 six-entry
+shards are structurally impossible now. dict 12.4MB total (2.9x user,
+was 32MB/7.4x); bank-shape 188MB (1.9x user, was 300MB/3.0x).
+
+Bank (1M acct / 10M tx): PASS. file 1131MB / live 926MB — file is now
+BELOW heart's 1120MB (was 2391MB, −53%); live-at-load 45MB (heart 31).
+Validation scan 16.6M/s (best part number yet; was 12.6M). Writes paid:
+247k/253k tx/s (was 354k/348k) and reader 2.35M/s (was 3.75M).
+Dict probe: live 13.1MB (−76%); insert 1.7M/s (−76%), get 11.7M/s
+(−31%), scan 37.7M/s (−16%) vs the no-pages ladder.
+
+Perf levers (not yet pulled): (a) every write does route + path_mut =
+two full descents — fuse into one privatizing floor walk; (b) the find's
+with_router-lambda floor hops vs the equality macro descent — a fused
+HKV_BODY-style floor descent; (c) fat suffixes land in dedicated lines
+(one extra deref per probe) — subpage-first layout or a bigger inline
+cell cap would keep dict-shaped entries in subpages; (d) splits rebuild
+both halves through cb_insert_ — bulk-build fast path.
+
+FOUR bugs the page work flushed out of the EXISTING stack:
+1. kv commit skipped the root handoff on raw equality — unsound under
+   line recycling (fcache ABA can hand the new root generation the very
+   line the retired root freed): _live stranded a +1 on a dead subtree.
+   Handoff is now unconditional. Almost certainly v1's untraceable
+   "2-line leak under generations".
+2. cb_alloc_cell_'s bump path trusted page_line[open_spi] to be a
+   sub-page; big cells can claim that slot → small cells bump-wrote into
+   live dedicated lines. Slots now carry the spec's {subpage|bigval} tag
+   (spare ptr bits); the bump/close arms require the subpage tag.
+3. cb_reprefix_ (LCP loosening) can overflow the rebuilt page even at
+   <=64 entries (longer suffixes): it reports overflow and the upsert
+   splits the ORIGINAL first, then retries.
+4. pg_unlink_rec_ nulled the parent slot itself so router_remove saw
+   null and skipped its bookkeeping (stale fx/cx counts, unreleased
+   lines, radix never collapsed) — children leave slots dangling now.
+
+Debug instruments added: pg_validate_ (env-gated page storage-order
+audit), refcheck() (expected-vs-actual refcount walk), tree_dbg().
+
 ## Phase 2 prep: heart's diver rule (studied 2026-06-10)
 
 Heart is btree-pages-with-a-radix-index, NOT radix-with-bucket-leaves:

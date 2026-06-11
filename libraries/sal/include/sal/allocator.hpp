@@ -569,6 +569,12 @@ namespace sal
       // the database's persisted bitset once per open at thread start.
       std::array<uint64_t, 2> _registered_type_bits{};
       bool                    _types_sealed = false;
+      bool                    _read_only    = false;
+
+     public:
+      bool read_only() const noexcept { return _read_only; }
+
+     private:
       std::filesystem::path   _types_file;
       std::mutex                      _sync_mutex;
       /// used by readers/writers to grab/update a root object

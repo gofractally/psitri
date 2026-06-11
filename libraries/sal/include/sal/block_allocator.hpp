@@ -55,7 +55,7 @@ namespace sal
       block_allocator(std::filesystem::path file,
                       uint64_t              block_size,
                       uint32_t              max_blocks,
-                      bool                  read_write = true);
+                      access_mode           mode = access_mode::read_write);
       ~block_allocator();
 
       uint64_t block_size() const { return _block_size; }
@@ -288,6 +288,7 @@ namespace sal
       // Cached RLIMIT_MEMLOCK value (bytes). Set once in constructor.
       // RLIM_INFINITY (~0ULL) means no limit.
       uint64_t _mlock_limit_bytes;
+      access_mode _mode = access_mode::read_write;
 
       // mlock diagnostics for metadata files that opt into pinning.
       std::atomic<uint32_t> _mlock_attempted_blocks{0};

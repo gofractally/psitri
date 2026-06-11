@@ -122,7 +122,12 @@ namespace sal
    enum class access_mode
    {
       read_only  = 0,
-      read_write = 1
+      read_write = 1,
+      // Private (copy-on-write) mapping: writes land in anonymous pages and
+      // are DISCARDED at close — the file is never dirtied. Used by read-only
+      // database opens for control structures that readers must still bump
+      // (refcounts, read-lock slots).
+      copy_on_write = 2
    };
 
    /**
@@ -133,6 +138,13 @@ namespace sal
     */
    struct runtime_config
    {
+      /// Open the database READ-ONLY: no background threads, no allocation or
+      /// release-to-zero (asserted), data segments mapped PROT_READ, control
+      /// structures (refcounts, read-lock slots) mapped copy-on-write so the
+      /// file is never dirtied. Takes a SHARED advisory lock — exits early
+      /// with an exception if a writer (exclusive lock) has the database open.
+      bool read_only = false;
+
       /** @name Cache & Memory */
       ///@{
 

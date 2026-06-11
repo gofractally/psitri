@@ -16,15 +16,15 @@ namespace sal
    {
       int get_prot(access_mode mode)
       {
-         if (mode == access_mode::read_write)
-         {
+         if (mode == access_mode::read_write || mode == access_mode::copy_on_write)
             return PROT_READ | PROT_WRITE;
-         }
-         else
-         {
-            assert(mode == access_mode::read_only);
-            return PROT_READ;
-         }
+         assert(mode == access_mode::read_only);
+         return PROT_READ;
+      }
+
+      int get_flags(access_mode mode)
+      {
+         return mode == access_mode::copy_on_write ? MAP_PRIVATE : MAP_SHARED;
       }
 
       void try_pin(bool* pinned, void* base, std::size_t size)
@@ -85,7 +85,7 @@ namespace sal
       }
       else
       {
-         if (auto addr = ::mmap(nullptr, _size, get_prot(mode), MAP_SHARED, _fd, 0);
+         if (auto addr = ::mmap(nullptr, _size, get_prot(mode), get_flags(mode), _fd, 0);
              addr != MAP_FAILED)
          {
             _data = addr;
@@ -160,7 +160,7 @@ namespace sal
       {
          auto end = (char*)_data.load() + _size;
          auto addr =
-             ::mmap(end, new_size - _size, prot, MAP_SHARED | MAP_FIXED_NOREPLACE, _fd, _size);
+             ::mmap(end, new_size - _size, prot, get_flags(_mode) | MAP_FIXED_NOREPLACE, _fd, _size);
          if (addr == end)
          {
             try_pin(&_pinned, end, new_size - _size);
@@ -180,7 +180,7 @@ namespace sal
       }
 #endif
       // Move the mapping to a new location
-      if (auto addr = ::mmap(nullptr, new_size, prot, MAP_SHARED, _fd, 0); addr != MAP_FAILED)
+      if (auto addr = ::mmap(nullptr, new_size, prot, get_flags(_mode), _fd, 0); addr != MAP_FAILED)
       {
          result->addr = _data.load();
          result->size = _size;

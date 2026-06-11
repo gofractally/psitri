@@ -6,11 +6,17 @@
 
 namespace sal
 {
-   control_block_alloc::control_block_alloc(const std::filesystem::path& dir) : _dir(dir)
+   control_block_alloc::control_block_alloc(const std::filesystem::path& dir, access_mode mode)
+       : _dir(dir)
    {
-      std::filesystem::create_directories(dir);
-      _dir    = dir;
-      _header = std::make_unique<mapping>(dir / "header.bin", sal::access_mode::read_write, true);
+      if (mode == access_mode::read_write)
+         std::filesystem::create_directories(dir);
+      _dir = dir;
+      // read-only opens map refcount words copy-on-write: readers still bump
+      // them, the file is never dirtied, and the bumps evaporate at close.
+      const auto cb_mode =
+          (mode == access_mode::read_write) ? access_mode::read_write : access_mode::copy_on_write;
+      _header = std::make_unique<mapping>(dir / "header.bin", cb_mode, true);
       if (_header->size() != sizeof(detail::ptr_alloc_header))
       {
          if (_header->size() != 0)
@@ -22,9 +28,10 @@ namespace sal
       if (not _header_ptr)
          throw std::runtime_error("failed to create control_block_alloc header");
       _zone_allocator = std::make_unique<block_allocator>(dir / "zone.bin", detail::zone_size_bytes,
-                                                          detail::max_allocated_zones);
-      _zone_free_list = std::make_unique<block_allocator>(
-          dir / "free_list.bin", detail::ptrs_per_zone / 8, detail::max_allocated_zones);
+                                                          detail::max_allocated_zones, cb_mode);
+      _zone_free_list = std::make_unique<block_allocator>(dir / "free_list.bin",
+                                                          detail::ptrs_per_zone / 8,
+                                                          detail::max_allocated_zones, cb_mode);
       _zone_allocator->mlock_mapped_blocks();
       _zone_free_list->mlock_mapped_blocks();
 

@@ -96,14 +96,23 @@ namespace sal
          block_allocator::mlock_stats free_list;
       };
 
-      explicit colo_alloc(const std::filesystem::path& dir) : _dir(dir)
+      explicit colo_alloc(const std::filesystem::path& dir,
+                          access_mode                  mode = access_mode::read_write)
+          : _dir(dir)
       {
-         std::filesystem::create_directories(dir);
-         _header = std::make_unique<mapping>(dir / "header.bin", sal::access_mode::read_write, true);
+         if (mode == access_mode::read_write)
+            std::filesystem::create_directories(dir);
+         // read-only opens map these copy-on-write: readers still bump the
+         // implicit refcounts, the file is never dirtied.
+         const auto sub_mode = (mode == access_mode::read_write) ? access_mode::read_write
+                                                                 : access_mode::copy_on_write;
+         _header = std::make_unique<mapping>(dir / "header.bin", sub_mode, true);
          if (_header->size() != sizeof(detail::ptr_alloc_header))
          {
             if (_header->size() != 0)
                throw std::runtime_error("colo_alloc header file is wrong size");
+            if (mode != access_mode::read_write)
+               throw std::runtime_error("colo_alloc: cannot initialize read-only");
             _header->resize(sizeof(detail::ptr_alloc_header));
             new (_header->data()) detail::ptr_alloc_header();
          }
@@ -111,9 +120,10 @@ namespace sal
          if (not _header_ptr)
             throw std::runtime_error("failed to create colo_alloc header");
          _zone_allocator = std::make_unique<block_allocator>(dir / "zone.bin", zone_bytes,
-                                                             detail::max_allocated_zones);
-         _zone_free_list = std::make_unique<block_allocator>(
-             dir / "free_list.bin", detail::ptrs_per_zone / 8, detail::max_allocated_zones);
+                                                             detail::max_allocated_zones, sub_mode);
+         _zone_free_list = std::make_unique<block_allocator>(dir / "free_list.bin",
+                                                             detail::ptrs_per_zone / 8,
+                                                             detail::max_allocated_zones, sub_mode);
          _zone_allocator->mlock_mapped_blocks();
          _zone_free_list->mlock_mapped_blocks();
          ensure_capacity(1);

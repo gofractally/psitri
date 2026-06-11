@@ -265,20 +265,34 @@ namespace sal
 
    allocator::allocator(std::filesystem::path dir, runtime_config cfg, bool start_threads_now)
        : _ptr_alloc(dir / "ptrs"),
-         _iref(dir / "iref"),
+         _iref(dir / "iref",
+               cfg.read_only ? access_mode::read_only : access_mode::read_write),
          _block_alloc(dir / "segs", segment_size,
                       static_cast<uint32_t>(
                           cap_to_disk_space(dir,
                               std::min<int64_t>(cfg.max_database_size, sal::max_database_size)) /
-                          segment_size)),
-         _seg_alloc_state_file(dir / "header", access_mode::read_write, true),
-         _root_object_file(dir / "roots", access_mode::read_write, true),
-         _session_op_stats_file(dir / "session_ops.bin", access_mode::read_write, false)
+                          segment_size),
+                      cfg.read_only ? access_mode::read_only : access_mode::read_write),
+         _seg_alloc_state_file(dir / "header",
+                               cfg.read_only ? access_mode::copy_on_write
+                                             : access_mode::read_write,
+                               true),
+         _root_object_file(dir / "roots",
+                           cfg.read_only ? access_mode::copy_on_write
+                                         : access_mode::read_write,
+                           true),
+         _session_op_stats_file(dir / "session_ops.bin",
+                                cfg.read_only ? access_mode::copy_on_write
+                                              : access_mode::read_write,
+                                false)
    {
+      _read_only = cfg.read_only;
       _type_ops.fill(&default_object_type_ops<alloc_header>());
 
       _allocator_index = alloc_allocator_index();
       _types_file      = dir / "types.bin";
+      if (_read_only && (_seg_alloc_state_file.size() == 0 || _root_object_file.size() == 0))
+         throw std::runtime_error("sal: cannot open an empty/uninitialized database read-only");
       if (_seg_alloc_state_file.size() == 0)
       {
          _seg_alloc_state_file.resize(
@@ -386,9 +400,13 @@ namespace sal
 
       mlock_pinned_segments();
 
-      provider_populate_pinned_segments();
-      provider_populate_unpinned_segments();
-      if (start_threads_now)
+      if (!_read_only)
+      {  // the segment-provider pipeline feeds ALLOCATION — meaningless (and
+         // growth-attempting) on a read-only mapping
+         provider_populate_pinned_segments();
+         provider_populate_unpinned_segments();
+      }
+      if (start_threads_now && !_read_only)
          start_background_threads();
    }
 
@@ -2315,6 +2333,8 @@ namespace sal
 
    void allocator::start_background_threads()
    {
+      if (_read_only)
+         return;  // no compactor/releaser/provider — nothing mutates
       // ── type-registry seal + once-per-open version-skew check ─────────────
       // Registration must precede the background threads (the compactor walks
       // existing objects immediately); the persisted bitset makes reopening a

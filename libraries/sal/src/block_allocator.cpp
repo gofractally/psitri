@@ -102,9 +102,11 @@ namespace sal
    block_allocator::block_allocator(std::filesystem::path file,
                                     uint64_t              block_size,
                                     uint32_t              max_blocks,
-                                    bool                  read_write)
+                                    access_mode           mode)
        : _filename(file), _block_size(block_size)
    {
+      _mode                 = mode;
+      const bool read_write = (mode == access_mode::read_write);
       // Validate that block_size is a power of 2
       if (!is_power_of_2(block_size))
       {
@@ -181,13 +183,14 @@ namespace sal
       int flags = O_CLOEXEC;
       int flock_operation;
       if (read_write)
-      {
+      {  // the WRITE-LOCK: one writer, exclusively
          flags |= O_RDWR;
          flags |= O_CREAT;
          flock_operation = LOCK_EX;
       }
       else
-      {
+      {  // read-only / copy-on-write openers share; a held write lock
+         // (or a concurrent writer) makes this throw — the early exit
          flags |= O_RDONLY;
          flock_operation = LOCK_SH;
       }
@@ -245,7 +248,7 @@ namespace sal
 
       if (_file_size.load(std::memory_order_relaxed) > 0)
       {
-         auto prot = PROT_READ | PROT_WRITE;
+         auto prot = (mode == access_mode::read_only) ? PROT_READ : (PROT_READ | PROT_WRITE);
 
          // Map the file at the beginning of our reserved space
          // Release the protection on the portion we need
@@ -260,7 +263,9 @@ namespace sal
          // need to reserve swap — avoids exhausting the kernel's commit charge
          // and destabilising the OS on repeated runs.
          _mapped_base = ::mmap(_reserved_base, _file_size.load(std::memory_order_relaxed), prot,
-                               MAP_SHARED | MAP_FIXED | MAP_NORESERVE, _fd, 0);
+                               ((_mode == access_mode::copy_on_write) ? MAP_PRIVATE : MAP_SHARED) |
+                                   MAP_FIXED | MAP_NORESERVE,
+                               _fd, 0);
 
          if (_mapped_base != MAP_FAILED)
          {
@@ -405,6 +410,14 @@ namespace sal
    {
       if (desired_num_blocks > _max_blocks)
          throw std::runtime_error("unable to reserve, maximum block would be reached");
+      if (_mode != access_mode::read_write)
+      {
+         // growth requires the write lock; existing capacity is still served
+         uint32_t capacity = _file_size.load(std::memory_order_relaxed) / _block_size;
+         if (desired_num_blocks > capacity)
+            throw std::runtime_error("block_allocator: cannot grow a read-only mapping");
+         return capacity;
+      }
 
       std::lock_guard l{_resize_mutex};
 

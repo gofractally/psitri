@@ -26,7 +26,11 @@ namespace sal
    class implicit_ref_pool
    {
      public:
-      explicit implicit_ref_pool(const std::filesystem::path& dir) : _a(dir) {}
+      explicit implicit_ref_pool(const std::filesystem::path& dir,
+                                 access_mode                  mode = access_mode::read_write)
+          : _a(dir, mode)
+      {
+      }
 
       static constexpr uint32_t slots_per_cacheline =
           colo_alloc<implicit_ref_count>::slots_per_cacheline;  // 128

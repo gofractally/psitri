@@ -224,7 +224,8 @@ namespace sal
       /**
        *  @param dir the directory to store the page table and pages
        */
-      control_block_alloc(const std::filesystem::path& dir);
+      control_block_alloc(const std::filesystem::path& dir,
+                          access_mode                  mode = access_mode::read_write);
       ~control_block_alloc();
 
       mlock_stats get_mlock_stats() const noexcept

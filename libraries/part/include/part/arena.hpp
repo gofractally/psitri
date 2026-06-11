@@ -203,12 +203,16 @@ namespace part
          fs::create_directories(_cfg.dir);
 
          _data = std::make_unique<sal::block_allocator>(_cfg.dir / "data.part", segment_bytes,
-                                                        _cfg.max_segments, true);
-         _free = std::make_unique<sal::block_allocator>(
-             _cfg.dir / "free.part", std::bit_ceil(sizeof(seg_freeset)), _cfg.max_segments, true);
+                                                        _cfg.max_segments,
+                                                        sal::access_mode::read_write);
+         _free = std::make_unique<sal::block_allocator>(_cfg.dir / "free.part",
+                                                        std::bit_ceil(sizeof(seg_freeset)),
+                                                        _cfg.max_segments,
+                                                        sal::access_mode::read_write);
          _refs = std::make_unique<sal::block_allocator>(_cfg.dir / "refs.part",
                                                         uint64_t(lines_per_segment) /* 1B/line */,
-                                                        _cfg.max_segments, true);
+                                                        _cfg.max_segments,
+                                                        sal::access_mode::read_write);
          _meta = std::make_unique<sal::mapping>(_cfg.dir / "meta.part",
                                                 sal::access_mode::read_write);
 

@@ -1810,6 +1810,22 @@ namespace sal
 
          if (obj_ref.control().cas_move(obj_ref.loc(), loc))
          {
+#if PSITRI_DEEP_INVARIANTS
+            // Diagnostic: the cas succeeded against the LIVE control, but every
+            // guard above ran on the smart_ref's CACHED snapshot. If the source
+            // bytes are no longer a live allocation, dump the full state before
+            // the tracker's fatal verify fires inside record_freed_space.
+            if (!sal::debug::free_range_tracker::instance().is_live_start(obj_ref.obj()))
+            {
+               const auto cur = obj_ref.control().load(std::memory_order_relaxed);
+               SAL_ERROR(
+                   "MOVE-OF-DEAD: nh={} nh->address={} nh->size={} nh->type={} "
+                   "snapshot(ref={} loc_cl={}) current(ref={} loc_cl={}) dest_cl={}",
+                   (const void*)nh, *nh->address(), nh->size(), (int)nh->type(),
+                   obj_ref.ref(), obj_ref.loc().cacheline(), (uint32_t)cur.ref,
+                   cur.loc().cacheline(), loc.cacheline());
+            }
+#endif
             ses.record_freed_space(obj_ref.obj(), "compactor_segment_move");
             release_pending_relocation_refs(ses, pending_releases);
          }

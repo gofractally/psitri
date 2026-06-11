@@ -856,6 +856,14 @@ target_compile_definitions(heart-scale-bench PRIVATE XXH_INLINE_ALL)
 set_target_properties(heart-scale-bench PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+# heart memory-cleanliness check (insert/overwrite/remove-all + exact object audit)
+add_executable(heart-leak-check programs/heart_leak_check.cpp)
+target_link_libraries(heart-leak-check PRIVATE heart)
+target_include_directories(heart-leak-check PRIVATE ${CMAKE_SOURCE_DIR}/libraries/heart/test)
+target_compile_definitions(heart-leak-check PRIVATE XXH_INLINE_ALL)
+set_target_properties(heart-leak-check PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 add_executable(bank-bench-part programs/bank_bench.cpp)
 target_compile_definitions(bank-bench-part PRIVATE BANK_ENGINE_PART=1)
 target_link_libraries(bank-bench-part PRIVATE part Boost::program_options hash)

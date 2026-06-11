@@ -425,10 +425,21 @@ namespace sal
 #endif
             return;
          }
-         // queue full (rare): fall through and destroy inline anyway.
+         // queue full (rare): fall through and destroy inline anyway. We just published
+         // ref=1 for the queue's benefit — RECLAIM it (CAS, racing only the compactor's
+         // cas_move) or the control stays resurrected at (ref=1, loc=freed-bytes) after
+         // the inline destroy below: every later compaction then re-moves the corpse and
+         // double-counts its bytes (freed_space overflow, file bloat, child re-release).
+         // The CAS also refreshes loc — the compactor may have relocated the object
+         // between set_ref(1) and here, so destroy must use the CURRENT location.
 #ifdef SAL_RELEASE_DEBUG_COUNTERS
          ++g_sal_spill_fallthrough;
 #endif
+#if PSITRI_DEEP_INVARIANTS
+         fprintf(stderr, "SPILL-FALLTHROUGH: adr=%u queue full — reclaiming for inline destroy\n",
+                 *adr);
+#endif
+         prev = cb.take_for_destroy();
       }
       const bool top = (_destroy_budget == UINT32_MAX);
       if (top)

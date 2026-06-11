@@ -7,8 +7,25 @@
 #include <sal/location.hpp>
 #include <stdexcept>
 
+#if PSITRI_DEEP_INVARIANTS
+#include <execinfo.h>
+#include <unistd.h>
+#endif
+
 namespace sal
 {
+#if PSITRI_DEEP_INVARIANTS
+   [[noreturn]] inline void sal_debug_resurrection_abort(const void* cb, uint64_t prior_word)
+   {
+      fprintf(stderr, "RESURRECTION-RETAIN: cb=%p prior_word=0x%llx (ref was 0)\n", cb,
+              (unsigned long long)prior_word);
+      void* frames[32];
+      int   n = ::backtrace(frames, 32);
+      ::backtrace_symbols_fd(frames, n, STDERR_FILENO);
+      ::abort();
+   }
+#endif
+
    /**
     * A control block for a shared pointer to a location in shared memory,
     * modeled after std::control_block but adapted for the needs of the psitri.
@@ -123,6 +140,13 @@ namespace sal
             _data.fetch_sub(1, std::memory_order_relaxed);
             throw std::runtime_error("reference count exceeded limits");
          }
+#if PSITRI_DEEP_INVARIANTS
+         // A retain on ref==0 resurrects a dead control (stale loc, bytes
+         // already freed) — the seed of compactor double-free corruption.
+         // Catch it AT the caller, with a backtrace.
+         if (prior.ref == 0)
+            sal_debug_resurrection_abort(this, prior.to_int());
+#endif
          assert(prior.ref > 0);
          return prior;
       };
@@ -156,6 +180,28 @@ namespace sal
       void set_ref(int ref, std::memory_order order = std::memory_order_relaxed) noexcept
       {
          store(load(order).set_ref(ref), order);
+      }
+
+      /**
+       * Reclaim exclusive ownership of a just-resurrected control for inline destroy:
+       * (ref=1, loc=L) -> (ref=0, loc=L) under CAS, so a concurrent compactor cas_move
+       * (the only legal writer of an unreachable ref-1 object) cannot be lost — the
+       * object may have relocated since the caller's last read. Returns the
+       * pre-transition word: destroy at its loc().
+       */
+      control_block_data take_for_destroy() noexcept
+      {
+         uint64_t           expect = _data.load(std::memory_order_acquire);
+         control_block_data prior, next;
+         do
+         {
+            prior.from_int(expect);
+            assert(prior.ref == 1);
+            next = prior;
+            next.set_ref(0);
+         } while (
+             not _data.compare_exchange_weak(expect, next.to_int(), std::memory_order_acq_rel));
+         return prior;
       }
 
       /**

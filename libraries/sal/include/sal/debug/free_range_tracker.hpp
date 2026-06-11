@@ -38,6 +38,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <deque>
 #include <map>
 #include <mutex>
 
@@ -77,6 +78,35 @@ class free_range_tracker {
         verifier_ = std::move(f);
     }
 
+    // Tombstones: who freed a range last (diagnostic context for the
+    // double-free aborts below). Bounded FIFO so long runs stay sane.
+    struct tomb_info { uintptr_t end; const char* tag; uint64_t seq; };
+    void record_tomb_(uintptr_t off, uintptr_t end, const char* tag) {
+        tombs_[off] = tomb_info{end, tag, ++op_seq_};
+        tomb_order_.push_back(off);
+        while (tomb_order_.size() > 2'000'000) {
+            tombs_.erase(tomb_order_.front());
+            tomb_order_.pop_front();
+        }
+    }
+    void print_tomb_(uintptr_t off) const {
+        auto it = tombs_.find(off);
+        if (it == tombs_.end()) {
+            auto up = tombs_.upper_bound(off);
+            if (up != tombs_.begin()) {
+                auto p = std::prev(up);
+                if (p->second.end > off) it = p;
+            }
+        }
+        if (it != tombs_.end())
+            SAL_ERROR("  tombstone: bytes [{:#x},{:#x}) last freed by tag={} "
+                      "{} tracker-ops ago",
+                      it->first, it->second.end, it->second.tag,
+                      op_seq_ - it->second.seq);
+        else
+            SAL_ERROR("  tombstone: no record of these bytes ever being freed");
+    }
+
     // Range is being allocated (claims live ownership of these bytes).
     // Aborts if any overlap with current live ranges.
     void mark_alloc(const void* obj, uint32_t size, const char* tag) {
@@ -90,6 +120,7 @@ class free_range_tracker {
             check_no_overlap("ALLOC-OVER-LIVE", off, end, tag);
             live_.emplace_hint(live_.lower_bound(off), off,
                                range_info{end, tag});
+            ++op_seq_;
             v_copy = verifier_;
         }
         if (v_copy) v_copy("after_mark_alloc", tag, obj, size);
@@ -117,6 +148,7 @@ class free_range_tracker {
                 }
                 SAL_ERROR("FREE-OF-UNINIT: free=[{:#x},{:#x}) tag={} no matching live range",
                           off, end, tag);
+                print_tomb_(off);
                 std::abort();
             }
             if (it->second.end != end) {
@@ -126,9 +158,18 @@ class free_range_tracker {
                 std::abort();
             }
             live_.erase(it);
+            record_tomb_(off, end, tag);
             v_copy = verifier_;
         }
         if (v_copy) v_copy("after_mark_free", tag, obj, size);
+    }
+
+    // Diagnostic query: is there a live range starting exactly at `obj`?
+    // (compactor uses this to dump full context before the fatal verify)
+    bool is_live_start(const void* obj) const {
+        if (!active_) return true;
+        std::lock_guard l(mu_);
+        return live_.find(reinterpret_cast<uintptr_t>(obj)) != live_.end();
     }
 
     // Diagnostic: verify that a live range starting at `obj` has exactly
@@ -166,6 +207,7 @@ class free_range_tracker {
                           "range starts here (no enclosing range either)",
                           off, off + expected_size, tag);
             }
+            print_tomb_(off);
             std::abort();
         }
         uint32_t live_size = uint32_t(it->second.end - it->first);
@@ -261,6 +303,9 @@ class free_range_tracker {
     // Without this, the verifier observes torn state on concurrent ops.
     mutable std::recursive_mutex      mu_;
     std::map<uintptr_t, range_info>   live_;
+    std::map<uintptr_t, tomb_info>    tombs_;
+    std::deque<uintptr_t>             tomb_order_;
+    mutable uint64_t                  op_seq_ = 0;
     std::atomic<uint64_t>             alloc_count_{0};
     std::atomic<uint64_t>             free_count_{0};
     verifier_fn                       verifier_;

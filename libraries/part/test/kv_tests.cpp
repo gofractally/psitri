@@ -35,8 +35,10 @@ namespace
 {
    // Every line the engine ever allocated must come back once the sessions and
    // database are gone — the leak detector for the whole COW machinery.
-   void require_drained(part::arena& a)
+   void require_drained(part::kv::database& db)
    {
+      db.flush_releases();  // SPEC §19: the gate waits for the releaser
+      part::arena& a = db.store();
       uint64_t free_total = 0;
       for (uint32_t s = 0; s < a.num_segments(); ++s)
          free_total += a.freeset_of(s).free_lines();
@@ -154,7 +156,7 @@ TEST_CASE("kv battery: batched commits, updates, removes vs oracle")
    }
    // After remove-all the live root is null: every generation has drained
    // and the arena must be empty even while the database stays open.
-   require_drained(db->store());
+   require_drained(*db);
 }
 
 TEST_CASE("dense ladder: every tier boundary, narrow ranges, shared-seg widen")
@@ -256,7 +258,7 @@ TEST_CASE("dense ladder: every tier boundary, narrow ranges, shared-seg widen")
          tx.remove(k);
       tx.commit();
    }
-   require_drained(db->store());
+   require_drained(*db);
 }
 
 TEST_CASE("pages: reprefix overflow splits the original (diverging key, fat cells)")
@@ -316,7 +318,7 @@ TEST_CASE("pages: reprefix overflow splits the original (diverging key, fat cell
          tx.remove(k);
       tx.commit();
    }
-   require_drained(db->store());
+   require_drained(*db);
 }
 
 TEST_CASE("kv terms: a key that is a strict prefix of >64 same-byte siblings")
@@ -398,7 +400,7 @@ TEST_CASE("kv terms: a key that is a strict prefix of >64 same-byte siblings")
          tx.remove(k);
       tx.commit();
    }
-   require_drained(db->store());
+   require_drained(*db);
 }
 
 TEST_CASE("kv churn: repeated overwrites under generation turnover drain fully")
@@ -445,5 +447,5 @@ TEST_CASE("kv churn: repeated overwrites under generation turnover drain fully")
          tx.remove(k);
       tx.commit();
    }
-   require_drained(db->store());
+   require_drained(*db);
 }

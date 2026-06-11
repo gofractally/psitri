@@ -5740,9 +5740,40 @@ namespace detail  // implementation types & node helpers — not part of the pub
             return true;
       }
 
-      // Drop one reference to the subtree at p; on death free the node and
-      // cascade into its children.
+      // Drop one reference to the subtree at p. A release that would hit ZERO
+      // on a CASCADING node can be a huge subtree even mid-write (remove,
+      // privatize, retired generations) — hand the whole thing to the
+      // background releaser when one is registered. In shared mode the
+      // decrement cannot reach zero (another generation owns it indirectly),
+      // so deferral triggers only on unique ownership; the deferred node's
+      // LAST reference rides the ring (no decrement here).
       void cow_release(Ptr p) noexcept
+      {
+         if constexpr (cow_enabled)
+         {
+            if (p.is_null() || p.tag() == K::value_inline)
+               return;
+            if (p.tag() != K::value_ptr && alloc_.hkv_ref(line_of(p)) == 1)
+            {
+               // bounded foreground work per op: small cascades run inline
+               // (and feed the writer's hot-hole fcache); once the budget is
+               // spent, remaining SUBTREES offload to the background releaser
+               if (rel_budget_ == 0)
+               {
+                  if (alloc_.hkv_defer(uint32_t(p.raw())))
+                     return;  // ownership moved to the releaser
+               }
+               else
+                  --rel_budget_;
+            }
+            cow_release_now(p);
+         }
+      }
+      uint32_t rel_budget_ = 64;  // refilled at op entry; counts to-zero cascades
+      void     release_budget(uint32_t n) noexcept { rel_budget_ = n; }
+      // the inline path (also the releaser's worker path: its allocator does
+      // not defer, so cascades run here to completion)
+      void cow_release_now(Ptr p) noexcept
       {
          if constexpr (cow_enabled)
          {
@@ -5755,6 +5786,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       template <class V>
       bool cow_insert(key_param k, V&& v)
       {
+         rel_budget_ = 64;  // per-op inline release budget
          static_assert(cow_enabled, "allocator has no refcount hooks");
          static_assert(std::is_trivially_copyable_v<T>, "COW memcpy-clones leaf values");
          {
@@ -5769,6 +5801,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       // future work; the bank workload never removes.
       bool cow_remove(key_param k)
       {
+         rel_budget_ = 64;  // per-op inline release budget
          static_assert(cow_enabled, "allocator has no refcount hooks");
          {
             scratch_t ks;

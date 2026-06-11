@@ -63,13 +63,16 @@ namespace part
       arena*   a   = nullptr;  // deref base + refcounts (any thread)
       session* ses = nullptr;  // allocation context (writer thread only);
                                // null for read-only snapshot views
+      bool defer = false;      // writer-side trees may hand release-to-zero
+                               // cascades to the background releaser
 
       part_alloc() = default;
-      explicit part_alloc(session* s) noexcept : a(&s->store()), ses(s) {}
-      explicit part_alloc(session& s) noexcept : a(&s.store()), ses(&s) {}
+      explicit part_alloc(session* s) noexcept : a(&s->store()), ses(s), defer(true) {}
+      explicit part_alloc(session& s) noexcept : a(&s.store()), ses(&s), defer(true) {}
       explicit part_alloc(arena* ar) noexcept : a(ar) {}  // read-only views
+      part_alloc(arena* ar, bool d) noexcept : a(ar), defer(d) {}  // writer temp views
       template <class U>
-      part_alloc(const part_alloc<U>& o) noexcept : a(o.a), ses(o.ses)
+      part_alloc(const part_alloc<U>& o) noexcept : a(o.a), ses(o.ses), defer(o.defer)
       {
       }
 
@@ -107,6 +110,7 @@ namespace part
       // dropping the last snapshot reference).
       static constexpr bool hkv_cow = true;
       uint8_t hkv_ref(uint32_t line) const noexcept { return a->ref(line); }
+      bool hkv_defer(uint32_t raw) noexcept { return defer && a->try_defer(raw); }
       bool    hkv_retain(uint32_t line) noexcept { return a->retain(line); }
       template <class D>
       bool hkv_release(uint32_t line, D&& d) noexcept(noexcept(d(line)))

@@ -483,6 +483,18 @@ namespace part
       seg_freeset& freeset_of(uint32_t s) noexcept { return freeset_(s); }
       const arena_stats& stats() const noexcept { return _stats; }
       const void* refs_base_dbg() const noexcept { return _ref_base; }
+      // background-release hook (SPEC §19): the kv layer registers a push-to-
+      // ring callback; cow_release routes release-to-zero CASCADES through it
+      using defer_fn = bool (*)(void*, uint32_t);
+      void set_defer(defer_fn f, void* ctx) noexcept
+      {
+         _defer_fn  = f;
+         _defer_ctx = ctx;
+      }
+      bool try_defer(uint32_t raw) noexcept
+      {
+         return _defer_fn && _defer_fn(_defer_ctx, raw);
+      }
       const arena_config& config() const noexcept { return _cfg; }
 
      private:
@@ -669,6 +681,8 @@ namespace part
       meta_hdr*                             _hdr  = nullptr;
       seg_entry*                            _segs = nullptr;
       std::byte*                            _base = nullptr;
+      defer_fn                              _defer_fn  = nullptr;
+      void*                                 _defer_ctx = nullptr;
       std::byte*                            _free_base = nullptr;
       std::atomic<uint8_t>*                 _ref_base  = nullptr;
       std::mutex                            _claim_mutex;

@@ -22,6 +22,8 @@
 #include <string>
 #include <string_view>
 #include <chrono>
+#include <condition_variable>
+#include <thread>
 
 #include <part/hkv/tree.hpp>
 #include <part/tree_alloc.hpp>
@@ -297,6 +299,14 @@ namespace part::kv
 
       ~database()
       {
+         // clean shutdown (SPEC §19): ring drained, releaser stopped and
+         // JOINED before any member teardown; the rest runs foreground/exact
+         flush_releases();
+         _rel_stop.store(true, std::memory_order_release);
+         _rel_cv.notify_one();
+         if (_rel_thread.joinable())
+            _rel_thread.join();
+         _arena.set_defer(nullptr, nullptr);  // remaining releases are inline
          // No readers remain by contract: force-drain retired roots, then the
          // live root's slot reference.
          for (uint64_t raw : _retired)
@@ -315,6 +325,14 @@ namespace part::kv
       }
 
       part::arena& store() noexcept { return _arena; }
+      // SPEC §19: wait until the background releaser has emptied its ring
+      // (drain gates and shutdown ordering call this)
+      void flush_releases() noexcept
+      {
+         while (_rel_tail.load(std::memory_order_acquire) !=
+                _rel_head.load(std::memory_order_acquire))
+            std::this_thread::yield();
+      }
       // debug/tools only: the raw live root (no pin — caller must hold off writers)
       root_ptr     live_root_dbg() const noexcept { return _live_root; }
 
@@ -338,6 +356,48 @@ namespace part::kv
       database(std::filesystem::path dir, runtime_config cfg)
           : _arena(make_cfg_(std::move(dir), cfg)), _live_root(root_ptr::null())
       {
+         // background releaser (SPEC §19): the writer pushes release-to-zero
+         // subtree roots; this thread runs the cascades; a full ring makes the
+         // writer release inline (graceful degradation to the old behavior)
+         _arena.set_defer(&defer_cb_, this);
+         _rel_thread = std::thread([this] { rel_loop_(); });
+      }
+      static bool defer_cb_(void* ctx, uint32_t raw) noexcept
+      {
+         return static_cast<database*>(ctx)->rel_push_(raw);
+      }
+      bool rel_push_(uint32_t raw) noexcept
+      {
+         const uint32_t h = _rel_head.load(std::memory_order_relaxed);
+         const uint32_t t = _rel_tail.load(std::memory_order_acquire);
+         if (h - t >= kRelRing)
+            return false;  // full: the caller releases in the foreground
+         _rel[h % kRelRing].store(raw, std::memory_order_relaxed);
+         _rel_head.store(h + 1, std::memory_order_release);
+         if (h == t)
+            _rel_cv.notify_one();  // was empty: wake the releaser
+         return true;
+      }
+      void rel_loop_() noexcept
+      {
+         engine_t v{part_alloc<pval>(&_arena, /*defer=*/false)};  // inline worker
+         for (;;)
+         {
+            const uint32_t t = _rel_tail.load(std::memory_order_relaxed);
+            if (t == _rel_head.load(std::memory_order_acquire))
+            {
+               if (_rel_stop.load(std::memory_order_acquire))
+                  return;
+               std::unique_lock lk(_rel_mx);
+               _rel_cv.wait_for(lk, std::chrono::milliseconds(2));
+               continue;
+            }
+            const uint32_t raw = uint32_t(_rel[t % kRelRing].load(std::memory_order_relaxed));
+            root_ptr       p;
+            std::memcpy(p.b, &raw, 4);
+            v.cow_release(p);  // non-deferring allocator: full cascade here
+            _rel_tail.store(t + 1, std::memory_order_release);
+         }
       }
       static part::arena_config make_cfg_(std::filesystem::path dir, runtime_config cfg)
       {
@@ -371,8 +431,8 @@ namespace part::kv
             root_ptr p;
             const uint32_t r32 = uint32_t(_retired[i]);
             std::memcpy(p.b, &r32, 4);
-            engine_t v{part_alloc<pval>(&_arena)};
-            v.cow_release(p);
+            engine_t v{part_alloc<pval>(&_arena, /*defer=*/true)};
+            v.cow_release(p);  // big generations route to the releaser
             _retired[i] = _retired.back();
             _retired.pop_back();
             ++_drain_roots;
@@ -390,6 +450,15 @@ namespace part::kv
      private:
       uint64_t _drain_ns    = 0;
       uint64_t _drain_roots = 0;
+
+      private:
+      static constexpr uint32_t kRelRing = 4096;  // big cascades shard into many subtree chunks
+      std::atomic<uint32_t>     _rel[kRelRing] = {};
+      std::atomic<uint32_t>     _rel_head{0}, _rel_tail{0};
+      std::mutex                _rel_mx;
+      std::condition_variable   _rel_cv;
+      std::thread               _rel_thread;
+      std::atomic<bool>         _rel_stop{false};
 
       part::arena           _arena;
       std::mutex            _root_mx;

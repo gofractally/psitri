@@ -6055,7 +6055,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
       };
 #ifndef PART_CBUCKET
-#define PART_CBUCKET 1  // phase 2: diver rule — keys live in pages over a floor-routed divider radix (BUCKET_SPEC v2)
+#define PART_CBUCKET 0  // OFF (Dan, 2026-06-11): pages amplified copies/complexity vs the pure radix and did not pay on disk pages. The page engine stays behind this gate; the PURE RADIX (occupancy ladder, no buckets) is the configuration of record.
                         // WIP: 3 oracle-found bugs fixed (run-spanning lookup,
                         // recursive split, burst capacity); a duplicate-update
                         // edge remains — needs the BUCKET_SPEC TDD pass before

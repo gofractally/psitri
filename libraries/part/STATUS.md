@@ -111,7 +111,22 @@ direct-when-dense top tier or offtab-style c2 would close it. (c) bulk
 load ladder churn: sequential fill walks every rung — could jump
 setlist -> full_x when the insert pattern is recognizably dense.
 
-## Phase 2 LANDED: diver rule + floor radix (2026-06-10, gate default ON)
+## VERDICT (2026-06-11, Dan): pages OFF — the pure radix is the record
+
+The page experiment amplified copies and complexity relative to part's
+radix and did not buy enough on disk pages. PART_CBUCKET defaults 0;
+the full page engine (diver rule, floor radix, two-probe split,
+clone-as-insert, demand compaction) stays behind the gate with its
+tests. Pure-radix numbers, fresh session: bank b=1 PASS (readers
+4.10M/4.43M, scan 13.0M/s, file 2391MB), bank b=1000 write+read
+**630.1k tx/s** (heart 702k — 0.90x), dict insert 5.46M / get 16.5M /
+scan 48.4M, live 55.7MB. Keepers from the detour, all gate-independent:
+the unconditional root handoff (fcache-ABA leak), the cnode CL0 pad fix,
+the occupancy dense ladder, slot-tagged page tables, the census/refcheck
+instruments. The radix's standing space lever remains variable-length
+leaves (bytes_value) — the 80B pval in a 128B line is the bank's bulk.
+
+## Phase 2 LANDED: diver rule + floor radix (2026-06-10, gate default ON; now OFF — see VERDICT)
 
 BUCKET_SPEC v2 implemented end-to-end: keys live in self-contained pages
 from the first insert; pages fill to 64 / table-capacity then split by

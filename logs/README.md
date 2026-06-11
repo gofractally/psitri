@@ -29,3 +29,4 @@ Conventions:
 | 2026-06-10 | [heart-scale-1B](2026-06-10_heart-scale-1B/) | 1B keys in 23.1 min; ins 1.38µs / rd 566ns / iter 16ns flat; file 40GB = 1.39× live |
 | 2026-06-10 | [psitri-scale-262M-control](2026-06-10_psitri-scale-262M-control/) | psitri on the identical workload: 1.26× live, free% monotone — compactor never the bottleneck |
 | 2026-06-11 | [heart-scale-2.8B-beyond-ram](2026-06-11_heart-scale-2.8B-beyond-ram/) | thrash onset ~100GB RSS (78% of RAM); floor ~20µs = QD1 read-before-write fault; 160MB/s pageins |
+| 2026-06-11 | [hkv-scale-550M-in-memory](2026-06-11_hkv-scale-550M-in-memory/) | u48 hkv in-memory: rd 130-235ns flat to 450M (fastest measured); ~165B/key caps 128GB RAM at ~550M — 2B needs 330GB |

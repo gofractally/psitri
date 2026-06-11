@@ -77,10 +77,14 @@ namespace psitri
                                               recovery_mode                mode)
 	       : _dir(dir),
 	         _cfg(cfg),
-	         _dead_versions(dir / "dead_versions.bin"),
+	         _dead_versions(dir / "dead_versions.bin",
+	                        cfg.read_only ? sal::access_mode::copy_on_write
+	                                      : sal::access_mode::read_write),
 	         _object_registry(_dead_versions),
 	         _allocator(dir, cfg, false),
-	         _dbfile(dir / "dbfile.bin", sal::access_mode::read_write)
+	         _dbfile(dir / "dbfile.bin",
+	                 cfg.read_only ? sal::access_mode::copy_on_write
+	                               : sal::access_mode::read_write)
    {
       _object_registry.install(_allocator);
 
@@ -92,6 +96,8 @@ namespace psitri
 
       if (_dbfile.size() == 0)
       {
+         if (cfg.read_only)
+            throw std::runtime_error("psitri: cannot open an empty database read-only");
          _dbfile.resize(sizeof(detail::database_state));
          new (_dbfile.data()) detail::database_state();
       }
@@ -106,6 +112,10 @@ namespace psitri
 
       // Determine effective recovery mode
       auto effective_mode = mode;
+      if (cfg.read_only && not _dbm->clean_shutdown)
+         throw std::runtime_error(
+             "psitri: database was not shut down cleanly — recovery requires a "
+             "read-write open before it can be opened read-only");
       if (not _dbm->clean_shutdown && effective_mode == recovery_mode::none)
          effective_mode = recovery_mode::deferred_cleanup;  // fast default for unclean shutdown
 
@@ -139,8 +149,12 @@ namespace psitri
 	      recover_global_version_from_roots();
 	      if (_dead_versions.created_storage())
 	         bootstrap_dead_versions_from_control_blocks();
-	      _dbm->clean_shutdown = false;
-	      _allocator.start_background_threads();
+	      if (!cfg.read_only)
+	      {  // RO: clean_shutdown stays true on disk (COW page anyway) and no
+	         // background threads run — reads only, file never dirtied.
+	         _dbm->clean_shutdown = false;
+	         _allocator.start_background_threads();
+	      }
 	   }
 
    template <class LockPolicy>

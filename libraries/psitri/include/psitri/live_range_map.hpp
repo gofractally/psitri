@@ -74,19 +74,24 @@ namespace psitri
 
 	      live_range_map() = default;
 
-	      explicit live_range_map(const std::filesystem::path& path)
+	      explicit live_range_map(const std::filesystem::path& path,
+	                              sal::access_mode             mode = sal::access_mode::read_write)
 	      {
-	         open(path);
+	         open(path, mode);
 	      }
 
-	      void open(const std::filesystem::path& path)
+	      void open(const std::filesystem::path& path,
+	                sal::access_mode             mode = sal::access_mode::read_write)
 	      {
 	         std::lock_guard lock(_mutex);
-	         std::filesystem::create_directories(path.parent_path());
-	         _mapping = std::make_unique<sal::mapping>(path, sal::access_mode::read_write);
+	         if (mode == sal::access_mode::read_write)
+	            std::filesystem::create_directories(path.parent_path());
+	         _mapping = std::make_unique<sal::mapping>(path, mode);
 	         _created_storage = _mapping->size() == 0;
 	         if (_created_storage)
 	         {
+	            if (mode != sal::access_mode::read_write)
+	               throw std::runtime_error("live_range_map: cannot initialize read-only");
 	            _mapping->resize(storage_size(initial_mapped_capacity));
 	            refresh_mapping();
 	            new (_mapped_header) mapped_header();

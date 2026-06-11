@@ -70,8 +70,9 @@ TEST_CASE("cursor-prev-next", "[cursor]")
 {
    sal::set_current_thread_name("main");
    unique_dbdir dbdir{"treectx"};
-   sal::allocator salloc(dbdir, sal::runtime_config());
-   register_node_types(salloc);
+   sal::allocator salloc(dbdir, sal::runtime_config(), /*start_threads_now=*/false);
+   register_node_types(salloc);  // registration precedes the thread-start seal
+   salloc.start_background_threads();
    auto           ses  = salloc.get_session();
    auto           root = ses->get_root<>(sal::root_object_number(0));
 
@@ -173,8 +174,9 @@ TEST_CASE("tree_context-insert-remove", "[tree_context][remove]")
 {
    sal::set_current_thread_name("main");
    unique_dbdir dbdir{"treectx"};
-   sal::allocator salloc(dbdir, sal::runtime_config());
-   register_node_types(salloc);
+   sal::allocator salloc(dbdir, sal::runtime_config(), /*start_threads_now=*/false);
+   register_node_types(salloc);  // registration precedes the thread-start seal
+   salloc.start_background_threads();
    auto           ses  = salloc.get_session();
    auto           root = ses->get_root<>(sal::root_object_number(0));
 
@@ -243,8 +245,9 @@ TEST_CASE("tree_context-single-branch-collapse", "[tree_context][remove][collaps
 {
    sal::set_current_thread_name("main");
    unique_dbdir dbdir{"treectx"};
-   sal::allocator salloc(dbdir, sal::runtime_config());
-   register_node_types(salloc);
+   sal::allocator salloc(dbdir, sal::runtime_config(), /*start_threads_now=*/false);
+   register_node_types(salloc);  // registration precedes the thread-start seal
+   salloc.start_background_threads();
    auto           ses  = salloc.get_session();
    auto           root = ses->get_root<>(sal::root_object_number(0));
 
@@ -345,8 +348,9 @@ TEST_CASE("tree_context-subtree-collapse", "[tree_context][remove][collapse]")
 {
    sal::set_current_thread_name("main");
    unique_dbdir dbdir{"treectx"};
-   sal::allocator salloc(dbdir, sal::runtime_config());
-   register_node_types(salloc);
+   sal::allocator salloc(dbdir, sal::runtime_config(), /*start_threads_now=*/false);
+   register_node_types(salloc);  // registration precedes the thread-start seal
+   salloc.start_background_threads();
    auto           ses  = salloc.get_session();
    auto           root = ses->get_root<>(sal::root_object_number(0));
 
@@ -490,8 +494,9 @@ TEST_CASE("tree_context", "[tree_context][!benchmark]")
 {
    sal::set_current_thread_name("main");
    unique_dbdir dbdir{"treectx"};
-   sal::allocator salloc(dbdir, sal::runtime_config());
-   register_node_types(salloc);
+   sal::allocator salloc(dbdir, sal::runtime_config(), /*start_threads_now=*/false);
+   register_node_types(salloc);  // registration precedes the thread-start seal
+   salloc.start_background_threads();
    auto ses  = salloc.get_session();
    auto root = ses->get_root<>(sal::root_object_number(0));
 

@@ -139,8 +139,10 @@ namespace heart::radix
       class transaction;
       class frame;
       class subtree;
-      explicit radix_tree(const std::filesystem::path& dir)
-          : _alloc(make_alloc(dir)), _ses(_alloc->get_session())
+      explicit radix_tree(const std::filesystem::path& dir,
+                          bool                         wipe      = true,
+                          bool                         read_only = false)
+          : _alloc(make_alloc(dir, wipe, read_only)), _ses(_alloc->get_session())
       {
          _alloc->register_type_ops<leaf_node>();
          _alloc->register_type_ops<setlist_u8>();
@@ -975,11 +977,17 @@ namespace heart::radix
          }
       }
 
-      static std::unique_ptr<sal::allocator> make_alloc(const std::filesystem::path& dir)
+      static std::unique_ptr<sal::allocator> make_alloc(const std::filesystem::path& dir,
+                                                        bool wipe      = true,
+                                                        bool read_only = false)
       {
-         std::filesystem::remove_all(dir);
-         std::filesystem::create_directories(dir);
+         if (wipe)
+         {
+            std::filesystem::remove_all(dir);
+            std::filesystem::create_directories(dir);
+         }
          sal::runtime_config cfg;
+         cfg.read_only               = read_only;
          cfg.sync_mode               = sal::sync_type::none;
          cfg.write_protect_on_commit = false;
          cfg.enable_read_cache       = false;
@@ -6234,10 +6242,23 @@ namespace heart::radix
       radix_tree _engine;
 
      public:
-      explicit database(const std::filesystem::path& dir) : _engine(dir) {}
+      explicit database(const std::filesystem::path& dir,
+                        bool                         wipe      = true,
+                        bool                         read_only = false)
+          : _engine(dir, wipe, read_only)
+      {
+      }
       static std::shared_ptr<database> open(const std::filesystem::path& dir)
       {
          return std::make_shared<database>(dir);
+      }
+      // Open an EXISTING database (no wipe). read_only=true: no background
+      // threads, data PROT_READ, control pages copy-on-write (file pristine),
+      // flock LOCK_SH — refuses immediately if a writer holds the database.
+      static std::shared_ptr<database> open_existing(const std::filesystem::path& dir,
+                                                     bool read_only = false)
+      {
+         return std::make_shared<database>(dir, /*wipe=*/false, read_only);
       }
       std::shared_ptr<write_session> start_write_session()
       {

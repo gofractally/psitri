@@ -160,11 +160,16 @@ namespace heart::radix
          // upsert_raw lazily creates on first write; an emptied tree returns to null. (The
          // database layer's published roots live in SAL's root table, likewise null until the
          // first commit.)
-         // Start SAL's background threads ONLY AFTER this (main) thread has its session and root
-         // — exactly as psitri's database does. Constructing with start_threads_now=true spins
-         // the threads up mid-construction; they race the thread-local session handout so this
-         // thread can end up bound to a background-thread-owned session (tripping the session
-         // thread-ownership check and racing the compactor on unsynchronized session state).
+         // Start SAL's background threads ONLY AFTER the register_type_ops calls above —
+         // exactly as psitri's database does (it also finishes RECOVERY first). The threads
+         // are NOT waiting on this thread's session: get_session() is a thread_local handout
+         // (each thread claims its own slot atomically), so session order is independent —
+         // verified empirically, both orders clean under a debug build's ownership checks.
+         // What actually forces the ordering is _type_ops: registration is a plain pointer
+         // store into a non-atomic array the compactor/release/decay loops read on every
+         // object they touch. Threads running before registration = a data race, and on a
+         // reopened database the compactor would MOVE live heart nodes using the default
+         // alloc_header ops (wrong visit/checksum/move semantics) — silent corruption.
          _alloc->start_background_threads();
       }
 

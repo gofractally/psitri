@@ -21,6 +21,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <chrono>
 
 #include <part/hkv/tree.hpp>
 #include <part/tree_alloc.hpp>
@@ -357,6 +358,9 @@ namespace part::kv
       // readers never touch refcounts or locks).
       void drain_retired_()  // caller holds _root_mx
       {
+         const bool tm = getenv("PART_DRAIN_TIME") != nullptr;
+         const auto t0 = tm ? std::chrono::steady_clock::now()
+                            : std::chrono::steady_clock::time_point{};
          for (size_t i = 0; i < _retired.size();)
          {
             if (_arena.root_published(_retired[i]))
@@ -371,8 +375,21 @@ namespace part::kv
             v.cow_release(p);
             _retired[i] = _retired.back();
             _retired.pop_back();
+            ++_drain_roots;
          }
+         if (tm)
+            _drain_ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                      std::chrono::steady_clock::now() - t0)
+                                      .count());
       }
+
+     public:
+      uint64_t drain_ns_dbg() const noexcept { return _drain_ns; }
+      uint64_t drain_roots_dbg() const noexcept { return _drain_roots; }
+
+     private:
+      uint64_t _drain_ns    = 0;
+      uint64_t _drain_roots = 0;
 
       part::arena           _arena;
       std::mutex            _root_mx;

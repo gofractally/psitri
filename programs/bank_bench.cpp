@@ -838,6 +838,9 @@ class PartEngine : public BankEngine
 
    SizeReport report_size(const std::string& db_path) override
    {
+      if (getenv("PART_DRAIN_TIME"))
+         printf("  [drain: %.3fs over %llu roots]\n", _db->drain_ns_dbg() / 1e9,
+                (unsigned long long)_db->drain_roots_dbg());
       const auto& st = _db->store().stats();
       SizeReport  r;
       r.file_size = measure_db_size(db_path);

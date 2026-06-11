@@ -773,3 +773,78 @@ F. recovery hooks + test 7; stats; perf harness (test 8).
 
 Each phase lands compiling + tested before the next (TDD-bugs-first house
 rule applies).
+
+
+# §19 Background release (DRAFT for sign-off — measured first, design before impl)
+
+## Motivation (measured 2026-06-11, bank 1M/10M, names)
+
+PART_DRAIN_TIME instrumentation on drain_retired_: the writer spends
+~25% of its write-phase wall time releasing retired generations, at BOTH
+batch sizes — b=1: 14.4s across 20.1M retired roots (~0.7us each,
+shallow); b=1000: 7.5s across 20.1k roots (~370us each, deep). Hiding it
+is a ~1.33x write-throughput ceiling (b=1k write-only 735k → ~980k).
+
+## Design (psitri-shaped: try-push, help when full)
+
+One background release thread per database. A fixed SPSC ring (64
+slots) of retired root_ptrs, writer-side producer only.
+
+At commit (unchanged decision logic, SPEC §7 — reclamation DECISIONS
+stay on the writer): the hazard check runs as today; a retired root
+that no reader slot publishes is then
+   try_push(ring) → ok: the background thread runs the cow_release
+                        cascade (pure decrement/destroy/free work);
+                  → full: the writer FOREGROUND-releases one pending
+                        retired root, then retries the push — bounded
+                        helping; under a saturated ring the system
+                        degrades exactly to today's behavior.
+Roots still hazard-pinned stay on the writer's _retired list and are
+re-checked next commit, as today (the ring only ever holds roots that
+are already unreachable by readers).
+
+## Why it is safe with one writer + N readers + one releaser
+
+- Refcounts are atomic RMW; concurrent writer retains / reader pins vs
+  background decrements are already the live protocol. The writer-band
+  (clone at 190) and pin-band semantics are unaffected: the releaser
+  only ever DECREMENTS.
+- The freeset's L0/tier maintenance is CAS + responsible-toggler
+  (TSan-proven multi-session). The releaser frees through the arena's
+  shared release_run path — NEVER the session word-window/fcache fast
+  paths (those are writer-private). Freed lines surface to the writer's
+  slow-path allocator; the txn-floor rule already classifies
+  old-generation cascades as below-floor (unreachable until segment
+  recycle), so the window fast path is not defeated.
+- Sharing between a retired generation and the live root is by
+  refcount, not reachability: background decrements bottom out at the
+  live generation's references, identical to foreground order.
+- CRASH SAFETY: refs/freeset become ADVISORY while a release is in
+  flight (a crash can leave them torn mid-cascade). Recovery must treat
+  a non-clean shutdown as "rebuild refs+freeset from the committed
+  root" (mark_line walk — machinery exists). A clean-shutdown bit in
+  the meta header lets clean opens trust the files and skip the walk.
+
+## Clean shutdown (the consequence Dan flagged)
+
+Ordering in ~database (and an explicit flush_releases() for tests):
+ 1. Sessions are gone by contract (asserted): no new commits, no pins.
+ 2. Set stop flag; the releaser drains the ring to EMPTY and exits;
+    writer JOINS before any member teardown (no use-after-free window).
+ 3. Remaining _retired entries (hazard-held at close would be a caller
+    bug — assert) release FOREGROUND, deterministically.
+ 4. Session/live root releases run foreground as today.
+ 5. fsync freeset+refs, then set the clean-shutdown bit — the files are
+    exact again at this instant and only at this instant.
+The drain gates (require_drained) call flush_releases() first; the
+fork+SIGKILL durability tests are unchanged (recovery rebuilds).
+
+## Open questions for sign-off
+
+1. Ring depth 64 ok? (b=1 retires fast but each is tiny — helping cost
+   is ~0.7us; b=1k saturation is ~64×370us ≈ 24ms of queued work.)
+2. Helping policy: release ONE then retry (proposed) vs drain-half.
+3. Should the releaser ALSO take the in-op release_run cascades from
+   remove paths, or only whole retired generations (proposed: only
+   generations — keeps every other path single-threaded).
+4. Clean-bit format in the arena meta header.

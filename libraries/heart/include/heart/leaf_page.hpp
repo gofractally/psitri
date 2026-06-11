@@ -581,10 +581,15 @@ namespace heart
       }
 
       // ── split-divider selection ──────────────────────────────────────────────────
-      // The shortest separator near the median, last byte snapped toward trailing
-      // zeros (power-of-2 friendly) — dividers feed the lower-bound radix above, so
-      // shorter + rounder is structurally cheaper up there. Bounded skew: candidates
-      // come from the middle window [3n/8, 5n/8].
+      // TWO probes (part's divider rule, b11dc1a5): the keys at 40% and 60% of the
+      // page (median ∓10%; 60 keys → 24 and 36). The divider is the shortest
+      // separator between THOSE two keys — their shared prefix + one byte snapped
+      // toward trailing zeros (power-of-2 friendly) — and the split index is its
+      // lower_bound, which lands in (40%, 60%] by construction so both halves are
+      // non-empty. Dividers feed the lower-bound radix above, so shorter + rounder
+      // is structurally cheaper up there. Cost: at most two extern resolutions and
+      // one in-page search, instead of one resolution per adjacent pair across a
+      // middle window.
       struct split_pos
       {
          uint16_t index;    // right half = [index, nkeys)
@@ -596,8 +601,7 @@ namespace heart
       {
          assert(_nkeys >= 2);
          // Separator math needs the REAL suffix of an extern record (its in-page fragment can
-         // tie); splits are cold, so resolving boundary candidates through the key_val_node
-         // is fine.
+         // tie); splits are cold, so resolving the two probes through the key_val_node is fine.
          auto real_suffix = [&](uint32_t i) -> std::span<const uint8_t> {
             const inline_value* iv = record(i);
             if (iv->value_type != inline_value::vt_extern)
@@ -606,55 +610,38 @@ namespace heart
             return {kk.data() + _cpfx_len, kk.size() - _cpfx_len};
          };
          const uint32_t n  = _nkeys;
-         uint32_t       lo = (n * 3) / 8, hi = (n * 5) / 8;
-         if (lo < 1)
-            lo = 1;
-         if (hi >= n)
-            hi = n - 1;
-         if (hi < lo)
-            hi = lo;
-         uint32_t best_i = lo, best_len = ~0u, best_tz = 0, best_dist = ~0u;
-         uint8_t  best_byte = 0;
-         for (uint32_t i = lo; i <= hi; ++i)
+         uint32_t       ia = (n * 2) / 5, ib = (n * 3) / 5;
+         if (ib >= n)
+            ib = n - 1;
+         if (ib < 1)
+            ib = 1;
+         if (ia >= ib)
+            ia = ib - 1;
+         auto     a = real_suffix(ia), b = real_suffix(ib);
+         uint32_t p = shared_prefix(a.data(), a.size(), b.data(), b.size());
+         assert(p < b.size());  // strict order: b can't be a prefix of a
+         // separator = b[0..p) + v, valid v in (a[p], b[p]] — or [0, b[p]] when a
+         // is a prefix of b. Maximize trailing zeros of v (simple bit math, no scans).
+         const int     lo_excl = p < a.size() ? int(a[p]) : -1;
+         const uint8_t hi_v    = b[p];
+         uint8_t       v       = hi_v;
+         for (int z = 8; z >= 1; --z)
          {
-            auto     a = real_suffix(i - 1), b = real_suffix(i);
-            uint32_t p = shared_prefix(a.data(), a.size(), b.data(), b.size());
-            assert(p < b.size());  // strict order: b can't be a prefix of a
-            // separator = b[0..p] + v, valid v in (a[p], b[p]] — or [0, b[p]] when a
-            // is a prefix of b. Maximize trailing zeros of v.
-            const int     lo_excl = p < a.size() ? int(a[p]) : -1;
-            const uint8_t hi_v    = b[p];
-            uint8_t       v       = hi_v;
-            uint32_t      tz      = 0;
-            for (int z = 8; z >= 1; --z)
+            const uint8_t cand = uint8_t(hi_v & ~((1u << z) - 1u));
+            if (int(cand) > lo_excl)
             {
-               const uint8_t cand = uint8_t(hi_v & ~((1u << z) - 1u));
-               if (int(cand) > lo_excl)
-               {
-                  v  = cand;
-                  tz = uint32_t(z);
-                  break;
-               }
-            }
-            const uint32_t len  = p + 1;
-            const uint32_t dist = i > n / 2 ? i - n / 2 : n / 2 - i;
-            if (len < best_len || (len == best_len && tz > best_tz) ||
-                (len == best_len && tz == best_tz && dist < best_dist))
-            {
-               best_i    = i;
-               best_len  = len;
-               best_tz   = tz;
-               best_dist = dist;
-               best_byte = v;
+               v = cand;
+               break;
             }
          }
          split_pos r;
-         r.index = uint16_t(best_i);
-         auto b  = real_suffix(best_i);
          std::memcpy(r.div, cpfx_data(), _cpfx_len);
-         std::memcpy(r.div + _cpfx_len, b.data(), best_len - 1);
-         r.div[_cpfx_len + best_len - 1] = best_byte;
-         r.div_len                       = uint16_t(_cpfx_len + best_len);
+         std::memcpy(r.div + _cpfx_len, b.data(), p);
+         r.div[_cpfx_len + p] = v;
+         r.div_len            = uint16_t(_cpfx_len + p + 1);
+         const int idx        = lower_bound(r.div, r.div_len, R);
+         assert(idx > int(ia) && idx <= int(ib));  // key[ia] < divider <= key[ib]
+         r.index = uint16_t(idx);
          return r;
       }
 

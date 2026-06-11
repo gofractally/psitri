@@ -4301,6 +4301,7 @@ namespace heart::radix
       }
       // One SAL session per thread: call on the thread that will use it (psitri read_session model).
       sal::allocator_session_ptr make_session() { return _alloc->get_session(); }
+      sal::allocator&            underlying_allocator() noexcept { return *_alloc; }
       sal::seg_alloc_dump        dump() const { return _alloc->dump(); }
       void                       sync(sal::sync_type st) { _alloc->sync(st); }
 
@@ -6252,6 +6253,9 @@ namespace heart::radix
       // [testing] engine diagnostics passthrough — leak checks need object_count/audit_refs
       // against the SAME tree the public sessions drive.
       radix_tree& engine_for_testing() { return _engine; }
+      // The SAL allocator backing this database (dwal's btree_layer arena hook —
+      // heart and psitri share sal::allocator, so the hook is engine-portable).
+      sal::allocator& underlying_allocator() noexcept { return _engine.underlying_allocator(); }
       // Data-layout selector (default = page model). Exposed so benches/tools can A/B the
       // legacy byte-radix engine against radix-indexed leaf pages on identical workloads.
       void set_page_mode(bool on) { _engine.set_page_mode(on); }

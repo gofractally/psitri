@@ -1,3 +1,4 @@
+#include <fstream>
 #include <sys/mman.h>
 #include <algorithm>
 #include <array>
@@ -15,6 +16,8 @@
 
 namespace sal
 {
+   static constexpr uint64_t types_file_magic = 0x73616c2d74797065ull;  // "sal-type"
+
    class recovery_visit_set
    {
      public:
@@ -143,7 +146,11 @@ namespace sal
 
    /// Set to true to enable compactor timing and unpinned-segment diagnostics.
    /// When false, all instrumentation is compiled out by the optimizer.
+#if PSITRI_DEEP_INVARIANTS
+   static constexpr bool debug_compactor = true;
+#else
    static constexpr bool debug_compactor = false;
+#endif
 
    /**
        * These methods assign a unique number to each instance of allocator so
@@ -271,6 +278,7 @@ namespace sal
       _type_ops.fill(&default_object_type_ops<alloc_header>());
 
       _allocator_index = alloc_allocator_index();
+      _types_file      = dir / "types.bin";
       if (_seg_alloc_state_file.size() == 0)
       {
          _seg_alloc_state_file.resize(
@@ -2307,6 +2315,46 @@ namespace sal
 
    void allocator::start_background_threads()
    {
+      // ── type-registry seal + once-per-open version-skew check ─────────────
+      // Registration must precede the background threads (the compactor walks
+      // existing objects immediately); the persisted bitset makes reopening a
+      // database with FEWER registered types than it was written with a hard
+      // error — same types or a superset, never less. One check per open.
+      if (!_types_sealed)
+      {
+         _types_sealed = true;
+         std::array<uint64_t, 2> stored{};
+         bool                    have_stored = false;
+         if (std::filesystem::exists(_types_file))
+         {
+            std::ifstream in(_types_file, std::ios::binary);
+            uint64_t      magic = 0;
+            in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+            in.read(reinterpret_cast<char*>(stored.data()), sizeof(stored));
+            have_stored = in.good() && magic == types_file_magic;
+         }
+         if (have_stored)
+         {
+            std::string missing;
+            for (int w = 0; w < 2; ++w)
+               if (uint64_t miss = stored[w] & ~_registered_type_bits[w])
+                  for (int b = 0; b < 64; ++b)
+                     if ((miss >> b) & 1)
+                        missing += std::to_string(w * 64 + b) + " ";
+            if (!missing.empty())
+               throw std::runtime_error(
+                   "sal: database was created with object types {" + missing +
+                   "} that are not registered in this binary — refusing to open "
+                   "(register the same types or a superset, never less)");
+         }
+         std::array<uint64_t, 2> merged{stored[0] | _registered_type_bits[0],
+                                        stored[1] | _registered_type_bits[1]};
+         std::ofstream out(_types_file, std::ios::binary | std::ios::trunc);
+         out.write(reinterpret_cast<const char*>(&types_file_magic),
+                   sizeof(types_file_magic));
+         out.write(reinterpret_cast<const char*>(merged.data()), sizeof(merged));
+      }
+
       stop_background_threads();
 
       // Initialize and start all threads after _mapped_state is set

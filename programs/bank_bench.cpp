@@ -567,6 +567,7 @@ class PsiTriEngine : public BankEngine
              "      gap (dead - estimated): %.1f MB\n",
              audit.size(), (unsigned long long)total_objects,
              est_mb, dead_mb, live_mb, dead_mb - est_mb);
+      }
    }
 
    void wait_compactor() override

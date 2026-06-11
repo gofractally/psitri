@@ -82,7 +82,17 @@ namespace sal
       void register_type_ops(const object_type_ops& ops) noexcept
       {
          static_assert(uint8_t(T::type_id) < 128, "type_id out of range");
+         if (_types_sealed) [[unlikely]]
+         {  // registration AFTER background threads start = the startup race
+            // this seal exists to kill (compactor walking objects whose ops
+            // aren't installed yet). Programmer error: fail loudly, both modes.
+            SAL_ERROR("register_type_ops({}) after start_background_threads()",
+                      uint32_t(T::type_id));
+            std::abort();
+         }
          _type_ops[uint8_t(T::type_id)] = &ops;
+         _registered_type_bits[uint8_t(T::type_id) >> 6] |= 1ull
+                                                            << (uint8_t(T::type_id) & 63);
       }
 
       template <typename T>
@@ -91,8 +101,19 @@ namespace sal
          register_type_ops<T>(default_object_type_ops<T>());
       }
 
+      bool is_registered_type(header_type type) const noexcept
+      {
+         return (_registered_type_bits[uint8_t(type) >> 6] >> (uint8_t(type) & 63)) & 1;
+      }
+
       const object_type_ops& type_ops(header_type type) const noexcept
       {
+         // Unregistered types silently get alloc_header's default ops (wrong
+         // destroy/compact semantics). Programmer error — debug-only check;
+         // version-skew across database opens is enforced ONCE per open by the
+         // persisted type bitset in start_background_threads().
+         assert((is_registered_type(type) || uint8_t(type) < uint8_t(header_type::start_user_type)) &&
+                "object type used before register_type_ops");
          return *_type_ops[uint8_t(type)];
       }
 
@@ -544,6 +565,11 @@ namespace sal
       root_object_array*              _root_objects;
       mapped_memory::session_operation_stats* _session_op_stats = nullptr;
       std::array<const object_type_ops*, 128> _type_ops;
+      // Types registered THIS run (sal-internal ids excluded); compared against
+      // the database's persisted bitset once per open at thread start.
+      std::array<uint64_t, 2> _registered_type_bits{};
+      bool                    _types_sealed = false;
+      std::filesystem::path   _types_file;
       std::mutex                      _sync_mutex;
       /// used by readers/writers to grab/update a root object
       std::array<std::shared_mutex, 1024> _root_object_mutex;

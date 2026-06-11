@@ -573,6 +573,7 @@ namespace heart::sal_proto
          _alloc->register_type_ops<setlist_node>();
          _alloc->register_type_ops<bitset_node>();
          _alloc->register_type_ops<full_node>();
+         _alloc->start_background_threads();  // registration done — seal + go
          _root = _ses->alloc<leaf_node>(bytes{});  // tree starts as one empty leaf (ref==1)
       }
 
@@ -759,7 +760,8 @@ namespace heart::sal_proto
          cfg.sync_mode               = sal::sync_type::none;
          cfg.write_protect_on_commit = false;
          cfg.enable_read_cache       = false;
-         return std::make_unique<sal::allocator>(dir, cfg, true);
+         // threads start AFTER type registration (the registry seals at start)
+         return std::make_unique<sal::allocator>(dir, cfg, false);
       }
 
       // ── ordered-query dispatch helpers (term/nprefix/heap are common base

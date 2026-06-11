@@ -40,6 +40,10 @@ namespace part::kv
       bool           write_protect_on_commit = false;
       bool           checksum_on_commit      = false;
       uint32_t       max_segments            = 4096;  // x 8MB arena ceiling (32 GB default)
+      // SPEC §19: when false, no releaser thread is spawned and the defer hook
+      // is never registered — every release runs synchronously on its caller
+      // (identical semantics, for deployments that cannot tolerate a thread).
+      bool           background_release      = true;
    };
 
    // Inline POD value: len-prefixed bytes, trivially copyable (COW memcpy).
@@ -358,9 +362,14 @@ namespace part::kv
       {
          // background releaser (SPEC §19): the writer pushes release-to-zero
          // subtree roots; this thread runs the cascades; a full ring makes the
-         // writer release inline (graceful degradation to the old behavior)
-         _arena.set_defer(&defer_cb_, this);
-         _rel_thread = std::thread([this] { rel_loop_(); });
+         // writer release inline (graceful degradation to the old behavior).
+         // OPTIONAL: without the thread the hook is never registered and the
+         // queue is permanently "blocked" — everything runs synchronously.
+         if (cfg.background_release)
+         {
+            _arena.set_defer(&defer_cb_, this);
+            _rel_thread = std::thread([this] { rel_loop_(); });
+         }
       }
       static bool defer_cb_(void* ctx, uint32_t raw) noexcept
       {

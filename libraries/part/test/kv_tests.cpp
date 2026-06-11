@@ -403,6 +403,43 @@ TEST_CASE("kv terms: a key that is a strict prefix of >64 same-byte siblings")
    require_drained(*db);
 }
 
+TEST_CASE("synchronous mode: background_release=false drains identically")
+{
+   // the queue reports blocked-forever; every cascade runs on its caller —
+   // same battery shape, same drain gate, no second thread
+   auto dir = fs::temp_directory_path() / "part_kv_sync";
+   fs::remove_all(dir);
+   part::kv::runtime_config cfg;
+   cfg.background_release = false;
+   auto db  = part::kv::database::create(dir, cfg);
+   auto ses = db->start_write_session();
+   std::map<std::string, std::string> oracle;
+   for (int b = 0; b < 8; ++b)
+   {
+      auto tx = ses->start_transaction(0);
+      for (int i = 0; i < 500; ++i)
+      {
+         std::string k = "s/" + std::to_string(b * 500 + i);
+         tx.upsert(k, mkval(uint64_t(i)));
+         oracle[k] = mkval(uint64_t(i));
+      }
+      tx.commit();
+   }
+   {
+      auto tx = ses->start_transaction(0);
+      for (auto& [k, v] : oracle)
+         REQUIRE(*tx.get<std::string>(k) == v);
+      tx.abort();
+   }
+   {
+      auto tx = ses->start_transaction(0);
+      for (auto& [k, v] : oracle)
+         tx.remove(k);
+      tx.commit();
+   }
+   require_drained(*db);
+}
+
 TEST_CASE("kv churn: repeated overwrites under generation turnover drain fully")
 {
    auto dir = fs::temp_directory_path() / "part_kv_churn";

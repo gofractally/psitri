@@ -2217,6 +2217,81 @@ class ArtMapEngine : public BankEngine
 };
 #endif
 
+#if defined(BANK_ENGINE_HKV)
+#include <hkv/tree.hpp>
+
+// upstream hkv (myartlib): headerless in-memory radix, std::allocator,
+// no COW — the gold-standard read tree. Same single-thread contract.
+class HkvEngine : public BankEngine
+{
+   using tree_t = hkv::kv_tree<std::string_view, std::string>;
+   std::unique_ptr<tree_t> _t;
+
+  public:
+   const char* name() const override { return "hkv (single-thread, in-memory)"; }
+   bool        single_threaded() const override { return true; }
+   void open(const std::string&, const std::string&) override { _t = std::make_unique<tree_t>(); }
+   void close() override { _t.reset(); }
+
+   void bulk_load(const std::vector<std::string>& accounts, uint64_t balance) override
+   {
+      auto bal = encode_balance(balance);
+      for (auto& acct : accounts)
+         _t->insert(acct, bal);
+   }
+   void begin_batch() override {}
+   void commit_batch() override {}
+   void sync() override {}
+
+   bool transfer(const std::string& src,
+                 const std::string& dst,
+                 uint64_t           amount,
+                 uint64_t           seq) override
+   {
+      std::string sv;
+      if (!_t->find(src, sv))
+         return false;
+      const uint64_t src_bal = decode_balance(sv);
+      if (src_bal < amount)
+         return false;
+      std::string dv;
+      if (!_t->find(dst, dv))
+         return false;
+      const uint64_t dst_bal = decode_balance(dv);
+      _t->insert(src, encode_balance(src_bal - amount));
+      _t->insert(dst, encode_balance(dst_bal + amount));
+      _t->insert(encode_log_key(seq), encode_log_value(src, dst, amount));
+      return true;
+   }
+   SizeReport report_size(const std::string&) override
+   {
+      SizeReport r;
+      r.file_size = 0;
+      r.live_size = 0;  // std::allocator: not tracked
+      r.free_size = 0;
+      return r;
+   }
+   bool read_account(const std::string& key, uint64_t& balance_out) override
+   {
+      std::string v;
+      if (!_t->find(key, v))
+         return false;
+      balance_out = decode_balance(v);
+      return true;
+   }
+   uint64_t scan_all(std::function<void(const std::string&, uint64_t)> visitor) override
+   {
+      uint64_t n = 0;
+      for (auto it = _t->begin(); it != _t->end(); ++it, ++n)
+      {
+         const auto kv = *it;
+         visitor(std::string(kv.first), decode_balance(kv.second.data(), kv.second.size()));
+      }
+      return n;
+   }
+};
+#endif
+
 #if defined(BANK_ENGINE_ART)
 extern "C" {
 #include <art.h>
@@ -2443,6 +2518,8 @@ int main(int argc, char** argv)
    engine = std::make_unique<ArtEngine>();
 #elif defined(BANK_ENGINE_ARTMAP)
    engine = std::make_unique<ArtMapEngine>();
+#elif defined(BANK_ENGINE_HKV)
+   engine = std::make_unique<HkvEngine>();
 #else
 #error "No BANK_ENGINE_* defined"
 #endif

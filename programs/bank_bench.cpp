@@ -65,6 +65,10 @@
 #include <part/kv.hpp>  // part engine — psitri-shaped API over the part arena
 #endif
 
+#if defined(BANK_ENGINE_WALART)
+#include <walart/walart.hpp>  // part-backed delta WAL over a heart base
+#endif
+
 #if defined(BANK_ENGINE_ROCKSDB)
 #include <rocksdb/db.h>
 #include <rocksdb/options.h>
@@ -894,6 +898,160 @@ class PartEngine : public BankEngine
    }
 };
 #endif
+
+// ============================================================
+// Walart Engine (part-backed delta WAL over a heart base)
+// ============================================================
+
+#if defined(BANK_ENGINE_WALART)
+class WalartEngine : public BankEngine
+{
+   std::shared_ptr<walart::database>      _db;
+   std::shared_ptr<walart::write_session> _ses;
+   std::optional<walart::transaction>     _tx;
+
+  public:
+   const char* name() const override { return "Walart"; }
+
+   void open(const std::string& path, const std::string& sync_mode) override
+   {
+      std::filesystem::remove_all(path);
+      std::filesystem::create_directories(path);
+      sal::sync_type sync = sal::sync_type::none;
+      if (sync_mode == "async")
+         sync = sal::sync_type::msync_async;
+      else if (sync_mode == "sync")
+         sync = sal::sync_type::msync_sync;
+      _db  = walart::database::open(path, sync);
+      _ses = _db->start_write_session();
+   }
+
+   void close() override
+   {
+      _tx.reset();
+      _ses.reset();
+      _db.reset();
+   }
+
+   void bulk_load(const std::vector<std::string>& accounts, uint64_t balance) override
+   {
+      auto bal = encode_balance(balance);
+      auto tx  = _ses->start_transaction(0);
+      for (auto& acct : accounts)
+         tx.upsert(acct, bal);
+      tx.commit();
+   }
+
+   void begin_batch() override { _tx.emplace(_ses->start_transaction(0)); }
+
+   bool transfer(const std::string& src,
+                 const std::string& dst,
+                 uint64_t           amount,
+                 uint64_t           seq) override
+   {
+      auto src_val = _tx->get<std::string>(src);
+      if (!src_val)
+         return false;
+      uint64_t src_bal = decode_balance(*src_val);
+      if (src_bal < amount)
+         return false;
+
+      auto dst_val = _tx->get<std::string>(dst);
+      if (!dst_val)
+         return false;
+      uint64_t dst_bal = decode_balance(*dst_val);
+
+      _tx->upsert(src, encode_balance(src_bal - amount));
+      _tx->upsert(dst, encode_balance(dst_bal + amount));
+      _tx->upsert(encode_log_key(seq), encode_log_value(src, dst, amount));
+      return true;
+   }
+
+   void commit_batch() override
+   {
+      _tx->commit();
+      _tx.reset();
+   }
+
+   void sync() override {}
+
+   SizeReport report_size(const std::string&) override
+   {
+      SizeReport r;
+      auto       d = _db->base().dump();
+      r.file_size  = d.total_segments * sal::segment_size;
+      uint64_t live = 0;
+      for (auto& seg : d.segments)
+         if (!seg.is_free && seg.alloc_pos > 0)
+            live += seg.alloc_pos - seg.freed_bytes;
+      // delta arena on top
+      auto&    ar   = _db->delta_store();
+      uint64_t dfree = 0;
+      for (uint32_t sg = 0; sg < ar.num_segments(); ++sg)
+         dfree += ar.freeset_of(sg).free_lines();
+      const uint64_t dfile = uint64_t(ar.num_segments()) * part::segment_bytes;
+      r.file_size += dfile;
+      live += dfile - dfree * part::line_bytes;
+      r.live_size = live;
+      r.free_size = r.file_size - live;
+      return r;
+   }
+
+   void wait_compactor() override
+   {
+      _db->flush_barrier();
+      _db->base().wait_for_compactor();
+   }
+
+   // Reader thread state — walart read_session per reader thread
+   static inline thread_local std::shared_ptr<walart::read_session> _reader_rs;
+   static inline thread_local std::optional<walart::cursor>         _reader_cur;
+
+   void reader_thread_init() override { _reader_rs = _db->start_read_session(); }
+
+   void reader_thread_teardown() override
+   {
+      _reader_cur.reset();
+      _reader_rs.reset();
+   }
+
+   void reader_batch_begin() override { _reader_cur.emplace(_reader_rs->create_cursor(0)); }
+   void reader_batch_end() override { _reader_cur.reset(); }
+
+   bool read_account(const std::string& key, uint64_t& balance_out) override
+   {
+      auto val = _reader_cur->get<std::string>(key);
+      if (!val)
+         return false;
+      balance_out = decode_balance(*val);
+      return true;
+   }
+
+   uint64_t scan_all(std::function<void(const std::string&, uint64_t)> visitor) override
+   {
+      // v1: pure-heart scan behind a flush barrier (spec §4) — the delta is
+      // fully merged, so heart's published root covers every commit.
+      _db->flush_barrier();
+      auto     rs  = _db->base().start_read_session();
+      auto     cur = rs->create_cursor(0);
+      uint64_t count = 0;
+      cur.seek_begin();
+      while (!cur.is_end())
+      {
+         auto val = cur.value<std::string>();
+         if (val)
+         {
+            auto k = cur.key();
+            visitor(std::string(k.data(), k.size()), decode_balance(*val));
+            ++count;
+         }
+         cur.next();
+      }
+      return count;
+   }
+};
+#endif
+
 
 // ============================================================
 // DWAL Engine (PsiTri + write-ahead log buffering layer)
@@ -1984,6 +2142,81 @@ class TidesDbEngine : public BankEngine
 // durability) reads against this. Keys follow the standard libart
 // convention of including a trailing NUL so prefix-of-another keys work.
 
+#if defined(BANK_ENGINE_ARTMAP)
+#include <art/art_map.hpp>
+#include <art/heap_arena.hpp>
+
+// art::art_map (Dan's in-memory ART, heap arena) — single-thread baseline,
+// same contract as the libart engine: no transactions, immediate visibility.
+class ArtMapEngine : public BankEngine
+{
+   using map_t = art::art_map<std::string, art::heap_arena>;
+   std::unique_ptr<map_t> _m;
+
+  public:
+   const char* name() const override { return "art_map (single-thread, in-memory)"; }
+   bool        single_threaded() const override { return true; }
+
+   void open(const std::string&, const std::string&) override { _m = std::make_unique<map_t>(); }
+   void close() override { _m.reset(); }
+
+   void bulk_load(const std::vector<std::string>& accounts, uint64_t balance) override
+   {
+      auto bal = encode_balance(balance);
+      for (auto& acct : accounts)
+         _m->insert(acct, bal);
+   }
+   void begin_batch() override {}
+   void commit_batch() override {}
+   void sync() override {}
+
+   bool transfer(const std::string& src,
+                 const std::string& dst,
+                 uint64_t           amount,
+                 uint64_t           seq) override
+   {
+      auto si = _m->find(src);
+      if (si == _m->end())
+         return false;
+      const uint64_t src_bal = decode_balance(si.value().data(), si.value().size());
+      if (src_bal < amount)
+         return false;
+      auto di = _m->find(dst);
+      if (di == _m->end())
+         return false;
+      const uint64_t dst_bal = decode_balance(di.value().data(), di.value().size());
+      _m->insert(src, encode_balance(src_bal - amount));
+      _m->insert(dst, encode_balance(dst_bal + amount));
+      _m->insert(encode_log_key(seq), encode_log_value(src, dst, amount));
+      return true;
+   }
+
+   SizeReport report_size(const std::string&) override
+   {
+      SizeReport r;
+      r.file_size = 0;
+      r.live_size = _m ? _m->get_arena().bytes_used() : 0;
+      r.free_size = 0;
+      return r;
+   }
+   bool read_account(const std::string& key, uint64_t& balance_out) override
+   {
+      auto it = _m->find(key);
+      if (it == _m->end())
+         return false;
+      balance_out = decode_balance(it.value().data(), it.value().size());
+      return true;
+   }
+   uint64_t scan_all(std::function<void(const std::string&, uint64_t)> visitor) override
+   {
+      uint64_t n = 0;
+      for (auto it = _m->begin(); it != _m->end(); ++it, ++n)
+         visitor(std::string(it.key()), decode_balance(it.value().data(), it.value().size()));
+      return n;
+   }
+};
+#endif
+
 #if defined(BANK_ENGINE_ART)
 extern "C" {
 #include <art.h>
@@ -2190,6 +2423,8 @@ int main(int argc, char** argv)
    engine = std::make_unique<HeartEngine>();
 #elif defined(BANK_ENGINE_PART)
    engine = std::make_unique<PartEngine>();
+#elif defined(BANK_ENGINE_WALART)
+   engine = std::make_unique<WalartEngine>();
 #elif defined(BANK_ENGINE_DWAL)
    engine = std::make_unique<DwalEngine>();
 #elif defined(BANK_ENGINE_ROCKSDB)
@@ -2206,6 +2441,8 @@ int main(int argc, char** argv)
    engine = std::make_unique<SqliteEngine>();
 #elif defined(BANK_ENGINE_ART)
    engine = std::make_unique<ArtEngine>();
+#elif defined(BANK_ENGINE_ARTMAP)
+   engine = std::make_unique<ArtMapEngine>();
 #else
 #error "No BANK_ENGINE_* defined"
 #endif

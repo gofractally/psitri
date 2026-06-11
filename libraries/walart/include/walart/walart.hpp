@@ -15,8 +15,8 @@
 // RAM pressure forcing small generations. Knob: WALART_STEAL_KEYS.
 //
 // Value encoding in the part delta: [tag byte][payload]; tag 0x01 = data,
-// 0x00 = tombstone. part's inline pval caps payload at 77 bytes — fine for
-// the bank (8B balances, ~40B log entries); lift via part big-values later.
+// 0x00 = tombstone. Values are raw leaf bytes (hkv::bytes_value) — no length
+// cap; reads hand back views valid while the pinned root lives.
 #include <radix_engine.hpp>  // heart engine + native psitri-shaped API
 #include <part/kv.hpp>       // part engine family (pval, hkv tree, arena)
 
@@ -37,26 +37,20 @@ namespace walart
 
    namespace detail
    {
-      using engine_t = part::kv::engine_t;  // hkv tree over part_alloc<pval>
+      using engine_t = part::kv::engine_t;  // hkv tree over part_alloc<bval>
       using root_ptr = part::kv::root_ptr;
-      using pval     = part::kv::pval;
+      using bval     = part::kv::bval;  // raw leaf bytes, view-in/view-out
 
-      inline pval encode(value_view v, bool tombstone)
+      // [tag][payload] staged in caller scratch; the leaf copies once on insert.
+      inline bval encode(value_view v, bool tombstone, std::string& scratch)
       {
-         if (v.size() > 77)  // HARD check: part pval payload cap (v1)
-            throw std::length_error("walart v1: value exceeds 77-byte inline cap, size=" +
-                                    std::to_string(v.size()));
-         pval p;
-         p.len  = uint16_t(v.size() + 1);
-         p.b[0] = tombstone ? 0x00 : 0x01;
-         std::memcpy(p.b + 1, v.data(), v.size());
-         return p;
+         scratch.resize(v.size() + 1);
+         scratch[0] = tombstone ? char(0x00) : char(0x01);
+         std::memcpy(scratch.data() + 1, v.data(), v.size());
+         return bval{std::string_view(scratch.data(), scratch.size())};
       }
-      inline bool is_tombstone(const pval& p) { return p.len >= 1 && p.b[0] == 0x00; }
-      inline value_view payload(const pval& p)
-      {
-         return value_view(p.b + 1, p.len - 1);
-      }
+      inline bool is_tombstone(const bval& p) { return !p.v.empty() && p.v[0] == 0x00; }
+      inline value_view payload(const bval& p) { return value_view(p.v.data() + 1, p.v.size() - 1); }
    }  // namespace detail
 
    class database;
@@ -182,7 +176,7 @@ namespace walart
           : _sync(sync),
             _arena(make_arena_cfg_(dir / "delta", sync)),
             _wses(_arena.start_session()),
-            _wtree(part::part_alloc<detail::pval>(&_wses))
+            _wtree(part::part_alloc<detail::bval>(&_wses))
       {
          if (const char* sk = std::getenv("WALART_STEAL_KEYS"); sk && atoll(sk) > 0)
             _steal_keys = uint64_t(atoll(sk));
@@ -308,13 +302,13 @@ namespace walart
                s = _s_root;
             }
             {
-               detail::engine_t view{part::part_alloc<detail::pval>(&_arena)};
+               detail::engine_t view{part::part_alloc<detail::bval>(&_arena)};
                view.adopt_root(s);
                auto htx = hws->start_transaction(0);
                for (auto it = view.begin(); it != view.end(); ++it)
                {
                   const auto&         kv = *it;
-                  const detail::pval& p  = kv.second;
+                  const detail::bval& p  = kv.second;
                   if (detail::is_tombstone(p))
                      htx.remove(kv.first);
                   else
@@ -347,8 +341,8 @@ namespace walart
       bool find_delta_(const detail::engine_t& view, key_view k, std::string& out,
                        bool& tombstone) const
       {
-         detail::pval p;
-         if (!view.find(k, p))
+         detail::bval p;
+         if (!view.find(k, p))  // p.v: view into the pinned tree (copied below)
             return false;
          tombstone = detail::is_tombstone(p);
          if (!tombstone)
@@ -388,12 +382,14 @@ namespace walart
    }
    inline void transaction::upsert(key_view k, value_view v)
    {
-      _db->_wtree.cow_insert(k, detail::encode(v, false));
+      thread_local std::string scratch;  // writer thread only
+      _db->_wtree.cow_insert(k, detail::encode(v, false, scratch));
       _db->_delta_keys.fetch_add(1, std::memory_order_relaxed);
    }
    inline int transaction::remove(key_view k)
    {
-      _db->_wtree.cow_insert(k, detail::encode({}, true));
+      thread_local std::string scratch;
+      _db->_wtree.cow_insert(k, detail::encode({}, true, scratch));
       _db->_delta_keys.fetch_add(1, std::memory_order_relaxed);
       return 0;
    }
@@ -434,7 +430,7 @@ namespace walart
       }
       if (s.raw() != detail::root_ptr::null().raw())
       {
-         detail::engine_t v{part::part_alloc<detail::pval>(&_db->_arena)};
+         detail::engine_t v{part::part_alloc<detail::bval>(&_db->_arena)};
          v.adopt_root(s);
          bool hit = _db->find_delta_(v, k, out, tomb);
          v.adopt_root(detail::root_ptr::null());
@@ -460,8 +456,8 @@ namespace walart
 
    inline cursor::cursor(database* db, heart::radix::cursor&& hc)
        : _db(db),
-         _wview(part::part_alloc<detail::pval>(&db->_arena)),
-         _sview(part::part_alloc<detail::pval>(&db->_arena)),
+         _wview(part::part_alloc<detail::bval>(&db->_arena)),
+         _sview(part::part_alloc<detail::bval>(&db->_arena)),
          _hc(std::move(hc))
    {
       std::unique_lock g(db->_mx);
@@ -477,8 +473,8 @@ namespace walart
        : _db(o._db),
          _w(o._w),
          _s(o._s),
-         _wview(part::part_alloc<detail::pval>(&o._db->_arena)),
-         _sview(part::part_alloc<detail::pval>(&o._db->_arena)),
+         _wview(part::part_alloc<detail::bval>(&o._db->_arena)),
+         _sview(part::part_alloc<detail::bval>(&o._db->_arena)),
          _hc(std::move(o._hc))
    {
       o._wview.adopt_root(detail::root_ptr::null());  // source owns nothing

@@ -27,7 +27,7 @@
 #include <random>
 
 using Clock = std::chrono::steady_clock;
-using part::kv::pval;
+using bval = part::kv::bval;
 using K = hkv::detail::K;
 
 static uint64_t splitmix64(uint64_t x)
@@ -160,7 +160,7 @@ struct part_alloc6
 template <template <class> class Alloc>
 static void run_side(const char* name, const char* dirs, uint64_t total, uint64_t chunk)
 {
-   using engine = hkv::kv_tree<std::string_view, pval, hkv::mode::none, Alloc<pval>>;
+   using engine = hkv::kv_tree<std::string_view, bval, hkv::mode::none, Alloc<bval>>;
    using root_t = std::decay_t<decltype(std::declval<engine&>().root_handle())>;
 
    std::filesystem::path dir(dirs);
@@ -171,7 +171,7 @@ static void run_side(const char* name, const char* dirs, uint64_t total, uint64_
    ac.reuse_threshold = 0.125;  // match part::kv
    part::arena ar(ac);
    auto        ses = ar.start_session();
-   engine      t{Alloc<pval>(&ses)};
+   engine      t{Alloc<bval>(&ses)};
    root_t      live = root_t::null();
 
    printf("\n== %s (%zu-byte handle) ==\n", name, sizeof(root_t));
@@ -190,7 +190,7 @@ static void run_side(const char* name, const char* dirs, uint64_t total, uint64_
          {
             const uint64_t k = splitmix64(i);
             const uint64_t v = splitmix64(i ^ 0xDEADBEEFCAFEBABEull);
-            t.cow_insert(k8(k), pval::from(std::string_view(k8(v))));
+            t.cow_insert(k8(k), bval{std::string_view(k8(v))});
          }
          ptx.commit();
       }
@@ -212,13 +212,13 @@ static void run_side(const char* name, const char* dirs, uint64_t total, uint64_
       uint64_t found = 0, stepped = 0, ksum = 0;
       auto     t2 = Clock::now(), t3 = t2, t4 = t2, t5 = t2;
       {
-         engine view{Alloc<pval>(&ar)};
+         engine view{Alloc<bval>(&ar)};
          view.adopt_root(live);
          t2 = Clock::now();
          for (uint64_t r = 0; r < 100'000; ++r)
          {
             const uint64_t k = splitmix64(rng() % done);
-            pval           out;
+            bval           out;
             if (view.find(k8(k), out))
                ++found;
          }
@@ -259,7 +259,7 @@ static void run_side(const char* name, const char* dirs, uint64_t total, uint64_
    };
    std::map<K, agg> by;
    {
-      engine view{Alloc<pval>(&ar)};
+      engine view{Alloc<bval>(&ar)};
       view.adopt_root(live);
       view.census(
           [&](typename engine::census_row r)

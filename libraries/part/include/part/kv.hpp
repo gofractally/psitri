@@ -104,7 +104,7 @@ namespace part::kv
       }
       void find(key_view k)
       {
-         if constexpr (engine_t::cb_enabled)
+         if constexpr (engine_t::cb_create)
          {  // pages: position at lower_bound and demand an exact key match
             _it = _view.lower_bound(k);
             if (_it != _view.end() && (*_it).first != k)
@@ -140,7 +140,7 @@ namespace part::kv
       std::optional<S> get(key_view k) const
       {
          pval out;
-         const bool hit = engine_t::cb_enabled ? _view.pg_find(k, out) : _view.find(k, out);
+         const bool hit = engine_t::cb_create ? _view.pg_find(k, out) : _view.find(k, out);
          if (!hit)
             return std::nullopt;
          return S(out.b, out.len);
@@ -149,7 +149,7 @@ namespace part::kv
       bool get(key_view k, F&& f) const
       {
          pval out;
-         const bool hit = engine_t::cb_enabled ? _view.pg_find(k, out) : _view.find(k, out);
+         const bool hit = engine_t::cb_create ? _view.pg_find(k, out) : _view.find(k, out);
          if (!hit)
             return false;
          f(out.view());
@@ -407,14 +407,14 @@ namespace part::kv
 
    inline void transaction::upsert(key_view k, value_view v)
    {
-      if constexpr (engine_t::cb_enabled)
+      if constexpr (engine_t::cb_create)
          _ws->_t.pg_upsert(k, pval::from(v));  // diver rule: keys live in pages
       else
          _ws->_t.cow_insert(k, pval::from(v));
    }
    inline int transaction::remove(key_view k)
    {
-      if constexpr (engine_t::cb_enabled)
+      if constexpr (engine_t::cb_create)
          return _ws->_t.pg_remove(k) ? 0 : -1;
       else
          return _ws->_t.cow_remove(k) ? 0 : -1;
@@ -423,7 +423,7 @@ namespace part::kv
    inline bool transaction::get(key_view k, F&& fn) const
    {
       pval out;
-      const bool hit = engine_t::cb_enabled ? _ws->_t.pg_find(k, out) : _ws->_t.find(k, out);
+      const bool hit = engine_t::cb_create ? _ws->_t.pg_find(k, out) : _ws->_t.find(k, out);
       if (!hit)
          return false;
       fn(out.view());
@@ -433,7 +433,7 @@ namespace part::kv
    inline std::optional<S> transaction::get(key_view k) const
    {
       pval out;
-      const bool hit = engine_t::cb_enabled ? _ws->_t.pg_find(k, out) : _ws->_t.find(k, out);
+      const bool hit = engine_t::cb_create ? _ws->_t.pg_find(k, out) : _ws->_t.find(k, out);
       if (!hit)
          return std::nullopt;
       return S(out.b, out.len);

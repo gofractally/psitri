@@ -259,6 +259,66 @@ TEST_CASE("dense ladder: every tier boundary, narrow ranges, shared-seg widen")
    require_drained(db->store());
 }
 
+TEST_CASE("pages: reprefix overflow splits the original (diverging key, fat cells)")
+{
+   // A page whose LCP is deep and whose cells are near the inline cap: a key
+   // diverging early forces a reprefix whose longer suffixes can NOT fit the
+   // rebuilt page — the engine must split the original and retry, never drop.
+   auto dir = fs::temp_directory_path() / "part_kv_reprefix";
+   fs::remove_all(dir);
+   auto db  = part::kv::database::create(dir);
+   auto ses = db->start_write_session();
+
+   std::map<std::string, std::string> oracle;
+   const std::string deep(30, 'P');
+   {
+      auto tx = ses->start_transaction(0);
+      for (int i = 0; i < 50; ++i)
+      {
+         std::string k = deep + "x" + std::to_string(1000 + i) + std::string(38, char('a' + i % 26));
+         std::string v = mkval(uint64_t(i));
+         tx.upsert(k, v);
+         oracle[k] = v;
+      }
+      // the diverger: shares only 15 bytes with the page prefix
+      std::string dk = deep.substr(0, 15) + "Q";
+      tx.upsert(dk, "DIVERGED");
+      oracle[dk] = "DIVERGED";
+      tx.commit();
+   }
+   {
+      auto tx = ses->start_transaction(0);
+      for (auto& [k, v] : oracle)
+      {
+         auto got = tx.template get<std::string>(k);
+         INFO("key.len=" << k.size());
+         REQUIRE(got.has_value());
+         REQUIRE(*got == v);
+      }
+      tx.abort();
+   }
+   {  // scan agrees
+      auto c   = ses->get_root(0).snapshot_cursor();
+      auto oit = oracle.begin();
+      c.seek_begin();
+      while (!c.is_end())
+      {
+         REQUIRE(oit != oracle.end());
+         REQUIRE(std::string(c.key()) == oit->first);
+         c.next();
+         ++oit;
+      }
+      REQUIRE(oit == oracle.end());
+   }
+   {
+      auto tx = ses->start_transaction(0);
+      for (auto& [k, v] : oracle)
+         tx.remove(k);
+      tx.commit();
+   }
+   require_drained(db->store());
+}
+
 TEST_CASE("kv terms: a key that is a strict prefix of >64 same-byte siblings")
 {
    // Burst shape that silently dropped the bucket term under NDEBUG: the

@@ -1759,7 +1759,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      f.cur = 0;
                      if (!s->rh.term.is_null())
                      {
-                        if constexpr (kv_tree::cb_enabled)
+                        if constexpr (kv_tree::cb_create)
                         {  // page mode: a router term IS a page — descend into it
                            if (descend_(s->rh.term, maintain_ ? key_.len : 0))
                               return;
@@ -1789,7 +1789,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   f.cur = 0;
                   if (!rh->term.is_null())
                   {
-                     if constexpr (kv_tree::cb_enabled)
+                     if constexpr (kv_tree::cb_create)
                      {  // page mode: a router term IS a page — descend into it
                         if (descend_(rh->term, maintain_ ? key_.len : 0))
                            return;
@@ -2010,7 +2010,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             if (!root.is_null())
             {
                end_ = false;
-               if constexpr (kv_tree::cb_enabled)
+               if constexpr (kv_tree::cb_create)
                   pg_lb_(key, upper);  // page mode: floor route + in-page rank
                else if (!descend_lb_(root, key, 0, upper))
                   seek_();
@@ -5239,13 +5239,24 @@ namespace detail  // implementation types & node helpers — not part of the pub
                cb_hdr*          h = static_cast<cb_hdr*>(deref_(*slot));
                std::string_view pfx(reinterpret_cast<const char*>(h->prefix),
                                     h->rh.hdr.prefix_len);
+               bool must_split = false;
                if (key.size() < pfx.size() || key.compare(0, pfx.size(), pfx) != 0)
-               {  // loosen the page LCP, then re-run against the rebuilt page
-                  *slot = cb_reprefix_(*slot, lcp(key, pfx));
-                  h     = static_cast<cb_hdr*>(deref_(*slot));
-                  pfx   = std::string_view(reinterpret_cast<const char*>(h->prefix),
-                                           h->rh.hdr.prefix_len);
+               {  // loosen the page LCP, then re-run against the rebuilt page;
+                  // when the loosened rebuild can't fit, split the ORIGINAL
+                  // (its entries still share the tight prefix) and retry
+                  const Ptr np = cb_reprefix_(*slot, lcp(key, pfx));
+                  if (np.is_null())
+                     must_split = true;
+                  else
+                  {
+                     *slot = np;
+                     h     = static_cast<cb_hdr*>(deref_(*slot));
+                     pfx   = std::string_view(reinterpret_cast<const char*>(h->prefix),
+                                              h->rh.hdr.prefix_len);
+                  }
                }
+               if (!must_split)
+               {
                const std::string_view sfx = key.substr(pfx.size());
                if (sfx.empty())
                {  // key == page prefix: the page's own term
@@ -5272,6 +5283,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   count_ += unsigned(r == 1);
                   return r == 1;
                }
+               }  // !must_split
                // full: split by the shortest round separator near the median, retry
                cb_eref        refs[CB_MAX + 1];
                const unsigned n  = cb_collect_refs_(h, refs);
@@ -5949,8 +5961,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
             const std::string_view val(reinterpret_cast<const char*>(refs[i].val),
                                        refs[i].vlen);
             const int r = cb_insert_(nh, sfx, val);  // strip>0: never empty
-            assert(r >= 0);
-            (void)r;
+            if (r < 0)
+            {  // longer suffixes can exceed the page heap even at <=64
+               // entries: abandon — the caller SPLITS the original first
+               cow_release(np);
+               return Ptr::null();
+            }
          }
          cow_release(cur);
          return np;

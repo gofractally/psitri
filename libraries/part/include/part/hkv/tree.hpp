@@ -5958,55 +5958,50 @@ namespace detail  // implementation types & node helpers — not part of the pub
       static cb_sep_ cb_get_split_sep_(const cb_eref* es, unsigned n)
       {
          assert(n >= 2);
-         unsigned lo = (n * 3) / 8, hi = (n * 5) / 8;
-         if (lo < 1)
-            lo = 1;
-         if (hi >= n)
-            hi = n - 1;
-         if (hi < lo)
-            hi = lo;
-         unsigned best_i = lo, best_len = ~0u, best_tz = 0, best_dist = ~0u;
-         uint8_t  best_byte = 0;
-         for (unsigned i = lo; i <= hi; ++i)
+         // Dan's rule — no candidate scan: probe the two keys at median ±10%
+         // (60 keys → 24 and 36). Their common prefix is the divider prefix;
+         // the next byte is the MOST-ZEROS value strictly between them — one
+         // xor + clz (clear b's bits below the highest bit differing from a).
+         // The divider lands between the probes, so both halves keep >=~40%.
+         unsigned i = (n * 4) / 10, j = (n * 6) / 10;
+         if (j <= i)
+            j = i + 1;
+         if (j >= n)
          {
-            const cb_eref& a = es[i - 1];
-            const cb_eref& b = es[i];
-            const unsigned m = a.slen < b.slen ? a.slen : b.slen;
-            unsigned       p = 0;
-            while (p < m && a.sfx[p] == b.sfx[p])
-               ++p;
-            assert(p < b.slen && "strict order: b cannot be a prefix of a");
-            const int     lo_excl = p < a.slen ? int(a.sfx[p]) : -1;
-            const uint8_t hi_v    = b.sfx[p];
-            uint8_t       v       = hi_v;
-            unsigned      tz      = 0;
-            for (int z = 8; z >= 1; --z)
-            {
-               const uint8_t cand = uint8_t(hi_v & ~((1u << z) - 1u));
-               if (int(cand) > lo_excl)
-               {
-                  v  = cand;
-                  tz = unsigned(z);
-                  break;
-               }
-            }
-            const unsigned len  = p + 1;
-            const unsigned dist = i > n / 2 ? i - n / 2 : n / 2 - i;
-            if (len < best_len || (len == best_len && tz > best_tz) ||
-                (len == best_len && tz == best_tz && dist < best_dist))
-            {
-               best_i    = i;
-               best_len  = len;
-               best_tz   = tz;
-               best_dist = dist;
-               best_byte = v;
-            }
+            j = n - 1;
+            i = j - 1;
+         }
+         const cb_eref& a = es[i];
+         const cb_eref& b = es[j];
+         const unsigned m = a.slen < b.slen ? a.slen : b.slen;
+         unsigned       p = 0;
+         while (p < m && a.sfx[p] == b.sfx[p])
+            ++p;
+         assert(p < b.slen && "strict order: b cannot be a prefix of a");
+         uint8_t v;
+         if (p >= a.slen)
+            v = 0;  // a IS the shared prefix: any byte qualifies; 0 = max zeros
+         else
+         {
+            const uint8_t d = uint8_t(a.sfx[p] ^ b.sfx[p]);  // a<b ⇒ nonzero
+            const int     k = 31 - __builtin_clz(unsigned(d));
+            v               = uint8_t(b.sfx[p] & ~((1u << k) - 1u));  // >a[p], <=b[p]
          }
          cb_sep_ r;
-         r.index = uint16_t(best_i);
-         r.len   = uint8_t(best_len);
-         std::memcpy(r.b, es[best_i].sfx, best_len - 1);
-         r.b[best_len - 1] = best_byte;
+         r.len = uint8_t(p + 1);
+         std::memcpy(r.b, b.sfx, p);
+         r.b[p] = v;
+         // partition = first entry >= separator; it lies in (i, j]
+         unsigned idx = i + 1;
+         for (; idx <= j; ++idx)
+         {
+            const cb_eref& e  = es[idx];
+            const unsigned mm = e.slen < unsigned(p + 1) ? e.slen : unsigned(p + 1);
+            const int      c  = mm ? std::memcmp(e.sfx, r.b, mm) : 0;
+            if (c > 0 || (c == 0 && e.slen >= unsigned(p + 1)))
+               break;  // e >= separator
+         }
+         r.index = uint16_t(idx);
          return r;
       }
       // a key diverging from the page LCP loosens it: rebuild with the shorter

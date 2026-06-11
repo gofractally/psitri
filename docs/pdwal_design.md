@@ -1,6 +1,12 @@
-# PDWAL — part-backed Delta WAL over a heart base
+# WALART — part-backed Delta WAL over a heart base
 
-Status: DESIGN (2026-06-11). No code. Replaces the dwal delta machinery
+Status: DESIGN (2026-06-11, rev 2 after Dan's review). No code.
+**Packaging decision: walart is a WRAPPER layer over heart + part** (exactly as
+dwal wraps psitri) — heart stays a clean single-writer COW page engine, part
+stays a clean delta store; walart owns the W/S/H protocol, view composition,
+steal/merge scheduling, and exposes the psitri-shaped public API
+(database/write_session/transaction/cursor) so the kv-compat conformance body,
+bank bench, scale benches, and the sqlite layer drive it unchanged. Replaces the dwal delta machinery
 (`art::art_map` RW layer + arena + op-log WAL file) with **part** (COW,
 refcounted, persistent) and the base tier with **heart** (page model).
 Grounded in the measured numbers from `logs/` (2026-06-10/11 campaign) and a
@@ -84,8 +90,70 @@ Three refcounted roots per logical tree, all in SAL root slots:
 8. **One structure family.** art_map + bump arena + range_tombstone_list +
    wal_format/reader/writer/status all retire; part/heart are already
    shipped, tested (kv-compat: one test body drives both), and benched.
+9. **Per-transaction snapshot granularity at every tier.** Every part commit
+   publishes a pinnable refcounted root, so readers don't choose among four
+   fixed read_modes — they pin ANY committed W_n (hottest), S (warm), or any
+   retained H (cold) with near-zero latency. dwal's generation-granular
+   snapshots (one per RW→RO swap) become transaction-granular for free.
+10. **Replication falls out.** dwal's op-log doubles as a replication stream;
+   a COW delta seems to lose that — but the stolen root S IS the batch delta:
+   a background streamer walks S (entries + tombstones, key-sorted) and ships
+   it. Finer granularity is also cheap: diff W_n against W_{n-1} by walking
+   only where child addresses differ — COW sharing makes unchanged subtrees
+   pointer-equal, so the diff cost is proportional to the change set, not the
+   tree. No WAL needed for replication either.
 
-## 3. What today's dwal does that this spec must address (the gap list)
+## 3. Subtree counts (the pre-MVCC per-node summaries)
+
+Single-version COW makes restoring per-node child-count summaries viable
+again in heart. Across the merge interface the composition problem is real:
+a delta insert may be net-new or an overwrite of a base key, and a tombstone
+may or may not hit — so per-tier counts do NOT add up without per-key
+existence checks. Two-part resolution:
+
+- **The merge maintains exact base counts for free.** Applying a delta entry
+  into a heart page discovers insert-vs-overwrite (and tombstone hit-vs-miss)
+  as a byproduct, so the merger can carry exact count deltas up the COW spine
+  it is already rewriting. H's summaries are exact at every publish, no extra
+  I/O.
+- **Counts are a base-tier feature.** Queries against W/S views don't get
+  exact counts (the overlap is unknowable without lookups); callers that need
+  them use a flush barrier (§4) — Dan's "wait until your snapshot is merged",
+  formalized. If approximate hot counts ever matter, delta-entry tallies give
+  an upper bound.
+
+## 4. Pure-heart snapshots, subtree handles, and the expensive-op problem
+
+The blockchain requirement: take a heart `smart_ptr` snapshot and store it as
+a subtree value that passes through walart. Constraints this imposes:
+
+- **Subtrees live in heart's arena, full stop** (resolves gap §5.3 toward the
+  restriction): a subtree VALUE written through walart is created as a heart
+  tree immediately (heart's `create_subtree` machinery), retained in heart's
+  arena; the part delta carries only the root id + the pin. No cross-arena
+  refcount edges, and a freshly stored subtree handle is valid the moment the
+  transaction commits — no merge wait for NEW subtrees.
+- **Minting a pure-heart snapshot of live data = flush barrier, not world
+  halt.** `flush_barrier(upto = W_n)`: steal through W_n, merge, publish H';
+  H' is a coherent heart root covering everything committed through W_n —
+  pin it, store it, ship it. Cost is proportional to the pending delta, and
+  the writer keeps committing into a fresh lineage during the drain (it
+  blocks only if IT needs the barrier).
+- **Range-scoped flush** for the surgical case: the composite-key layout
+  (§5.4) makes "merge only this table/subtree's prefix range into the base"
+  natural — a subtree handle request drains just that range's pending
+  entries, bounded by that subtree's delta, not the whole WAL.
+- **Block-aligned cadence for free**: a chain that snapshots every block (or
+  N blocks) aligns steals with block boundaries — every merge publish IS the
+  block snapshot; the barrier only matters for mid-stream snapshot demands.
+- **Bulk deletes don't wait for cold**: `remove_range` is O(1) at write time
+  (range tombstone into the delta sidecar), shadows immediately in every
+  view, and the expensive page-level work happens lazily inside the merge.
+  The only operation that genuinely waits is minting a PURE base artifact —
+  and that wait is the scoped/full flush barrier above, never a halt of the
+  writer or readers.
+
+## 5. What today's dwal does that this spec must address (the gap list)
 
 Ordered by risk:
 
@@ -104,15 +172,11 @@ Ordered by risk:
    range-remove); (b) first-class range-tombstone VALUE in part. Spec choice:
    **(a)** — smallest part surface change, proven structure; revisit (b) if
    sidecar/root lifecycle gets awkward.
-3. **Subtree values** (`btree_value::kind::subtree`, `sal::tree_id` payload,
-   refcount cascade through layer destruction). PDWAL stores subtree refs as
-   part values with a discriminator (heart already has `value_type` +
-   first-class subtree values). OPEN: the delta (part arena) holding refs
-   into the base (heart arena) is a **cross-allocator refcount edge** —
-   needs an explicit protocol (retain-on-store in the owner arena, release
-   routed back on delta-entry death/overwrite/merge), or a restriction that
-   subtree values live only in the base and the delta stores them by id +
-   pin table. Must be decided before sqlite parity.
+3. **Subtree values** — RESOLVED to the restriction (§4): subtrees are heart
+   trees from birth, retained in heart's arena; the delta stores root id +
+   pin only. Release routed on delta-entry overwrite/death/merge. Remaining
+   work: the pin-table lifecycle and crash interaction (a pinned-but-unmerged
+   subtree must survive reopen → pins live in a SAL root-adjacent record).
 4. **Multi-root atomic commit.** dwal: 512 independent roots, sorted lock
    acquisition, multi-tx WAL framing (tx_id + participant count) so a
    cross-root commit recovers all-or-nothing. PDWAL options:
@@ -162,18 +226,20 @@ Ordered by risk:
     proved the session-per-thread pattern); reader sessions per-thread with
     hazard slots (part proven).
 
-## 4. Open questions (decide before building)
+## 6. Open questions (decide before building)
 
-- Composite-key single delta (§3.4a): confirm sqlite's table count / key
+- Composite-key single delta (§5.4a): confirm sqlite's table count / key
   shapes don't blow part's key length or hot-path comparisons.
-- Cross-arena subtree refs (§3.3): protocol vs restriction.
+- flush_barrier semantics under concurrent steals (barrier names a W_n; merge
+  generations must be ordered, which the single-stolen-generation policy
+  already gives).
 - Merge chunk size and whether the merger should prioritize key ranges that
   the writer is currently cold on (avoids stealing the writer's cache).
 - Does `durable`-view iteration need S's range tombstones materialized, or
   is cursor-time shadowing (today's model) kept verbatim? (Spec: keep.)
 - part crash-fuzz harness scope (§3.1) — this is the gating workstream.
 
-## 5. Measured-number cheat sheet (from logs/)
+## 7. Measured-number cheat sheet (from logs/)
 
 | quantity | value | source |
 |---|---|---|

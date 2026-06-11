@@ -102,7 +102,17 @@ namespace part::kv
          if (_it != _view.end() && (*_it).first == k)
             ++_it;
       }
-      void find(key_view k) { _it = _view.find(k); }
+      void find(key_view k)
+      {
+         if constexpr (engine_t::cb_enabled)
+         {  // pages: position at lower_bound and demand an exact key match
+            _it = _view.lower_bound(k);
+            if (_it != _view.end() && (*_it).first != k)
+               _it = _view.end();
+         }
+         else
+            _it = _view.find(k);
+      }
       void next() { ++_it; }
       bool is_end() const { return _it == _view.end(); }
 
@@ -130,7 +140,8 @@ namespace part::kv
       std::optional<S> get(key_view k) const
       {
          pval out;
-         if (!_view.find(k, out))
+         const bool hit = engine_t::cb_enabled ? _view.pg_find(k, out) : _view.find(k, out);
+         if (!hit)
             return std::nullopt;
          return S(out.b, out.len);
       }
@@ -138,7 +149,8 @@ namespace part::kv
       bool get(key_view k, F&& f) const
       {
          pval out;
-         if (!_view.find(k, out))
+         const bool hit = engine_t::cb_enabled ? _view.pg_find(k, out) : _view.find(k, out);
+         if (!hit)
             return false;
          f(out.view());
          return true;
@@ -232,6 +244,8 @@ namespace part::kv
          _t.cow_release(_t.root_handle());
          _t.adopt_root(root_ptr::null());
       }
+
+      engine_t& tree_dbg() noexcept { return _t; }  // debug/tools only
 
      private:
       friend class database;
@@ -393,17 +407,24 @@ namespace part::kv
 
    inline void transaction::upsert(key_view k, value_view v)
    {
-      _ws->_t.cow_insert(k, pval::from(v));
+      if constexpr (engine_t::cb_enabled)
+         _ws->_t.pg_upsert(k, pval::from(v));  // diver rule: keys live in pages
+      else
+         _ws->_t.cow_insert(k, pval::from(v));
    }
    inline int transaction::remove(key_view k)
    {
-      return _ws->_t.cow_remove(k) ? 0 : -1;
+      if constexpr (engine_t::cb_enabled)
+         return _ws->_t.pg_remove(k) ? 0 : -1;
+      else
+         return _ws->_t.cow_remove(k) ? 0 : -1;
    }
    template <class F>
    inline bool transaction::get(key_view k, F&& fn) const
    {
       pval out;
-      if (!_ws->_t.find(k, out))
+      const bool hit = engine_t::cb_enabled ? _ws->_t.pg_find(k, out) : _ws->_t.find(k, out);
+      if (!hit)
          return false;
       fn(out.view());
       return true;
@@ -412,7 +433,8 @@ namespace part::kv
    inline std::optional<S> transaction::get(key_view k) const
    {
       pval out;
-      if (!_ws->_t.find(k, out))
+      const bool hit = engine_t::cb_enabled ? _ws->_t.pg_find(k, out) : _ws->_t.find(k, out);
+      if (!hit)
          return std::nullopt;
       return S(out.b, out.len);
    }
@@ -424,16 +446,18 @@ namespace part::kv
       root_ptr  nr = _ws->_t.root_handle();
       std::lock_guard g(db->_root_mx);
       const root_ptr  old = db->_live_root;
-      if (nr.raw() != old.raw())
-      {
-         if (!nr.is_null() && !_ws->_t.cow_retain(nr))
-            throw std::runtime_error("part::kv: root retain refused");
-         db->_live_root = nr;
-         db->_live_raw.store(nr.is_null() ? 0 : nr.raw(), std::memory_order_seq_cst);
-         db->_arena.set_root(0, nr.is_null() ? 0 : nr.raw());
-         if (!old.is_null())
-            db->_retired.push_back(old.raw());  // strictly after the root moved on
-      }
+      // UNCONDITIONAL handoff: a raw-equality skip is unsound under line
+      // recycling — the new root GENERATION can land on the very line the
+      // retired root freed (fcache ABA), and skipping then strands _live's
+      // reference on a dead subtree. retain-new then retire-old is a net
+      // no-op for a genuinely unchanged root and correct for the collision.
+      if (!nr.is_null() && !_ws->_t.cow_retain(nr))
+         throw std::runtime_error("part::kv: root retain refused");
+      db->_live_root = nr;
+      db->_live_raw.store(nr.is_null() ? 0 : nr.raw(), std::memory_order_seq_cst);
+      db->_arena.set_root(0, nr.is_null() ? 0 : nr.raw());
+      if (!old.is_null())
+         db->_retired.push_back(old.raw());  // strictly after the root moved on
       db->drain_retired_();  // all reclamation on the writer thread (SPEC §7)
    }
 }  // namespace part::kv

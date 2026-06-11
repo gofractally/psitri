@@ -13,6 +13,7 @@
 // the documented next step; the dispatch and growth scaffolding already fits them.
 #pragma once
 #include <bit>
+#include <map>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -1644,17 +1645,19 @@ namespace detail  // implementation types & node helpers — not part of the pub
                {
                   if constexpr (kv_tree::cb_enabled)
                   {
+                     // pages are SELF-CONTAINED (entry key = page prefix + suffix):
+                     // the radix path above is the page's DIVIDER, never part of
+                     // the key — the key buffer restarts at zero inside a page
+                     // and pops back to the divider path (f.plen) on exit.
                      const auto* h =
                          reinterpret_cast<const typename kv_tree::cb_hdr*>(t_->deref_(child));
-                     uint32_t cb = uint32_t(base);
+                     uint32_t cb = 0;
                      if (maintain_)
                      {
-                        key_.len = base;
+                        key_.len = 0;
                         key_.append(h->prefix, h->rh.hdr.prefix_len);
                         cb = uint32_t(key_.len);
                      }
-                     // storage is totally ordered (cb_place_): iterate in rank
-                     // order directly — no per-descend sort, no order vector
                      stk_.push_back(Frame{child, -1, uint32_t(base), cb});
                      return false;
                   }
@@ -1756,6 +1759,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      f.cur = 0;
                      if (!s->rh.term.is_null())
                      {
+                        if constexpr (kv_tree::cb_enabled)
+                        {  // page mode: a router term IS a page — descend into it
+                           if (descend_(s->rh.term, maintain_ ? key_.len : 0))
+                              return;
+                           continue;
+                        }
                         sfx_ = nullptr; sfxlen_ = 0; full_str_ = nullptr;
                         emit_(s->rh.term);
                         if (maintain_) key_.len = f.cbase;
@@ -1780,6 +1789,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   f.cur = 0;
                   if (!rh->term.is_null())
                   {
+                     if constexpr (kv_tree::cb_enabled)
+                     {  // page mode: a router term IS a page — descend into it
+                        if (descend_(rh->term, maintain_ ? key_.len : 0))
+                           return;
+                        continue;
+                     }
                      sfx_ = nullptr; sfxlen_ = 0; full_str_ = nullptr;
                      emit_(rh->term);
                      if (maintain_) key_.len = f.cbase;
@@ -1995,7 +2010,93 @@ namespace detail  // implementation types & node helpers — not part of the pub
             if (!root.is_null())
             {
                end_ = false;
-               if (!descend_lb_(root, key, 0, upper)) seek_();
+               if constexpr (kv_tree::cb_enabled)
+                  pg_lb_(key, upper);  // page mode: floor route + in-page rank
+               else if (!descend_lb_(root, key, 0, upper))
+                  seek_();
+            }
+         }
+         // page-mode lower_bound: floor-route, walk the divider path pushing
+         // frames (cur = byte+1 so ++ resumes after the taken branch), enter the
+         // page, rank-position within it. A fully-smaller page leaves cur at
+         // nbranch and seek_ pops into the NEXT page.
+         void pg_lb_(std::string_view key, bool upper)
+         {
+            if constexpr (kv_tree::cb_enabled)
+            {
+               typename kv_tree::pg_div div;
+               t_->pg_route_(key, &div);
+               packed_ptr cur   = t_->root_;
+               size_t     depth = 0;
+               while (cur.tag() != K::cbucket)
+               {
+                  const K k = cur.tag();
+                  if (k == K::prefix_node)
+                  {
+                     const char* P = static_cast<const char*>(t_->deref_(cur));
+                     stk_.push_back(Frame{cur, 1, 0, 0});
+                     depth += pn_plen(P);
+                     cur = pn_next<Ptr>(const_cast<char*>(P));
+                     continue;
+                  }
+                  const auto* rh = static_cast<const router_hdr*>(t_->deref_(cur));
+                  if (k == K::setlist_u8 && rh->hdr.prefix_len)
+                     depth += rh->hdr.prefix_len;
+                  if (depth == div.len)
+                  {  // the page hangs at this node's term; branches resume at 0
+                     stk_.push_back(Frame{cur, 0, 0, 0});
+                     cur = rh->term;
+                     continue;
+                  }
+                  const uint8_t b = div.b[depth];
+                  stk_.push_back(Frame{cur, int32_t(b) + 1, 0, 0});
+                  cur = router_child_(cur, b);
+                  ++depth;
+               }
+               const auto* h = reinterpret_cast<const typename kv_tree::cb_hdr*>(t_->deref_(cur));
+               const std::string_view pfx(reinterpret_cast<const char*>(h->prefix),
+                                          h->rh.hdr.prefix_len);
+               // key vs (pfx + sfx), lexicographic
+               auto cmp_full = [&](std::string_view sfx) -> int
+               {
+                  const size_t m1 = std::min(pfx.size(), key.size());
+                  int          c  = m1 ? std::memcmp(pfx.data(), key.data(), m1) : 0;
+                  if (c != 0)
+                     return c;
+                  if (pfx.size() >= key.size())
+                     return (pfx.size() > key.size() || !sfx.empty()) ? 1 : 0;
+                  const std::string_view kr = key.substr(pfx.size());
+                  const size_t           m2 = std::min(sfx.size(), kr.size());
+                  c = m2 ? std::memcmp(sfx.data(), kr.data(), m2) : 0;
+                  if (c != 0)
+                     return c;
+                  return sfx.size() == kr.size() ? 0 : sfx.size() < kr.size() ? -1 : 1;
+               };
+               int32_t pos    = 0;
+               bool    term_q = false;
+               if (!h->rh.term.is_null())
+               {
+                  const int c = cmp_full(std::string_view{});
+                  term_q      = upper ? c > 0 : c >= 0;
+               }
+               if (!term_q)
+                  for (unsigned li = 0; li < 4; ++li)
+                  {
+                     if (!h->cnt[li] || h->sp_line[li].is_null())
+                        continue;
+                     const auto* sp = t_->cb_spl_(h, li);
+                     for (unsigned i = 0; i < h->cnt[li]; ++i)
+                     {
+                        auto      cell = t_->cb_cell_at_(h, sp->lref[i]);
+                        const int c    = cmp_full(cell.suffix());
+                        if (upper ? c > 0 : c >= 0)
+                           goto pg_lb_done;
+                        ++pos;
+                     }
+                  }
+            pg_lb_done:
+               stk_.push_back(Frame{cur, term_q ? -1 : pos, 0, 0});
+               seek_();
             }
          }
          // Pure position comparison (no key materialization): two iterators are equal iff
@@ -2065,13 +2166,13 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   if (fr.cur >= 1)
                   { const uint16_t st = s->stems[fr.cur - 1]; key_.push(uint8_t(st >> 8)); key_.push(uint8_t(st & 0xFF)); }
                }
-               else if (k == K::cbucket)  // composed bucket: replay its prefix
-
+               else if (k == K::cbucket)  // self-contained page: key restarts here
                {
                   if constexpr (kv_tree::cb_enabled)
                   {
                      const auto* h =
                          reinterpret_cast<const typename kv_tree::cb_hdr*>(t_->deref_(fr.node));
+                     key_.len = 0;
                      if (h->rh.hdr.prefix_len)
                         key_.append(h->prefix, h->rh.hdr.prefix_len);
                   }
@@ -3912,6 +4013,105 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
          return router_find(n, byte);
       }
+      // ── router_prev: the LARGEST branch byte STRICTLY BELOW `from` (from=256 → max).
+      // The floor-radix walk's mirror of router_next; structural path only (page routing,
+      // splits), so plain backward scans are fine.
+      static bool router_prev(setlist* sl, int from, uint8_t& ob, packed_ptr& oc) noexcept
+      {
+         int best = -1;
+         for (int i = 0; i < sl->rh.hdr.nbranch; ++i)
+            if (int(sl->bytes[i]) < from)
+               best = i;
+            else
+               break;  // bytes ascend
+         if (best < 0)
+            return false;
+         ob = sl->bytes[best];
+         oc = sl->branch[best];
+         return true;
+      }
+      template <int N>
+      static bool router_prev(cnode<N>* c, int from, uint8_t& ob, packed_ptr& oc) noexcept
+      {
+         for (int b = (from > 256 ? 256 : from) - 1; b >= 0; --b)
+         {
+            const auto* sg = &c->segs[b >> cnode<N>::SHIFT];
+            const int   d  = b & (cnode<N>::SEGW - 1);
+            if (bm_test(sg->present, d))
+            {
+               ob = uint8_t(b);
+               oc = sg->branch[bm_rank(sg->present, d)];
+               return true;
+            }
+         }
+         return false;
+      }
+      static bool router_prev(node_full* f, int from, uint8_t& ob, packed_ptr& oc) noexcept
+      {
+         for (int b = (from > 256 ? 256 : from) - 1; b >= 0; --b)
+         {
+            unsigned li, sl;
+            full_index<Ptr>(uint8_t(b), li, sl);
+            if (!f->ranges[li].ptr[sl].is_null())
+            {
+               ob = uint8_t(b);
+               oc = f->ranges[li].ptr[sl];
+               return true;
+            }
+         }
+         return false;
+      }
+      bool router_prev(node_fullx* x, int from, uint8_t& ob, packed_ptr& oc) const noexcept
+      {
+         for (int b = (from > 256 ? 256 : from) - 1; b >= 0; --b)
+         {
+            unsigned li, sl;
+            full_index<Ptr>(uint8_t(b), li, sl);
+            if (x->lines[li].is_null())
+            {  // skip the whole empty range
+               b = int(li * full_per_line_v<Ptr>);
+               continue;
+            }
+            cline_direct_t<Ptr>* L = fx_line_(x, li);
+            if (!L->ptr[sl].is_null())
+            {
+               ob = uint8_t(b);
+               oc = L->ptr[sl];
+               return true;
+            }
+         }
+         return false;
+      }
+      bool router_prev(node_cx* x, int from, uint8_t& ob, packed_ptr& oc) const noexcept
+      {
+         for (int b = (from > 256 ? 256 : from) - 1; b >= 0; --b)
+         {
+            const unsigned sg = unsigned(b) >> (8 - x->lg);
+            if (x->seglines[sg].is_null())
+            {
+               b = int(sg * cx_segw(x->lg));
+               continue;
+            }
+            uint8_t*       m = cx_seg_(x, sg);
+            const unsigned d = unsigned(b) & (cx_segw(x->lg) - 1);
+            if (bm_test(m, int(d)))
+            {
+               ob = uint8_t(b);
+               oc = cx_branches<Ptr>(m, x->lg)[bm_rank(m, int(d))];
+               return true;
+            }
+         }
+         return false;
+      }
+      static bool router_prev(setlist16*, int, uint8_t&, packed_ptr&) noexcept
+      {
+         assert(false && "page radix never contains wide-stem routers");
+         return false;
+      }
+      bool router_prev_d(packed_ptr cur, int from, uint8_t& ob, packed_ptr& oc) const noexcept
+      {
+         return with_router(cur, [&](auto* n) noexcept { return router_prev(n, from, ob, oc); });
+      }
       bool router_next_d(node_cx* n, int from, uint8_t& ob, packed_ptr& oc) const noexcept
       {
          return router_next(n, from, ob, oc);
@@ -4517,6 +4717,661 @@ namespace detail  // implementation types & node helpers — not part of the pub
       }
       uint32_t line_of(Ptr p) const noexcept { return uint32_t(p.raw() >> 4); }
 
+      static constexpr unsigned PG_DIV_MAX = 36 + 256;
+      struct pg_div  // a divider / radix-path buffer
+      {
+         uint8_t  b[PG_DIV_MAX];
+         uint16_t len = 0;
+         void     push(uint8_t c) noexcept
+         {
+            assert(len < PG_DIV_MAX);
+            b[len++] = c;
+         }
+         void append(const void* p, size_t n) noexcept
+         {
+            assert(len + n <= PG_DIV_MAX);
+            std::memcpy(b + len, p, n);
+            len += uint16_t(n);
+         }
+         std::string_view view() const noexcept
+         {
+            return std::string_view(reinterpret_cast<const char*>(b), len);
+         }
+      };
+      struct cb_eref  // one entry by reference: suffix + value views into the page
+      {
+         const uint8_t* sfx;
+         const uint8_t* val;
+         uint8_t        slen, vlen;
+      };
+      // ── v2 PAGE MODE (BUCKET_SPEC v2): diver rule + floor-routed divider radix ──
+      // Keys terminate in self-contained cbucket pages; the radix maps divider ->
+      // page with FLOOR semantics (page of the largest divider <= key); pages hang
+      // ONLY at router terms (or root_). All entry points are pg_*.
+
+      // floor route; when `div` is non-null it receives the routed page's divider
+      // (the exact radix path — what pg_path_mut_ re-descends by).
+      Ptr pg_route_(std::string_view key, pg_div* div = nullptr) const
+      {
+         Ptr    cur   = root_;
+         size_t depth = 0;
+         Ptr    fb_node = Ptr::null();  // deepest node passed that has a floor option
+         int    fb_from = -1;
+         size_t fb_dlen = 0;
+         for (;;)
+         {
+            const K k = cur.tag();
+            if (k == K::cbucket)
+               return cur;
+            if (k == K::prefix_node)
+            {
+               const char*      P = static_cast<const char*>(deref_(cur));
+               std::string_view PP(reinterpret_cast<const char*>(pn_pfx<Ptr>(P)), pn_plen(P));
+               std::string_view R = key.substr(depth);
+               const size_t     c = lcp(PP, R);
+               if (c < PP.size())
+               {
+                  if (c == R.size() || uint8_t(R[c]) < uint8_t(PP[c]))
+                     return pg_fallback_(key, fb_node, fb_from, fb_dlen, div);
+                  if (div)
+                     div->append(PP.data(), PP.size());
+                  return pg_max_(pn_next<Ptr>(const_cast<char*>(P)), div);
+               }
+               if (div)
+                  div->append(PP.data(), PP.size());
+               depth += PP.size();
+               cur = pn_next<Ptr>(const_cast<char*>(P));
+               continue;
+            }
+            // routers; a setlist may carry an inline prefix
+            const router_hdr* rh = static_cast<const router_hdr*>(deref_(cur));
+            if (k == K::setlist_u8 && rh->hdr.prefix_len)
+            {
+               const setlist*   sl = static_cast<const setlist*>(deref_(cur));
+               std::string_view PP(reinterpret_cast<const char*>(sl->prefix), rh->hdr.prefix_len);
+               std::string_view R = key.substr(depth);
+               const size_t     c = lcp(PP, R);
+               if (c < PP.size())
+               {
+                  if (c == R.size() || uint8_t(R[c]) < uint8_t(PP[c]))
+                     return pg_fallback_(key, fb_node, fb_from, fb_dlen, div);
+                  if (div)
+                     div->append(PP.data(), PP.size());
+                  return pg_max_(cur, div, /*skip_prefix=*/true);
+               }
+               if (div)
+                  div->append(PP.data(), PP.size());
+               depth += PP.size();
+            }
+            if (depth == key.size())
+            {
+               if (!rh->term.is_null())
+                  return rh->term;
+               return pg_fallback_(key, fb_node, fb_from, fb_dlen, div);
+            }
+            const uint8_t byte  = uint8_t(key[depth]);
+            Ptr           child =
+                with_router(cur, [&](auto* n) noexcept { return router_find_d(n, byte); });
+            if (!child.is_null())
+            {
+               uint8_t ob;
+               Ptr     oc;
+               if (!rh->term.is_null() || router_prev_d(cur, byte, ob, oc))
+               {  // a floor option exists at this node: remember it
+                  fb_node = cur;
+                  fb_from = byte;
+                  fb_dlen = div ? div->len : 0;
+               }
+               if (div)
+                  div->push(byte);
+               cur = child;
+               ++depth;
+               continue;
+            }
+            uint8_t ob;
+            Ptr     oc;
+            if (router_prev_d(cur, byte, ob, oc))
+            {
+               if (div)
+                  div->push(ob);
+               return pg_max_(oc, div);
+            }
+            if (!rh->term.is_null())
+               return rh->term;
+            return pg_fallback_(key, fb_node, fb_from, fb_dlen, div);
+         }
+      }
+      Ptr pg_fallback_(std::string_view, Ptr fb_node, int fb_from, size_t fb_dlen,
+                       pg_div* div) const
+      {
+         assert(!fb_node.is_null() && "the radix root always holds the \"\" divider");
+         if (div)
+            div->len = uint16_t(fb_dlen);
+         uint8_t ob;
+         Ptr     oc;
+         if (router_prev_d(fb_node, fb_from, ob, oc))
+         {
+            if (div)
+               div->push(ob);
+            return pg_max_(oc, div);
+         }
+         const router_hdr* rh = static_cast<const router_hdr*>(deref_(fb_node));
+         assert(!rh->term.is_null());
+         return rh->term;
+      }
+      // rightmost page of a subtree (largest divider under it)
+      Ptr pg_max_(Ptr cur, pg_div* div, bool skip_prefix = false) const
+      {
+         for (;;)
+         {
+            const K k = cur.tag();
+            if (k == K::cbucket)
+               return cur;
+            if (k == K::prefix_node)
+            {
+               const char* P = static_cast<const char*>(deref_(cur));
+               if (div)
+                  div->append(pn_pfx<Ptr>(P), pn_plen(P));
+               cur = pn_next<Ptr>(const_cast<char*>(P));
+               continue;
+            }
+            const router_hdr* rh = static_cast<const router_hdr*>(deref_(cur));
+            if (k == K::setlist_u8 && rh->hdr.prefix_len && !skip_prefix && div)
+               div->append(static_cast<const setlist*>(deref_(cur))->prefix,
+                           rh->hdr.prefix_len);
+            skip_prefix = false;
+            uint8_t ob;
+            Ptr     oc;
+            if (router_prev_d(cur, 256, ob, oc))
+            {
+               if (div)
+                  div->push(ob);
+               cur = oc;
+               continue;
+            }
+            assert(!rh->term.is_null() && "a routers-only subtree must hold a page");
+            return rh->term;
+         }
+      }
+      // equality re-descent by a collected divider, PRIVATIZING the path; returns
+      // the slot holding the routed page (a router's term slot, or root_ itself).
+      Ptr* pg_path_mut_(std::string_view D)
+      {
+         Ptr*   slot  = &root_;
+         size_t depth = 0;
+         for (;;)
+         {
+            if (cow_shared_(*slot))
+               cow_clone_into_(slot, *slot);
+            Ptr     cur = *slot;
+            const K k   = cur.tag();
+            if (k == K::cbucket)
+            {
+               assert(depth == D.size());
+               return slot;
+            }
+            if (k == K::prefix_node)
+            {
+               char* P = static_cast<char*>(deref_(cur));
+               assert(D.compare(depth, pn_plen(P),
+                                reinterpret_cast<const char*>(pn_pfx<Ptr>(P)), pn_plen(P)) == 0);
+               depth += pn_plen(P);
+               slot = reinterpret_cast<Ptr*>(P + 2);
+               continue;
+            }
+            router_hdr* rh = static_cast<router_hdr*>(deref_(cur));
+            if (k == K::setlist_u8 && rh->hdr.prefix_len)
+               depth += rh->hdr.prefix_len;  // verified by construction (route built D)
+            if (depth == D.size())
+            {
+               assert(!rh->term.is_null());
+               return &rh->term;
+            }
+            const uint8_t byte = uint8_t(D[depth]);
+            // privatize the branch line for the explicit kinds (per-line COW)
+            if constexpr (cow_enabled)
+            {
+               if (k == K::full_x)
+               {
+                  node_fullx* x = static_cast<node_fullx*>(deref_(cur));
+                  unsigned    li, sl2;
+                  full_index<Ptr>(byte, li, sl2);
+                  if (!x->lines[li].is_null() &&
+                      alloc_.hkv_ref(line_of(x->lines[li])) >= 2)
+                  {
+                     const Ptr old = x->lines[li];
+                     x->lines[li]  = fx_clone_line_(old);
+                     fx_release_line_(old);
+                  }
+               }
+               else if (k == K::cx)
+               {
+                  node_cx*       x  = static_cast<node_cx*>(deref_(cur));
+                  const unsigned sg = byte >> (8 - x->lg);
+                  if (!x->seglines[sg].is_null() &&
+                      alloc_.hkv_ref(line_of(x->seglines[sg])) >= 2)
+                  {
+                     const Ptr old   = x->seglines[sg];
+                     x->seglines[sg] = cx_clone_line_(old, x->lg);
+                     cx_release_line_(old, x->lg);
+                  }
+               }
+            }
+            Ptr* cs = with_router(cur, [&](auto* n) noexcept { return router_find_slot(n, byte); });
+            assert(cs && !cs->is_null());
+            slot = cs;
+            ++depth;
+            continue;
+         }
+      }
+      // hang page R at divider D (which is NOT yet present). Path nodes are
+      // privatized; missing structure is built; prefix edges split as needed.
+      void pg_link_(std::string_view D, Ptr R)
+      {
+         Ptr*   slot  = &root_;
+         size_t depth = 0;
+         for (;;)
+         {
+            if (!slot->is_null() && cow_shared_(*slot))
+               cow_clone_into_(slot, *slot);
+            Ptr cur = *slot;
+            if (cur.is_null())
+            {
+               *slot = pg_tail_(D, depth, R);
+               return;
+            }
+            const K k = cur.tag();
+            assert(k != K::cbucket && "pages hang at terms; link never lands on one");
+            if (k == K::prefix_node)
+            {
+               char*            P = static_cast<char*>(deref_(cur));
+               std::string_view PP(reinterpret_cast<const char*>(pn_pfx<Ptr>(P)), pn_plen(P));
+               std::string_view R2 = D.substr(depth);
+               const size_t     c  = lcp(PP, R2);
+               if (c == PP.size())
+               {
+                  depth += c;
+                  slot = reinterpret_cast<Ptr*>(P + 2);
+                  continue;
+               }
+               // split the edge at c
+               setlist* s2 = new_setlist();
+               Ptr      sp = pack_(s2, K::setlist_u8);
+               Ptr old_tail = pn_next<Ptr>(P);
+               if (PP.size() - c > 1)
+                  old_tail = make_prefix(std::string_view(PP.substr(c + 1)), old_tail);
+               const bool ok = setlist_set(s2, uint8_t(PP[c]), old_tail);
+               assert(ok);
+               (void)ok;
+               if (depth + c == D.size())
+               {
+                  s2->rh.term         = R;
+                  s2->rh.hdr.has_term = 1;
+               }
+               else
+               {
+                  const bool ok2 =
+                      setlist_set(s2, uint8_t(D[depth + c]), pg_tail_(D, depth + c + 1, R));
+                  assert(ok2);
+                  (void)ok2;
+               }
+               Ptr out = c ? make_prefix(std::string_view(PP.substr(0, c)), sp) : sp;
+               *slot   = out;
+               node_free_(P, pn_size<Ptr>(uint16_t(PP.size())));  // children moved
+               return;
+            }
+            router_hdr* rh = static_cast<router_hdr*>(deref_(cur));
+            if (k == K::setlist_u8 && rh->hdr.prefix_len)
+            {
+               setlist*         sl = static_cast<setlist*>(deref_(cur));
+               std::string_view PP(reinterpret_cast<const char*>(sl->prefix), rh->hdr.prefix_len);
+               if (lcp(PP, D.substr(depth)) < PP.size())
+               {  // divider diverges inside the inline prefix: lift it, re-loop
+                  uint8_t pfx[setlist::PREFIX_CAP];
+                  std::memcpy(pfx, sl->prefix, PP.size());
+                  Ptr pnp = make_prefix(std::string_view(reinterpret_cast<char*>(pfx), PP.size()), cur);
+                  sl->rh.hdr.prefix_len = 0;
+                  *slot                 = pnp;
+                  continue;  // handled by the prefix_node arm
+               }
+               depth += PP.size();
+            }
+            if (depth == D.size())
+            {
+               assert(rh->term.is_null() && "divider already present");
+               rh->term         = R;
+               rh->hdr.has_term = 1;
+               return;
+            }
+            const uint8_t byte = uint8_t(D[depth]);
+            if constexpr (cow_enabled)
+            {
+               if (k == K::full_x)
+               {
+                  node_fullx* x = static_cast<node_fullx*>(deref_(cur));
+                  unsigned    li, sl2;
+                  full_index<Ptr>(byte, li, sl2);
+                  if (!x->lines[li].is_null() &&
+                      alloc_.hkv_ref(line_of(x->lines[li])) >= 2)
+                  {
+                     const Ptr old = x->lines[li];
+                     x->lines[li]  = fx_clone_line_(old);
+                     fx_release_line_(old);
+                  }
+               }
+               else if (k == K::cx)
+               {
+                  node_cx*       x  = static_cast<node_cx*>(deref_(cur));
+                  const unsigned sg = byte >> (8 - x->lg);
+                  if (!x->seglines[sg].is_null() &&
+                      alloc_.hkv_ref(line_of(x->seglines[sg])) >= 2)
+                  {
+                     const Ptr old   = x->seglines[sg];
+                     x->seglines[sg] = cx_clone_line_(old, x->lg);
+                     cx_release_line_(old, x->lg);
+                  }
+               }
+            }
+            Ptr* cs = with_router(cur, [&](auto* n) noexcept { return router_find_slot(n, byte); });
+            if (cs)
+            {
+               slot = cs;
+               ++depth;
+               continue;
+            }
+            Ptr child = pg_tail_(D, depth + 1, R);
+            build_guard gc{this, &child};
+            grow_router_(slot, cur, byte, child);
+            gc.release();
+            return;
+         }
+      }
+      Ptr pg_tail_(std::string_view D, size_t depth, Ptr R)
+      {
+         setlist* s2         = new_setlist();
+         s2->rh.term         = R;
+         s2->rh.hdr.has_term = 1;
+         Ptr sp              = pack_(s2, K::setlist_u8);
+         return depth == D.size() ? sp : make_prefix(D.substr(depth), sp);
+      }
+      // remove divider D: clears the term slot (caller releases the page) and
+      // cascades now-empty nodes; then collapses a term-only root router.
+      void pg_unlink_(std::string_view D)
+      {
+         if (pg_unlink_rec_(&root_, D, 0))
+            root_ = Ptr::null();  // children leave slots dangling for the PARENT
+         if (root_.is_null() || root_.tag() == K::cbucket || root_.tag() == K::prefix_node)
+            return;
+         router_hdr* rh = static_cast<router_hdr*>(deref_(root_));
+         if (rh->hdr.nbranch == 0 && !rh->term.is_null())
+         {  // term-only root router: the "" page becomes the root
+            const Ptr t      = rh->term;
+            rh->term         = Ptr::null();
+            rh->hdr.has_term = 0;
+            cow_release(root_);
+            root_ = t;
+         }
+      }
+      bool pg_unlink_rec_(Ptr* slot, std::string_view D, size_t depth)
+      {
+         if (cow_shared_(*slot))
+            cow_clone_into_(slot, *slot);
+         Ptr     cur = *slot;
+         const K k   = cur.tag();
+         if (k == K::prefix_node)
+         {
+            char* P = static_cast<char*>(deref_(cur));
+            if (pg_unlink_rec_(reinterpret_cast<Ptr*>(P + 2), D, depth + pn_plen(P)))
+            {
+               node_free_(P, pn_size<Ptr>(pn_plen(P)));
+               return true;  // slot left dangling: the PARENT's router_remove
+            }                // must see non-null to fix its counts/lines
+            return false;
+         }
+         router_hdr* rh = static_cast<router_hdr*>(deref_(cur));
+         if (k == K::setlist_u8 && rh->hdr.prefix_len)
+            depth += rh->hdr.prefix_len;
+         if (depth == D.size())
+         {
+            assert(!rh->term.is_null());
+            rh->term         = Ptr::null();  // page released by the caller
+            rh->hdr.has_term = 0;
+         }
+         else
+         {
+            const uint8_t byte = uint8_t(D[depth]);
+            // privatize the branch LINE before writing through it (per-line COW —
+            // pg_path_mut_/pg_link_ do the same; without this the descent slot
+            // and router_remove mutate a line shared with older generations)
+            if constexpr (cow_enabled)
+            {
+               if (k == K::full_x)
+               {
+                  node_fullx* x = static_cast<node_fullx*>(deref_(cur));
+                  unsigned    li, sl2;
+                  full_index<Ptr>(byte, li, sl2);
+                  if (!x->lines[li].is_null() &&
+                      alloc_.hkv_ref(line_of(x->lines[li])) >= 2)
+                  {
+                     const Ptr old = x->lines[li];
+                     x->lines[li]  = fx_clone_line_(old);
+                     fx_release_line_(old);
+                  }
+               }
+               else if (k == K::cx)
+               {
+                  node_cx*       x  = static_cast<node_cx*>(deref_(cur));
+                  const unsigned sg = byte >> (8 - x->lg);
+                  if (!x->seglines[sg].is_null() &&
+                      alloc_.hkv_ref(line_of(x->seglines[sg])) >= 2)
+                  {
+                     const Ptr old   = x->seglines[sg];
+                     x->seglines[sg] = cx_clone_line_(old, x->lg);
+                     cx_release_line_(old, x->lg);
+                  }
+               }
+            }
+            Ptr* cs = with_router(cur, [&](auto* n) noexcept { return router_find_slot(n, byte); });
+            assert(cs && !cs->is_null());
+            if (!pg_unlink_rec_(cs, D, depth + 1))
+               return false;
+            router_remove(cur, byte);  // nulls the (freed) slot + fixes counts
+         }
+         if (rh->hdr.nbranch == 0 && rh->term.is_null())
+         {
+            cow_release(cur);  // empty shell (no children to cascade into);
+            return true;       // slot dangles — the parent cleans it up
+         }
+         return false;
+      }
+
+      // ── page-mode entry points ──────────────────────────────────────────────
+      bool pg_find(std::string_view key, T& out) const
+      {
+         if constexpr (cb_enabled)
+         {
+            if (root_.is_null())
+               return false;
+            const Ptr     pg = pg_route_(key);
+            const cb_hdr* h  = static_cast<const cb_hdr*>(deref_(pg));
+            const std::string_view pfx(reinterpret_cast<const char*>(h->prefix),
+                                       h->rh.hdr.prefix_len);
+            if (key.size() < pfx.size() || key.compare(0, pfx.size(), pfx) != 0)
+               return false;
+            const std::string_view sfx = key.substr(pfx.size());
+            if (sfx.empty())
+            {
+               if (h->rh.term.is_null())
+                  return false;
+               out = *leaf_val(static_cast<const char*>(deref_(h->rh.term)));
+               return true;
+            }
+            const uint8_t* c = cb_find_(h, sfx);
+            if (!c)
+               return false;
+            out = T::from_bytes(cb_cell{const_cast<uint8_t*>(c)}.value());
+            return true;
+         }
+         else
+            return false;
+      }
+      template <bool Assign = true>
+      bool pg_upsert(std::string_view key, T&& v)
+      {
+         if constexpr (!cb_enabled)
+            return false;
+         else
+         {
+            if (root_.is_null())
+               root_ = cb_make0_(key.substr(0, std::min<size_t>(key.size(), 36)));
+            pg_div div;
+            for (int pass = 0;; ++pass)
+            {
+               assert(pass < 64 && "page split did not converge");
+               div.len = 0;
+               const Ptr routed = pg_route_(key, &div);
+               assert(key >= div.view() && "floor route: divider must not exceed the key");
+               Ptr* slot = pg_path_mut_(div.view());
+               assert(slot->raw() == routed.raw() &&
+                      "collected divider must re-reach the routed page");
+               if (cow_shared_(*slot))
+                  cow_clone_into_(slot, *slot);
+               cb_hdr*          h = static_cast<cb_hdr*>(deref_(*slot));
+               std::string_view pfx(reinterpret_cast<const char*>(h->prefix),
+                                    h->rh.hdr.prefix_len);
+               if (key.size() < pfx.size() || key.compare(0, pfx.size(), pfx) != 0)
+               {  // loosen the page LCP, then re-run against the rebuilt page
+                  *slot = cb_reprefix_(*slot, lcp(key, pfx));
+                  h     = static_cast<cb_hdr*>(deref_(*slot));
+                  pfx   = std::string_view(reinterpret_cast<const char*>(h->prefix),
+                                           h->rh.hdr.prefix_len);
+               }
+               const std::string_view sfx = key.substr(pfx.size());
+               if (sfx.empty())
+               {  // key == page prefix: the page's own term
+                  if (h->rh.term.is_null())
+                  {
+                     h->rh.term         = cb_leaf_(std::string_view{}, std::move(v));
+                     h->rh.hdr.has_term = 1;
+                     ++count_;
+                     return true;
+                  }
+                  if constexpr (Assign)
+                  {
+                     const Ptr old = h->rh.term;
+                     h->rh.term    = cb_leaf_(std::string_view{}, std::move(v));
+                     cow_release(old);
+                  }
+                  return false;
+               }
+               const auto bytes = v.to_bytes();
+               const int  r     = cb_insert_<Assign>(
+                   h, sfx, std::string_view(bytes.data(), bytes.size()));
+               if (r >= 0)
+               {
+                  count_ += unsigned(r == 1);
+                  return r == 1;
+               }
+               // full: split by the shortest round separator near the median, retry
+               cb_eref        refs[CB_MAX + 1];
+               const unsigned n  = cb_collect_refs_(h, refs);
+               const auto     sp = cb_get_split_sep_(refs, n);
+               pg_div         nd;  // divider = page prefix + separator
+               nd.append(pfx.data(), pfx.size());
+               nd.append(sp.b, sp.len);
+               const Ptr L = cb_build_page_refs_(pfx, refs, 0, sp.index);
+               const Ptr R = cb_build_page_refs_(pfx, refs, sp.index, n);
+               // L/R built from views into the OLD page: release it only now
+               if (slot == &root_)
+               {  // the root page grows a radix above it (the "" divider = term)
+                  const Ptr old       = root_;
+                  setlist*  s2        = new_setlist();
+                  s2->rh.term         = L;
+                  s2->rh.hdr.has_term = 1;
+                  root_               = pack_(s2, K::setlist_u8);
+                  pg_link_(nd.view(), R);
+                  cow_release(old);
+               }
+               else
+               {
+                  const Ptr old = *slot;  // re-resolve below: pg_link_ can restructure
+                  pg_link_(nd.view(), R);
+                  Ptr* s3 = pg_path_mut_(div.view());
+                  assert(s3->raw() == old.raw());
+                  *s3 = L;
+                  cow_release(old);
+               }
+            }
+         }
+      }
+      bool pg_remove(std::string_view key)
+      {
+         if constexpr (!cb_enabled)
+            return false;
+         else
+         {
+            if (root_.is_null())
+               return false;
+            {  // const miss-check first: no privatization on misses
+               T tmp;
+               if (!pg_find(key, tmp))
+                  return false;
+            }
+            pg_div div;
+            const Ptr routed = pg_route_(key, &div);
+            Ptr*      slot   = pg_path_mut_(div.view());
+            assert(slot->raw() == routed.raw() &&
+                   "collected divider must re-reach the routed page");
+            (void)routed;
+            if (cow_shared_(*slot))
+               cow_clone_into_(slot, *slot);
+            cb_hdr*                h = static_cast<cb_hdr*>(deref_(*slot));
+            const std::string_view pfx(reinterpret_cast<const char*>(h->prefix),
+                                       h->rh.hdr.prefix_len);
+            const std::string_view sfx = key.substr(pfx.size());
+            if (sfx.empty())
+            {
+               cow_release(h->rh.term);
+               h->rh.term         = Ptr::null();
+               h->rh.hdr.has_term = 0;
+            }
+            else
+            {
+               const bool ok = cb_remove_(h, sfx);
+               assert(ok);
+               (void)ok;
+            }
+            --count_;
+            if (h->rh.hdr.nbranch == 0 && !h->rh.hdr.has_term)
+            {
+               if (slot == &root_)
+               {
+                  cow_release(root_);
+                  root_ = Ptr::null();
+               }
+               else if (div.len)
+               {  // drop the divider; the "" page persists while dividers remain
+                  const Ptr dead = *slot;
+                  pg_unlink_(div.view());
+                  cow_release(dead);
+                  // the unlink may have collapsed the radix onto the "" page:
+                  // if that page is ALSO empty, the tree is empty
+                  if (!root_.is_null() && root_.tag() == K::cbucket)
+                  {
+                     const cb_hdr* rhh = static_cast<const cb_hdr*>(deref_(root_));
+                     if (rhh->rh.hdr.nbranch == 0 && !rhh->rh.hdr.has_term)
+                     {
+                        cow_release(root_);
+                        root_ = Ptr::null();
+                     }
+                  }
+               }
+            }
+            return true;
+         }
+      }
+
+
       // +1 on a subtree root (root-slot / snapshot bookkeeping). False would
       // mean 190 state refs on one node — unreachable under sane root usage.
       bool cow_retain(Ptr p)
@@ -4860,7 +5715,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
       };
 #ifndef PART_CBUCKET
-#define PART_CBUCKET 0  // phase 1 (Dan): no-bucket default; dense ladder carries size. Bucket rework (heart diver rule) = phase 2.
+#define PART_CBUCKET 1  // phase 2: diver rule — keys live in pages over a floor-routed divider radix (BUCKET_SPEC v2)
                         // WIP: 3 oracle-found bugs fixed (run-spanning lookup,
                         // recursive split, burst capacity); a duplicate-update
                         // edge remains — needs the BUCKET_SPEC TDD pass before
@@ -4889,8 +5744,13 @@ namespace detail  // implementation types & node helpers — not part of the pub
 
       // create a bucket from two colliding entries (the leaf-split replacement):
       // CL0 + FP + SP0 + one page = 5 lines
-      Ptr cb_make2_(std::string_view pfx, std::string_view s1, std::string_view v1,
-                    std::string_view s2, std::string_view v2)
+      struct cb_ent_  // (sfx holds a SUFFIX in the v1 burst, a FULL key in v2 pages)
+      {
+         std::string sfx, val;
+      };
+      // a fresh EMPTY page: CL0 + FP + first SP line, no entries (the diver
+      // rule starts every tree as one of these and splits never re-shard)
+      Ptr cb_make0_(std::string_view pfx)
       {
          cb_hdr* h = static_cast<cb_hdr*>(node_alloc_(128));
          std::memset(h, 0, 128);
@@ -4899,7 +5759,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             pl = Ptr::null();
          for (auto& sl : h->sp_line)
             sl = Ptr::null();
-         h->rh.hdr.prefix_len = uint16_t(pfx.size() & 63);
+         h->rh.hdr.prefix_len = uint16_t(std::min<size_t>(pfx.size(), 36));
          std::memcpy(h->prefix, pfx.data(), std::min<size_t>(pfx.size(), 36));
          h->fp_line    = pack_(node_alloc_(128), K::node_full);
          h->sp_line[0] = pack_(node_alloc_(128), K::node_full);
@@ -4907,7 +5767,13 @@ namespace detail  // implementation types & node helpers — not part of the pub
          std::memset(deref_(h->sp_line[0]), 0, 128);
          h->open_spi  = 0;
          h->open_off8 = 0;  // page_line[0] null: first alloc opens it
-         const Ptr hp = pack_(h, K::cbucket);
+         return pack_(h, K::cbucket);
+      }
+      Ptr cb_make2_(std::string_view pfx, std::string_view s1, std::string_view v1,
+                    std::string_view s2, std::string_view v2)
+      {
+         const Ptr hp = cb_make0_(pfx);
+         cb_hdr*   h  = static_cast<cb_hdr*>(deref_(hp));
          // a key that IS the common prefix has an empty suffix: it lives in
          // the term (lookups for it end at depth == key.size())
          auto put = [&](std::string_view sfx, std::string_view val)
@@ -4923,6 +5789,171 @@ namespace detail  // implementation types & node helpers — not part of the pub
          put(s1, v1);
          put(s2, v2);
          return hp;
+      }
+
+      // ── v2 page machinery — NO dynamic temporaries (Dan): splits/rebuilds
+      // work on stack REF arrays pointing into the live page (cells stay valid
+      // until the old page is released, after the builds), and dividers live in
+      // fixed buffers bounded by prefix(36) + suffix(255) + 1.
+      // refs in key order (term — the prefix-exact key, slen 0 — first); count.
+      unsigned cb_collect_refs_(const cb_hdr* h, cb_eref* out) const
+      {
+         unsigned n = 0;
+         if (!h->rh.term.is_null())
+         {
+            const auto b = leaf_val(static_cast<const char*>(deref_(h->rh.term)))->to_bytes();
+            out[n++] = cb_eref{nullptr, reinterpret_cast<const uint8_t*>(b.data()), 0,
+                               uint8_t(b.size())};
+         }
+         for (unsigned li = 0; li < 4; ++li)
+         {
+            if (!h->cnt[li] || h->sp_line[li].is_null())
+               continue;
+            const cb_sp* sp = cb_spl_(h, li);
+            for (unsigned i = 0; i < h->cnt[li]; ++i)
+            {
+               cb_cell c = cb_cell_at_(h, sp->lref[i]);
+               out[n++]  = cb_eref{c.p + 3, c.p + 3 + c.p[0], c.p[0], c.p[1]};
+            }
+         }
+         return n;
+      }
+      // ONE page from ref entries [lo,hi): new prefix = old prefix + the range's
+      // suffix-space LCP (capped at 36 total) — splits only TIGHTEN, so suffixes
+      // slice without concatenation.
+      Ptr cb_build_page_refs_(std::string_view old_pfx, const cb_eref* es, unsigned lo,
+                              unsigned hi)
+      {
+         assert(hi > lo && hi - lo <= CB_MAX);
+         size_t scl = es[lo].slen;  // suffix-space LCP over the range
+         for (unsigned i = lo + 1; i < hi && scl; ++i)
+         {
+            const size_t m = std::min<size_t>(scl, es[i].slen);
+            size_t       c = 0;
+            while (c < m && es[lo].sfx[c] == es[i].sfx[c])
+               ++c;
+            scl = c;
+         }
+         scl = std::min<size_t>(scl, old_pfx.size() < 36 ? 36 - old_pfx.size() : 0);
+         uint8_t pfxb[36];
+         std::memcpy(pfxb, old_pfx.data(), old_pfx.size());
+         if (scl)
+            std::memcpy(pfxb + old_pfx.size(), es[lo].sfx, scl);
+         const Ptr hp = cb_make0_(
+             std::string_view(reinterpret_cast<const char*>(pfxb), old_pfx.size() + scl));
+         cb_hdr* h = static_cast<cb_hdr*>(deref_(hp));
+         for (unsigned i = lo; i < hi; ++i)
+         {
+            const std::string_view sfx(reinterpret_cast<const char*>(es[i].sfx) + scl,
+                                       es[i].slen - scl);
+            const std::string_view val(reinterpret_cast<const char*>(es[i].val), es[i].vlen);
+            if (sfx.empty())
+            {
+               h->rh.term         = cb_leaf_(std::string_view{}, T::from_bytes(val));
+               h->rh.hdr.has_term = 1;
+            }
+            else
+            {
+               const int r = cb_insert_(h, sfx, val);
+               assert(r >= 0 && "<= CB_MAX sorted entries always fit a fresh page");
+               (void)r;
+            }
+         }
+         return hp;
+      }
+      // heart's split rule in SUFFIX space: candidates in the middle window
+      // [3n/8, 5n/8]; the separator between neighbours a,b is b[0..p]+v with
+      // v in (a[p], b[p]] snapped toward TRAILING ZEROS; pick (shortest,
+      // roundest, most median). The divider = page prefix + separator.
+      struct cb_sep_
+      {
+         uint16_t index;
+         uint8_t  len;
+         uint8_t  b[260];
+      };
+      static cb_sep_ cb_get_split_sep_(const cb_eref* es, unsigned n)
+      {
+         assert(n >= 2);
+         unsigned lo = (n * 3) / 8, hi = (n * 5) / 8;
+         if (lo < 1)
+            lo = 1;
+         if (hi >= n)
+            hi = n - 1;
+         if (hi < lo)
+            hi = lo;
+         unsigned best_i = lo, best_len = ~0u, best_tz = 0, best_dist = ~0u;
+         uint8_t  best_byte = 0;
+         for (unsigned i = lo; i <= hi; ++i)
+         {
+            const cb_eref& a = es[i - 1];
+            const cb_eref& b = es[i];
+            const unsigned m = a.slen < b.slen ? a.slen : b.slen;
+            unsigned       p = 0;
+            while (p < m && a.sfx[p] == b.sfx[p])
+               ++p;
+            assert(p < b.slen && "strict order: b cannot be a prefix of a");
+            const int     lo_excl = p < a.slen ? int(a.sfx[p]) : -1;
+            const uint8_t hi_v    = b.sfx[p];
+            uint8_t       v       = hi_v;
+            unsigned      tz      = 0;
+            for (int z = 8; z >= 1; --z)
+            {
+               const uint8_t cand = uint8_t(hi_v & ~((1u << z) - 1u));
+               if (int(cand) > lo_excl)
+               {
+                  v  = cand;
+                  tz = unsigned(z);
+                  break;
+               }
+            }
+            const unsigned len  = p + 1;
+            const unsigned dist = i > n / 2 ? i - n / 2 : n / 2 - i;
+            if (len < best_len || (len == best_len && tz > best_tz) ||
+                (len == best_len && tz == best_tz && dist < best_dist))
+            {
+               best_i    = i;
+               best_len  = len;
+               best_tz   = tz;
+               best_dist = dist;
+               best_byte = v;
+            }
+         }
+         cb_sep_ r;
+         r.index = uint16_t(best_i);
+         r.len   = uint8_t(best_len);
+         std::memcpy(r.b, es[best_i].sfx, best_len - 1);
+         r.b[best_len - 1] = best_byte;
+         return r;
+      }
+      // a key diverging from the page LCP loosens it: rebuild with the shorter
+      // prefix (heart: "factoring only ever loosens"); returns the new page.
+      // The stripped prefix bytes are re-joined per entry in one stack buffer.
+      Ptr cb_reprefix_(Ptr cur, size_t new_plen)
+      {
+         cb_hdr* h = static_cast<cb_hdr*>(deref_(cur));
+         assert(new_plen < h->rh.hdr.prefix_len);
+         cb_eref        refs[CB_MAX + 1];
+         const unsigned n = cb_collect_refs_(h, refs);
+         const std::string_view old_pfx(reinterpret_cast<const char*>(h->prefix),
+                                        h->rh.hdr.prefix_len);
+         const size_t strip = old_pfx.size() - new_plen;
+         const Ptr    np    = cb_make0_(old_pfx.substr(0, new_plen));
+         cb_hdr*      nh    = static_cast<cb_hdr*>(deref_(np));
+         uint8_t      kb[36 + 256];
+         std::memcpy(kb, old_pfx.data() + new_plen, strip);
+         for (unsigned i = 0; i < n; ++i)
+         {
+            std::memcpy(kb + strip, refs[i].sfx, refs[i].slen);
+            const std::string_view sfx(reinterpret_cast<const char*>(kb),
+                                       strip + refs[i].slen);
+            const std::string_view val(reinterpret_cast<const char*>(refs[i].val),
+                                       refs[i].vlen);
+            const int r = cb_insert_(nh, sfx, val);  // strip>0: never empty
+            assert(r >= 0);
+            (void)r;
+         }
+         cow_release(cur);
+         return np;
       }
 
       // insert-or-update. Returns: 0 updated, 1 inserted, -1 needs split.
@@ -5133,10 +6164,6 @@ namespace detail  // implementation types & node helpers — not part of the pub
       // overflow: burst into children keyed by the next byte; groups bigger
       // than a comfortable bucket recurse (strip shared bytes into prefix
       // wrappers), so no entry is ever dropped regardless of skew.
-      struct cb_ent_
-      {
-         std::string sfx, val;
-      };
       Ptr cb_build_(std::vector<cb_ent_>& es, size_t lo, size_t hi)
       {
          if (hi - lo == 1)
@@ -5319,6 +6346,121 @@ namespace detail  // implementation types & node helpers — not part of the pub
 
      private:
      public:
+      // ── debug refcheck: visit every line the live tree REFERENCES with the
+      // count of references the tree itself holds (root extra-refs passed in).
+      // The caller compares against the arena's refcount bytes.
+      template <class F>
+      void refcheck(F&& f, unsigned root_extra = 0) const
+      {
+         if (root_.is_null())
+            return;
+         std::map<uint32_t, uint32_t> exp;
+         refwalk_(root_, exp);
+         exp[line_of(root_)] += root_extra;
+         for (auto& [ln, n] : exp)
+            f(ln, n);
+      }
+      void refadd_(std::map<uint32_t, uint32_t>& exp, Ptr p, unsigned nlines = 1) const
+      {
+         for (unsigned k2 = 0; k2 < nlines; ++k2)
+            ++exp[line_of(p) + k2];
+      }
+      void refwalk_(Ptr cur, std::map<uint32_t, uint32_t>& exp) const
+      {
+         if (cur.is_null() || cur.tag() == K::value_inline)
+            return;
+         const K k = cur.tag();
+         refadd_(exp, cur, uint32_t((cow_node_bytes_(cur) + 127) / 128));
+         switch (k)
+         {
+            case K::value_ptr:
+            case K::bucket:
+            case K::value_inline:
+            case K::null:
+               return;
+            case K::prefix_node:
+               refwalk_(pn_next<Ptr>(static_cast<char*>(deref_(cur))), exp);
+               return;
+            case K::setlist_u8:
+            case K::setlist_u16:
+            case K::c2:
+            case K::c4:
+            case K::c8:
+            case K::node_full:
+            {
+               const router_hdr* rh = static_cast<const router_hdr*>(deref_(cur));
+               refwalk_(rh->term, exp);
+               router_for_each(cur, [&](uint8_t, Ptr br) { refwalk_(br, exp); });
+               return;
+            }
+            case K::full_x:
+            {
+               if constexpr (cow_enabled)
+               {
+                  const node_fullx* x = static_cast<const node_fullx*>(deref_(cur));
+                  refwalk_(x->rh.term, exp);
+                  for (unsigned li = 0; li < full_lines_v<Ptr>; ++li)
+                  {
+                     if (x->lines[li].is_null())
+                        continue;
+                     refadd_(exp, x->lines[li]);  // the line itself
+                     const cline_direct_t<Ptr>* L = fx_line_(x, li);
+                     for (unsigned sl = 0; sl < full_per_line_v<Ptr>; ++sl)
+                        if (!L->ptr[sl].is_null())
+                           refwalk_(L->ptr[sl], exp);
+                  }
+               }
+               return;
+            }
+            case K::cx:
+            {
+               if constexpr (cow_enabled)
+               {
+                  const node_cx* x = static_cast<const node_cx*>(deref_(cur));
+                  refwalk_(x->rh.term, exp);
+                  for (unsigned sg = 0; sg < (1u << x->lg); ++sg)
+                  {
+                     if (x->seglines[sg].is_null())
+                        continue;
+                     refadd_(exp, x->seglines[sg]);
+                     cx_for_each_seg_(x, sg, [&](uint8_t, Ptr br) { refwalk_(br, exp); });
+                  }
+               }
+               return;
+            }
+            case K::cbucket:
+            {
+               if constexpr (cb_enabled)
+               {
+                  const cb_hdr* h = static_cast<const cb_hdr*>(deref_(cur));
+                  refwalk_(h->rh.term, exp);
+                  refadd_(exp, h->fp_line);
+                  for (unsigned li = 0; li < 4; ++li)
+                     if (!h->sp_line[li].is_null())
+                        refadd_(exp, h->sp_line[li]);
+                  bool    big[CB_PAGES]  = {};
+                  uint8_t blen[CB_PAGES] = {};
+                  for (unsigned li = 0; li < 4; ++li)
+                  {
+                     if (!h->cnt[li] || h->sp_line[li].is_null())
+                        continue;
+                     const cb_sp* sp = cb_spl_(h, li);
+                     for (unsigned i = 0; i < h->cnt[li]; ++i)
+                        if (cb_big(sp->lref[i]))
+                        {
+                           big[cb_spi(sp->lref[i])]  = true;
+                           blen[cb_spi(sp->lref[i])] = uint8_t(std::max(1u, cb_len8(sp->lref[i])));
+                        }
+                  }
+                  for (unsigned spi = 0; spi < CB_PAGES; ++spi)
+                     if (!h->page_line[spi].is_null())
+                        refadd_(exp, h->page_line[spi], big[spi] ? blen[spi] : 2);
+               }
+               return;
+            }
+         }
+      }
+
       // ── debug census: walk the live tree, report every node (read-only) ──
       // f(kind, inclusive_bytes, nbranch, lines_used, lines_alloc); inclusive
       // means demoted kinds / cbucket count their riding lines, so Σbytes is

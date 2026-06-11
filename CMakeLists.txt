@@ -856,6 +856,12 @@ target_compile_definitions(heart-scale-bench PRIVATE XXH_INLINE_ALL)
 set_target_properties(heart-scale-bench PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+# psitri control leg for the progressive scale comparison
+add_executable(psitri-scale-bench programs/psitri_scale_bench.cpp)
+target_link_libraries(psitri-scale-bench PRIVATE psitri)
+set_target_properties(psitri-scale-bench PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 # heart memory-cleanliness check (insert/overwrite/remove-all + exact object audit)
 add_executable(heart-leak-check programs/heart_leak_check.cpp)
 target_link_libraries(heart-leak-check PRIVATE heart)

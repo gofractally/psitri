@@ -963,6 +963,12 @@ namespace heart::radix
          cfg.sync_mode               = sal::sync_type::none;
          cfg.write_protect_on_commit = false;
          cfg.enable_read_cache       = false;
+         // Sessions allocate into PINNED (mlock'd) segments by default and pinned
+         // segments are exempt from the unpinned compactor — the file's steady-state
+         // high-water is ~max_pinned_cache_size_mb (8 GB default) regardless of live
+         // size. Knob for scale benches (mirrors HEART_PAGE_BYTES).
+         if (const char* mb = std::getenv("HEART_PINNED_MB"); mb && atoi(mb) > 0)
+            cfg.max_pinned_cache_size_mb = uint64_t(atoi(mb));
          return std::make_unique<sal::allocator>(dir, cfg, false);  // threads started post-ctor
       }
 

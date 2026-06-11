@@ -5518,7 +5518,18 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   }
                   return false;
                }
-               const int r = cb_insert_<Assign>(h, sfx, vbytes);  // bytes straight in
+               int r = cb_insert_<Assign>(h, sfx, vbytes);  // bytes straight in
+               if (r == -2 && h->dead8 &&
+                   cb_reformat_fits_(h, sfx.size(), vbytes.size()))
+               {  // reformat reclaims enough: clone+canonicalize, retry in place
+                  const Ptr np = cb_canonicalize_(*slot);
+                  if (!np.is_null())
+                  {
+                     *slot = np;
+                     h     = static_cast<cb_hdr*>(deref_(*slot));
+                     r     = cb_insert_<Assign>(h, sfx, vbytes);
+                  }
+               }
                if (getenv("PG_OPS"))
                   fprintf(stderr, "OP   r=%d nbr=%u\n", r, unsigned(h->rh.hdr.nbranch));
                if (r >= 0)
@@ -6290,6 +6301,47 @@ namespace detail  // implementation types & node helpers — not part of the pub
          r.index = uint16_t(idx);
          return r;
       }
+      // would a compact reformat make room for one more (slen, vlen) cell?
+      // Exact scan of live extents — runs only at the would-split decision.
+      bool cb_reformat_fits_(const cb_hdr* h, size_t slen, size_t vlen) const
+      {
+         const unsigned bytes = 3 + unsigned(slen) + unsigned(vlen);
+         unsigned       live8 = 0, bigs = 0;
+         for (unsigned li = 0; li < 4; ++li)
+         {
+            if (!h->cnt[li] || h->sp_line[li].is_null())
+               continue;
+            const cb_sp* sp = cb_spl_(h, li);
+            for (unsigned i = 0; i < h->cnt[li]; ++i)
+            {
+               if (cb_big(sp->lref[i]))
+                  ++bigs;
+               else
+                  live8 += cb_cell_alloc8_(cb_cell_at_(h, sp->lref[i]).p);
+            }
+         }
+         unsigned need_small8 = live8, need_bigs = bigs;
+         if (bytes > CB_CELLMAX)
+            ++need_bigs;
+         else
+            need_small8 += (bytes + 7) / 8;
+         const unsigned sub = (need_small8 + CB_PGCAP8 - 1) / CB_PGCAP8;
+         return sub + need_bigs <= CB_PAGES;  // optimistic: a failed retry splits
+      }
+      // demand-time compaction: rebuild THIS (private) page densely
+      Ptr cb_canonicalize_(Ptr cur)
+      {
+         cb_hdr*        h = static_cast<cb_hdr*>(deref_(cur));
+         cb_eref        refs[CB_MAX + 1];
+         const unsigned n = cb_collect_refs_(h, refs);
+         const std::string_view pfx(reinterpret_cast<const char*>(h->prefix),
+                                    h->rh.hdr.prefix_len);
+         const Ptr np = n ? cb_build_page_bulk_(pfx, {}, refs, 0, n, 0) : cb_make0_(pfx);
+         if (np.is_null())
+            return np;
+         cow_release(cur);
+         return np;
+      }
       // a key diverging from the page LCP loosens it: rebuild with the shorter
       // prefix (heart: "factoring only ever loosens"); returns the new page.
       // The stripped prefix bytes are re-joined per entry in one stack buffer.
@@ -6356,7 +6408,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             }
             const uint16_t nlr = cb_alloc_cell_(h, sfx, val);
             if (nlr == 0xFFFF)
-               return -1;
+               return -2;  // no space: a reformat may make room
             cb_free_cell_(h, cb_spl_(h, uli)->lref[i]);
             cb_spl_(h, uli)->lref[i] = nlr;
             return 0;
@@ -6377,7 +6429,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          }
          const uint16_t lr = cb_alloc_cell_(h, sfx, val);
          if (lr == 0xFFFF)
-            return -1;
+            return -2;  // no space: a reformat may make room
          if (h->sp_line[li].is_null())
          {
             h->sp_line[li] = pack_(node_alloc_(128), K::node_full);
@@ -7522,19 +7574,10 @@ namespace detail  // implementation types & node helpers — not part of the pub
                // the page through the bulk builder — dead sub-page bytes
                // (removed cells, outgrown values) vanish at every generation
                // instead of riding the verbatim copy forever.
-               cb_hdr* h = static_cast<cb_hdr*>(deref_(cur));
-               if (h->dead8)
-               {  // dirty page: the clone IS the compactor
-                  cb_eref        refs[CB_MAX + 1];
-                  const unsigned n = cb_collect_refs_(h, refs);
-                  const std::string_view pfx(reinterpret_cast<const char*>(h->prefix),
-                                             h->rh.hdr.prefix_len);
-                  const Ptr np = n ? cb_build_page_bulk_(pfx, {}, refs, 0, n, 0)
-                                   : cb_make0_(pfx);
-                  assert(!np.is_null() && "a compacted page never exceeds its source");
-                  return np;
-               }
-               // clean page: verbatim piece copy (no dead bytes to reclaim)
+               // verbatim piece copy ALWAYS (Dan): reclamation happens on
+               // DEMAND — when an insert lacks space and the dead ledger says
+               // a reformat would fit it (cb_canonicalize_ in pg_upsert_)
+               cb_hdr* h  = static_cast<cb_hdr*>(deref_(cur));
                cb_hdr* d2 = static_cast<cb_hdr*>(node_alloc_(128));
                std::memcpy(d2, h, 128);
                cow_fix_child_(&d2->rh.term);

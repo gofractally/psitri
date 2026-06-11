@@ -870,6 +870,14 @@ target_compile_definitions(heart-leak-check PRIVATE XXH_INLINE_ALL)
 set_target_properties(heart-leak-check PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+# DWAL over a heart base (engine-templated dwal)
+add_executable(bank-bench-dwal-heart programs/bank_bench.cpp)
+target_compile_definitions(bank-bench-dwal-heart PRIVATE BANK_ENGINE_DWAL_HEART=1 XXH_INLINE_ALL)
+target_link_libraries(bank-bench-dwal-heart PRIVATE psitri heart Boost::program_options hash)
+target_include_directories(bank-bench-dwal-heart PRIVATE ${CMAKE_SOURCE_DIR}/libraries/heart/test)
+set_target_properties(bank-bench-dwal-heart PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 # Walart bank bench — part-backed delta WAL over a heart base
 add_executable(bank-bench-walart programs/bank_bench.cpp)
 target_compile_definitions(bank-bench-walart PRIVATE BANK_ENGINE_WALART=1 XXH_INLINE_ALL)

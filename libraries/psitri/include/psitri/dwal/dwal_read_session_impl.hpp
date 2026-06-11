@@ -8,15 +8,15 @@
 
 namespace psitri::dwal
 {
-   template <class LockPolicy>
-   basic_dwal_read_session<LockPolicy>::basic_dwal_read_session(database_type& db)
+   template <class LockPolicy, class Engine>
+   basic_dwal_read_session<LockPolicy, Engine>::basic_dwal_read_session(database_type& db)
        : _db(db), _tri_session(db.underlying_db()->start_read_session())
    {
       init_cache();
    }
 
-   template <class LockPolicy>
-   basic_dwal_read_session<LockPolicy>::~basic_dwal_read_session()
+   template <class LockPolicy, class Engine>
+   basic_dwal_read_session<LockPolicy, Engine>::~basic_dwal_read_session()
    {
       if (_cache)
       {
@@ -27,8 +27,8 @@ namespace psitri::dwal
       }
    }
 
-   template <class LockPolicy>
-   void basic_dwal_read_session<LockPolicy>::init_cache()
+   template <class LockPolicy, class Engine>
+   void basic_dwal_read_session<LockPolicy, Engine>::init_cache()
    {
       void* mem = ::operator new(sizeof(root_cache) * max_roots);
       _cache    = static_cast<root_cache*>(mem);
@@ -38,8 +38,8 @@ namespace psitri::dwal
          new (&_cache[i]) root_cache(session);
    }
 
-   template <class LockPolicy>
-   void basic_dwal_read_session<LockPolicy>::refresh(uint32_t root_index)
+   template <class LockPolicy, class Engine>
+   void basic_dwal_read_session<LockPolicy, Engine>::refresh(uint32_t root_index)
    {
       auto& root  = _db.root(root_index);
       auto& cache = _cache[root_index];
@@ -59,9 +59,9 @@ namespace psitri::dwal
       cache.initialized = true;
    }
 
-   template <class LockPolicy>
-   typename basic_dwal_read_session<LockPolicy>::lookup_result
-   basic_dwal_read_session<LockPolicy>::get(uint32_t         root_index,
+   template <class LockPolicy, class Engine>
+   typename basic_dwal_read_session<LockPolicy, Engine>::lookup_result
+   basic_dwal_read_session<LockPolicy, Engine>::get(uint32_t         root_index,
                                             std::string_view key,
                                             read_mode        mode)
    {

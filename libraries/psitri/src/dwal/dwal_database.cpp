@@ -11,5 +11,5 @@ namespace psitri::dwal::detail
 
 namespace psitri::dwal
 {
-   template class basic_dwal_database<std_lock_policy>;
+   template class basic_dwal_database<std_lock_policy, psitri_engine<std_lock_policy>>;
 }  // namespace psitri::dwal

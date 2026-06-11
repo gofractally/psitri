@@ -2,6 +2,7 @@
 #include <psitri/cursor.hpp>
 #include <psitri/dwal/btree_layer.hpp>
 #include <psitri/dwal/btree_value.hpp>
+#include <psitri/dwal/kv_engine.hpp>
 
 #include <optional>
 #include <string>
@@ -18,17 +19,19 @@ namespace psitri::dwal
    ///
    /// Layer pointers may be null to exclude layers (e.g., read_mode::buffered
    /// omits RW, read_mode::trie omits RW+RO).
-   class merge_cursor
+   template <class Engine>
+   class basic_merge_cursor
    {
      public:
       using btree_iter = btree_layer::iterator;
+      using cursor_t   = typename Engine::cursor;
 
       /// Construct a merge cursor over up to three layers.
       /// Any layer pointer may be null to exclude that layer.
       /// The tri cursor is optional — pass a default-constructed optional to skip.
-      merge_cursor(const btree_layer*            rw,
-                   const btree_layer*            ro,
-                   std::optional<psitri::cursor>  tri);
+      basic_merge_cursor(const btree_layer*       rw,
+                         const btree_layer*       ro,
+                         std::optional<cursor_t>  tri);
 
       // ── Positioning ────────────────────────────────────────────────
 
@@ -70,8 +73,8 @@ namespace psitri::dwal
       bool is_subtree() const noexcept;
 
       /// Access the underlying tri cursor (e.g., for value reads, subtree access).
-      psitri::cursor*       tri_cursor() noexcept;
-      const psitri::cursor* tri_cursor() const noexcept;
+      cursor_t*       tri_cursor() noexcept;
+      const cursor_t* tri_cursor() const noexcept;
 
       // ── Counting ───────────────────────────────────────────────────
 
@@ -103,7 +106,7 @@ namespace psitri::dwal
       btree_iter _ro_it, _ro_end;
 
       // PsiTri cursor (optional).
-      std::optional<psitri::cursor> _tri;
+      std::optional<cursor_t> _tri;
 
       // Current merged position.
       std::string  _current_key;
@@ -118,31 +121,39 @@ namespace psitri::dwal
    /// Returned by dwal_database::create_cursor(). Holds shared_ptr copies
    /// of the RW/RO btree layers so the caller does not need to manage
    /// layer lifetimes or hold any DWAL locks during iteration.
-   class owned_merge_cursor
+   template <class Engine>
+   class basic_owned_merge_cursor
    {
      public:
-      owned_merge_cursor(std::shared_ptr<btree_layer>    rw,
-                         std::shared_ptr<btree_layer>    ro,
-                         std::optional<psitri::cursor>   tri)
+      using merge_cursor_t = basic_merge_cursor<Engine>;
+      using cursor_t       = typename Engine::cursor;
+
+      basic_owned_merge_cursor(std::shared_ptr<btree_layer> rw,
+                               std::shared_ptr<btree_layer> ro,
+                               std::optional<cursor_t>      tri)
           : _rw(std::move(rw)),
             _ro(std::move(ro)),
             _cursor(_rw.get(), _ro.get(), std::move(tri))
       {
       }
 
-      merge_cursor&       cursor() noexcept { return _cursor; }
-      const merge_cursor& cursor() const noexcept { return _cursor; }
+      merge_cursor_t&       cursor() noexcept { return _cursor; }
+      const merge_cursor_t& cursor() const noexcept { return _cursor; }
 
-      merge_cursor*       operator->() noexcept { return &_cursor; }
-      const merge_cursor* operator->() const noexcept { return &_cursor; }
+      merge_cursor_t*       operator->() noexcept { return &_cursor; }
+      const merge_cursor_t* operator->() const noexcept { return &_cursor; }
 
-      merge_cursor&       operator*() noexcept { return _cursor; }
-      const merge_cursor& operator*() const noexcept { return _cursor; }
+      merge_cursor_t&       operator*() noexcept { return _cursor; }
+      const merge_cursor_t& operator*() const noexcept { return _cursor; }
 
      private:
-      std::shared_ptr<btree_layer>  _rw;
-      std::shared_ptr<btree_layer>  _ro;
-      merge_cursor                  _cursor;
+      std::shared_ptr<btree_layer> _rw;
+      std::shared_ptr<btree_layer> _ro;
+      merge_cursor_t               _cursor;
    };
+
+   /// psitri-engine aliases (the historical concrete types — external ABI).
+   using merge_cursor       = basic_merge_cursor<psitri_engine<std_lock_policy>>;
+   using owned_merge_cursor = basic_owned_merge_cursor<psitri_engine<std_lock_policy>>;
 
 }  // namespace psitri::dwal

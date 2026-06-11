@@ -12,55 +12,55 @@ namespace psitri::dwal
 {
    // ── root_handle ──────────────────────────────────────────────────
 
-   template <class LockPolicy>
-   void basic_transaction<LockPolicy>::root_handle::upsert(std::string_view key,
+   template <class LockPolicy, class Engine>
+   void basic_transaction<LockPolicy, Engine>::root_handle::upsert(std::string_view key,
                                                            std::string_view value)
    {
       assert(_writable && "upsert called on read-only root");
       _inner->upsert(key, value);
    }
 
-   template <class LockPolicy>
-   void basic_transaction<LockPolicy>::root_handle::upsert_subtree(std::string_view key,
+   template <class LockPolicy, class Engine>
+   void basic_transaction<LockPolicy, Engine>::root_handle::upsert_subtree(std::string_view key,
                                                                    sal::tree_id     tid)
    {
       assert(_writable && "upsert_subtree called on read-only root");
       _inner->upsert_subtree(key, tid);
    }
 
-   template <class LockPolicy>
-   typename basic_transaction<LockPolicy>::remove_result_type
-   basic_transaction<LockPolicy>::root_handle::remove(std::string_view key)
+   template <class LockPolicy, class Engine>
+   typename basic_transaction<LockPolicy, Engine>::remove_result_type
+   basic_transaction<LockPolicy, Engine>::root_handle::remove(std::string_view key)
    {
       assert(_writable && "remove called on read-only root");
       return _inner->remove(key);
    }
 
-   template <class LockPolicy>
-   void basic_transaction<LockPolicy>::root_handle::remove_range(std::string_view low,
+   template <class LockPolicy, class Engine>
+   void basic_transaction<LockPolicy, Engine>::root_handle::remove_range(std::string_view low,
                                                                  std::string_view high)
    {
       assert(_writable && "remove_range called on read-only root");
       _inner->remove_range(low, high);
    }
 
-   template <class LockPolicy>
-   typename basic_transaction<LockPolicy>::lookup_result
-   basic_transaction<LockPolicy>::root_handle::get(std::string_view key) const
+   template <class LockPolicy, class Engine>
+   typename basic_transaction<LockPolicy, Engine>::lookup_result
+   basic_transaction<LockPolicy, Engine>::root_handle::get(std::string_view key) const
    {
       return _inner->get(key);
    }
 
-   template <class LockPolicy>
-   owned_merge_cursor basic_transaction<LockPolicy>::root_handle::create_cursor() const
+   template <class LockPolicy, class Engine>
+   basic_owned_merge_cursor<Engine> basic_transaction<LockPolicy, Engine>::root_handle::create_cursor() const
    {
       return _inner->create_cursor();
    }
 
    // ── transaction construction ─────────────────────────────────────
 
-   template <class LockPolicy>
-   basic_transaction<LockPolicy>::basic_transaction(database_type&                  db,
+   template <class LockPolicy, class Engine>
+   basic_transaction<LockPolicy, Engine>::basic_transaction(database_type&                  db,
                                                     std::initializer_list<uint32_t> write_roots,
                                                     std::initializer_list<uint32_t> read_roots)
        : _db(&db)
@@ -68,8 +68,8 @@ namespace psitri::dwal
       init(std::vector<uint32_t>(write_roots), std::vector<uint32_t>(read_roots));
    }
 
-   template <class LockPolicy>
-   basic_transaction<LockPolicy>::basic_transaction(database_type&        db,
+   template <class LockPolicy, class Engine>
+   basic_transaction<LockPolicy, Engine>::basic_transaction(database_type&        db,
                                                     std::vector<uint32_t> write_roots,
                                                     std::vector<uint32_t> read_roots)
        : _db(&db)
@@ -77,8 +77,8 @@ namespace psitri::dwal
       init(std::move(write_roots), std::move(read_roots));
    }
 
-   template <class LockPolicy>
-   void basic_transaction<LockPolicy>::init(std::vector<uint32_t> write_roots,
+   template <class LockPolicy, class Engine>
+   void basic_transaction<LockPolicy, Engine>::init(std::vector<uint32_t> write_roots,
                                             std::vector<uint32_t> read_roots)
    {
       std::set<uint32_t> write_set(write_roots.begin(), write_roots.end());
@@ -128,15 +128,15 @@ namespace psitri::dwal
       }
    }
 
-   template <class LockPolicy>
-   basic_transaction<LockPolicy>::~basic_transaction()
+   template <class LockPolicy, class Engine>
+   basic_transaction<LockPolicy, Engine>::~basic_transaction()
    {
       if (!_committed && !_aborted && _db)
          abort();
    }
 
-   template <class LockPolicy>
-   basic_transaction<LockPolicy>::basic_transaction(basic_transaction&& other) noexcept
+   template <class LockPolicy, class Engine>
+   basic_transaction<LockPolicy, Engine>::basic_transaction(basic_transaction&& other) noexcept
        : _db(std::exchange(other._db, nullptr)),
          _locks(std::move(other._locks)),
          _txns(std::move(other._txns)),
@@ -151,9 +151,9 @@ namespace psitri::dwal
 
    // ── root access ──────────────────────────────────────────────────
 
-   template <class LockPolicy>
-   typename basic_transaction<LockPolicy>::root_handle&
-   basic_transaction<LockPolicy>::root(uint32_t root_index)
+   template <class LockPolicy, class Engine>
+   typename basic_transaction<LockPolicy, Engine>::root_handle&
+   basic_transaction<LockPolicy, Engine>::root(uint32_t root_index)
    {
       auto it = _handles.find(root_index);
       assert(it != _handles.end() && "root_index not declared in transaction");
@@ -162,38 +162,38 @@ namespace psitri::dwal
 
    // ── convenience methods ──────────────────────────────────────────
 
-   template <class LockPolicy>
-   void basic_transaction<LockPolicy>::upsert(uint32_t         root_index,
+   template <class LockPolicy, class Engine>
+   void basic_transaction<LockPolicy, Engine>::upsert(uint32_t         root_index,
                                               std::string_view key,
                                               std::string_view value)
    {
       root(root_index).upsert(key, value);
    }
 
-   template <class LockPolicy>
-   typename basic_transaction<LockPolicy>::remove_result_type
-   basic_transaction<LockPolicy>::remove(uint32_t root_index, std::string_view key)
+   template <class LockPolicy, class Engine>
+   typename basic_transaction<LockPolicy, Engine>::remove_result_type
+   basic_transaction<LockPolicy, Engine>::remove(uint32_t root_index, std::string_view key)
    {
       return root(root_index).remove(key);
    }
 
-   template <class LockPolicy>
-   void basic_transaction<LockPolicy>::remove_range(uint32_t         root_index,
+   template <class LockPolicy, class Engine>
+   void basic_transaction<LockPolicy, Engine>::remove_range(uint32_t         root_index,
                                                     std::string_view low,
                                                     std::string_view high)
    {
       root(root_index).remove_range(low, high);
    }
 
-   template <class LockPolicy>
-   typename basic_transaction<LockPolicy>::lookup_result
-   basic_transaction<LockPolicy>::get(uint32_t root_index, std::string_view key)
+   template <class LockPolicy, class Engine>
+   typename basic_transaction<LockPolicy, Engine>::lookup_result
+   basic_transaction<LockPolicy, Engine>::get(uint32_t root_index, std::string_view key)
    {
       return root(root_index).get(key);
    }
 
-   template <class LockPolicy>
-   owned_merge_cursor basic_transaction<LockPolicy>::create_cursor(uint32_t root_index) const
+   template <class LockPolicy, class Engine>
+   basic_owned_merge_cursor<Engine> basic_transaction<LockPolicy, Engine>::create_cursor(uint32_t root_index) const
    {
       auto it = _handles.find(root_index);
       assert(it != _handles.end() && "root_index not declared in transaction");
@@ -202,8 +202,8 @@ namespace psitri::dwal
 
    // ── commit ───────────────────────────────────────────────────────
 
-   template <class LockPolicy>
-   void basic_transaction<LockPolicy>::commit()
+   template <class LockPolicy, class Engine>
+   void basic_transaction<LockPolicy, Engine>::commit()
    {
       assert(!_committed && !_aborted);
       _committed = true;
@@ -240,8 +240,8 @@ namespace psitri::dwal
 
    // ── abort ────────────────────────────────────────────────────────
 
-   template <class LockPolicy>
-   void basic_transaction<LockPolicy>::abort()
+   template <class LockPolicy, class Engine>
+   void basic_transaction<LockPolicy, Engine>::abort()
    {
       assert(!_committed && !_aborted);
       _aborted = true;
@@ -264,8 +264,8 @@ namespace psitri::dwal
 
    // ── lock management ──────────────────────────────────────────────
 
-   template <class LockPolicy>
-   void basic_transaction<LockPolicy>::release_locks()
+   template <class LockPolicy, class Engine>
+   void basic_transaction<LockPolicy, Engine>::release_locks()
    {
       for (auto& le : _locks)
       {

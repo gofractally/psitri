@@ -3,5 +3,5 @@
 namespace psitri::dwal
 {
    // Explicit instantiation for the default lock policy.
-   template class basic_transaction<std_lock_policy>;
+   template class basic_transaction<std_lock_policy, psitri_engine<std_lock_policy>>;
 }  // namespace psitri::dwal

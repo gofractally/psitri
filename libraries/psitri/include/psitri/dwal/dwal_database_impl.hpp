@@ -16,8 +16,8 @@
 
 namespace psitri::dwal
 {
-   template <class LockPolicy>
-   basic_dwal_database<LockPolicy>::basic_dwal_database(std::shared_ptr<database_type> db,
+   template <class LockPolicy, class Engine>
+   basic_dwal_database<LockPolicy, Engine>::basic_dwal_database(std::shared_ptr<database_type> db,
                                                         std::filesystem::path          wal_dir,
                                                         dwal_config                    cfg)
        : _db(std::move(db)), _wal_dir(std::move(wal_dir)), _cfg(cfg)
@@ -32,8 +32,8 @@ namespace psitri::dwal
              _db, _cfg.merge_threads, _epochs, _wal_dir, _cfg.max_rw_arena_bytes);
    }
 
-   template <class LockPolicy>
-   void basic_dwal_database<LockPolicy>::recover()
+   template <class LockPolicy, class Engine>
+   void basic_dwal_database<LockPolicy, Engine>::recover()
    {
       std::error_code ec;
 
@@ -179,8 +179,8 @@ namespace psitri::dwal
       }
    }
 
-   template <class LockPolicy>
-   void basic_dwal_database<LockPolicy>::replay_wal_to_tri(
+   template <class LockPolicy, class Engine>
+   void basic_dwal_database<LockPolicy, Engine>::replay_wal_to_tri(
        uint32_t root_index, const std::filesystem::path& wal_path)
    {
       wal_reader reader;
@@ -202,16 +202,24 @@ namespace psitri::dwal
                       break;
                    case wal_op_type::upsert_subtree:
                    {
-                      auto subtree = ws->make_ptr(op.subtree, /*retain=*/true);
-                      if (subtree)
-                         tx.upsert(op.key, std::move(subtree));
+                      if constexpr (requires { ws->make_ptr(op.subtree, true); })
+                      {
+                         auto subtree = ws->make_ptr(op.subtree, /*retain=*/true);
+                         if (subtree)
+                            tx.upsert(op.key, std::move(subtree));
+                      }
+                      else
+                         assert(false && "subtree WAL replay needs engine make_ptr");
                       break;
                    }
                    case wal_op_type::remove:
                       tx.remove(op.key);
                       break;
                    case wal_op_type::remove_range:
-                      tx.remove_range_any(op.range_low, op.range_high);
+                      if constexpr (requires { tx.remove_range_any(op.range_low, op.range_high); })
+                         tx.remove_range_any(op.range_low, op.range_high);
+                      else
+                         tx.remove_range_counted(op.range_low, op.range_high);
                       break;
                 }
              }
@@ -221,8 +229,8 @@ namespace psitri::dwal
          tx.commit();
    }
 
-   template <class LockPolicy>
-   void basic_dwal_database<LockPolicy>::replay_wal_to_rw(
+   template <class LockPolicy, class Engine>
+   void basic_dwal_database<LockPolicy, Engine>::replay_wal_to_rw(
        uint32_t root_index, const std::filesystem::path& wal_path)
    {
       wal_reader reader;
@@ -266,8 +274,8 @@ namespace psitri::dwal
       root.next_wal_seq = reader.end_sequence();
    }
 
-   template <class LockPolicy>
-   basic_dwal_database<LockPolicy>::~basic_dwal_database()
+   template <class LockPolicy, class Engine>
+   basic_dwal_database<LockPolicy, Engine>::~basic_dwal_database()
    {
       if (_merge_pool)
          _merge_pool->shutdown();
@@ -306,15 +314,25 @@ namespace psitri::dwal
                            tx.remove(it.key());
                         else if (val.is_subtree())
                         {
-                           auto subtree = ws->make_ptr(val.subtree, true);
-                           if (subtree)
-                              tx.upsert(it.key(), std::move(subtree));
+                           if constexpr (requires { ws->make_ptr(val.subtree, true); })
+                           {
+                              auto subtree = ws->make_ptr(val.subtree, true);
+                              if (subtree)
+                                 tx.upsert(it.key(), std::move(subtree));
+                           }
+                           else
+                              assert(false && "subtree flush needs engine make_ptr");
                         }
                         else
                            tx.upsert(it.key(), val.data);
                      }
                      for (const auto& range : layer.tombstones.ranges())
-                        tx.remove_range_any(range.low, range.high);
+                     {
+                        if constexpr (requires { tx.remove_range_any(range.low, range.high); })
+                           tx.remove_range_any(range.low, range.high);
+                        else
+                           tx.remove_range_counted(range.low, range.high);
+                     }
                      tx.commit();
                   };
 
@@ -359,21 +377,21 @@ namespace psitri::dwal
       }
    }
 
-   template <class LockPolicy>
-   void basic_dwal_database<LockPolicy>::clear_thread_local_cache()
+   template <class LockPolicy, class Engine>
+   void basic_dwal_database<LockPolicy, Engine>::clear_thread_local_cache()
    {
       detail::thread_local_cache().reset();
    }
 
-   template <class LockPolicy>
-   void basic_dwal_database<LockPolicy>::clear_thread_local_caches()
+   template <class LockPolicy, class Engine>
+   void basic_dwal_database<LockPolicy, Engine>::clear_thread_local_caches()
    {
       detail::thread_local_cache().reset();
    }
 
-   template <class LockPolicy>
-   typename basic_dwal_database<LockPolicy>::dwal_root_type&
-   basic_dwal_database<LockPolicy>::ensure_root(uint32_t index)
+   template <class LockPolicy, class Engine>
+   typename basic_dwal_database<LockPolicy, Engine>::dwal_root_type&
+   basic_dwal_database<LockPolicy, Engine>::ensure_root(uint32_t index)
    {
       assert(index < max_roots);
       if (!_roots[index])
@@ -419,8 +437,8 @@ namespace psitri::dwal
       return *_roots[index];
    }
 
-   template <class LockPolicy>
-   void basic_dwal_database<LockPolicy>::ensure_wal(uint32_t root_index)
+   template <class LockPolicy, class Engine>
+   void basic_dwal_database<LockPolicy, Engine>::ensure_wal(uint32_t root_index)
    {
       auto& root = ensure_root(root_index);
       if (!root.wal)
@@ -433,9 +451,9 @@ namespace psitri::dwal
       }
    }
 
-   template <class LockPolicy>
-   typename basic_dwal_database<LockPolicy>::dwal_transaction_type
-   basic_dwal_database<LockPolicy>::start_write_transaction(uint32_t         root_index,
+   template <class LockPolicy, class Engine>
+   typename basic_dwal_database<LockPolicy, Engine>::dwal_transaction_type
+   basic_dwal_database<LockPolicy, Engine>::start_write_transaction(uint32_t         root_index,
                                                             transaction_mode mode)
    {
       assert(root_index < max_roots);
@@ -457,31 +475,31 @@ namespace psitri::dwal
       return dwal_transaction_type(root, root.wal.get(), root_index, this);
    }
 
-   template <class LockPolicy>
-   typename basic_dwal_database<LockPolicy>::transaction_type
-   basic_dwal_database<LockPolicy>::start_transaction(
+   template <class LockPolicy, class Engine>
+   typename basic_dwal_database<LockPolicy, Engine>::transaction_type
+   basic_dwal_database<LockPolicy, Engine>::start_transaction(
        std::initializer_list<uint32_t> write_roots,
        std::initializer_list<uint32_t> read_roots)
    {
       return transaction_type(*this, write_roots, read_roots);
    }
 
-   template <class LockPolicy>
-   typename basic_dwal_database<LockPolicy>::transaction_type
-   basic_dwal_database<LockPolicy>::start_transaction(uint32_t root_index)
+   template <class LockPolicy, class Engine>
+   typename basic_dwal_database<LockPolicy, Engine>::transaction_type
+   basic_dwal_database<LockPolicy, Engine>::start_transaction(uint32_t root_index)
    {
       return transaction_type(*this, {root_index});
    }
 
-   template <class LockPolicy>
-   uint64_t basic_dwal_database<LockPolicy>::next_multi_tx_id() noexcept
+   template <class LockPolicy, class Engine>
+   uint64_t basic_dwal_database<LockPolicy, Engine>::next_multi_tx_id() noexcept
    {
       return _next_multi_tx_id.fetch_add(1, std::memory_order_relaxed);
    }
 
-   template <class LockPolicy>
-   typename basic_dwal_database<LockPolicy>::lookup_result
-   basic_dwal_database<LockPolicy>::get(uint32_t         root_index,
+   template <class LockPolicy, class Engine>
+   typename basic_dwal_database<LockPolicy, Engine>::lookup_result
+   basic_dwal_database<LockPolicy, Engine>::get(uint32_t         root_index,
                                         std::string_view key,
                                         read_mode        mode)
    {
@@ -518,8 +536,8 @@ namespace psitri::dwal
       return {false, {}};
    }
 
-   template <class LockPolicy>
-   bool basic_dwal_database<LockPolicy>::should_swap(uint32_t root_index) const
+   template <class LockPolicy, class Engine>
+   bool basic_dwal_database<LockPolicy, Engine>::should_swap(uint32_t root_index) const
    {
       auto& root = *_roots[root_index];
       if (root.rw_layer->size() >= _cfg.max_rw_entries)
@@ -535,8 +553,8 @@ namespace psitri::dwal
       return false;
    }
 
-   template <class LockPolicy>
-   bool basic_dwal_database<LockPolicy>::should_backpressure(uint32_t root_index) const
+   template <class LockPolicy, class Engine>
+   bool basic_dwal_database<LockPolicy, Engine>::should_backpressure(uint32_t root_index) const
    {
       if (_cfg.max_rw_arena_bytes == 0)
          return false;
@@ -544,8 +562,8 @@ namespace psitri::dwal
       return root.rw_layer->map.arena_capacity() >= _cfg.max_rw_arena_bytes;
    }
 
-   template <class LockPolicy>
-   void basic_dwal_database<LockPolicy>::try_swap_rw_to_ro(uint32_t root_index)
+   template <class LockPolicy, class Engine>
+   void basic_dwal_database<LockPolicy, Engine>::try_swap_rw_to_ro(uint32_t root_index)
    {
       assert(root_index < max_roots && _roots[root_index]);
       auto& root = *_roots[root_index];
@@ -627,20 +645,20 @@ namespace psitri::dwal
       }
    }
 
-   template <class LockPolicy>
-   void basic_dwal_database<LockPolicy>::swap_rw_to_ro(uint32_t root_index)
+   template <class LockPolicy, class Engine>
+   void basic_dwal_database<LockPolicy, Engine>::swap_rw_to_ro(uint32_t root_index)
    {
       try_swap_rw_to_ro(root_index);
    }
 
-   template <class LockPolicy>
-   void basic_dwal_database<LockPolicy>::flush_wal()
+   template <class LockPolicy, class Engine>
+   void basic_dwal_database<LockPolicy, Engine>::flush_wal()
    {
       flush_wal(sal::sync_type::full);
    }
 
-   template <class LockPolicy>
-   void basic_dwal_database<LockPolicy>::flush_wal(sal::sync_type sync)
+   template <class LockPolicy, class Engine>
+   void basic_dwal_database<LockPolicy, Engine>::flush_wal(sal::sync_type sync)
    {
       for (uint32_t i = 0; i < max_roots; ++i)
       {
@@ -649,23 +667,23 @@ namespace psitri::dwal
       }
    }
 
-   template <class LockPolicy>
-   void basic_dwal_database<LockPolicy>::flush_wal(uint32_t root_index)
+   template <class LockPolicy, class Engine>
+   void basic_dwal_database<LockPolicy, Engine>::flush_wal(uint32_t root_index)
    {
       flush_wal(root_index, sal::sync_type::full);
    }
 
-   template <class LockPolicy>
-   void basic_dwal_database<LockPolicy>::flush_wal(uint32_t root_index, sal::sync_type sync)
+   template <class LockPolicy, class Engine>
+   void basic_dwal_database<LockPolicy, Engine>::flush_wal(uint32_t root_index, sal::sync_type sync)
    {
       assert(root_index < max_roots);
       if (_roots[root_index] && _roots[root_index]->wal)
          _roots[root_index]->wal->flush(sync);
    }
 
-   template <class LockPolicy>
-   typename basic_dwal_database<LockPolicy>::lookup_result
-   basic_dwal_database<LockPolicy>::get_latest(uint32_t root_index, std::string_view key)
+   template <class LockPolicy, class Engine>
+   typename basic_dwal_database<LockPolicy, Engine>::lookup_result
+   basic_dwal_database<LockPolicy, Engine>::get_latest(uint32_t root_index, std::string_view key)
    {
       assert(root_index < max_roots);
 
@@ -721,8 +739,8 @@ namespace psitri::dwal
       return tri_get(root_index, key);
    }
 
-   template <class LockPolicy>
-   owned_merge_cursor basic_dwal_database<LockPolicy>::create_cursor(uint32_t  root_index,
+   template <class LockPolicy, class Engine>
+   basic_owned_merge_cursor<Engine> basic_dwal_database<LockPolicy, Engine>::create_cursor(uint32_t  root_index,
                                                                      read_mode mode,
                                                                      bool      skip_rw_lock)
    {
@@ -755,14 +773,15 @@ namespace psitri::dwal
       auto session =
           std::static_pointer_cast<read_session_type>(tlc.cursor_session);
 
-      std::optional<psitri::cursor> tri_cursor;
+      std::optional<typename Engine::cursor> tri_cursor;
       tri_cursor.emplace(session->create_cursor(root_index));
 
-      return owned_merge_cursor(std::move(rw), std::move(ro), std::move(tri_cursor));
+      return basic_owned_merge_cursor<Engine>(std::move(rw), std::move(ro), std::move(tri_cursor));
    }
 
-   template <class LockPolicy>
-   psitri::cursor basic_dwal_database<LockPolicy>::create_tri_cursor(uint32_t root_index)
+   template <class LockPolicy, class Engine>
+   typename basic_dwal_database<LockPolicy, Engine>::tri_cursor_type
+   basic_dwal_database<LockPolicy, Engine>::create_tri_cursor(uint32_t root_index)
    {
       auto& tlc      = detail::thread_local_cache();
       auto  db_owner = std::static_pointer_cast<void>(_db);
@@ -777,16 +796,17 @@ namespace psitri::dwal
       return session->create_cursor(root_index);
    }
 
-   template <class LockPolicy>
-   typename basic_dwal_database<LockPolicy>::lookup_result
-   basic_dwal_database<LockPolicy>::tri_get(uint32_t root_index, std::string_view key)
+   template <class LockPolicy, class Engine>
+   typename basic_dwal_database<LockPolicy, Engine>::lookup_result
+   basic_dwal_database<LockPolicy, Engine>::tri_get(uint32_t root_index, std::string_view key)
    {
       auto& tlc      = detail::thread_local_cache();
       auto  db_owner = std::static_pointer_cast<void>(_db);
 
       if (!detail::same_owner(tlc.tri_db.lock(), db_owner))
       {
-         delete tlc.tri_cursor;
+         if (tlc.tri_cursor && tlc.tri_cursor_del)
+            tlc.tri_cursor_del(tlc.tri_cursor);
          tlc.tri_cursor  = nullptr;
          auto rs         = _db->start_read_session();
          tlc.tri_session = std::static_pointer_cast<void>(rs);
@@ -796,25 +816,40 @@ namespace psitri::dwal
       auto session =
           std::static_pointer_cast<read_session_type>(tlc.tri_session);
 
-      if (!tlc.tri_cursor)
+      auto* cur = static_cast<tri_cursor_type*>(tlc.tri_cursor);
+      if (!cur)
       {
-         auto root      = session->create_cursor(root_index);
-         tlc.tri_cursor = new psitri::cursor(std::move(root));
+         cur                = new tri_cursor_type(session->create_cursor(root_index));
+         tlc.tri_cursor     = cur;
+         tlc.tri_cursor_del = [](void* c) { delete static_cast<tri_cursor_type*>(c); };
+      }
+      else if constexpr (requires(tri_cursor_type& c) { c.refresh(root_index); })
+      {
+         cur->refresh(root_index);
       }
       else
-      {
-         tlc.tri_cursor->refresh(root_index);
+      {  // engines without refresh: re-pin by recreating at the live root
+         *cur = session->create_cursor(root_index);
       }
 
-      std::string buf;
-      if (tlc.tri_cursor->get(key_view(key.data(), key.size()), &buf) >= 0)
-         return lookup_result::make_owned(std::move(buf));
+      if constexpr (requires(std::string& b) {
+                       { cur->get(key_view(key.data(), key.size()), &b) } -> std::convertible_to<int>;
+                    })
+      {  // psitri's borrowed-buffer point get — the measured hot path
+         std::string buf;
+         if (cur->get(key_view(key.data(), key.size()), &buf) >= 0)
+            return lookup_result::make_owned(std::move(buf));
+      }
+      else if (auto v = cur->template get<std::string>(std::string_view(key.data(), key.size())))
+      {
+         return lookup_result::make_owned(std::move(*v));
+      }
 
       return {false, {}};
    }
 
-   template <class LockPolicy>
-   void basic_dwal_database<LockPolicy>::request_shutdown()
+   template <class LockPolicy, class Engine>
+   void basic_dwal_database<LockPolicy, Engine>::request_shutdown()
    {
       if (_merge_pool)
       {

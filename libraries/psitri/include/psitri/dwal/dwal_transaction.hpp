@@ -1,4 +1,5 @@
 #pragma once
+#include <psitri/dwal/kv_engine.hpp>
 #include <psitri/dwal/btree_layer.hpp>
 #include <psitri/dwal/btree_value.hpp>
 #include <psitri/dwal/dwal_root.hpp>
@@ -15,10 +16,10 @@
 
 namespace psitri::dwal
 {
-   template <class LockPolicy>
+   template <class LockPolicy, class Engine>
    class basic_dwal_database;
 
-   template <class LockPolicy>
+   template <class LockPolicy, class Engine>
    class basic_dwal_transaction;
 
    /**
@@ -28,11 +29,11 @@ namespace psitri::dwal
     * If not, converting to bool triggers a lookup in lower layers (RO + Tri).
     * Callers that discard the result pay no lookup cost.
     */
-   template <class LockPolicy = std_lock_policy>
+   template <class LockPolicy, class Engine>
    class basic_remove_result
    {
      public:
-      using transaction_type = basic_dwal_transaction<LockPolicy>;
+      using transaction_type = basic_dwal_transaction<LockPolicy, Engine>;
 
       /// Implicit conversion — resolves the lazy check if needed.
       operator bool()
@@ -43,7 +44,7 @@ namespace psitri::dwal
       }
 
      private:
-      friend class basic_dwal_transaction<LockPolicy>;
+      friend class basic_dwal_transaction<LockPolicy, Engine>;
 
       explicit basic_remove_result(bool existed) : _existed(existed), _resolved(true) {}
 
@@ -60,7 +61,7 @@ namespace psitri::dwal
       bool                    _resolved = true;
    };
 
-   using remove_result = basic_remove_result<std_lock_policy>;
+   using remove_result = basic_remove_result<std_lock_policy, psitri_engine<std_lock_policy>>;
 
    /// Mode for a root within a transaction.
    enum class root_mode : uint8_t
@@ -106,13 +107,13 @@ namespace psitri::dwal
     * transaction_mode::direct when starting the transaction.  This flushes
     * the DWAL buffer and writes directly to the PsiTri COW trie.
     */
-   template <class LockPolicy = std_lock_policy>
+   template <class LockPolicy, class Engine>
    class basic_dwal_transaction
    {
      public:
-      using database_type      = basic_dwal_database<LockPolicy>;
+      using database_type      = basic_dwal_database<LockPolicy, Engine>;
       using dwal_root_type     = basic_dwal_root<LockPolicy>;
-      using remove_result_type = basic_remove_result<LockPolicy>;
+      using remove_result_type = basic_remove_result<LockPolicy, Engine>;
 
       basic_dwal_transaction(dwal_root_type& root,
                              wal_writer*     wal,
@@ -253,7 +254,7 @@ namespace psitri::dwal
 	      };
 
       lookup_result      get(std::string_view key) const;
-      owned_merge_cursor create_cursor() const;
+      basic_owned_merge_cursor<Engine> create_cursor() const;
 
       // ── Transaction Control ────────────────────────────────────────
 
@@ -270,7 +271,7 @@ namespace psitri::dwal
       uint32_t root_index() const noexcept { return _root_index; }
 
      private:
-      friend class basic_remove_result<LockPolicy>;
+      friend class basic_remove_result<LockPolicy, Engine>;
 
       lookup_result ro_get(std::string_view key) const;
       bool          exists_in_lower_layers(std::string_view key) const;
@@ -289,6 +290,6 @@ namespace psitri::dwal
       undo_log _undo;
    };
 
-   using dwal_transaction = basic_dwal_transaction<std_lock_policy>;
+   using dwal_transaction = basic_dwal_transaction<std_lock_policy, psitri_engine<std_lock_policy>>;
 
 }  // namespace psitri::dwal

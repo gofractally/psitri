@@ -1,4 +1,5 @@
 #pragma once
+#include <psitri/dwal/kv_engine.hpp>
 #include <psitri/cursor.hpp>
 #include <psitri/dwal/btree_layer.hpp>
 #include <psitri/dwal/dwal_root.hpp>
@@ -11,7 +12,7 @@
 
 namespace psitri::dwal
 {
-   template <class LockPolicy>
+   template <class LockPolicy, class Engine>
    class basic_dwal_database;
 
    /// A read session for the DWAL layer.
@@ -30,12 +31,13 @@ namespace psitri::dwal
    ///   if (!result.found)
    ///       // not in any layer
    /// @endcode
-   template <class LockPolicy = std_lock_policy>
+   template <class LockPolicy, class Engine>
    class basic_dwal_read_session
    {
      public:
-      using database_type     = basic_dwal_database<LockPolicy>;
-      using read_session_type = basic_read_session<LockPolicy>;
+      using database_type     = basic_dwal_database<LockPolicy, Engine>;
+      using read_session_type = typename Engine::read_session;
+      using tri_cursor_type   = typename Engine::cursor;
 
       struct lookup_result
       {
@@ -72,7 +74,7 @@ namespace psitri::dwal
       struct root_cache
       {
          std::shared_ptr<btree_layer> snapshot;
-         psitri::cursor               tri_cursor;
+         tri_cursor_type              tri_cursor;
          uint32_t                     gen         = 0;
          bool                         initialized = false;
 
@@ -91,6 +93,6 @@ namespace psitri::dwal
       root_cache*               _cache    = nullptr;
    };
 
-   using dwal_read_session = basic_dwal_read_session<std_lock_policy>;
+   using dwal_read_session = basic_dwal_read_session<std_lock_policy, psitri_engine<std_lock_policy>>;
 
 }  // namespace psitri::dwal

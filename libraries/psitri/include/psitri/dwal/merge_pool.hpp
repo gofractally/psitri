@@ -1,4 +1,5 @@
 #pragma once
+#include <psitri/dwal/kv_engine.hpp>
 #include <psitri/dwal/dwal_root.hpp>
 #include <psitri/dwal/epoch_lock.hpp>
 #include <psitri/fwd.hpp>
@@ -26,12 +27,12 @@ namespace psitri::dwal
    /// pool runs its own background std::threads and never yields a fiber
    /// while holding them. LockPolicy therefore only parameterizes the types
    /// that cross into user threads (dwal_root, epoch_registry, database).
-   template <class LockPolicy = std_lock_policy>
+   template <class LockPolicy, class Engine>
    class basic_merge_pool
    {
      public:
-      using database_type       = basic_database<LockPolicy>;
-      using write_session_type  = basic_write_session<LockPolicy>;
+      using database_type       = typename Engine::database;
+      using write_session_type  = typename Engine::write_session;
       using dwal_root_type      = basic_dwal_root<LockPolicy>;
       using epoch_registry_type = basic_epoch_registry<LockPolicy>;
 
@@ -87,6 +88,6 @@ namespace psitri::dwal
       std::atomic<bool>         _shutdown{false};
    };
 
-   using merge_pool = basic_merge_pool<std_lock_policy>;
+   using merge_pool = basic_merge_pool<std_lock_policy, psitri_engine<std_lock_policy>>;
 
 }  // namespace psitri::dwal

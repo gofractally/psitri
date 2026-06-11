@@ -61,6 +61,18 @@
 #include <radix_engine.hpp>  // heart engine + its native psitri-shaped public API
 #endif
 
+#if defined(BANK_ENGINE_DWAL_HEART)
+// dwal over a heart base: the template bodies must be instantiated in this TU
+// (the psitri library only ships the psitri-engine instantiation).
+#include <heart_dwal_engine.hpp>
+#include <psitri/dwal/dwal_database_impl.hpp>
+#include <psitri/dwal/dwal_read_session_impl.hpp>
+#include <psitri/dwal/dwal_transaction_impl.hpp>
+#include <psitri/dwal/merge_cursor_impl.hpp>
+#include <psitri/dwal/merge_pool_impl.hpp>
+#include <psitri/dwal/transaction_impl.hpp>
+#endif
+
 #if defined(BANK_ENGINE_PART)
 #include <part/kv.hpp>  // part engine — psitri-shaped API over the part arena
 #endif
@@ -530,6 +542,10 @@ class PsiTriEngine : public BankEngine
 
    void audit_freed() override
    {
+      if constexpr (!requires { _db->audit_freed_space(); })
+         return;
+      else
+      {
       auto audit = _db->audit_freed_space();
       uint64_t total_estimated = 0, total_actual_dead = 0, total_actual_live = 0;
       uint64_t total_sync = 0, total_objects = 0;
@@ -1057,35 +1073,35 @@ class WalartEngine : public BankEngine
 // DWAL Engine (PsiTri + write-ahead log buffering layer)
 // ============================================================
 
-#if defined(BANK_ENGINE_DWAL)
-class DwalEngine : public BankEngine
+#if defined(BANK_ENGINE_DWAL) || defined(BANK_ENGINE_DWAL_HEART)
+template <class BE>
+class DwalEngineT : public BankEngine
 {
-   std::shared_ptr<psitri::database>              _db;
-   std::unique_ptr<psitri::dwal::dwal_database>   _dwal_db;
-   std::shared_ptr<psitri::write_session>          _ws;
-   std::optional<psitri::dwal::dwal_transaction>   _tx;
-   std::string                                     _path;
+   using engine_t  = typename BE::engine_t;
+   using dwal_db_t = psitri::dwal::basic_dwal_database<psitri::std_lock_policy, engine_t>;
+   using dwal_tx_t = psitri::dwal::basic_dwal_transaction<psitri::std_lock_policy, engine_t>;
+   using mc_t      = psitri::dwal::basic_merge_cursor<engine_t>;
+
+   std::shared_ptr<typename engine_t::database>      _db;
+   std::unique_ptr<dwal_db_t>                         _dwal_db;
+   std::shared_ptr<typename engine_t::write_session>  _ws;
+   std::optional<dwal_tx_t>                           _tx;
+   std::string                                        _path;
 
   public:
-   const char* name() const override { return "PsiTri-DWAL"; }
+   const char* name() const override { return BE::name; }
 
    void open(const std::string& path, const std::string& sync_mode) override
    {
       std::filesystem::remove_all(path);
       _path = path;
-      psitri::runtime_config cfg;
-      if (sync_mode == "async")
-         cfg.sync_mode = sal::sync_type::msync_async;
-      else if (sync_mode == "sync")
-         cfg.sync_mode = sal::sync_type::msync_sync;
-      else
-         cfg.sync_mode = sal::sync_type::none;
-      _db = psitri::database::open(path, psitri::open_mode::create_or_open, cfg);
+      _db = BE::open_db(path, sync_mode);
       _ws = _db->start_write_session();
 
       auto wal_dir = std::filesystem::path(path) / "wal";
       psitri::dwal::dwal_config dwal_cfg;
-      _dwal_db = std::make_unique<psitri::dwal::dwal_database>(_db, wal_dir, dwal_cfg);
+      BE::tune(dwal_cfg);
+      _dwal_db = std::make_unique<dwal_db_t>(_db, wal_dir, dwal_cfg);
    }
 
    void close() override
@@ -1093,18 +1109,29 @@ class DwalEngine : public BankEngine
       _tx.reset();
       _dwal_db.reset();
       _ws.reset();
-      _db->compact_and_truncate();
+      if constexpr (requires { _db->compact_and_truncate(); })
+         _db->compact_and_truncate();
       _db.reset();
    }
 
    void bulk_load(const std::vector<std::string>& accounts, uint64_t balance) override
    {
-      // Bulk load goes directly through PsiTri for speed
       auto bal = encode_balance(balance);
-      auto tx  = _ws->start_transaction(0);
-      for (auto& acct : accounts)
-         tx.upsert(psitri::to_key_view(acct), psitri::to_value_view(bal));
-      tx.commit();
+      if constexpr (BE::direct_bulk_load)
+      {  // straight into the base engine (psitri: multi-writer safe)
+         auto tx = _ws->start_transaction(0);
+         for (auto& acct : accounts)
+            tx.upsert(std::string_view(acct), std::string_view(bal));
+         tx.commit();
+      }
+      else
+      {  // single-writer base (heart): every base write flows through the
+         // merge worker — bulk load rides the normal dwal path
+         auto tx = _dwal_db->start_write_transaction(0);
+         for (auto& acct : accounts)
+            tx.upsert(std::string_view(acct), std::string_view(bal));
+         tx.commit();
+      }
    }
 
    void begin_batch() override
@@ -1161,7 +1188,8 @@ class DwalEngine : public BankEngine
             live += seg.alloc_pos - seg.freed_bytes;
       r.live_size = live;
       r.free_size = r.file_size - live;
-      r.reachable_size = _db->reachable_size();
+      if constexpr (requires { _db->reachable_size(); })
+         r.reachable_size = _db->reachable_size();
       return r;
    }
 
@@ -1193,6 +1221,10 @@ class DwalEngine : public BankEngine
 
    void audit_freed() override
    {
+      if constexpr (!requires { _db->audit_freed_space(); })
+         return;
+      else
+      {
       auto audit = _db->audit_freed_space();
       uint64_t total_estimated = 0, total_actual_dead = 0, total_actual_live = 0;
       uint64_t total_sync = 0, total_objects = 0;
@@ -1214,13 +1246,14 @@ class DwalEngine : public BankEngine
              "      gap (dead - estimated): %.1f MB\n",
              audit.size(), (unsigned long long)total_objects,
              est_mb, dead_mb, live_mb, dead_mb - est_mb);
+      }
    }
 
    void wait_compactor() override { _db->wait_for_compactor(); }
 
-   // Reader thread state — PsiTri read session + cursor per thread
-   std::shared_ptr<psitri::read_session> _reader_rs;
-   std::optional<psitri::cursor>         _reader_cur;
+   // Reader thread state — base-engine read session + cursor per thread
+   std::shared_ptr<typename engine_t::read_session> _reader_rs;
+   std::optional<typename engine_t::cursor>         _reader_cur;
 
    void reader_thread_init() override
    {
@@ -1238,7 +1271,7 @@ class DwalEngine : public BankEngine
 
    bool read_account(const std::string& key, uint64_t& balance_out) override
    {
-      auto val = _reader_cur->get<std::string>(psitri::to_key_view(key));
+      auto val = _reader_cur->template get<std::string>(std::string_view(key));
       if (!val)
          return false;
       balance_out = decode_balance(*val);
@@ -1254,9 +1287,9 @@ class DwalEngine : public BankEngine
       while (!mc->is_end())
       {
          std::string val_buf;
-         if (mc->current_source() == psitri::dwal::merge_cursor::source::tri)
+         if (mc->current_source() == mc_t::source::tri)
          {
-            mc->tri_cursor()->get_value([&](psitri::value_view vv) {
+            mc->tri_cursor()->get_value([&](auto vv) {
                val_buf.assign(vv.data(), vv.size());
             });
          }
@@ -1273,6 +1306,55 @@ class DwalEngine : public BankEngine
       return count;
    }
 };
+
+#if defined(BANK_ENGINE_DWAL)
+struct dwal_psitri_traits
+{
+   using engine_t = psitri::dwal::psitri_engine<psitri::std_lock_policy>;
+   static constexpr const char* name             = "PsiTri-DWAL";
+   static constexpr bool        direct_bulk_load = true;
+   static void                  tune(psitri::dwal::dwal_config&) {}
+   static std::shared_ptr<psitri::database> open_db(const std::string& path,
+                                                    const std::string& sync_mode)
+   {
+      psitri::runtime_config cfg;
+      if (sync_mode == "async")
+         cfg.sync_mode = sal::sync_type::msync_async;
+      else if (sync_mode == "sync")
+         cfg.sync_mode = sal::sync_type::msync_sync;
+      else
+         cfg.sync_mode = sal::sync_type::none;
+      return psitri::database::open(path, psitri::open_mode::create_or_open, cfg);
+   }
+};
+using DwalEngine = DwalEngineT<dwal_psitri_traits>;
+#else
+struct dwal_heart_traits
+{
+   using engine_t = heart::radix::dwal_engine;
+   static constexpr const char* name             = "Heart-DWAL";
+   static constexpr bool        direct_bulk_load = false;  // single-writer base
+   static void                  tune(psitri::dwal::dwal_config& c)
+   {
+      c.merge_threads = 1;  // heart is single-writer: ONE merge worker owns it
+   }
+   static std::shared_ptr<heart::radix::database> open_db(const std::string& path,
+                                                          const std::string&)
+   {
+      std::filesystem::create_directories(path);
+      // Construct on a throwaway thread: SAL's get_session() SHARES sessions
+      // per-thread via TLS, so opening on main would hand heart's engine
+      // session to every main-thread read_session while the merge worker
+      // writes through it — the engine session must not live in any TLS slot
+      // that readers can reach. (Close-time end_session sees a TLS mismatch
+      // at process exit — benign for the bench, noted in the dwal-heart docs.)
+      std::shared_ptr<heart::radix::database> db;
+      std::thread([&] { db = heart::radix::database::open(path); }).join();
+      return db;
+   }
+};
+using DwalEngine = DwalEngineT<dwal_heart_traits>;
+#endif
 #endif
 
 // ============================================================
@@ -2500,7 +2582,7 @@ int main(int argc, char** argv)
    engine = std::make_unique<PartEngine>();
 #elif defined(BANK_ENGINE_WALART)
    engine = std::make_unique<WalartEngine>();
-#elif defined(BANK_ENGINE_DWAL)
+#elif defined(BANK_ENGINE_DWAL) || defined(BANK_ENGINE_DWAL_HEART)
    engine = std::make_unique<DwalEngine>();
 #elif defined(BANK_ENGINE_ROCKSDB)
    engine = std::make_unique<RocksDbEngine>();

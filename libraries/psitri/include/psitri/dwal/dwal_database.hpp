@@ -6,6 +6,7 @@
 #include <psitri/dwal/merge_cursor.hpp>
 #include <psitri/dwal/merge_pool.hpp>
 #include <psitri/dwal/transaction.hpp>
+#include <psitri/dwal/kv_engine.hpp>
 #include <psitri/fwd.hpp>
 #include <psitri/lock_policy.hpp>
 
@@ -60,17 +61,20 @@ namespace psitri::dwal
          std::shared_ptr<void> cursor_session;
          std::weak_ptr<void>   cursor_db;
 
-         // Used by tri_get
+         // Used by tri_get — type-erased so one TU serves every Engine
          std::shared_ptr<void> tri_session;
          std::weak_ptr<void>   tri_db;
-         psitri::cursor*       tri_cursor = nullptr;
+         void*                 tri_cursor = nullptr;
+         void (*tri_cursor_del)(void*) = nullptr;
 
          void reset()
          {
             cursor_session.reset();
             cursor_db.reset();
-            delete tri_cursor;
-            tri_cursor = nullptr;
+            if (tri_cursor && tri_cursor_del)
+               tri_cursor_del(tri_cursor);
+            tri_cursor     = nullptr;
+            tri_cursor_del = nullptr;
             tri_session.reset();
             tri_db.reset();
          }
@@ -94,20 +98,22 @@ namespace psitri::dwal
    ///
    /// Each root (0-511) has independent state: its own btree, WAL file, undo log,
    /// mutex, and RO slot. Operations on different roots never contend.
-   template <class LockPolicy = std_lock_policy>
+   template <class LockPolicy, class Engine>
    class basic_dwal_database
    {
      public:
       using lock_policy_type      = LockPolicy;
-      using database_type         = basic_database<LockPolicy>;
-      using read_session_type     = basic_read_session<LockPolicy>;
-      using write_session_type    = basic_write_session<LockPolicy>;
+      using engine_type           = Engine;
+      using database_type         = typename Engine::database;
+      using read_session_type     = typename Engine::read_session;
+      using write_session_type    = typename Engine::write_session;
+      using tri_cursor_type       = typename Engine::cursor;
       using dwal_root_type        = basic_dwal_root<LockPolicy>;
       using epoch_registry_type   = basic_epoch_registry<LockPolicy>;
-      using merge_pool_type       = basic_merge_pool<LockPolicy>;
-      using dwal_transaction_type = basic_dwal_transaction<LockPolicy>;
-      using transaction_type      = basic_transaction<LockPolicy>;
-      using read_session_dwal_type = basic_dwal_read_session<LockPolicy>;
+      using merge_pool_type       = basic_merge_pool<LockPolicy, Engine>;
+      using dwal_transaction_type = basic_dwal_transaction<LockPolicy, Engine>;
+      using transaction_type      = basic_transaction<LockPolicy, Engine>;
+      using read_session_dwal_type = basic_dwal_read_session<LockPolicy, Engine>;
       using lookup_result         = typename dwal_transaction_type::lookup_result;
 
       /// Create a DWAL database wrapping an existing PsiTri database.
@@ -143,8 +149,8 @@ namespace psitri::dwal
 
       lookup_result get_latest(uint32_t root_index, std::string_view key);
 
-      owned_merge_cursor create_cursor(uint32_t root_index, read_mode mode,
-                                       bool skip_rw_lock = false);
+      basic_owned_merge_cursor<Engine> create_cursor(uint32_t root_index, read_mode mode,
+                                                     bool skip_rw_lock = false);
 
       // ── Flush & Swap ──────────────────────────────────────────────
 
@@ -176,7 +182,7 @@ namespace psitri::dwal
 
       lookup_result tri_get(uint32_t root_index, std::string_view key);
 
-      psitri::cursor create_tri_cursor(uint32_t root_index);
+      tri_cursor_type create_tri_cursor(uint32_t root_index);
 
       void clear_thread_local_caches();
 
@@ -205,6 +211,6 @@ namespace psitri::dwal
       std::unique_ptr<merge_pool_type> _merge_pool;
    };
 
-   using dwal_database = basic_dwal_database<std_lock_policy>;
+   using dwal_database = basic_dwal_database<std_lock_policy, psitri_engine<std_lock_policy>>;
 
 }  // namespace psitri::dwal

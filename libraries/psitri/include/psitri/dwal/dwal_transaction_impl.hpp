@@ -11,8 +11,8 @@
 
 namespace psitri::dwal
 {
-   template <class LockPolicy>
-   basic_dwal_transaction<LockPolicy>::basic_dwal_transaction(dwal_root_type& root,
+   template <class LockPolicy, class Engine>
+   basic_dwal_transaction<LockPolicy, Engine>::basic_dwal_transaction(dwal_root_type& root,
                                                               wal_writer*     wal,
                                                               uint32_t        root_index,
                                                               database_type*  db,
@@ -43,15 +43,15 @@ namespace psitri::dwal
       }
    }
 
-   template <class LockPolicy>
-   basic_dwal_transaction<LockPolicy>::~basic_dwal_transaction()
+   template <class LockPolicy, class Engine>
+   basic_dwal_transaction<LockPolicy, Engine>::~basic_dwal_transaction()
    {
       if (!_committed && !_aborted && _root)
          abort();
    }
 
-   template <class LockPolicy>
-   basic_dwal_transaction<LockPolicy>::basic_dwal_transaction(
+   template <class LockPolicy, class Engine>
+   basic_dwal_transaction<LockPolicy, Engine>::basic_dwal_transaction(
        basic_dwal_transaction&& other) noexcept
        : _root(std::exchange(other._root, nullptr)),
          _wal(std::exchange(other._wal, nullptr)),
@@ -68,8 +68,8 @@ namespace psitri::dwal
 
    // ── Mutations ────────────────────────────────────────────────────
 
-   template <class LockPolicy>
-   void basic_dwal_transaction<LockPolicy>::upsert(std::string_view key, std::string_view value)
+   template <class LockPolicy, class Engine>
+   void basic_dwal_transaction<LockPolicy, Engine>::upsert(std::string_view key, std::string_view value)
    {
       assert(_root && !_committed && !_aborted && _mode == root_mode::read_write);
 
@@ -80,8 +80,8 @@ namespace psitri::dwal
          _wal->add_upsert_data(key, value);
    }
 
-   template <class LockPolicy>
-   void basic_dwal_transaction<LockPolicy>::upsert_subtree(std::string_view key,
+   template <class LockPolicy, class Engine>
+   void basic_dwal_transaction<LockPolicy, Engine>::upsert_subtree(std::string_view key,
                                                            sal::tree_id     tid)
    {
       assert(_root && !_committed && !_aborted && _mode == root_mode::read_write);
@@ -93,9 +93,9 @@ namespace psitri::dwal
          _wal->add_upsert_subtree(key, tid);
    }
 
-   template <class LockPolicy>
-   typename basic_dwal_transaction<LockPolicy>::remove_result_type
-   basic_dwal_transaction<LockPolicy>::remove(std::string_view key)
+   template <class LockPolicy, class Engine>
+   typename basic_dwal_transaction<LockPolicy, Engine>::remove_result_type
+   basic_dwal_transaction<LockPolicy, Engine>::remove(std::string_view key)
    {
       assert(_root && !_committed && !_aborted && _mode == root_mode::read_write);
 
@@ -116,8 +116,8 @@ namespace psitri::dwal
       return remove_result_type(this, std::string(key));
    }
 
-   template <class LockPolicy>
-   bool basic_dwal_transaction<LockPolicy>::exists_in_lower_layers(std::string_view key) const
+   template <class LockPolicy, class Engine>
+   bool basic_dwal_transaction<LockPolicy, Engine>::exists_in_lower_layers(std::string_view key) const
    {
       auto ro = ro_get(key);
       if (ro.found)
@@ -133,15 +133,15 @@ namespace psitri::dwal
       return false;
    }
 
-   template <class LockPolicy>
-   void basic_remove_result<LockPolicy>::resolve()
+   template <class LockPolicy, class Engine>
+   void basic_remove_result<LockPolicy, Engine>::resolve()
    {
       _resolved = true;
       _existed  = _tx && _tx->exists_in_lower_layers(_key);
    }
 
-   template <class LockPolicy>
-   void basic_dwal_transaction<LockPolicy>::remove_range(std::string_view low,
+   template <class LockPolicy, class Engine>
+   void basic_dwal_transaction<LockPolicy, Engine>::remove_range(std::string_view low,
                                                          std::string_view high)
    {
       assert(_root && !_committed && !_aborted && _mode == root_mode::read_write);
@@ -177,9 +177,9 @@ namespace psitri::dwal
 
    // ── Point Reads ──────────────────────────────────────────────────
 
-   template <class LockPolicy>
-   typename basic_dwal_transaction<LockPolicy>::lookup_result
-   basic_dwal_transaction<LockPolicy>::get(std::string_view key) const
+   template <class LockPolicy, class Engine>
+   typename basic_dwal_transaction<LockPolicy, Engine>::lookup_result
+   basic_dwal_transaction<LockPolicy, Engine>::get(std::string_view key) const
    {
       assert(_root);
 
@@ -212,8 +212,8 @@ namespace psitri::dwal
 
    // ── Cursor ────────────────────────────────────────────────────────
 
-   template <class LockPolicy>
-   owned_merge_cursor basic_dwal_transaction<LockPolicy>::create_cursor() const
+   template <class LockPolicy, class Engine>
+   basic_owned_merge_cursor<Engine> basic_dwal_transaction<LockPolicy, Engine>::create_cursor() const
    {
       assert(_root && !_committed && !_aborted);
 
@@ -225,16 +225,16 @@ namespace psitri::dwal
          ro = _root->buffered_ptr;
       }
 
-      std::optional<psitri::cursor> tri;
+      std::optional<typename Engine::cursor> tri;
       if (_db)
          tri.emplace(_db->create_tri_cursor(_root_index));
 
-      return owned_merge_cursor(std::move(rw), std::move(ro), std::move(tri));
+      return basic_owned_merge_cursor<Engine>(std::move(rw), std::move(ro), std::move(tri));
    }
 
-   template <class LockPolicy>
-   typename basic_dwal_transaction<LockPolicy>::lookup_result
-   basic_dwal_transaction<LockPolicy>::ro_get(std::string_view key) const
+   template <class LockPolicy, class Engine>
+   typename basic_dwal_transaction<LockPolicy, Engine>::lookup_result
+   basic_dwal_transaction<LockPolicy, Engine>::ro_get(std::string_view key) const
    {
       std::shared_ptr<btree_layer> ro;
       {
@@ -259,8 +259,8 @@ namespace psitri::dwal
 
    // ── Transaction Control ──────────────────────────────────────────
 
-   template <class LockPolicy>
-   void basic_dwal_transaction<LockPolicy>::commit()
+   template <class LockPolicy, class Engine>
+   void basic_dwal_transaction<LockPolicy, Engine>::commit()
    {
       assert(_root && !_committed && !_aborted);
       _committed = true;
@@ -336,8 +336,8 @@ namespace psitri::dwal
       }
    }
 
-   template <class LockPolicy>
-   void basic_dwal_transaction<LockPolicy>::commit_multi(uint64_t tx_id,
+   template <class LockPolicy, class Engine>
+   void basic_dwal_transaction<LockPolicy, Engine>::commit_multi(uint64_t tx_id,
                                                          uint16_t participants,
                                                          bool     is_commit)
    {
@@ -365,8 +365,8 @@ namespace psitri::dwal
       }
    }
 
-   template <class LockPolicy>
-   void basic_dwal_transaction<LockPolicy>::abort()
+   template <class LockPolicy, class Engine>
+   void basic_dwal_transaction<LockPolicy, Engine>::abort()
    {
       assert(_root && !_committed && !_aborted);
       _aborted = true;
@@ -503,9 +503,9 @@ namespace psitri::dwal
       }
    }
 
-   template <class LockPolicy>
-   basic_dwal_transaction<LockPolicy>
-   basic_dwal_transaction<LockPolicy>::sub_transaction()
+   template <class LockPolicy, class Engine>
+   basic_dwal_transaction<LockPolicy, Engine>
+   basic_dwal_transaction<LockPolicy, Engine>::sub_transaction()
    {
       assert(_root && !_committed && !_aborted);
       return basic_dwal_transaction(*_root, _wal, _root_index, _db, /*nested=*/true);
@@ -513,8 +513,8 @@ namespace psitri::dwal
 
    // ── Undo Recording ───────────────────────────────────────────────
 
-   template <class LockPolicy>
-   void basic_dwal_transaction<LockPolicy>::record_undo_for_upsert(std::string_view key)
+   template <class LockPolicy, class Engine>
+   void basic_dwal_transaction<LockPolicy, Engine>::record_undo_for_upsert(std::string_view key)
    {
       auto& layer = *_root->rw_layer;
       auto* v     = layer.map.get(key);
@@ -537,8 +537,8 @@ namespace psitri::dwal
       }
    }
 
-   template <class LockPolicy>
-   void basic_dwal_transaction<LockPolicy>::record_undo_for_remove(std::string_view key)
+   template <class LockPolicy, class Engine>
+   void basic_dwal_transaction<LockPolicy, Engine>::record_undo_for_remove(std::string_view key)
    {
       auto& layer = *_root->rw_layer;
       auto* v     = layer.map.get(key);

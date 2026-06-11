@@ -12,8 +12,8 @@
 
 namespace psitri::dwal
 {
-   template <class LockPolicy>
-   basic_merge_pool<LockPolicy>::basic_merge_pool(std::shared_ptr<database_type> db,
+   template <class LockPolicy, class Engine>
+   basic_merge_pool<LockPolicy, Engine>::basic_merge_pool(std::shared_ptr<database_type> db,
                                                   uint32_t                       num_threads,
                                                   epoch_registry_type&           epochs,
                                                   std::filesystem::path          wal_dir,
@@ -33,14 +33,14 @@ namespace psitri::dwal
          _threads.emplace_back(&basic_merge_pool::worker_loop, this, i);
    }
 
-   template <class LockPolicy>
-   basic_merge_pool<LockPolicy>::~basic_merge_pool()
+   template <class LockPolicy, class Engine>
+   basic_merge_pool<LockPolicy, Engine>::~basic_merge_pool()
    {
       shutdown();
    }
 
-   template <class LockPolicy>
-   void basic_merge_pool<LockPolicy>::signal(uint32_t root_index, dwal_root_type& root)
+   template <class LockPolicy, class Engine>
+   void basic_merge_pool<LockPolicy, Engine>::signal(uint32_t root_index, dwal_root_type& root)
    {
       {
          std::lock_guard lk(_queue_mu);
@@ -49,15 +49,15 @@ namespace psitri::dwal
       _queue_cv.notify_one();
    }
 
-   template <class LockPolicy>
-   void basic_merge_pool<LockPolicy>::request_stop()
+   template <class LockPolicy, class Engine>
+   void basic_merge_pool<LockPolicy, Engine>::request_stop()
    {
       _shutdown.store(true, std::memory_order_relaxed);
       _queue_cv.notify_all();
    }
 
-   template <class LockPolicy>
-   void basic_merge_pool<LockPolicy>::shutdown()
+   template <class LockPolicy, class Engine>
+   void basic_merge_pool<LockPolicy, Engine>::shutdown()
    {
       _shutdown.store(true, std::memory_order_relaxed);
       _queue_cv.notify_all();
@@ -70,8 +70,8 @@ namespace psitri::dwal
       _sessions.clear();
    }
 
-   template <class LockPolicy>
-   void basic_merge_pool<LockPolicy>::worker_loop(uint32_t thread_index)
+   template <class LockPolicy, class Engine>
+   void basic_merge_pool<LockPolicy, Engine>::worker_loop(uint32_t thread_index)
    {
       // Create the write session on this worker thread so the allocator_session
       // is bound to the correct thread-local storage.  The session must also be
@@ -99,8 +99,8 @@ namespace psitri::dwal
       _sessions[thread_index].reset();
    }
 
-   template <class LockPolicy>
-   void basic_merge_pool<LockPolicy>::drain_ro_btree(uint32_t        thread_index,
+   template <class LockPolicy, class Engine>
+   void basic_merge_pool<LockPolicy, Engine>::drain_ro_btree(uint32_t        thread_index,
                                                      uint32_t        root_index,
                                                      dwal_root_type& root)
    {
@@ -123,11 +123,15 @@ namespace psitri::dwal
       struct timespec cpu_start_ts;
       clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu_start_ts);
 
-      auto& ws               = *_sessions[thread_index];
-      auto  as               = ws.allocator_session();
-      auto  seg_count_before = as->seg_alloc_count();
-      auto  seg_ns_before    = as->seg_alloc_ns();
-      auto  tx               = ws.start_transaction(root_index);
+      auto&    ws               = *_sessions[thread_index];
+      uint64_t seg_count_before = 0, seg_ns_before = 0;
+      if constexpr (requires { ws.allocator_session(); })
+      {  // SAL merge telemetry (psitri); engines without it report zeros
+         auto as          = ws.allocator_session();
+         seg_count_before = as->seg_alloc_count();
+         seg_ns_before    = as->seg_alloc_ns();
+      }
+      auto tx = ws.start_transaction(root_index);
 
       // Drain all entries from the RO btree into PsiTri.
       // Keys arrive in sorted order — use upsert_sorted to enable sibling
@@ -171,13 +175,28 @@ namespace psitri::dwal
          }
          else if (val.is_subtree())
          {
-            auto subtree = ws.make_ptr(val.subtree, /*retain=*/true);
-            if (subtree)
-               tx.upsert_sorted(key, std::move(subtree));
+            if constexpr (requires { ws.make_ptr(val.subtree, true); })
+            {
+               auto subtree = ws.make_ptr(val.subtree, /*retain=*/true);
+               if (subtree)
+               {
+                  if constexpr (requires { tx.upsert_sorted(key, std::move(subtree)); })
+                     tx.upsert_sorted(key, std::move(subtree));
+                  else
+                     tx.upsert_subtree(key, std::move(subtree));
+               }
+            }
+            else
+            {
+               assert(false && "subtree WAL entries require an engine with make_ptr");
+            }
          }
          else
          {
-            tx.upsert_sorted(key, val.data);
+            if constexpr (requires { tx.upsert_sorted(key, val.data); })
+               tx.upsert_sorted(key, val.data);  // sorted-insert sibling prefetch
+            else
+               tx.upsert(key, val.data);  // engines without the hint: plain upsert
          }
          ++entry_count;
          double us = std::chrono::duration<double, std::micro>(
@@ -208,7 +227,10 @@ namespace psitri::dwal
       uint64_t range_tombstone_count = 0;
       for (const auto& range : ro->tombstones.ranges())
       {
-         tx.remove_range_any(range.low, range.high);
+         if constexpr (requires { tx.remove_range_any(range.low, range.high); })
+            tx.remove_range_any(range.low, range.high);
+         else
+            tx.remove_range_counted(range.low, range.high);  // heart's range delete
          ++range_tombstone_count;
       }
 
@@ -245,8 +267,14 @@ namespace psitri::dwal
       double us_per_entry    = entry_count > 0 ? (wall_total_ms * 1000.0) / entry_count : 0;
       double top_total_ms    = sum_top_us / 1000.0;
 
-      uint64_t seg_count = as->seg_alloc_count() - seg_count_before;
-      double   seg_ms    = (as->seg_alloc_ns() - seg_ns_before) / 1e6;
+      uint64_t seg_count = 0;
+      double   seg_ms    = 0;
+      if constexpr (requires { ws.allocator_session(); })
+      {
+         auto as   = ws.allocator_session();
+         seg_count = as->seg_alloc_count() - seg_count_before;
+         seg_ms    = (as->seg_alloc_ns() - seg_ns_before) / 1e6;
+      }
 
       fprintf(stderr,
               "[MERGE] root=%u entries=%llu  %.0f ms wall / %.0f ms cpu  "
@@ -269,8 +297,13 @@ namespace psitri::dwal
       // Update the DWAL root's tri_root to reflect the new PsiTri root.
       auto new_root = ws.get_root(root_index);
       if (new_root)
-         root.tri_root.store(static_cast<uint32_t>(new_root.address()),
-                             std::memory_order_release);
+      {
+         if constexpr (requires { new_root.address(); })
+            root.tri_root.store(static_cast<uint32_t>(new_root.address()),
+                                std::memory_order_release);
+         else  // engines without a public root id: observability only, keep 0
+            root.tri_root.store(0, std::memory_order_release);
+      }
       if (root.status)
       {
          root.status->tri_root.store(root.tri_root.load(std::memory_order_relaxed),
@@ -368,8 +401,8 @@ namespace psitri::dwal
       // No need for merge-thread-initiated swaps.
    }
 
-   template <class LockPolicy>
-   void basic_merge_pool<LockPolicy>::try_reclaim()
+   template <class LockPolicy, class Engine>
+   void basic_merge_pool<LockPolicy, Engine>::try_reclaim()
    {
       // With shared_ptr-based RO pools, reclamation is automatic.
       // The last shared_ptr holder (reader or merge thread) frees the btree_layer.

@@ -1,4 +1,5 @@
 #pragma once
+#include <psitri/dwal/kv_engine.hpp>
 #include <psitri/dwal/dwal_transaction.hpp>
 #include <psitri/dwal/merge_cursor.hpp>
 #include <psitri/lock_policy.hpp>
@@ -11,9 +12,10 @@
 
 namespace psitri::dwal
 {
-   class owned_merge_cursor;
+   template <class Engine>
+   class basic_owned_merge_cursor;
 
-   template <class LockPolicy>
+   template <class LockPolicy, class Engine>
    class basic_dwal_database;
 
    /// Multi-root DWAL transaction.
@@ -31,13 +33,13 @@ namespace psitri::dwal
    ///   auto r = tx.root(3).get("cfg");
    ///   tx.commit();
    /// @endcode
-   template <class LockPolicy = std_lock_policy>
+   template <class LockPolicy, class Engine>
    class basic_transaction
    {
      public:
-      using database_type         = basic_dwal_database<LockPolicy>;
-      using dwal_transaction_type = basic_dwal_transaction<LockPolicy>;
-      using remove_result_type    = basic_remove_result<LockPolicy>;
+      using database_type         = basic_dwal_database<LockPolicy, Engine>;
+      using dwal_transaction_type = basic_dwal_transaction<LockPolicy, Engine>;
+      using remove_result_type    = basic_remove_result<LockPolicy, Engine>;
       using lookup_result         = typename dwal_transaction_type::lookup_result;
 
       /// Per-root handle. Exposes mutations (write roots only) and reads.
@@ -52,13 +54,13 @@ namespace psitri::dwal
 
          // ── Reads (always allowed) ─────────────────────────────────
          lookup_result get(std::string_view key) const;
-         owned_merge_cursor create_cursor() const;
+         basic_owned_merge_cursor<Engine> create_cursor() const;
 
          bool     writable() const noexcept { return _writable; }
          uint32_t index() const noexcept { return _root_index; }
 
         private:
-         friend class basic_transaction<LockPolicy>;
+         friend class basic_transaction<LockPolicy, Engine>;
          root_handle(dwal_transaction_type* inner, uint32_t root_index, bool writable)
              : _inner(inner), _root_index(root_index), _writable(writable)
          {
@@ -94,7 +96,7 @@ namespace psitri::dwal
       void               remove_range(uint32_t root_index, std::string_view low,
                                       std::string_view high);
       lookup_result      get(uint32_t root_index, std::string_view key);
-      owned_merge_cursor create_cursor(uint32_t root_index) const;
+      basic_owned_merge_cursor<Engine> create_cursor(uint32_t root_index) const;
 
       // ── Transaction control ───────────────────────────────────────
 
@@ -123,6 +125,6 @@ namespace psitri::dwal
       bool                                         _aborted   = false;
    };
 
-   using transaction = basic_transaction<std_lock_policy>;
+   using transaction = basic_transaction<std_lock_policy, psitri_engine<std_lock_policy>>;
 
 }  // namespace psitri::dwal

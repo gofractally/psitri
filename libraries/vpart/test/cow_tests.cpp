@@ -293,3 +293,82 @@ TEST_CASE("abort semantics: the window walk frees the diverged era exactly")
    }
    REQUIRE(free_lines_total(a) == uint64_t(a.num_segments()) * lines_per_segment);
 }
+
+TEST_CASE("wide routers carry inline prefixes (see-header), never prefix_nodes")
+{
+   arena_config c;
+   c.dir = tmp_dir("wpfx");
+   arena a(c);
+   {
+      auto       ses = a.start_session();
+      auto       tx  = ses.start_transaction(0);
+      vlog_state vl;
+      tree_t     t{part_alloc<uint64_t>(&ses)};
+      t.allocator_mut().vlog = &vl;
+      t.allocator_mut().vtxn = 1;
+
+      oracle_t o;
+      auto     put = [&](const std::string& k, uint64_t v)
+      {
+         t.cow_insert(std::string_view(k), v);
+         o[k] = v;
+      };
+      // a shared prefix with fanout >16 forces setlist -> c2 widening UNDER
+      // the prefix: the prefix must ride the wide node's CL0 (K::hdr), and a
+      // prefix_node here is the bug Dan named.
+      for (int i = 0; i < 40; ++i)
+         put(std::string("shared/") + char('A' + i) + "tail", uint64_t(i));
+      // grow one branch deeper so iteration crosses the hdr node repeatedly
+      for (int i = 0; i < 30; ++i)
+         put(std::string("shared/Adeep/") + std::to_string(i), uint64_t(1000 + i));
+
+      uint64_t hdr_nodes = 0, pfx_nodes = 0;
+      t.census([&](auto row) {
+         if (unsigned(row.kind) == 12) ++hdr_nodes;          // K::hdr
+         if (unsigned(row.kind) == 2)  ++pfx_nodes;          // K::prefix_node
+      });
+      REQUIRE(hdr_nodes >= 1);  // the widened router carries the prefix itself
+      REQUIRE(pfx_nodes == 0);  // short prefixes never spawn prefix_nodes
+      verify_exact(t, o);
+
+      // era 2: COW across the boundary — clone of an hdr node, privatize
+      // through its prefix, and a SPLIT INSIDE the wide prefix
+      const uint32_t chain1 = era_commit(a, vl);
+      REQUIRE(chain1 == vlog_state::npos);
+      auto r0 = t.root_handle();
+      auto o0 = o;
+      t.allocator_mut().vtxn = 2;
+      for (int i = 0; i < 40; i += 2)
+         put(std::string("shared/") + char('A' + i) + "tail", uint64_t(5000 + i));
+      put("shaq", 42);  // diverges INSIDE "shared/" -> split_hdr_prefix_
+      put("sh",   43);  // key ends inside the prefix -> term inside split router
+      const uint32_t chain2 = era_commit(a, vl);
+      t.allocator_mut().vtxn = 0;
+      verify_exact(t, o);
+      {
+         tree_t s0{part_alloc<uint64_t>(&a)};
+         s0.adopt_root(r0);
+         verify_exact(s0, o0);  // the boundary is bit-stable across hdr clones
+         s0.adopt_root(decltype(r0)::null());
+      }
+      drain_chain(a, chain2);
+      verify_exact(t, o);
+
+      // era 3: remove most branches -> de-widen carries the prefix back down
+      t.allocator_mut().vtxn = 3;
+      for (int i = 4; i < 40; ++i)
+      {
+         std::string k = std::string("shared/") + char('A' + i) + "tail";
+         if (t.cow_remove(std::string_view(k)))
+            o.erase(k);
+      }
+      const uint32_t chain3 = era_commit(a, vl);
+      t.allocator_mut().vtxn = 0;
+      verify_exact(t, o);
+      drain_chain(a, chain3);
+      verify_exact(t, o);
+
+      reclaim_tree(a, t);
+   }
+   REQUIRE(free_lines_total(a) == uint64_t(a.num_segments()) * lines_per_segment);
+}

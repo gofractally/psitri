@@ -38,6 +38,13 @@ namespace vhkv::detail
       full_x       = 10, // EXPLICIT full router (part COW demotion of node_full):
                          // CL0 holds per-line pointers to individually-refcounted
                          // direct lines — COW of one branch shares the other lines
+      hdr          = 12, // SEE HEADER (vpart): the node cannot certify header-free
+                         // reads — CL0 names the real type (byte 6) and gives the
+                         // extra cachelines their meaning. Today: a wide implicit
+                         // router carrying an inline prefix (bytes 12.., len in
+                         // node_hdr.prefix_len). Fast tags are a CERTIFICATE that
+                         // normal reads never consult the header; minting a new
+                         // tag requires that certificate — everything else is hdr.
                          // instead of copying them (design5 implicit-to-explicit)
       null         = 0xF,
    };
@@ -54,7 +61,10 @@ namespace vhkv::detail
    constexpr bool is_terminal(K k) noexcept { return k == K::value_ptr || k == K::value_inline; }
    static_assert(uint8_t(K::setlist_u16) == uint8_t(K::c8) + 1,
                  "router tags are contiguous: setlist_u8..setlist_u16 is one range check");
-   constexpr bool is_router(K k) noexcept { return k >= K::setlist_u8 && k <= K::setlist_u16; }
+   constexpr bool is_router(K k) noexcept
+   {
+      return (k >= K::setlist_u8 && k <= K::setlist_u16) || k == K::hdr;
+   }
 
    // NOTE: we tried XOR-masking stored pointers to hide them from Apple's DMP
    // (the "rarely-dereferenced pointer" trick from dan/hive.blog). It REGRESSED hkv

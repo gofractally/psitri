@@ -874,7 +874,7 @@ class PartEngine : public BankEngine
          static const char* kn[16] = {"value_ptr", "value_inline", "prefix_node",
                                       "setlist_u8", "node_full", "c2", "c4", "c8",
                                       "setlist_u16", "bucket", "full_x", "cx",
-                                      "k12", "cbucket", "k14", "null"};
+                                      "hdr", "cbucket", "k14", "null"};
          {
             const auto& stt = _db->store().stats();
             printf("  [alloc] total=%.2f GB freed=%.2f GB\n",
@@ -1031,7 +1031,7 @@ class VPartEngine : public BankEngine
          static const char* kn[16] = {"value_ptr", "value_inline", "prefix_node",
                                       "setlist_u8", "node_full", "c2", "c4", "c8",
                                       "setlist_u16", "bucket", "full_x", "cx",
-                                      "k12", "cbucket", "k14", "null"};
+                                      "hdr", "cbucket", "k14", "null"};
          {
             const auto& stt = _db->store().stats();
             printf("  [alloc] total=%.2f GB freed=%.2f GB\n",

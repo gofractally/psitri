@@ -38,3 +38,4 @@ Conventions:
 - 2026-06-12_part-backport-ab/ — part back-port A/B (identical engineering): 100k writes PAR, 1M vpart +7.7%w/+17%r-solo, dict part load 132.9->98.2; deltas now attribute to liveness scheme + form choice
 - 2026-06-12_vpart-space-census/ — vpart +50% space EXPLAINED (straight-widen form, not stamps: 4B/leaf sub-line only); dense default flipped; 6-row matrix + census; bank PROVISIONAL (co-tenant load 4.5+)
 - 2026-06-12_pipeline-bench-v1/ — L5 prototype: 1GB delta flushes to heart in 4.6s (2.2M keys/s, 5x heart random rate); writer 537k tx/s concurrent; retire 4.2M keys/s
+- 2026-06-12_sustained-matrix/ — sustained throughput: clean baseline 677-743k (537k was co-tenancy); 512MB delta +10%; PACING INVERTS (burst beats trickle — L5 hysteresis validated); qos useless, repin free

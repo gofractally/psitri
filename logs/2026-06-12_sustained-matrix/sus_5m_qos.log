@@ -1,0 +1,34 @@
+=== pipeline_bench: vpart hot delta -> heart bulk flush ===
+keys=5000000 sustain=5000000 chunk=10000000
+
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/pipeline_vpart/meta.part[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=295072[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4346363904, size=295072[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/pipeline_heart/ptrs/header.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4344774656, size=4224[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/pipeline_heart/iref/header.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4344791040, size=4224[0m
+allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (7449 GB) — capping[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/pipeline_heart/header[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/pipeline_heart/roots[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/pipeline_heart/session_ops.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=93650944[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4754096128, size=93650944[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4344807424, size=32768[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4344840192, size=32768[0m
+Phase A  vpart delta writes :   1257881 tx/s  (5000000 txns, 3.97s)
+         heart direct writes:    569991 tx/s  (baseline, root 1)
+Phase B  bulk flush -> heart:   2512516 keys/s  (5000000 keys, 1.99s, chunk=10000000)
+Phase C  sustained writer   :    733673 tx/s  (flusher concurrent:   3063765 keys/s) [qos]
+         vpart arena after C: 2112 MB (264 segments)
+Phase D  retire (sorted rm) :   4660621 keys/s  (5000000 keys, 1.07s, batch=4096)
+Phase E  stable read (heart):     452.3 ns/op (200000/200000 hits)
+         latest post-retire :     468.8 ns/op (vpart miss -> heart, 200000 hits)
+
+PASS (validation: heart row count + spot values checked by flush hits above)

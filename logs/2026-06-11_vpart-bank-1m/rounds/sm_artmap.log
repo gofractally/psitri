@@ -1,0 +1,61 @@
+=== Bank Benchmark: art_map (single-thread, in-memory) ===
+  Accounts:     100,000
+  Transactions: 200,000
+  Batch size:   1
+  Sync every:   never commits
+  Sync mode:    none
+  Seed:         12345
+  Read mode:    latest
+  Key mode:     names
+  DB path:      /tmp/sm_artmap
+
+Phase 1: Account Generation
+  Loaded 100,000 dictionary words
+  Account generation              0.003 sec      30,363,223 ops/sec
+
+Phase 2: Bulk Load
+  Bulk load                       0.018 sec       5,685,411 ops/sec
+  Size: file=0.0 MB  live=19.8 MB  free=0.0 MB
+
+Warm-up: 20,000 transactions (not measured)
+  Warm-up                         0.031 sec         643,437 ops/sec
+  Successful: 18,875  Skipped: 1,125
+  Size: file=0.0 MB  live=78.3 MB  free=0.0 MB
+  commit                avg=   0 us  p50=   1 us  p99=   2 us  p99.9=    2 us  max=    1 us  (n=20000)
+  commit latency distribution:
+         <1 us:    19678  ( 98.4%)
+        1-2 us:      322  (  1.6%)
+
+Phase 3a: Transactions (write-only)
+  Write-only                      0.280 sec         713,309 ops/sec
+  Successful: 150,764  Skipped: 49,236
+  Size: file=0.0 MB  live=631.3 MB  free=0.0 MB
+  commit                avg=   0 us  p50=   1 us  p99=   2 us  p99.9=    2 us  max=    1 us  (n=200000)
+  commit latency distribution:
+         <1 us:   196659  ( 98.3%)
+        1-2 us:     3341  (  1.7%)
+
+Phase 3b: Transactions (engine is SINGLE-THREADED: no concurrent reader)
+  Write+Read                      0.263 sec         761,648 ops/sec
+  Successful: 135,739  Skipped: 64,261
+  Size: file=0.0 MB  live=1133.6 MB  free=0.0 MB
+  commit                avg=   0 us  p50=   1 us  p99=   2 us  p99.9=    2 us  max=    1 us  (n=200000)
+  commit latency distribution:
+         <1 us:   196621  ( 98.3%)
+        1-2 us:     3379  (  1.7%)
+
+Phase 3c: Reader solo (no concurrent writer, 100 reads/batch)
+  Reader solo: 12,794,800 reads in 2.005s (6,381,433 reads/sec, 12,794,800 found = 100.0%)
+
+  --- Phase 3 Summary ---
+  Write-only: 713,309 tx/sec  (3,566,545 KV ops/sec)
+  Write+Read: 761,648 tx/sec  (3,808,240 KV ops/sec, write impact: +6.8%)
+
+Phase 4: Validation
+  Validation scan                 0.013 sec      28,791,939 ops/sec
+  Accounts found: 100,000 (expected 100,000)
+  Log entries:    286,503 (expected 286,503)
+  Total balance:  100,000,000,000 (expected 100,000,000,000)  PASS
+  Size: file=0.0 MB  live=1133.6 MB  free=0.0 MB
+
+PASS  Total wall clock: 2.613 sec

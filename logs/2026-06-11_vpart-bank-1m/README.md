@@ -104,3 +104,23 @@ Survivable envelope 100k accounts / 200k txns @ batch=1:
   art_map<btree_value>, commit-aligned: 711,953 tx/s   6,296,790 reads/s solo
   (vs vpart at the same 100k scale: 474,661 tx/s — and vpart runs 10M+ txns
    indefinitely; reclamation is the difference, not the tree)
+
+## Correction (Dan): the sweep claim ignored artmap — honest four-engine table
+
+At 1M/10M artmap is DNF (generation-per-commit on the 4 GB bump arena
+exhausts ~2.5M txns) — but DNF is a row, not an excuse. At its envelope
+(100k accounts / 200k txns, rounds/bank_small_table.txt):
+
+  artmap   713,309* w   761,648* w+r   (reads n/a: single-threaded)  live 1,133.6 MB
+  vpart    386,251      470,479        7.03M* w/wr  8.35M* solo      live 59.2
+  part     442,358      449,907        6.02M        7.09M            live 58.3
+  heart    307,072      270,265        3.66M        4.96M            live 17.9*
+
+Readings: (1) the transient no-reclaim ceiling is 1.6-1.8x the durable
+engines' writes — that headroom is what bottom-up COW (#23), per-line
+stamps (L1c) and bump-region allocation are chasing; artmap pays 19x
+vpart's live bytes for it and cannot scale or serve readers. (2) at this
+small/cachey scale part out-writes vpart (442 vs 386) — the 16-line full
+clones cost relatively more when memory bandwidth isn't the constraint;
+the 1M-scale ordering (vpart 380 > part 349) is the realistic one. The
+"sweep" claim holds only among the durable versioned engines at scale.

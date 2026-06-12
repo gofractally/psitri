@@ -276,3 +276,25 @@ Nothing breaks — the storage layer they sit on becomes the generic one.
    typenum in W, writes in B); ttree ids are durable tokens by design.
 7. Engines without native sessions pass session* = their GC context;
    types that need no session ignore it.
+
+## 10. any_value — the dynamic read form (Dan, locked)
+
+    database::any_value = { typenum, pod payload (inline), session/read-lock }
+
+Returned by get/find WITHOUT a type argument; the lock-bundling proxy
+(heart's pinned_value lesson) generalized to typed values. Three read forms:
+
+    get<T>(key)        -> retained T            | throws invalid_type
+    get(key, lambda)   -> scoped view           | lock held for the lambda
+    get(key)           -> any_value             | lock held while it lives
+
+cursor.is_type<T>() mirrors holds_alternative (bytes = type 0).
+any_value surface: type(), is<T>(), as<T>() (materializes via make_from_pod,
+RETAINS — the only civilian exit), bytes() (typenum 0 only; invalid_type
+otherwise — a typed pod exposed as bytes would be a forgeable, unbalanced
+handle), raw_pod() (expert/merger path: zero-copy identity flow, balanced
+because the typed STORE form upsert(key, type, raw_pod) fires the retain
+hook — exactly the engine-internal clone-retain semantic).
+Contract: holding any_value holds a read lock — scoped inspection, not
+storage; engines bundle their native lock type (vpart: the cursor pin;
+heart/sal: the session read lock).

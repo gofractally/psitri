@@ -77,6 +77,121 @@ namespace vpart::kv
 
    class database;
 
+   // ── typed values (the LOCKED API, audit §9-§12) ───────────────────────
+   // EVERY stored slot is [u16 LE typenum][payload]. Typenum 0 = raw bytes
+   // (the null-hook builtin: strings/views); registered ids >= 1 dispatch
+   // retain/release through the database registry from the tree's value-
+   // lifecycle hooks — overwrite, remove, abort, COW clone, supersession
+   // drain, reaper: GC threads included. Reads are THREE-OUTCOME everywhere:
+   // found / not-found / invalid_type (a wrong-pod read is a type error,
+   // never a fake absence, never a reinterpret).
+   inline constexpr uint16_t kRawType = 0;
+
+   struct invalid_type : std::runtime_error
+   {
+      invalid_type(uint16_t stored, uint16_t asked)
+          : std::runtime_error("vpart: value is type " + std::to_string(stored) +
+                               ", read as type " + std::to_string(asked))
+      {
+      }
+   };
+
+   // part::shape::storable_type, restated locally (vpart doesn't include the
+   // concept header; the conformance suite asserts the shapes line up).
+   template <class T>
+   concept storable = requires(T t, const typename T::t_pod& p, void* ses) {
+      { T::type_id } -> std::convertible_to<uint16_t>;
+      requires std::is_trivially_copyable_v<typename T::t_pod>;
+      { std::move(t).take_pod() } -> std::same_as<typename T::t_pod>;
+      { T::make_from_pod(p, true) } -> std::same_as<T>;
+      T::t_pod::retain(ses, p);
+      T::t_pod::release(ses, p);
+   };
+
+   inline uint16_t slot_type(value_view s) noexcept
+   {
+      uint16_t t;
+      std::memcpy(&t, s.data(), 2);
+      return t;
+   }
+   inline value_view slot_payload(value_view s) noexcept
+   {
+      return s.substr(2);
+   }
+   // Raw-bytes envelope, built in thread_local arena scratch (grows once).
+   inline value_view env_raw_(value_view v)
+   {
+      thread_local std::string buf;
+      buf.resize(2 + v.size());
+      buf[0] = buf[1] = 0;
+      std::memcpy(buf.data() + 2, v.data(), v.size());
+      return {buf.data(), buf.size()};
+   }
+   template <class S>
+   S slot_decode(value_view slot)
+   {
+      const uint16_t t = slot_type(slot);
+      if constexpr (storable<S>)
+      {
+         if (t != S::type_id)
+            throw invalid_type{t, S::type_id};
+         typename S::t_pod pod;
+         if (slot.size() - 2 != sizeof(pod))
+            throw invalid_type{t, S::type_id};  // truncated/foreign pod bytes
+         std::memcpy(&pod, slot.data() + 2, sizeof(pod));
+         return S::make_from_pod(pod, true);  // a RETAINED handle out
+      }
+      else
+      {
+         if (t != kRawType)
+            throw invalid_type{t, kRawType};
+         const value_view p = slot_payload(slot);
+         return S(p.data(), p.size());
+      }
+   }
+
+   // any_value — the dynamic, lock-bundling read form (§10/§12): a pointer to
+   // the value SLOT in the tree, no copy. Inside a write transaction the
+   // transaction itself is the pin; the view is invalidated by a later write
+   // to the same key in that transaction. as<T>() retains (the only civilian
+   // exit); bytes() on a typed slot is invalid_type (a typed pod exposed raw
+   // would be a forgeable handle); raw_pod() is the expert/merger identity
+   // path, balanced by the typed STORE side firing the retain hook.
+   class any_value
+   {
+     public:
+      any_value() = default;
+      uint16_t type() const noexcept { return _s ? slot_type({_s, _n}) : kRawType; }
+      template <class T>
+      bool is() const noexcept
+      {
+         return _s && slot_type({_s, _n}) == T::type_id;
+      }
+      template <class T>
+      T as() const
+      {
+         if (!is<T>())
+            throw invalid_type{type(), T::type_id};
+         typename T::t_pod pod;
+         std::memcpy(&pod, _s + 2, sizeof(pod));
+         return T::make_from_pod(pod, true);
+      }
+      std::string_view bytes() const
+      {
+         if (type() != kRawType)
+            throw invalid_type{type(), kRawType};
+         return {_s + 2, _n - 2};
+      }
+      std::string_view raw_pod() const noexcept { return _s ? std::string_view{_s + 2, _n - 2} : std::string_view{}; }
+      explicit operator bool() const noexcept { return _s != nullptr; }
+
+     private:
+      friend class transaction;
+      any_value(const char* s, size_t n) : _s(s), _n(n) {}
+      const char* _s = nullptr;
+      size_t      _n = 0;  // the FULL slot (envelope included), in the tree
+   };
+
    // Refcounted handle to a FROZEN version root (the smart_ptr/"tree_root"
    // equivalent): copy freely across threads; the tree stays alive while any
    // handle (merger, reader warm legs) exists; the LAST drop enqueues the
@@ -103,6 +218,13 @@ namespace vpart::kv
          uint32_t  vf, raw;
          uint64_t  count = 0;     // keys in the tree (size() continuity)
          bool      armed = true;  // false until the displacing txn COMMITS
+         // snapshot handles: a reader-slot pin holds the drain floor at vf
+         // for the handle's lifetime (the nodes stay readable); DISARMED —
+         // dropping a snapshot of the live lineage must never reap it. The
+         // published value must be ZEROED on drop (floor_ scans values, not
+         // slot-ownership bits) — exactly the cursor teardown protocol.
+         std::optional<vpart::read_session> pin;
+         std::atomic<uint64_t>*             pin_slot = nullptr;
          ~ctrl();  // last handle dropped (and armed) -> reaper queue
       };
       explicit tree_root(std::shared_ptr<ctrl> c) : _c(std::move(c)) {}
@@ -193,16 +315,25 @@ namespace vpart::kv
       {
          if (is_end())
             return std::nullopt;
-         const value_view v = (*_it).second.v;
-         return S(v.data(), v.size());
+         return slot_decode<S>((*_it).second.v);
       }
       template <class F>
       bool get_value(F&& f) const
       {
          if (is_end())
             return false;
-         f((*_it).second.v);
+         const value_view s = (*_it).second.v;
+         if (slot_type(s) != kRawType)
+            throw invalid_type{slot_type(s), kRawType};
+         f(slot_payload(s));
          return true;
+      }
+      // typenum of the current slot (locked API: cursor type discovery)
+      uint16_t value_type() const { return is_end() ? kRawType : slot_type((*_it).second.v); }
+      template <class T>
+      bool is_type() const
+      {
+         return !is_end() && slot_type((*_it).second.v) == T::type_id;
       }
 
       // Point read against the snapshot (the bank reader hot path).
@@ -212,7 +343,7 @@ namespace vpart::kv
          bval out;
          if (!_view.find(k, out))
             return std::nullopt;
-         return S(out.v.data(), out.v.size());
+         return slot_decode<S>(out.v);
       }
       template <class F>
       bool get(key_view k, F&& f) const
@@ -220,7 +351,9 @@ namespace vpart::kv
          bval out;
          if (!_view.find(k, out))
             return false;
-         f(out.v);
+         if (slot_type(out.v) != kRawType)
+            throw invalid_type{slot_type(out.v), kRawType};
+         f(slot_payload(out.v));
          return true;
       }
 
@@ -265,6 +398,12 @@ namespace vpart::kv
      public:
       void insert(key_view k, value_view v) { upsert(k, v); }
       void upsert(key_view k, value_view v);
+      // typed store: take_pod() CONSUMES v — custody (one reference) moves
+      // into the database; the slot's later death fires the release hook.
+      template <class T>
+         requires storable<std::remove_cvref_t<T>>
+      void upsert(key_view k, T&& v);
+      any_value get_any(key_view k) const;
       int  remove(key_view k);
       // ── multi-root (psitri's model; concept-locked) ─────────────────────
       // primary() targets the root this transaction started on; open_root(i)
@@ -385,6 +524,11 @@ namespace vpart::kv
       // the last tree_root handle drops — GC lives in vpart, not callers).
       void clear_warm_slots();
       tree get_root(uint32_t root_index) { return tree(this, root_index); }
+      // Snapshot (concept: tree_snapshots): O(1) owned shared tree of root
+      // i's last COMMITTED state. The handle pins the boundary in a reader
+      // slot (the drain can't reclaim under it) and is DISARMED — the nodes
+      // belong to the live lineage; dropping a snapshot never reaps them.
+      tree_root snapshot(uint32_t root_index);
 
       // vpart: the working trees' nodes are the committed state (or were
       // logged when superseded) — teardown owns nothing to free.
@@ -487,6 +631,20 @@ namespace vpart::kv
       }
 
       vpart::arena& store() noexcept { return _arena; }
+
+      // ── typed-value registry (locked API §9) ────────────────────────────
+      // Registered ids dispatch retain/release from the tree's value-
+      // lifecycle hooks — the writer, the DRAIN and the REAPER threads all
+      // fire through here (hooks must be thread-safe and non-blocking, the
+      // sal type-ops contract). Register types BEFORE storing values of T;
+      // id 0 is the raw-bytes builtin. The psio schema persistence (§14)
+      // binds stored ids to these callbacks by canonical schema on load.
+      template <class... Ts>
+      void register_value_types()
+      {
+         (reg_type_<Ts>(), ...);
+      }
+
       // wait until the drain ring is empty (tests / shutdown ordering)
       void flush_releases() noexcept
       {
@@ -647,6 +805,7 @@ namespace vpart::kv
       void reaper_loop_() noexcept
       {
          engine_t v{part_alloc<bval>(&_arena, /*reclaim=*/true)};
+         v.allocator_mut().vhooks = &_vh;  // typed values die in reap cascades too
          // NO ring: _recycle is SPSC with the DRAIN as its sole producer —
          // a second producer corrupts it (measured: allocation livelock).
          // Reaper frees go straight to the thread-safe freesets; the writer
@@ -739,7 +898,8 @@ namespace vpart::kv
       void drain_(uint32_t floor) noexcept
       {
          engine_t v{part_alloc<bval>(&_arena, /*reclaim=*/true)};
-         v.allocator_mut().vring = &_recycle;  // freed runs go back to the writer
+         v.allocator_mut().vring  = &_recycle;  // freed runs go back to the writer
+         v.allocator_mut().vhooks = &_vh;       // superseded typed values die HERE
          auto eat_chain = [&](uint32_t head) noexcept {
             // walk the chain newest-line-first; entries within a chain share
             // the death version, so order inside is irrelevant
@@ -849,13 +1009,66 @@ namespace vpart::kv
       std::atomic<uint64_t> _live_arr[kMaxRoots];    // (version<<32|root_i) per root
       std::atomic<uint64_t> _live{0};             // (version << 32) | root raw
       uint32_t              _committed = 0;  // last published version (writer-owned)
+
+      // ── typed-value dispatch (slot envelope -> registered hooks) ────────
+      struct type_entry
+      {
+         void (*retain)(void*, const char*, size_t)  = nullptr;
+         void (*release)(void*, const char*, size_t) = nullptr;
+      };
+      std::vector<type_entry> _types = std::vector<type_entry>(65536);
+      template <class T>
+      void reg_type_()
+      {
+         static_assert(storable<T>);
+         static_assert(T::type_id != kRawType, "type_id 0 is the raw-bytes builtin");
+         _types[T::type_id] = {&vh_retain_t_<T>, &vh_release_t_<T>};
+      }
+      template <class T>
+      static void vh_retain_t_(void* db, const char* p, size_t n)
+      {
+         typename T::t_pod pod;
+         assert(n == sizeof(pod));
+         std::memcpy(&pod, p, sizeof(pod));
+         T::t_pod::retain(db, pod);
+      }
+      template <class T>
+      static void vh_release_t_(void* db, const char* p, size_t n)
+      {
+         typename T::t_pod pod;
+         assert(n == sizeof(pod));
+         std::memcpy(&pod, p, sizeof(pod));
+         T::t_pod::release(db, pod);
+      }
+      void vh_fire_(const char* b, size_t n, bool retain) noexcept
+      {
+         if (n < 2)
+            return;
+         uint16_t t;
+         std::memcpy(&t, b, 2);
+         if (t == kRawType)
+            return;
+         const auto& e = _types[t];
+         if (auto f = retain ? e.retain : e.release)
+            f(this, b + 2, n - 2);
+      }
+      static void vh_copy_s_(const char* b, size_t n, void* u)
+      {
+         static_cast<database*>(u)->vh_fire_(b, n, true);
+      }
+      static void vh_release_s_(const char* b, size_t n, void* u)
+      {
+         static_cast<database*>(u)->vh_fire_(b, n, false);
+      }
+      vpart::value_hooks _vh{&vh_copy_s_, &vh_release_s_, this};
    };
 
    // ── bodies ────────────────────────────────────────────────────────────────
    inline write_session::write_session(database* db)
        : _db(db), _ses(db->_arena.start_session()), _t(part_alloc<bval>(&_ses))
    {
-      _t.allocator_mut().vlog = &_vlog;
+      _t.allocator_mut().vlog   = &_vlog;
+      _t.allocator_mut().vhooks = &db->_vh;
       // re-adopt the durable root on reopen (parity plus: part started empty)
       const uint64_t live = db->_live_arr[0].load(std::memory_order_seq_cst);
       if (live != 0)  // raw 0 is a valid root; version 0 = unpublished
@@ -875,7 +1088,8 @@ namespace vpart::kv
       if (!_aux[i])
       {
          _aux[i].emplace(part_alloc<bval>(&_ses));
-         _aux[i]->allocator_mut().vlog = &_vlog;  // shared per-txn chains
+         _aux[i]->allocator_mut().vlog   = &_vlog;  // shared per-txn chains
+         _aux[i]->allocator_mut().vhooks = &_db->_vh;
          const uint64_t live = _db->_live_arr[i].load(std::memory_order_seq_cst);
          if (live != 0)
          {
@@ -960,6 +1174,32 @@ namespace vpart::kv
    {
       if (armed)
          db->reap_root_(raw);
+      if (pin_slot)
+         pin_slot->store(0, std::memory_order_seq_cst);  // drop the version pin
+   }
+
+   inline tree_root write_session::snapshot(uint32_t root_index)
+   {
+      auto& arena = _db->_arena;
+      auto  rs    = arena.start_read_session();
+      auto& slot  = arena.reader_slot(rs.slot());
+      uint64_t live;
+      for (;;)  // publish-validate (the pin_snapshot protocol)
+      {
+         live = _db->_live_arr[root_index].load(std::memory_order_seq_cst);
+         slot.store(live, std::memory_order_seq_cst);
+         if (_db->_live_arr[root_index].load(std::memory_order_seq_cst) == live)
+            break;
+      }
+      auto c   = std::make_shared<tree_root::ctrl>();
+      c->db    = _db;
+      c->vf    = uint32_t(live >> 32);
+      c->raw   = uint32_t(live);
+      c->count = tree_for(root_index).size_hint();
+      c->armed = false;  // view of the LIVE lineage: never reaped from here
+      c->pin.emplace(std::move(rs));
+      c->pin_slot = &slot;
+      return tree_root(std::move(c));
    }
 
    // TRANSITIONAL shim (#32 deletes): empty root 1 — the displaced tree ARMS
@@ -975,7 +1215,26 @@ namespace vpart::kv
 
    inline void transaction::upsert(key_view k, value_view v)
    {
-      _ws->_t.cow_insert(k, bval{v});  // view in; the leaf copies once
+      _ws->_t.cow_insert(k, bval{env_raw_(v)});  // [0][bytes]; the leaf copies once
+   }
+   template <class T>
+      requires storable<std::remove_cvref_t<T>>
+   inline void transaction::upsert(key_view k, T&& v)
+   {
+      using U                = std::remove_cvref_t<T>;
+      const typename U::t_pod pod = std::move(v).take_pod();  // custody -> db
+      char                    buf[2 + sizeof(pod)];
+      const uint16_t          id = U::type_id;
+      std::memcpy(buf, &id, 2);
+      std::memcpy(buf + 2, &pod, sizeof(pod));
+      _ws->_t.cow_insert(k, bval{value_view(buf, sizeof(buf))});
+   }
+   inline any_value transaction::get_any(key_view k) const
+   {
+      bval out;
+      if (!_ws->_t.find(k, out))
+         return {};
+      return any_value{out.v.data(), out.v.size()};  // slot view, txn-pinned
    }
    inline int transaction::remove(key_view k)
    {
@@ -1006,7 +1265,9 @@ namespace vpart::kv
       bval out;
       if (!_ws->_t.find(k, out))
          return false;
-      fn(out.v);
+      if (slot_type(out.v) != kRawType)
+         throw invalid_type{slot_type(out.v), kRawType};  // raw view of a typed pod
+      fn(slot_payload(out.v));
       return true;
    }
    template <class S>
@@ -1015,7 +1276,7 @@ namespace vpart::kv
       bval out;
       if (!_ws->_t.find(k, out))
          return std::nullopt;
-      return S(out.v.data(), out.v.size());
+      return slot_decode<S>(out.v);
    }
 
    inline transaction::transaction(write_session* ws, uint32_t root_index,
@@ -1061,7 +1322,7 @@ namespace vpart::kv
 
    inline void tree_handle::upsert(key_view k, value_view v)
    {
-      _tx->tree_(_ri).cow_insert(k, bval{v});
+      _tx->tree_(_ri).cow_insert(k, bval{env_raw_(v)});
    }
    inline int tree_handle::remove(key_view k)
    {
@@ -1073,7 +1334,9 @@ namespace vpart::kv
       bval out;
       if (!_tx->tree_(_ri).find(k, out))
          return false;
-      fn(out.v);
+      if (slot_type(out.v) != kRawType)
+         throw invalid_type{slot_type(out.v), kRawType};
+      fn(slot_payload(out.v));
       return true;
    }
    template <class S>
@@ -1082,7 +1345,7 @@ namespace vpart::kv
       bval out;
       if (!_tx->tree_(_ri).find(k, out))
          return std::nullopt;
-      return S(out.v.data(), out.v.size());
+      return slot_decode<S>(out.v);
    }
    inline uint64_t tree_handle::key_count() const
    {

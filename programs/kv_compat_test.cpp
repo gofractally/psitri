@@ -160,6 +160,7 @@ namespace
       t_pod    take_pod() &&
       {
          owned = false;  // the database now owns this reference
+         g_hooks.retains.fetch_add(1, std::memory_order_relaxed);  // custody -> pod
          return t_pod{id};
       }
       static test_ref make_from_pod(const t_pod& p, bool retain)
@@ -735,6 +736,9 @@ namespace
 
       // All keys removed: a correct engine has freed every node. part's arena
       // makes that checkable exactly: every line must be back in the freeset.
+      // QUIESCENT means no live sessions: a session legitimately caches
+      // claimed lines (fcache/window) while alive — end it before the census.
+      ses.reset();
       if constexpr (requires(DB& d) { d.store(); })
       {
          if constexpr (requires(DB& d) { d.flush_releases(); })

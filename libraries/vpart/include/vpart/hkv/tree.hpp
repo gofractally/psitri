@@ -582,6 +582,42 @@ namespace detail  // implementation types & node helpers — not part of the pub
          node_at::deallocate(na, static_cast<node_block*>(p), nblocks_(n));
       }
 
+      // ── typed-value lifecycle hooks (raw_vals, allocator-carried) ─────────
+      // When the allocator exposes vhooks (vpart's typed-value registry), the
+      // tree reports every PHYSICAL death of value bytes (on_release) and
+      // every engine-internal byte duplication (on_copy). A COW leaf clone
+      // and its husk's later drain fire a balanced copy/release pair; a
+      // same-scope move (split rebuild: bytes leave the old leaf into exactly
+      // one new node, then the old leaf is freed) fires neither. The only NET
+      // calls are therefore user-visible births and deaths, so a registry's
+      // refcounts stay exact across overwrite, remove, abort, supersession
+      // and drain — including values that die inside the drain thread.
+      static constexpr bool vh_on =
+          raw_vals && requires(Allocator& a) { a.vhooks->on_release; };
+      void                  vh_release_(std::string_view b) noexcept
+      {
+         if constexpr (vh_on)
+            if (auto* h = alloc_.vhooks; h && h->on_release)
+               h->on_release(b.data(), b.size(), h->user);
+      }
+      void vh_copy_(std::string_view b) noexcept
+      {
+         if constexpr (vh_on)
+            if (auto* h = alloc_.vhooks; h && h->on_copy)
+               h->on_copy(b.data(), b.size(), h->user);
+      }
+      void vh_leaf_dies_(const char* L) noexcept
+      {
+         if constexpr (vh_on)
+            vh_release_(leaf_bytes(L));
+      }
+      void vh_node_dies_(Ptr p) noexcept  // funnel for tag-dispatched frees
+      {
+         if constexpr (vh_on)
+            if (p.tag() == K::value_ptr)
+               vh_leaf_dies_(static_cast<const char*>(deref_(p)));
+      }
+
       // Address-resolution chokepoint. Direct handles compile to exactly the old static code
       // (base_ is an empty member and `this` folds away under inlining — asm-gated). Indexed
       // handles resolve base_ + (28-bit line index << 7); base_ is cached from the allocator
@@ -3674,6 +3710,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          auto free_leaf         = [&](char* L) {
             if constexpr (!raw_vals)
                v_destroy(alloc_, leaf_val(L));
+            vh_leaf_dies_(L);
             node_free_(L, leaf_alloc_size(L));
          };
          // BOTTOM-UP COW (Dan): descend READ-ONLY; own_rm_ clones the shared
@@ -5397,7 +5434,10 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   {  // same-size: bytes in place; else rebuild the term leaf
                      const std::string_view nb = vf_peek_(val);
                      if (nb.size() == leaf_vlen(tl))
+                     {
+                        vh_leaf_dies_(tl);  // old bytes clobbered in place
                         std::memcpy(tl + leaf_value_off(), nb.data(), nb.size());
+                     }
                      else
                      {
                         const Ptr old = rh->term;
@@ -5456,7 +5496,10 @@ namespace detail  // implementation types & node helpers — not part of the pub
                {
                   const std::string_view nb = vf_peek_(val);
                   if (nb.size() == leaf_vlen(L))
+                  {
+                     vh_leaf_dies_(L);  // old bytes clobbered in place
                      std::memcpy(L + leaf_value_off(), nb.data(), nb.size());
+                  }
                   else
                   {  // size changed: rebuild the leaf verbatim around new bytes
                      const size_t Lsz = leaf_alloc_size(L);
@@ -5472,6 +5515,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                                                       reinterpret_cast<const char*>(leaf_suf(L)),
                                                       leaf_slen(L)),
                                                   std::forward<VF>(val));
+                     vh_leaf_dies_(L);  // old bytes die with the old leaf
                      node_free_(L, Lsz);
                      inserted = false;
                      return np;
@@ -5504,7 +5548,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
             setlist_set(r, uint8_t(R[c]), make_value_at(key, depth + c + 1, std::forward<VF>(val)));
          partial = apply_prefix(r, key.substr(depth, c));             // (3) shared prefix (== S[0..c])
          if constexpr (raw_vals)
-         {  // bytes copy out of the OLD leaf into the new one, then free
+         {  // bytes MOVE out of the OLD leaf into exactly one new node, then the
+            // old leaf is freed — one live copy throughout, so no vh hooks fire
             const T ov{leaf_bytes(L)};
             if (c == S.size())  // (4) old value, LAST
                set_term(&r->rh, ov);
@@ -5658,6 +5703,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             {
                char* L = static_cast<char*>(deref_(cur));
                if constexpr (!std::is_trivially_destructible_v<T>) v_destroy(alloc_, leaf_val(L));
+               vh_leaf_dies_(L);
                node_free_(L, leaf_alloc_size(L));
                return;
             }
@@ -6860,6 +6906,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             if (alloc_.vreclaim || !alloc_.hkv_vold(vstamp_get_(p)))
             {
                cow_destroy_dead_(p);  // cascade children (window/drain rules inside)
+               vh_node_dies_(p);
                node_free_(deref_(p), cow_node_bytes_(p));
                return;
             }
@@ -6895,7 +6942,10 @@ namespace detail  // implementation types & node helpers — not part of the pub
                cow_release(p);
             }
             else  // SHALLOW: children carried by the successor — free p only
+            {
+               vh_node_dies_(p);  // a superseded leaf's bytes die with the husk
                node_free_(deref_(p), cow_node_bytes_(p));
+            }
          }
       }
       void cow_release_now(Ptr p) noexcept { cow_release(p); }
@@ -6931,6 +6981,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                default:
                   break;  // leaves/buckets: no children
             }
+            vh_node_dies_(p);
             node_free_(deref_(p), cow_node_bytes_(p));
          }
       }
@@ -8923,6 +8974,10 @@ namespace detail  // implementation types & node helpers — not part of the pub
          switch (k)
          {
             case K::value_ptr:
+               // duplicated value bytes; the shallow husk's drain balances this
+               if constexpr (vh_on)
+                  vh_copy_(leaf_bytes(static_cast<const char*>(dst)));
+               break;
             case K::bucket:
                break;
             case K::prefix_node:

@@ -125,6 +125,19 @@ namespace vpart
       bool empty() const noexcept { return clone_head == npos; }
    };
 
+   // Typed-value lifecycle hooks (LOCKED API §9): fired when stored value
+   // bytes are copied between leaves (retain) or physically die with
+   // their leaf (release) — including drain/reaper husks. Installed by
+   // the kv database on EVERY engine it constructs; hooks parse the
+   // (typenum, payload) envelope and dispatch the type registry.
+   // Namespace-scope (not nested) so allocator REBINDS share the pointer.
+   struct value_hooks
+   {
+      void (*on_copy)(const char* bytes, size_t n, void* user);
+      void (*on_release)(const char* bytes, size_t n, void* user);
+      void* user;
+   };
+
    template <class T>
    struct part_alloc
    {
@@ -135,6 +148,8 @@ namespace vpart
       session*    ses      = nullptr;  // allocation context (writer thread only);
                                        // null for read-only snapshot views
       vlog_state*   vlog     = nullptr;  // writer's per-txn logs (null on views)
+      const value_hooks* vhooks = nullptr;
+
       recycle_ring* vring    = nullptr;  // drain context: freed runs recycle here
       uint32_t      vtxn     = 0;        // current write window id (0 = no window)
       bool          vreclaim = false;    // drain context: free-now instead of log
@@ -146,7 +161,8 @@ namespace vpart
       part_alloc(arena* ar, bool reclaim) noexcept : a(ar), vreclaim(reclaim) {}
       template <class U>
       part_alloc(const part_alloc<U>& o) noexcept
-          : a(o.a), ses(o.ses), vlog(o.vlog), vring(o.vring), vtxn(o.vtxn), vreclaim(o.vreclaim)
+          : a(o.a), ses(o.ses), vlog(o.vlog), vhooks(o.vhooks), vring(o.vring), vtxn(o.vtxn),
+            vreclaim(o.vreclaim)
       {
       }
 

@@ -555,32 +555,38 @@ namespace tiered
                _warm_vf     = vf;
                _warm_root   = wroot;
             }
-            // master pin: holds the floor <= vf for every reader warm leg
-            auto warm = _w->pin_at(vf, wroot);
+            // master pin: holds the floor <= vf for every reader warm leg.
+            // optional: it MUST drop before the final writer-lock acquisition
+            // (deadlock cycle otherwise: writer spins on the full supersession
+            // ring inside commit while HOLDING _writer_m; the drain can't eat
+            // the ring while the floor sits at vf; we'd wait on _writer_m).
+            std::optional<typename W::cursor> warm;
+            warm.emplace(_w->pin_at(vf, wroot));
             if (!_bws)
                _bws = _b->start_write_session();  // ONCE per flushing thread
             uint64_t n    = 0;
-            bool     more = warm.seek_begin();
+            bool     more = warm->seek_begin();
             while (more)
             {
                auto     btx   = _bws->start_transaction(0);
                uint64_t in_tx = 0;
-               while (!warm.is_end() && in_tx < _k.flush_chunk)
+               while (!warm->is_end() && in_tx < _k.flush_chunk)
                {
-                  warm.get_value([&](value_view v) {
+                  warm->get_value([&](value_view v) {
                      if (!v.empty() && v[0] == TAG_DATA)
-                        btx.upsert(warm.key(), value_view(v.data() + 1, v.size() - 1));
+                        btx.upsert(warm->key(), value_view(v.data() + 1, v.size() - 1));
                      else
-                        btx.remove(warm.key());  // tombstone: applied, never stored in B
+                        btx.remove(warm->key());  // tombstone: applied, never stored in B
                   });
                   ++in_tx;
-                  warm.next();
+                  warm->next();
                }
                btx.commit();
                _base_epoch.fetch_add(1, std::memory_order_release);
                n += in_tx;
-               more = !warm.is_end();
+               more = !warm->is_end();
             }
+            warm.reset();  // DROP the floor pin before touching _writer_m
             // the warm data is durable in B: retire the WHOLE tree. New
             // readers stop getting warm legs; existing warm pins keep the
             // drain floor low until they finish (per-version release).

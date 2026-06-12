@@ -388,8 +388,13 @@ namespace vpart::kv
       // wait until the drain ring is empty (tests / shutdown ordering)
       void flush_releases() noexcept
       {
+         auto spill_empty = [&] {
+            std::lock_guard<std::mutex> g(_reg_spill_mx);
+            return _reg_spill.empty();
+         };
          while (_reg_tail.load(std::memory_order_acquire) !=
-                _reg_head.load(std::memory_order_acquire))
+                    _reg_head.load(std::memory_order_acquire) ||
+                !spill_empty())
          {
             _drain_cv.notify_one();
             std::this_thread::yield();
@@ -524,9 +529,16 @@ namespace vpart::kv
                _drain_cv.notify_one();
                return;
             }
-            // ring full: an ancient pin is blocking the floor — wait it out
-            // (alarmed via stats in a follow-up; bounded by reader batch size)
-            std::this_thread::yield();
+            // ring full: a pin is blocking the floor. NEVER spin here — the
+            // writer may hold locks a pin-holder needs to UNPIN (measured
+            // 3-thread deadlock: writer spins in commit, drain floor-gated,
+            // merger waits on the writer lock). Spill unbounded instead.
+            {
+               std::lock_guard g(_reg_spill_mx);
+               _reg_spill.push_back({ver, chain_head});
+            }
+            _drain_cv.notify_one();
+            return;
          }
       }
 
@@ -535,17 +547,10 @@ namespace vpart::kv
       {
          engine_t v{part_alloc<bval>(&_arena, /*reclaim=*/true)};
          v.allocator_mut().vring = &_recycle;  // freed runs go back to the writer
-         for (;;)
-         {
-            const uint32_t t = _reg_tail.load(std::memory_order_relaxed);
-            if (t == _reg_head.load(std::memory_order_acquire))
-               return;
-            const reg_entry e = _reg[t % kRegRing];
-            if (e.ver > floor)
-               return;  // strictly ordered: nothing behind it is eligible either
+         auto eat_chain = [&](uint32_t head) noexcept {
             // walk the chain newest-line-first; entries within a chain share
             // the death version, so order inside is irrelevant
-            uint32_t line = e.head;
+            uint32_t line = head;
             while (line != vlog_state::npos)
             {
                const uint32_t* w = static_cast<const uint32_t*>(_arena.get(line));
@@ -555,7 +560,37 @@ namespace vpart::kv
                _arena.release_run(line, 1);  // the chain line itself
                line = prev;
             }
+         };
+         for (;;)
+         {
+            const uint32_t t = _reg_tail.load(std::memory_order_relaxed);
+            if (t == _reg_head.load(std::memory_order_acquire))
+               break;
+            const reg_entry e = _reg[t % kRegRing];
+            if (e.ver > floor)
+               break;  // strictly ordered: nothing behind it is eligible either
+            eat_chain(e.head);
             _reg_tail.store(t + 1, std::memory_order_release);
+         }
+         // ring-overflow spill (unordered): eat what the floor allows, keep the rest
+         std::vector<reg_entry> local;
+         {
+            std::lock_guard g(_reg_spill_mx);
+            local.swap(_reg_spill);
+         }
+         if (!local.empty())
+         {
+            std::vector<reg_entry> keep;
+            for (const reg_entry& e : local)
+               if (e.ver <= floor)
+                  eat_chain(e.head);
+               else
+                  keep.push_back(e);
+            if (!keep.empty())
+            {
+               std::lock_guard g(_reg_spill_mx);
+               _reg_spill.insert(_reg_spill.end(), keep.begin(), keep.end());
+            }
          }
       }
       void drain_loop_() noexcept
@@ -601,6 +636,8 @@ namespace vpart::kv
       static constexpr uint32_t kRegRing = 1u << 16;  // 512 KB; covers deep pin backlogs
       reg_entry                 _reg[kRegRing];
       std::atomic<uint32_t>     _reg_head{0}, _reg_tail{0};
+      std::mutex                _reg_spill_mx;  // ring-overflow side list (writer never blocks)
+      std::vector<reg_entry>    _reg_spill;
       std::mutex                _drain_mx;
       std::condition_variable   _drain_cv;
       std::thread               _drain_thread;

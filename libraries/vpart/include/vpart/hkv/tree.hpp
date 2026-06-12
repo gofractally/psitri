@@ -752,59 +752,44 @@ namespace detail  // implementation types & node helpers — not part of the pub
             count_ += ins;
             return ins;
          }
-         // Iterative descent (mirrors find): walk to the insertion point keeping a
-         // pointer to the SLOT that holds `cur`, and write only there. No recursion,
-         // no per-level function calls, and pass-through levels do zero writes.
-         packed_ptr* slot   = &root_;
-         [[maybe_unused]] packed_ptr* pslot = nullptr;  // slot holding the parent of *slot (for fusion)
-         size_t      depth  = 0;
-         [[maybe_unused]] unsigned lowfan = 0;  // routers with <3 branches (deep-narrow signature)
-         // ── BOTTOM-UP COW (Dan): descend READ-ONLY recording the slot path;
-         // own_() runs only at an actual mutation point — it clones the shared
-         // suffix of the path top-down, each clone grafted into its (already
-         // private) parent and the next recorded slot re-based by OFFSET into
-         // the clone (a clone is a memcpy, so intra-node offsets are stable).
-         // No-op operations (emplace-hit, would-be misses) clone NOTHING.
-         // Invariant making the suffix contiguous: children of shared nodes
-         // are shared (writing a child slot requires privatizing the parent).
+         // template<Shared> (Dan / psitri's proven pattern): the descent starts
+         // in the UNIQUE instantiation — every ownership branch compiled out —
+         // and tail-switches into SHARED at the first old node; below that the
+         // children-of-shared-are-shared invariant means SHARED needs no checks
+         // either: own_suffix_(transition index) clones with NO scan.
          packed_ptr* path_[72];
-         uint32_t    pdep_ = 1;
-         path_[0]          = &root_;
-         auto own_ = [&]() -> packed_ptr
-         {
-            if constexpr (cow_stamped_)
-               if (alloc_.hkv_vtxn())
-               {
-                  uint32_t i = 0;
-                  while (i < pdep_ && !((*path_[i]).tag() != K::value_inline &&
-                                        cow_shared_(*path_[i])))
-                     ++i;
-                  for (; i < pdep_; ++i)
-                  {
-                     const packed_ptr old = *path_[i];
-                     if (old.is_null() || old.tag() == K::value_inline)
-                        break;
-                     char*            ob = static_cast<char*>(deref_(old));
-                     const packed_ptr nn = cow_clone_into_(path_[i], old);
-                     if (i + 1 < pdep_)
-                        path_[i + 1] = reinterpret_cast<packed_ptr*>(
-                            static_cast<char*>(deref_(nn)) +
-                            (reinterpret_cast<char*>(path_[i + 1]) - ob));
-                  }
-                  slot = path_[pdep_ - 1];
-               }
-            return *slot;
-         };
+         path_[0] = &root_;
+         return insert_impl_<Assign, false>(key, std::forward<VF>(v), path_, 1, 0, 0, 0);
+      }
+
+      // The one insert descent body, instantiated per (Assign, Shared).
+      // slot == path[pdep-1]; fshared = the Shared-mode transition index; the
+      // transition tail-call resumes at the SAME position (depth/lowfan carry).
+      template <bool Assign, bool Shared, class VF>
+      bool insert_impl_(std::string_view key, VF&& v, packed_ptr** path_, uint32_t pdep_,
+                        uint32_t fshared_, size_t depth, unsigned lowfan_in)
+      {
+         packed_ptr* slot   = path_[pdep_ - 1];
+         [[maybe_unused]] packed_ptr* pslot = nullptr;  // slot holding the parent of *slot (for fusion)
+         [[maybe_unused]] unsigned lowfan = lowfan_in;  // routers with <3 branches (deep-narrow signature)
+         (void)fshared_;
          for (;;)
          {
             packed_ptr cur = *slot;
             if (cur.is_null())
             {
-               (void)own_();  // parents of this slot must be private to write it
+               if constexpr (Shared)  // parents of this slot must be private
+                  slot = own_suffix_(path_, pdep_, fshared_);
                *slot = make_value_at(key, depth, std::forward<VF>(v));
                ++count_;
                return true;
             }
+            // UNIQUE → SHARED transition: one well-predicted branch per hop;
+            // the SHARED instantiation never tests again (invariant).
+            if constexpr (cow_stamped_ && !Shared)
+               if (alloc_.hkv_vtxn() && cur.tag() != K::value_inline && cow_shared_(cur))
+                  return insert_impl_<Assign, true>(key, std::forward<VF>(v), path_, pdep_,
+                                                    pdep_ - 1, depth, lowfan);
             const K k = cur.tag();
             // Adaptive: track the deep-narrow signature. Uniform data widens fast
             // (high fanout → lowfan resets), so it never trips; clustered/deep data
@@ -833,7 +818,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
                char* f = static_cast<char*>(deref_(cur));
                if (depth == key.size())
                {
-                  cur            = own_();
+                  if constexpr (Shared)
+                  {
+                     slot = own_suffix_(path_, pdep_, fshared_);
+                     cur  = *slot;
+                  }
                   f              = static_cast<char*>(deref_(cur));
                   const bool ins = set_or_update_term<Assign>(reinterpret_cast<router_hdr*>(f), std::forward<VF>(v));
                   count_ += ins;
@@ -850,7 +839,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   ++depth;
                   continue;
                }
-               cur = own_();
+               if constexpr (Shared)
+                  {
+                     slot = own_suffix_(path_, pdep_, fshared_);
+                     cur  = *slot;
+                  }
                f   = static_cast<char*>(deref_(cur));
                full_set(reinterpret_cast<node_full*>(f), byte,
                         make_value_at(key, depth + 1, std::forward<VF>(v)));  // node_full never overflows
@@ -975,7 +968,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
                case K::value_ptr:
                case K::value_inline:
                {
-                  cur = own_();  // leaf update / split: the leaf and its parents
+                  if constexpr (Shared)
+                  {
+                     slot = own_suffix_(path_, pdep_, fshared_);
+                     cur  = *slot;
+                  }  // leaf update / split: the leaf and its parents
                   if constexpr (cb_create)
                      if (k == K::value_ptr && std::is_same_v<std::decay_t<VF>, T>)
                      {
@@ -1036,7 +1033,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      depth += PP.size();
                      continue;
                   }
-                  cur = own_();  // split mutates this node in place
+                  if constexpr (Shared)
+                  {
+                     slot = own_suffix_(path_, pdep_, fshared_);
+                     cur  = *slot;
+                  }  // split mutates this node in place
                   *slot = split_prefix(cur, key, depth, c, std::forward<VF>(v), [&](auto&& x) {
                      return make_value_at(key, depth + c + 1, std::forward<decltype(x)>(x));
                   });
@@ -1053,7 +1054,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
                                           key.substr(depth));
                      if (c < pl)  // inline prefix diverges -> split it
                      {
-                        cur = own_();  // split re-prefixes this node in place
+                        if constexpr (Shared)
+                  {
+                     slot = own_suffix_(path_, pdep_, fshared_);
+                     cur  = *slot;
+                  }  // split re-prefixes this node in place
                         *slot = split_setlist_prefix(cur, key, depth, c, std::forward<VF>(v), [&](auto&& x) {
                            return make_value_at(key, depth + c + 1, std::forward<decltype(x)>(x));
                         });
@@ -1064,7 +1069,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   }
                   if (depth == key.size())
                   {
-                     cur            = own_();
+                     if constexpr (Shared)
+                  {
+                     slot = own_suffix_(path_, pdep_, fshared_);
+                     cur  = *slot;
+                  }
                      s              = static_cast<setlist*>(deref_(cur));
                      const bool ins = set_or_update_term<Assign>(&s->rh, std::forward<VF>(v));
                      count_ += ins;
@@ -1080,7 +1089,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      ++depth;
                      continue;
                   }
-                  cur = own_();
+                  if constexpr (Shared)
+                  {
+                     slot = own_suffix_(path_, pdep_, fshared_);
+                     cur  = *slot;
+                  }
                   s   = static_cast<setlist*>(deref_(cur));
                   packed_ptr lf = make_value_at(key, depth + 1, std::forward<VF>(v));
                   if (setlist_set(s, byte, lf))  // room: in place (prefix untouched)
@@ -1101,7 +1114,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   setlist16* s = static_cast<setlist16*>(deref_(cur));
                   if (key.size() - depth < 2)
                   {
-                     cur = own_();
+                     if constexpr (Shared)
+                  {
+                     slot = own_suffix_(path_, pdep_, fshared_);
+                     cur  = *slot;
+                  }
                      s   = static_cast<setlist16*>(deref_(cur));
                      if (depth == key.size())  // key ends exactly here → term
                      {
@@ -1122,7 +1139,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      depth += 2;
                      continue;
                   }
-                  cur = own_();
+                  if constexpr (Shared)
+                  {
+                     slot = own_suffix_(path_, pdep_, fshared_);
+                     cur  = *slot;
+                  }
                   s   = static_cast<setlist16*>(deref_(cur));
                   if (s->rh.hdr.nbranch >= setlist16::CAP)  // full → re-stride, retry (v untouched)
                   {
@@ -1142,7 +1163,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
                       lcp(std::string_view(hp + WPFX_OFF, hpl), key.substr(depth));
                   if (hc < hpl)  // diverges inside the wide prefix -> split
                   {
-                     cur = own_();  // split shortens this node's prefix in place
+                     if constexpr (Shared)
+                  {
+                     slot = own_suffix_(path_, pdep_, fshared_);
+                     cur  = *slot;
+                  }  // split shortens this node's prefix in place
                      *slot = split_hdr_prefix_(cur, key, depth, hc, std::forward<VF>(v));
                      ++count_;
                      return true;
@@ -1150,7 +1175,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   depth += hpl;
                   if (depth == key.size())
                   {
-                     cur            = own_();
+                     if constexpr (Shared)
+                  {
+                     slot = own_suffix_(path_, pdep_, fshared_);
+                     cur  = *slot;
+                  }
                      hrh            = reinterpret_cast<router_hdr*>(deref_(cur));
                      const bool ins = set_or_update_term<Assign>(hrh, std::forward<VF>(v));
                      count_ += ins;
@@ -1166,7 +1195,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      ++depth;
                      continue;
                   }
-                  cur = own_();
+                  if constexpr (Shared)
+                  {
+                     slot = own_suffix_(path_, pdep_, fshared_);
+                     cur  = *slot;
+                  }
                   packed_ptr hlf = make_value_at(key, depth + 1, std::forward<VF>(v));
                   build_guard hg{this, &hlf};
                   grow_router_(slot, cur, hbyte, hlf);  // try_set strips hdr; widen carries the prefix
@@ -1181,7 +1214,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   router_hdr* rh = static_cast<router_hdr*>(deref_(cur));
                   if (depth == key.size())
                   {
-                     cur            = own_();
+                     if constexpr (Shared)
+                  {
+                     slot = own_suffix_(path_, pdep_, fshared_);
+                     cur  = *slot;
+                  }
                      rh             = static_cast<router_hdr*>(deref_(cur));
                      const bool ins = set_or_update_term<Assign>(rh, std::forward<VF>(v));
                      count_ += ins;
@@ -1197,7 +1234,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      ++depth;
                      continue;
                   }
-                  cur = own_();
+                  if constexpr (Shared)
+                  {
+                     slot = own_suffix_(path_, pdep_, fshared_);
+                     cur  = *slot;
+                  }
                   packed_ptr lf = make_value_at(key, depth + 1, std::forward<VF>(v));
                   build_guard glf{this, &lf};  // grow can throw; don't orphan the new value
                   grow_router_(slot, cur, byte, lf);  // re-anchors *slot across the widen ladder
@@ -8485,6 +8526,30 @@ namespace detail  // implementation types & node helpers — not part of the pub
                break;
          }
          return np;
+      }
+
+      // Clone the recorded path's shared suffix starting at `from` (the
+      // template<Shared> transition index — no scan: children of shared
+      // nodes are shared). Idempotent: post-mutation re-entry (restride
+      // continue paths) finds private entries and skips them. Each next
+      // slot is re-based by OFFSET into the fresh clone (memcpy ⇒ stable).
+      packed_ptr* own_suffix_(packed_ptr** path, uint32_t n, uint32_t from)
+      {
+         for (uint32_t i = from; i < n; ++i)
+         {
+            const packed_ptr old = *path[i];
+            if (old.is_null() || old.tag() == K::value_inline)
+               break;
+            if (!cow_shared_(old))
+               continue;  // already owned (idempotent re-entry)
+            char*            ob = static_cast<char*>(deref_(old));
+            const packed_ptr nn = cow_clone_into_(path[i], old);
+            if (i + 1 < n)
+               path[i + 1] = reinterpret_cast<packed_ptr*>(
+                   static_cast<char*>(deref_(nn)) +
+                   (reinterpret_cast<char*>(path[i + 1]) - ob));
+         }
+         return path[n - 1];
       }
 
       Ptr cow_clone_into_(Ptr* slot, Ptr cur)

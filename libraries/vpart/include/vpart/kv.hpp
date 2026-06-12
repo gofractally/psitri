@@ -232,6 +232,12 @@ namespace vpart::kv
       // rewritten after the floor — and keys whose stamp is unknowable
       // (inline terminals) — are left alone. 0 = removed, -1 = kept/absent.
       int remove_if_older(key_view k, uint32_t vmax);
+      // L5 retirement, Dan's stamp-bounded subtree algorithm (3 phases; A and
+      // C run in (separate) write transactions under the caller's writer
+      // serialization; B is lock-free — the detached list is private).
+      size_t   retire_detach(uint32_t floor);
+      uint64_t retire_count() const;
+      void     retire_release(uint64_t counted);
       void commit();
       // CONTRACT (kv-compat 4.7b): dropping or aborting an uncommitted
       // transaction ROLLS BACK — the session tree returns to the txn-start
@@ -387,10 +393,15 @@ namespace vpart::kv
       // debug/tools only: the raw live root (no pin — caller must hold off writers)
       root_ptr live_root_dbg() const noexcept
       {
-         root_ptr       p   = root_ptr::null();
-         const uint32_t r32 = uint32_t(_live.load(std::memory_order_seq_cst));
-         if (r32)
+         root_ptr       p    = root_ptr::null();
+         const uint64_t live = _live.load(std::memory_order_seq_cst);
+         // raw 0 is a VALID root (line 0, tag value_ptr): "nothing published"
+         // is version 0 — test the WHOLE packed word, never the root half.
+         if (live != 0)
+         {
+            const uint32_t r32 = uint32_t(live);
             std::memcpy(p.b, &r32, 4);
+         }
          return p;
       }
 
@@ -406,10 +417,12 @@ namespace vpart::kv
             slot.store(live, std::memory_order_seq_cst);
             if (_live.load(std::memory_order_seq_cst) == live)
             {
-               root_ptr       p   = root_ptr::null();
-               const uint32_t r32 = uint32_t(live);
-               if (r32)
+               root_ptr p = root_ptr::null();
+               if (live != 0)  // raw 0 is a valid root; version 0 = unpublished
+               {
+                  const uint32_t r32 = uint32_t(live);
                   std::memcpy(p.b, &r32, 4);
+               }
                return cursor(&_arena, p, &slot, std::move(rs));
             }
          }
@@ -573,9 +586,10 @@ namespace vpart::kv
       _t.allocator_mut().vlog = &_vlog;
       // re-adopt the durable root on reopen (parity plus: part started empty)
       const uint64_t live = db->_live.load(std::memory_order_seq_cst);
-      if (uint32_t r32 = uint32_t(live); r32 != 0)
+      if (live != 0)  // raw 0 is a valid root; version 0 = unpublished
       {
-         root_ptr p;
+         const uint32_t r32 = uint32_t(live);
+         root_ptr       p;
          std::memcpy(p.b, &r32, 4);
          _t.adopt_root(p);
       }
@@ -609,10 +623,12 @@ namespace vpart::kv
          if (_db->_live.load(std::memory_order_seq_cst) == live)
          {  // ...then validate: the boundary was live after our publish, so
             // any drain that could free it must see our pinned version.
-            root_ptr       p   = root_ptr::null();
-            const uint32_t r32 = uint32_t(live);
-            if (r32)
+            root_ptr p = root_ptr::null();
+            if (live != 0)  // raw 0 is a valid root; version 0 = unpublished
+            {
+               const uint32_t r32 = uint32_t(live);
                std::memcpy(p.b, &r32, 4);
+            }
             return cursor(&_db->_arena, p, &slot);
          }
       }
@@ -637,6 +653,18 @@ namespace vpart::kv
       if (st == engine_t::no_stamp || st > vmax)
          return -1;
       return _ws->_t.cow_remove(k) ? 0 : -1;
+   }
+   inline size_t transaction::retire_detach(uint32_t floor)
+   {
+      return _ws->_t.retire_detach(floor);
+   }
+   inline uint64_t transaction::retire_count() const
+   {
+      return _ws->_t.retire_count();
+   }
+   inline void transaction::retire_release(uint64_t counted)
+   {
+      _ws->_t.retire_release(counted);
    }
    template <class F>
    inline bool transaction::get(key_view k, F&& fn) const
@@ -707,7 +735,12 @@ namespace vpart::kv
       root_ptr       nr = _ws->_t.root_handle();
       {
          std::lock_guard g(db->_root_mx);
-         const uint32_t  r32 = nr.is_null() ? 0 : uint32_t(nr.raw());
+         // null root publishes its REAL bit pattern (all-FF): raw 0 is a VALID
+         // root (line 0, tag value_ptr) — encoding null as 0 made a committed
+         // empty tree read as a phantom leaf at line 0 (and, before the reader
+         // fix, made a real line-0 leaf root invisible). Version 0 alone means
+         // "nothing ever published".
+         const uint32_t  r32 = uint32_t(nr.raw());
          db->_arena.set_root(0, r32);
          db->_arena.set_root(1, v);
          db->_committed = v;

@@ -43,7 +43,6 @@ namespace tiered
       uint64_t hi_water_bytes = 512ull << 20;  // burst trigger (Dan: ~512 MB keeps W shallow)
       uint64_t lo_water_bytes = 64ull << 20;   // flush down to here (hysteresis band)
       uint64_t flush_chunk    = 10'000'000;    // keys per B txn (plateau >= 100k; Dan: big)
-      uint64_t retire_batch   = 4096;          // remove_if_older per writer commit
       uint64_t repin_keys     = 1'000'000;     // re-pin the flush snapshot every N keys:
                                                // the drain floor advances DURING long flushes
       bool     background     = true;          // false: no merger thread (flush_now only; tests)
@@ -52,11 +51,13 @@ namespace tiered
    template <class W, class B>
    class tiered_kv
    {
-      // The retire pump needs W's stamp hooks; fail loudly if W lacks them.
-      static_assert(requires(typename W::transaction& t, key_view k, uint32_t v) {
-                       { t.remove_if_older(k, v) } -> std::convertible_to<int>;
+      // Retirement needs W's stamp-bounded subtree primitives (Dan's algorithm).
+      static_assert(requires(typename W::transaction& t, uint32_t f, uint64_t n) {
+                       { t.retire_detach(f) } -> std::convertible_to<size_t>;
+                       { t.retire_count() } -> std::convertible_to<uint64_t>;
+                       t.retire_release(n);
                     },
-                    "W must expose remove_if_older(key, vmax) — the L5 retire primitive");
+                    "W must expose retire_detach/count/release — the L5 retire primitives");
       static_assert(requires(typename W::database& d) {
                        { d.committed_version() } -> std::convertible_to<uint32_t>;
                     },
@@ -329,12 +330,14 @@ namespace tiered
             _tx->commit();
             _db->after_commit_(_bytes);
             _bytes = 0;
-            _db->retire_pump_(*_ws);
+            _lk.unlock();
          }
          void abort() noexcept
          {
             _tx->abort();
             _bytes = 0;
+            if (_lk.owns_lock())
+               _lk.unlock();
          }
          template <class F>
          bool get(key_view k, F&& f) const
@@ -365,12 +368,14 @@ namespace tiered
 
         private:
          friend class write_session;
-         transaction(database* db, write_session* ws, typename W::transaction&& tx)
-             : _db(db), _ws(ws), _tx(std::move(tx))
+         transaction(database* db, write_session* ws, std::unique_lock<std::mutex>&& lk,
+                     typename W::transaction&& tx)
+             : _db(db), _ws(ws), _lk(std::move(lk)), _tx(std::move(tx))
          {
          }
          database*                          _db;
          write_session*                     _ws;
+         std::unique_lock<std::mutex>       _lk;  // writer serialization (user <-> merger)
          std::optional<typename W::transaction> _tx;
          std::string                        _buf;  // envelope scratch (amortized)
          uint64_t                           _bytes = 0;
@@ -381,7 +386,8 @@ namespace tiered
         public:
          transaction start_transaction(uint32_t root_index)
          {
-            return transaction(_db, this, _ws->start_transaction(root_index));
+            std::unique_lock lk(_db->_writer_m);  // released at commit/abort
+            return transaction(_db, this, std::move(lk), _ws->start_transaction(root_index));
          }
 
         private:
@@ -407,8 +413,7 @@ namespace tiered
          }
          std::shared_ptr<write_session> start_write_session()
          {
-            return std::shared_ptr<write_session>(
-                new write_session(this, _w->start_write_session()));
+            return std::shared_ptr<write_session>(new write_session(this, _wws));
          }
          std::shared_ptr<read_session> start_read_session()
          {
@@ -432,8 +437,12 @@ namespace tiered
          uint64_t flush_now()
          {
             const uint32_t F   = _w->committed_version();  // BEFORE the pin: F <= pin
-            auto           wrs = _w->start_read_session();
-            auto           bws = _b->start_write_session();
+            auto wrs = _w->start_read_session();
+            if (!_bws)
+               _bws = _b->start_write_session();  // ONCE, on the flushing thread:
+                                                  // per-flush churn trips heart's
+                                                  // TLS-shared session teardown
+            auto& bws = _bws;
             std::optional<decltype(wrs->create_cursor(0))> cur;
             cur.emplace(wrs->create_cursor(0));
             uint64_t    n    = 0;
@@ -445,6 +454,9 @@ namespace tiered
                uint64_t in_tx = 0;
                while (!cur->is_end() && in_tx < _k.flush_chunk)
                {
+                  if (getenv("TIERED_TRACE"))
+                     fprintf(stderr, "[flush] key=%.*s\n", (int)cur->key().size(),
+                             cur->key().data());
                   cur->get_value([&](value_view v) {
                      if (!v.empty() && v[0] == TAG_DATA)
                         btx.upsert(cur->key(), value_view(v.data() + 1, v.size() - 1));
@@ -469,13 +481,31 @@ namespace tiered
                n += in_tx;
                more = !cur->is_end();
             }
-            {
-               std::lock_guard rg(_retire_m);  // pump reads resume/floor under the same lock
-               _retire_floor  = F;
-               _retire_resume.clear();  // pump restarts from the smallest key
-               _retire_live.store(true, std::memory_order_release);
-            }
             _unflushed.store(0, std::memory_order_relaxed);
+            // ── retirement (Dan's stamp-bounded subtree algorithm) ───────────
+            // A: writer-locked txn — detach every <=F subtree (O(post-F spine))
+            // B: lock-free — count keys in the detached (private) subtrees
+            // C: writer-locked txn — deep-log the roots; the DRAIN frees them
+            size_t   subtrees = 0;
+            {
+               std::lock_guard lg(_writer_m);
+               auto tx  = _wws->start_transaction(0);
+               subtrees = tx.retire_detach(F);
+               tx.commit();
+            }
+            if (subtrees)
+            {
+               uint64_t counted;
+               {
+                  auto tx = _wws->start_transaction(0);  // read-only use; no lock needed
+                  counted = tx.retire_count();
+                  tx.abort();
+               }
+               std::lock_guard lg(_writer_m);
+               auto            tx = _wws->start_transaction(0);
+               tx.retire_release(counted);
+               tx.commit();
+            }
             return n;
          }
 
@@ -494,8 +524,12 @@ namespace tiered
             // W keeps its own default (50%).
             if constexpr (requires { wcfg.reuse_threshold; })
                wcfg.reuse_threshold = 0.80;
-            _w = W::database::open(dir / "delta", mode, wcfg);
-            _b = B::database::open(dir / "base", mode, cfg.bcfg);
+            _w   = W::database::open(dir / "delta", mode, wcfg);
+            _b   = B::database::open(dir / "base", mode, cfg.bcfg);
+            _wws = _w->start_write_session();  // THE single W writer, shared
+                                               // (user txns and merger retire
+                                               // txns serialize on _writer_m;
+                                               // sessions are thread-agnostic)
             if (_k.background)
                _merger = std::thread([this] { merge_loop_(); });
          }
@@ -522,42 +556,6 @@ namespace tiered
             }
             return _bget_cur->get(k, std::forward<F>(f));
          }
-         // Writer-side retire pump (the writer thread calls this at commit
-         // boundaries — vpart is single-writer, removes never run elsewhere).
-         void retire_pump_(write_session& ws)
-         {
-            if (!_retire_live.load(std::memory_order_acquire))
-               return;
-            // collect the next sorted batch of candidate keys from a snapshot;
-            // resume/floor are shared with the merger's arm step -> same lock
-            uint32_t F;
-            _pump_keys.clear();
-            {
-               std::lock_guard rg(_retire_m);
-               F        = _retire_floor;
-               auto rs  = _w->start_read_session();
-               auto cur = rs->create_cursor(0);
-               bool ok  = _retire_resume.empty() ? cur.seek_begin()
-                                                 : cur.lower_bound(_retire_resume);
-               if (ok && !_retire_resume.empty() && cur.key() == key_view(_retire_resume))
-                  ok = cur.next();
-               for (uint64_t i = 0; ok && i < _k.retire_batch; ++i)
-               {
-                  _pump_keys.emplace_back(cur.key());
-                  ok = cur.next();
-               }
-               if (_pump_keys.empty())
-               {
-                  _retire_live.store(false, std::memory_order_release);
-                  return;
-               }
-               _retire_resume = _pump_keys.back();
-            }
-            auto           tx = ws._ws->start_transaction(0);
-            for (const auto& k : _pump_keys)
-               tx.remove_if_older(k, F);  // rewritten-after-F keys stay (the cache band)
-            tx.commit();
-         }
          void merge_loop_()
          {
             for (;;)
@@ -573,15 +571,13 @@ namespace tiered
             }
          }
 
-         std::shared_ptr<typename W::database> _w;
-         std::shared_ptr<typename B::database> _b;
+         std::shared_ptr<typename W::database>      _w;
+         std::shared_ptr<typename B::database>      _b;
+         std::shared_ptr<typename W::write_session> _wws;
+         std::shared_ptr<typename B::write_session> _bws;  // merger-thread, lazy
          knobs                                 _k;
          std::atomic<uint64_t>                 _unflushed{0};
-         std::mutex                            _retire_m;  // floor/resume handoff (merger <-> pump)
-         uint32_t                              _retire_floor = 0;
-         std::atomic<bool>                     _retire_live{false};
-         std::string                           _retire_resume;
-         std::vector<std::string>              _pump_keys;  // writer-thread scratch
+         std::mutex                            _writer_m;  // user txns <-> merger retire txns
          std::shared_ptr<typename B::read_session>        _bget_rs;   // writer-thread base reads
          std::optional<typename B::cursor>                _bget_cur;
          std::atomic<uint64_t>                            _base_epoch{0};

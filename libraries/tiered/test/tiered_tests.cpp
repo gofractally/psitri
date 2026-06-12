@@ -23,13 +23,12 @@ static_assert(psitri::dwal::kv_engine<TE>,
 
 namespace
 {
-   std::shared_ptr<TK::database> fresh(const char* tag, uint64_t retire_batch = 4096)
+   std::shared_ptr<TK::database> fresh(const char* tag)
    {
       auto dir = fs::temp_directory_path() / (std::string("tiered_") + tag);
       fs::remove_all(dir);
       TK::config cfg;
-      cfg.knobs.background   = false;  // tests drive flush_now() deterministically
-      cfg.knobs.retire_batch = retire_batch;
+      cfg.knobs.background = false;  // tests drive flush_now() deterministically
       return TK::database::open(dir, sal::open_mode::create_or_open, cfg);
    }
    std::string key16(std::mt19937_64& rng)
@@ -82,7 +81,9 @@ TEST_CASE("tiered: write/read through the delta, flush to base, both views agree
          ++n;
       }
       REQUIRE(n == oracle.size());
-      REQUIRE(db->flush_now() == oracle.size());  // idempotent re-apply
+      // retirement emptied the delta: re-flush is a no-op, and the latest
+      // view still answers every key (fall-through to the base)
+      REQUIRE(db->flush_now() == 0);
       auto lat = rs->create_cursor(0);
       for (auto& [k, v] : oracle)
          REQUIRE(lat.get<std::string>(k).value() == v);
@@ -176,9 +177,9 @@ TEST_CASE("tiered: tombstones mask the base in point reads and BOTH scan directi
    REQUIRE(n == oracle.size());
 }
 
-TEST_CASE("tiered: retire pump empties the flushed band; post-floor rewrites survive")
+TEST_CASE("tiered: retirement empties the flushed band; post-floor rewrites survive")
 {
-   auto db = fresh("retire", /*retire_batch=*/512);
+   auto db = fresh("retire");
    auto ws = db->start_write_session();
    std::map<std::string, std::string> oracle;
    std::mt19937_64                    rng(23);
@@ -209,22 +210,18 @@ TEST_CASE("tiered: retire pump empties the flushed band; post-floor rewrites sur
       }
       tx.commit();
    }
-   // drive the pump with empty commits until the retire pass completes
-   for (int i = 0; i < 40; ++i)
-   {
-      auto tx = ws->start_transaction(0);
-      tx.commit();
-   }
+   // flush_now retires inline now (merger-side 3-phase); a second flush
+   // re-arms the floor past the hot rewrites and retires what aged out
+   db->flush_now();
    // hot keys still answer from the DELTA with their post-floor values;
    // retired keys now answer from the BASE — every read still correct.
    auto rs  = db->start_read_session();
    auto lat = rs->create_cursor(0);
    for (auto& [k, v] : oracle)
       REQUIRE(lat.get<std::string>(k).value() == v);
-   // and the delta really emptied down to ~the hot band: a fresh flush
-   // re-flushes only what survived the pump (hot keys + stragglers).
+   // and the delta really emptied: everything <= each flush's floor is gone;
+   // only data written AFTER the most recent floor can remain.
    const uint64_t left = db->flush_now();
-   REQUIRE(left >= hot.size());
    REQUIRE(left < oracle.size() / 4);
 }
 

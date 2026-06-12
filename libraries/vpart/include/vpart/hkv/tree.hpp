@@ -3467,6 +3467,155 @@ namespace detail  // implementation types & node helpers — not part of the pub
       // beyond the deepest 64 levels are left unshrunk (the window covers any practical key).
       // NOTE: not noexcept — removing a non-POD value from a bucket rebuilds it (allocates),
       // and a custom key_codec may allocate. Nothrow in practice for POD values / radix mode.
+      // ── L5 retirement: stamp-bounded subtree detach (Dan's algorithm) ────────
+      // COW-to-root invariant: a node's stamp == the max stamp in its subtree
+      // (any deeper write would have cloned it on the way up). So retirement
+      // never modifies a <=F parent — it DETACHES it whole; only the >F spine
+      // (nodes above data written since the floor) is touched, owned once per
+      // retire txn, then mutated in place. Cost: O(post-floor spine), not
+      // O(keys retired). Three phases so the writer lock is held only for A:
+      //   A retire_detach(F)  writer-locked txn: unlink <=F subtrees -> list
+      //   B retire_count()    lock-free: count keys in the detached (private) list
+      //   C retire_release()  writer-locked txn: deep-log roots; the DRAIN
+      //                       thread cascades the frees in the background.
+      size_t retire_detach(uint32_t F)
+      {
+         retire_list_.clear();
+         retire_spine_(&root_, F);
+         return retire_list_.size();
+      }
+      uint64_t retire_count() const
+      {
+         uint64_t n = 0;
+         for (packed_ptr p : retire_list_)
+            n += count_keys_(p);
+         return n;
+      }
+      void retire_release(uint64_t counted)
+      {
+         for (packed_ptr p : retire_list_)
+            cow_release(p);  // stamp <= floor: deep-logged, drain cascades
+         retire_list_.clear();
+         count_ -= size_t(counted);
+      }
+
+     private:
+      std::vector<packed_ptr> retire_list_;  // merger-path scratch (not hot)
+
+      void retire_spine_(packed_ptr* slot, uint32_t F)
+      {
+         packed_ptr cur = *slot;
+         if (cur.is_null() || cur.tag() == K::value_inline)
+            return;  // inline terminals carry no stamp: they age out at the next floor
+         if (vstamp_get_(cur) <= F)
+         {  // the WHOLE subtree precedes the floor: detach, never modify
+            retire_list_.push_back(cur);
+            *slot = packed_ptr::null();
+            return;
+         }
+         const K k = cur.tag();
+         if (k == K::value_ptr)
+            return;  // post-floor leaf stays
+         // >F spine node: own it once per retire txn, then mutate in place
+         if constexpr (cow_stamped_)
+            if (alloc_.hkv_vtxn() && cow_shared_(cur))
+            {
+               cur = cow_clone_into_(slot, cur);
+            }
+         if (k == K::prefix_node)
+         {
+            char*       P  = static_cast<char*>(deref_(cur));
+            packed_ptr* ns = reinterpret_cast<packed_ptr*>(P + 2);
+            retire_spine_(ns, F);
+            if (ns->is_null())
+            {  // child detached: the (own-era, private) shell goes too
+               *slot = packed_ptr::null();
+               cow_release(cur);  // shallow husk; nothing below it
+            }
+            return;
+         }
+         // routers (hdr resolves to its base shape for dispatch; rh is at CL0)
+         router_hdr* rh = static_cast<router_hdr*>(deref_(cur));
+         if (!rh->term.is_null() && rh->term.tag() == K::value_ptr &&
+             vstamp_get_(rh->term) <= F)
+         {
+            retire_list_.push_back(rh->term);
+            rh->term         = packed_ptr::null();
+            rh->hdr.has_term = 0;
+         }
+         if (k == K::setlist_u16)
+         {
+            setlist16* sw = static_cast<setlist16*>(deref_(cur));
+            uint16_t   dead[setlist16::CAP];
+            int        nd = 0;
+            for (int i = 0; i < sw->rh.hdr.nbranch; ++i)
+            {
+               retire_spine_(&sw->branch[i], F);
+               if (sw->branch[i].is_null())
+                  dead[nd++] = sw->stems[i];
+            }
+            for (int i = 0; i < nd; ++i)
+               sl16_remove(sw, dead[i]);
+         }
+         else
+         {
+            uint8_t dead[256];
+            int     nd = 0;
+            router_for_each(cur, [&](uint8_t b, packed_ptr) { dead[nd++] = b; });
+            const int nkids = nd;
+            nd              = 0;
+            for (int i = 0; i < nkids; ++i)
+            {
+               const uint8_t b  = dead[i];
+               packed_ptr*   cs = router_find_slot(cur, b);
+               retire_spine_(cs, F);
+               if (cs->is_null())
+                  dead[nd++] = b;  // compact the dead bytes in place
+            }
+            if (k == K::node_full)
+            {  // slots were nulled directly; fix the population counters
+               node_full* f = static_cast<node_full*>(deref_(cur));
+               for (int i = 0; i < nd; ++i)
+               {
+                  unsigned li, sl;
+                  full_index<Ptr>(dead[i], li, sl);
+                  --f->ranges[li].nset;
+                  --f->rh.hdr.nbranch;
+               }
+            }
+            else
+               for (int i = 0; i < nd; ++i)
+                  router_remove(cur, dead[i]);
+         }
+         if (rh->hdr.nbranch == 0 && rh->term.is_null())
+         {  // emptied shell (own-era, private): unlink and shallow-release
+            *slot = packed_ptr::null();
+            cow_release(cur);
+         }
+      }
+
+      uint64_t count_keys_(packed_ptr cur) const
+      {
+         if (cur.is_null())
+            return 0;
+         switch (cur.tag())
+         {
+            case K::value_ptr:
+            case K::value_inline:
+               return 1;
+            case K::prefix_node:
+               return count_keys_(pn_next<Ptr>(static_cast<char*>(deref_(cur))));
+            default:
+            {
+               const router_hdr* rh = static_cast<const router_hdr*>(deref_(cur));
+               uint64_t          n  = rh->term.is_null() ? 0 : 1;
+               router_for_each(cur, [&](uint8_t, packed_ptr br) { n += count_keys_(br); });
+               return n;
+            }
+         }
+      }
+
+     public:
       bool remove(key_param k)
       {
          scratch_t        ks_;

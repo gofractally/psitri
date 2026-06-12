@@ -194,13 +194,29 @@ namespace vpart
          g_freeset_probes = 0;
          // vpart (Dan): the per-case constant IS ctz(n) — no jump table. With
          // class-rounded callers n is always a power of two, so the fast
-         // classes resolve branch-light AND constant-fold when n is known at
-         // the (inlined) call site. alloc_run_ stays for odd legacy sizes.
+         // classes resolve branch-light. alloc_run_ stays for odd legacy
+         // sizes; callers with COMPILE-TIME n use alloc_c<N> below, where
+         // the dispatch is if-constexpr (verified: the runtime chain does
+         // NOT fold — session::alloc_lines is outlined, 55 call sites).
          if (n <= 8 && (n & (n - 1)) == 0)
             return alloc_class_(uint32_t(std::countr_zero(n)), from);
          if (n == 16)
             return alloc_16_(from);
          return alloc_run_(n, from);
+      }
+
+      // Compile-time-N allocation: the class choice is decided by the
+      // INSTANTIATION, not a runtime dispatch.
+      template <uint32_t N>
+      uint32_t alloc_c(uint32_t from) noexcept
+      {
+         static_assert(N >= 1 && N <= max_alloc_lines);
+         if constexpr (N <= 8 && (N & (N - 1)) == 0)
+            return alloc_class_(uint32_t(std::countr_zero(N)), from);
+         else if constexpr (N == 16)
+            return alloc_16_(from);
+         else
+            return alloc_run_(N, from);
       }
 
       // Free n lines at `line` (previously allocated together or line-by-line —

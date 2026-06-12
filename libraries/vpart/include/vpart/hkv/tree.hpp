@@ -564,6 +564,18 @@ namespace detail  // implementation types & node helpers — not part of the pub
          node_alloc_t na(alloc_);
          return node_at::allocate(na, nblocks_(n));
       }
+      // Compile-time-size variant (Dan: n IS constant at typed call sites —
+      // make it constant; the runtime chain verifiably does not fold). Falls
+      // back to the runtime path for allocators without the hook (heap mode).
+      template <size_t Bytes>
+      void* node_alloc_c_()
+      {
+         node_alloc_t na(alloc_);
+         if constexpr (requires { na.template allocate_c<Bytes>(); })
+            return na.template allocate_c<Bytes>();
+         else
+            return node_at::allocate(na, nblocks_(Bytes));
+      }
       void node_free_(void* p, size_t n) noexcept
       {
          node_alloc_t na(alloc_);
@@ -3839,7 +3851,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       }
       setlist* new_setlist()
       {
-         setlist* s = ::new (node_alloc_(sizeof(setlist))) setlist;
+         setlist* s = ::new (node_alloc_c_<sizeof(setlist)>()) setlist;
          s->rh.hdr  = node_hdr{0, 0, 0};
          s->rh.term = packed_ptr::null();
          std::memset(s->bytes, 0xFF, sizeof(s->bytes));  // pad unused lanes with max for sorted SIMD lower_bound
@@ -4698,7 +4710,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       template <class N>
       packed_ptr build_wider(packed_ptr src, K newtag)
       {
-         N* n = ::new (node_alloc_(sizeof(N))) N;
+         N* n = ::new (node_alloc_c_<sizeof(N)>()) N;
          if constexpr (std::is_same_v<N, node_full>)
             full_init(n);
          else

@@ -9,12 +9,11 @@
 // RETIRED from the tree protocol. Every node carries a 4-byte version stamp
 // (the transaction id that created it, written at pack_); the write path's
 // privacy test is one compare (stamp == current txn -> mutate in place; else
-// COW). Superseded nodes append to per-transaction chain-line logs:
-//   clone-log  — (raw, birth|DEEP) 8 B entries. SHALLOW = children carried by
-//                the successor clone (drain frees the node's lines only);
-//                DEEP = subtree dropped (drain cascade-frees recursively).
-//   create-log — (line, nl) 8 B entries appended by allocate(); abort frees
-//                every still-allocated entry (kv-compat 4.7b rollback).
+// COW). Superseded nodes append to a per-transaction clone-log:
+//   (raw, birth|DEEP) 8 B entries. SHALLOW = children carried by the
+//   successor clone (drain frees the node's lines only); DEEP = subtree
+//   dropped (drain cascade-frees recursively). Abort needs no log at all:
+//   it walks the window (kv-compat 4.7b rollback).
 // Reclaim rule (floor): a committed chain with death D drains once every
 // pinned version is >= D (a pin at V sees exactly the state of commit V).
 // Sharing costs ZERO: no retain, no release, no per-child refcount traffic.
@@ -64,33 +63,30 @@ namespace vpart
       static_assert(sizeof(line_ptr) == 4, "line_ptr is exactly 4 bytes");
    }  // namespace detail
 
-   // Per-transaction log state, shared by every allocator copy of one writer
-   // (kv::write_session owns it; view/reader allocators carry nullptr).
-   // Logs are linked lists of 128 B arena lines, push-to-front, allocated from
-   // the writer's active segments (dirty-anyway pages: zero extra sync).
-   // Line format (both logs): [u32 prev][u32 n][15 x (u32 a, u32 b)]
-   //   clone-log entry:  a = tagged raw handle, b = birth stamp | DEEP flag
-   //   create-log entry: a = line_idx,          b = run length (lines)
+   // Per-transaction clone-log state, shared by every allocator copy of one
+   // writer (kv::write_session owns it; view/reader allocators carry nullptr).
+   // The log is a linked list of 128 B arena lines, push-to-front, allocated
+   // from the writer's active segments (dirty-anyway pages: zero extra sync).
+   // Line format: [u32 prev][u32 n][15 x (u32 raw, u32 birth|DEEP)]
+   // There is NO create-log: abort recovers the diverged generation by
+   // WALKING the window (recurse into current-stamped nodes only — old nodes
+   // are shared with the restored root and stop the walk), so the allocation
+   // hot path carries zero log traffic.
    struct vlog_state
    {
       static constexpr uint32_t npos = 0xFFFFFFFFu;
       static constexpr uint32_t cap  = 15;
       static constexpr uint32_t DEEP = 0x80000000u;  // flag on the birth word
 
-      uint32_t clone_head  = npos;  // newest clone-log line (line_idx)
-      uint32_t clone_n     = cap;   // entries used in the head line
-      uint32_t create_head = npos;
-      uint32_t create_n    = cap;
+      uint32_t clone_head = npos;  // newest clone-log line (line_idx)
+      uint32_t clone_n    = cap;   // entries used in the head line
 
       void reset() noexcept
       {
-         clone_head = create_head = npos;
-         clone_n = create_n = cap;
+         clone_head = npos;
+         clone_n    = cap;
       }
-      bool empty() const noexcept
-      {
-         return clone_head == npos && create_head == npos;
-      }
+      bool empty() const noexcept { return clone_head == npos; }
    };
 
    template <class T>
@@ -127,10 +123,7 @@ namespace vpart
       {
          static_assert(alignof(T) <= line_bytes, "vpart lines are 128-byte aligned");
          assert(ses && "read-only view allocators cannot allocate");
-         const uint32_t nl = uint32_t(lines_(n * sizeof(T)));
-         const line_idx i  = ses->alloc_lines(nl);
-         if (vlog && vtxn)  // create-log: abort frees every still-allocated entry
-            vappend_(vlog->create_head, vlog->create_n, i, nl);
+         const line_idx i = ses->alloc_lines(uint32_t(lines_(n * sizeof(T))));
          return static_cast<T*>(a->get(i));
       }
       void deallocate(T* p, size_t n) noexcept

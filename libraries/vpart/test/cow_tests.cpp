@@ -53,18 +53,10 @@ namespace
    }
 
    // "commit" an era: detach the clone-log chain (it becomes the committed
-   // version's supersession record) and free the create-log's own lines
-   // (they only serve abort). Returns the clone chain head.
-   uint32_t era_commit(arena& a, vlog_state& vl)
+   // version's supersession record). Returns the chain head.
+   uint32_t era_commit(arena&, vlog_state& vl)
    {
       const uint32_t chain = vl.clone_head;
-      uint32_t       line  = vl.create_head;
-      while (line != vlog_state::npos)
-      {
-         const uint32_t prev = *static_cast<const uint32_t*>(a.get(line));
-         a.release_run(line, 1);
-         line = prev;
-      }
       vl.reset();
       return chain;
    }
@@ -245,7 +237,7 @@ TEST_CASE("cow within one era degenerates to in-place (no clones)")
    REQUIRE(free_lines_total(a) == uint64_t(a.num_segments()) * lines_per_segment);
 }
 
-TEST_CASE("abort semantics: create-log frees the diverged era exactly")
+TEST_CASE("abort semantics: the window walk frees the diverged era exactly")
 {
    arena_config c;
    c.dir = tmp_dir("abort");
@@ -269,9 +261,9 @@ TEST_CASE("abort semantics: create-log frees the diverged era exactly")
       (void)era_commit(a, vl);
       const auto r0 = t.root_handle();
 
-      // era 2: diverge, then ABORT — free everything era 2 created via the
-      // create-log (per-line liveness check tolerates within-era reuse),
-      // drop the clone chain unpublished, restore the boundary root.
+      // era 2: diverge, then ABORT — the window walk frees everything era 2
+      // created, the clone chain drops unpublished, the boundary root is
+      // restored bit-stable.
       t.allocator_mut().vtxn = 2;
       for (int i = 0; i < 2000; ++i)
          t.cow_insert(std::string_view("base/" + std::to_string(i)), uint64_t(i) + 7'000'000);
@@ -279,25 +271,10 @@ TEST_CASE("abort semantics: create-log frees the diverged era exactly")
          t.cow_insert(std::string_view("new/" + std::to_string(i)), uint64_t(i));
       REQUIRE(t.root_handle().raw() != r0.raw());
 
-      t.adopt_root(r0);  // roll back the working tree
-      {                  // free the create-log (still-allocated entries only)
-         uint32_t line = vl.create_head;
-         while (line != vlog_state::npos)
-         {
-            const uint32_t* w    = static_cast<const uint32_t*>(a.get(line));
-            const uint32_t  prev = w[0], n = w[1];
-            for (uint32_t i = 0; i < n; ++i)
-            {
-               const uint32_t l0 = w[2 + i * 2];
-               const uint32_t nl = w[3 + i * 2];
-               for (uint32_t k = 0; k < nl; ++k)
-                  if (a.ref(l0 + k) == 1)
-                     a.release(l0 + k);
-            }
-            a.release_run(line, 1);
-            line = prev;
-         }
-      }
+      // free the diverged window by WALKING it: recursion stops at era-1
+      // nodes (shared with the restored root) — no create-log exists at all
+      t.vabort_release(t.root_handle());
+      t.adopt_root(r0);
       {  // drop the clone chain unpublished (the superseded nodes LIVE ON)
          uint32_t line = vl.clone_head;
          while (line != vlog_state::npos)

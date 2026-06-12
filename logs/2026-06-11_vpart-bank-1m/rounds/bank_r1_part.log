@@ -1,0 +1,108 @@
+=== Bank Benchmark: Part ===
+  Accounts:     1,000,000
+  Transactions: 10,000,000
+  Batch size:   1
+  Sync every:   never commits
+  Sync mode:    none
+  Seed:         12345
+  Read mode:    latest
+  Key mode:     names
+  DB path:      /tmp/bank_r1_part
+
+Phase 1: Account Generation
+  Loaded 235,976 dictionary words
+  Account generation              0.026 sec      39,212,355 ops/sec
+
+Phase 2: Bulk Load
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_r1_part/meta.part[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=295072[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4296769536, size=295072[0m
+  Bulk load                       0.166 sec       6,021,386 ops/sec
+  Size: file=194.2 MB  live=153.8 MB  free=40.4 MB
+
+Warm-up: 100,000 transactions (not measured)
+  Warm-up                         0.316 sec         316,777 ops/sec
+  Successful: 96,980  Skipped: 3,020
+  Size: file=388.0 MB  live=166.1 MB  free=222.0 MB
+  commit                avg=   1 us  p50=   2 us  p99=   4 us  p99.9=    4 us  max=   49 us  (n=100000)
+  commit latency distribution:
+         <1 us:     3551  (  3.6%)
+        1-2 us:    78622  ( 78.6%)
+        2-4 us:    17740  ( 17.7%)
+        4-8 us:       52  (  0.1%)
+       8-16 us:       22  (  0.0%)
+      16-32 us:        6  (  0.0%)
+      32-64 us:        7  (  0.0%)
+
+Phase 3a: Transactions (write-only)
+  1,000,000 / 10,000,000  (327,893 tx/sec, 811,569 ok, 188,431 skip)
+  2,000,000 / 10,000,000  (337,653 tx/sec, 1,528,363 ok, 471,637 skip)
+  3,000,000 / 10,000,000  (344,058 tx/sec, 2,215,724 ok, 784,276 skip)
+  4,000,000 / 10,000,000  (339,047 tx/sec, 2,889,548 ok, 1,110,452 skip)
+  5,000,000 / 10,000,000  (339,953 tx/sec, 3,555,179 ok, 1,444,821 skip)
+  6,000,000 / 10,000,000  (340,582 tx/sec, 4,216,150 ok, 1,783,850 skip)
+  7,000,000 / 10,000,000  (341,550 tx/sec, 4,872,774 ok, 2,127,226 skip)
+  8,000,000 / 10,000,000  (339,616 tx/sec, 5,525,537 ok, 2,474,463 skip)
+  9,000,000 / 10,000,000  (338,885 tx/sec, 6,175,843 ok, 2,824,157 skip)
+  10,000,000 / 10,000,000  (339,519 tx/sec, 6,824,726 ok, 3,175,274 skip)
+  Write-only                     29.453 sec         339,519 ops/sec
+  Successful: 6,824,726  Skipped: 3,175,274
+  Size: file=1325.1 MB  live=1022.7 MB  free=302.4 MB
+  commit                avg=   0 us  p50=   2 us  p99=   4 us  p99.9=    4 us  max=  406 us  (n=10000000)
+  commit latency distribution:
+         <1 us:  2904544  ( 29.0%)
+        1-2 us:  5248438  ( 52.5%)
+        2-4 us:  1838006  ( 18.4%)
+        4-8 us:     4369  (  0.0%)
+       8-16 us:     2780  (  0.0%)
+      16-32 us:     1248  (  0.0%)
+      32-64 us:      538  (  0.0%)
+     64-128 us:       68  (  0.0%)
+    128-256 us:        6  (  0.0%)
+    256-512 us:        3  (  0.0%)
+
+Phase 3b: Transactions (with 1 reader, 100 reads/batch)
+  1,000,000 / 10,000,000  (328,161 tx/sec, 647,956 ok, 352,044 skip)
+  2,000,000 / 10,000,000  (329,395 tx/sec, 1,294,719 ok, 705,281 skip)
+  3,000,000 / 10,000,000  (329,166 tx/sec, 1,939,162 ok, 1,060,838 skip)
+  4,000,000 / 10,000,000  (327,531 tx/sec, 2,583,046 ok, 1,416,954 skip)
+  5,000,000 / 10,000,000  (326,802 tx/sec, 3,227,083 ok, 1,772,917 skip)
+  6,000,000 / 10,000,000  (326,126 tx/sec, 3,870,885 ok, 2,129,115 skip)
+  7,000,000 / 10,000,000  (325,078 tx/sec, 4,513,875 ok, 2,486,125 skip)
+  8,000,000 / 10,000,000  (322,190 tx/sec, 5,156,150 ok, 2,843,850 skip)
+  9,000,000 / 10,000,000  (321,953 tx/sec, 5,798,311 ok, 3,201,689 skip)
+  10,000,000 / 10,000,000  (320,806 tx/sec, 6,439,998 ok, 3,560,002 skip)
+  Write+Read                     31.171 sec         320,806 ops/sec
+  Successful: 6,439,998  Skipped: 3,560,002
+  Reader: 130,358,100 reads in 31.171s (4,181,970 reads/sec, 130,358,100 found = 100.0%)
+  Size: file=2359.1 MB  live=1842.8 MB  free=516.3 MB
+  commit                avg=   0 us  p50=   2 us  p99=   8 us  p99.9=   16 us  max=  336 us  (n=10000000)
+  commit latency distribution:
+         <1 us:  4903935  ( 49.0%)
+        1-2 us:  3791871  ( 37.9%)
+        2-4 us:   233837  (  2.3%)
+        4-8 us:  1042752  ( 10.4%)
+       8-16 us:    22945  (  0.2%)
+      16-32 us:     2734  (  0.0%)
+      32-64 us:     1335  (  0.0%)
+     64-128 us:      504  (  0.0%)
+    128-256 us:       84  (  0.0%)
+    256-512 us:        3  (  0.0%)
+
+Phase 3c: Reader solo (no concurrent writer, 100 reads/batch)
+  Reader solo: 9,308,100 reads in 2.001s (4,652,108 reads/sec, 9,308,100 found = 100.0%)
+
+  --- Phase 3 Summary ---
+  Write-only: 339,519 tx/sec  (1,697,595 KV ops/sec)
+  Write+Read: 320,806 tx/sec  (1,604,030 KV ops/sec, write impact: -5.5%)
+  Reader:     4,181,970 reads/sec (with writer)
+  Reader:     4,652,108 reads/sec (solo)  -> writer interference: 1.1x
+
+Phase 4: Validation
+  Validation scan                 1.183 sec      12,058,060 ops/sec
+  Accounts found: 1,000,000 (expected 1,000,000)
+  Log entries:    13,264,724 (expected 13,264,724)
+  Total balance:  1,000,000,000,000 (expected 1,000,000,000,000)  PASS
+  Size: file=2359.1 MB  live=1842.8 MB  free=516.3 MB
+
+PASS  Total wall clock: 65.003 sec

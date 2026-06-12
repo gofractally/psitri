@@ -6055,6 +6055,40 @@ namespace detail  // implementation types & node helpers — not part of the pub
          }
       }
       void cow_release_now(Ptr p) noexcept { cow_release(p); }
+      // ABORT walk: free the diverged window. Recurse only into nodes the
+      // CURRENT transaction created; anything older is shared with the
+      // restored root and must survive untouched (and unlogged).
+      void vabort_release(Ptr p) noexcept
+      {
+         if constexpr (cow_enabled)
+         {
+            if (p.is_null() || p.tag() == K::value_inline)
+               return;
+            if (alloc_.hkv_vold(vstamp_get_(p)))
+               return;  // pre-txn node: the restored root still owns it
+            switch (p.tag())
+            {
+               case K::prefix_node:
+                  vabort_release(pn_next<Ptr>(static_cast<char*>(deref_(p))));
+                  break;
+               case K::setlist_u8:
+               case K::setlist_u16:
+               case K::c2:
+               case K::c4:
+               case K::c8:
+               case K::node_full:
+               {
+                  router_hdr* rh = static_cast<router_hdr*>(deref_(p));
+                  vabort_release(rh->term);
+                  router_for_each(p, [&](unsigned, Ptr c) { vabort_release(c); });
+                  break;
+               }
+               default:
+                  break;  // leaves/buckets: no children
+            }
+            node_free_(deref_(p), cow_node_bytes_(p));
+         }
+      }
 
       template <class V>
       bool cow_insert(key_param k, V&& v)

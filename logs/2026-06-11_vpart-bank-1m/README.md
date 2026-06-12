@@ -17,3 +17,34 @@ the hot top of the tree stays implicit skip-CL0); writes −7.5% (node-grain
 clones memcpy whole multi-line runs; per-line stamps are the recorded L1c
 follow-up), high-water +27% (drain lag + 10-line husks — same follow-up).
 All runs validate: balances, log entries, account counts exact.
+
+## Round 2 (same evening): variance-controlled medians + attribution
+
+3 alternated runs each (rounds/ dir), create-log removed from vpart's alloc path
+(abort = window walk now — zero log traffic on allocation):
+
+| Engine (median of 3) | Write-only tx/s | Reads solo |
+|---|---|---|
+| vpart  | 328,780 | 5,745,513 |
+| part   | 356,562 | 4,652,108 |
+| artmap (transient heap, Dan's baseline class, 1 run) | 1,317,358 | 3,269,536 |
+
+**Attribution (census + alloc-volume evidence, 1M/2M runs):**
+- READS vpart +23%: identical tree shape (12,590 wide routers each), but part's
+  are 100% DEMOTED to explicit full_x/cx (census: full_x=12590, node_full=0 —
+  every wide router demotes on first COW and stays demoted; each descent pays
+  CL0→line indirection). vpart's are 100% implicit node_full (skip-CL0,
+  single-load dispatch). Structural: refcount COW requires the explicit form
+  for sub-line sharing; stamp COW does not.
+- WRITES part +8%: vpart clones implicit wide routers WHOLESALE — 31.25 GB
+  allocated vs part's 10.89 GB on the same 2M-txn workload (2.9x). part's
+  demoted clone = 1-2 lines + ~18 refcount RMWs; vpart's implicit clone =
+  10 lines + 1.25 KB memcpy + drain.
+- ONE trade, two faces: explicit = cheap COW / slow reads; implicit = fast
+  reads / 10-line COW. part is stuck explicit after first COW; vpart sits
+  implicit. On EITHER side vpart >= part (no refcount traffic), the configs
+  just sit on opposite sides today. The designed resolution is COW-time
+  placement + background re-promotion (spec §3 / mover) — clone cheap,
+  read fast.
+- artmap reference: 1.32M tx/s writes = the in-memory ceiling (no durability,
+  no freeset, bump-only); reads BELOW both (std::string leaf values indirect).

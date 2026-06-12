@@ -565,28 +565,6 @@ namespace vpart::kv
 
    namespace detail2
    {
-      // free one log chain's payload lines via a per-line liveness check
-      // (ref==1 means still allocated; within-txn reuse leaves freed entries
-      // behind, which the check skips). Used by abort only.
-      inline void free_create_log_(vpart::arena& a, uint32_t head) noexcept
-      {
-         uint32_t line = head;
-         while (line != vlog_state::npos)
-         {
-            const uint32_t* w    = static_cast<const uint32_t*>(a.get(line));
-            const uint32_t  prev = w[0], n = w[1];
-            for (uint32_t i = 0; i < n; ++i)
-            {
-               const uint32_t l0 = w[2 + i * 2];
-               const uint32_t nl = w[3 + i * 2];
-               for (uint32_t k = 0; k < nl; ++k)
-                  if (a.ref(l0 + k) == 1)
-                     a.release(l0 + k);
-            }
-            a.release_run(line, 1);
-            line = prev;
-         }
-      }
       inline void free_chain_lines_(vpart::arena& a, uint32_t head) noexcept
       {
          uint32_t line = head;
@@ -608,10 +586,13 @@ namespace vpart::kv
       auto& t  = _ws->_t;
       auto& vl = _ws->_vlog;
       auto& a  = _ws->_db->_arena;
-      // roll the working tree back, then free EVERYTHING this txn created
-      // (the create-log) and drop its supersession chain unpublished.
+      // free the diverged window by WALKING it (recursion stops at pre-txn
+      // nodes — they are shared with the restored root), then restore the
+      // boundary root and drop the supersession chain unpublished.
+      const root_ptr diverged = t.root_handle();
+      if (diverged.raw() != _start_root.raw())
+         t.vabort_release(diverged);
       t.adopt_root(_start_root, _start_count);
-      detail2::free_create_log_(a, vl.create_head);
       detail2::free_chain_lines_(a, vl.clone_head);
       vl.reset();
       t.allocator_mut().vtxn = 0;
@@ -633,8 +614,6 @@ namespace vpart::kv
          db->_committed = v;
          db->_live.store((uint64_t(v) << 32) | r32, std::memory_order_seq_cst);
       }
-      // the create-log served abort; its lines are window garbage now
-      detail2::free_chain_lines_(db->_arena, vl.create_head);
       db->reg_push_(v, vl.clone_head);  // publish the supersession chain
       vl.reset();
       _ws->_t.allocator_mut().vtxn = 0;

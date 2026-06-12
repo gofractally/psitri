@@ -81,6 +81,7 @@
 #include <vpart/kv.hpp>  // vpart engine — part with STAMP liveness (no refcounts)
 #endif
 
+
 #if defined(BANK_ENGINE_WALART)
 #include <walart/walart.hpp>  // part-backed delta WAL over a heart base
 #endif
@@ -863,6 +864,29 @@ class PartEngine : public BankEngine
 
    SizeReport report_size(const std::string& db_path) override
    {
+      if (getenv("BANK_CENSUS"))
+      {
+         uint64_t cnt[16] = {}, lines[16] = {};
+         _ses->tree_dbg().census([&](auto row) {
+            cnt[unsigned(row.kind) & 15]++;
+            lines[unsigned(row.kind) & 15] += row.lines_alloc;
+         });
+         static const char* kn[16] = {"value_ptr", "value_inline", "prefix_node",
+                                      "setlist_u8", "node_full", "c2", "c4", "c8",
+                                      "setlist_u16", "bucket", "full_x", "cx",
+                                      "k12", "cbucket", "k14", "null"};
+         {
+            const auto& stt = _db->store().stats();
+            printf("  [alloc] total=%.2f GB freed=%.2f GB\n",
+                   stt.bytes_allocated.load() / 1e9, stt.bytes_freed.load() / 1e9);
+         }
+         printf("  [census]");
+         for (int i = 0; i < 16; ++i)
+            if (cnt[i])
+               printf(" %s=%llu(%llu ln)", kn[i], (unsigned long long)cnt[i],
+                      (unsigned long long)lines[i]);
+         printf("\n");
+      }
       if (getenv("PART_DRAIN_TIME"))
          printf("  [drain: %.3fs over %llu roots]\n", _db->drain_ns_dbg() / 1e9,
                 (unsigned long long)_db->drain_roots_dbg());
@@ -997,6 +1021,29 @@ class VPartEngine : public BankEngine
 
    SizeReport report_size(const std::string& db_path) override
    {
+      if (getenv("BANK_CENSUS"))
+      {
+         uint64_t cnt[16] = {}, lines[16] = {};
+         _ses->tree_dbg().census([&](auto row) {
+            cnt[unsigned(row.kind) & 15]++;
+            lines[unsigned(row.kind) & 15] += row.lines_alloc;
+         });
+         static const char* kn[16] = {"value_ptr", "value_inline", "prefix_node",
+                                      "setlist_u8", "node_full", "c2", "c4", "c8",
+                                      "setlist_u16", "bucket", "full_x", "cx",
+                                      "k12", "cbucket", "k14", "null"};
+         {
+            const auto& stt = _db->store().stats();
+            printf("  [alloc] total=%.2f GB freed=%.2f GB\n",
+                   stt.bytes_allocated.load() / 1e9, stt.bytes_freed.load() / 1e9);
+         }
+         printf("  [census]");
+         for (int i = 0; i < 16; ++i)
+            if (cnt[i])
+               printf(" %s=%llu(%llu ln)", kn[i], (unsigned long long)cnt[i],
+                      (unsigned long long)lines[i]);
+         printf("\n");
+      }
       const auto& st = _db->store().stats();
       SizeReport  r;
       r.file_size = measure_db_size(db_path);
@@ -1050,6 +1097,7 @@ class VPartEngine : public BankEngine
    }
 };
 #endif
+
 
 // ============================================================
 // Walart Engine (part-backed delta WAL over a heart base)

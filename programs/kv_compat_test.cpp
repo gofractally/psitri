@@ -136,43 +136,110 @@ namespace
       }
    };
    hookstats g_hooks;
-   constexpr uint16_t kTestType = 7;
-   inline part::shape::value_type_ops test_type_ops()
-   {
-      return part::shape::value_type_ops{
-          .retain  = [](std::string_view, void* u)
-          { static_cast<hookstats*>(u)->retains.fetch_add(1, std::memory_order_relaxed); },
-          .release = [](std::string_view, void* u)
-          { static_cast<hookstats*>(u)->releases.fetch_add(1, std::memory_order_relaxed); },
-          .user    = &g_hooks};
-   }
 
-   // Phase T: typed values (shape::typed_values) — engines without the
-   // feature fail every check in this phase (red until implemented).
+   // The lifecycle test type in the LOCKED traits shape (§9): a refcounted
+   // user handle whose pod is an 8-byte id; retain/release count globally
+   // (GC threads included — relaxed atomics, non-blocking per the contract).
+   struct test_ref
+   {
+      static constexpr uint16_t type_id = 7;
+      struct t_pod
+      {
+         uint64_t id;
+         static void retain(void*, const t_pod&)
+         {
+            g_hooks.retains.fetch_add(1, std::memory_order_relaxed);
+         }
+         static void release(void*, const t_pod&)
+         {
+            g_hooks.releases.fetch_add(1, std::memory_order_relaxed);
+         }
+      };
+      uint64_t id    = 0;
+      bool     owned = false;
+      t_pod    take_pod() &&
+      {
+         owned = false;  // the database now owns this reference
+         return t_pod{id};
+      }
+      static test_ref make_from_pod(const t_pod& p, bool retain)
+      {
+         if (retain)
+            t_pod::retain(nullptr, p);
+         return test_ref{p.id, true};
+      }
+   };
+   static_assert(part::shape::storable_type<test_ref>);
+
+   // Phase T: typed values in the LOCKED API (§9/§10) — take/make traits,
+   // THREE-OUTCOME reads, any_value. Engines without the feature fail RED.
    template <class DB>
    void phase_typed_values(DB& db, long& checks, long& fails, auto&& ok)
    {
-      if constexpr (!part::shape::typed_values<DB>)
+      if constexpr (!part::shape::typed_values<DB, test_ref>)
       {
-         ok(false);  // FEATURE ABSENT: typed values (T + blob, lifecycle hooks)
+         ok(false);  // FEATURE ABSENT: typed values (traits/take-make/any_value)
          return;
       }
       else
       {
          g_hooks.reset();
-         db.register_value_type(kTestType, test_type_ops());
+         db.template register_value_types<test_ref>();
          auto ws = db.start_write_session();
          {
             auto tx = ws->start_transaction(0);
-            tx.upsert("typed/a", "AAAAAAAA", kTestType);  // store: retain #1
-            tx.upsert("typed/b", "BBBBBBBB", kTestType);
-            tx.upsert("pod/x", "plain");  // T=0: NO hooks
+            tx.upsert("typed/a", test_ref{0xA1});  // take_pod: DB owns one ref
+            tx.upsert("typed/b", test_ref{0xB2});
+            tx.upsert("pod/x", "plain");  // typenum 0: NO hooks, fast path
             tx.commit();
          }
-         ok(g_hooks.retains.load() >= 2);  // both stores retained
+         {  // typed read: a RETAINED handle out
+            auto tx = ws->start_transaction(0);
+            auto r  = tx.template get<test_ref>("typed/a");
+            ok(r.has_value() && r->id == 0xA1);
+            // THREE OUTCOMES: wrong-pod read = invalid_type, NEVER not-found
+            bool threw = false;
+            try
+            {
+               (void)tx.template get<std::string>("typed/a");
+            }
+            catch (...)
+            {
+               threw = true;
+            }
+            ok(threw);
+            bool threw2 = false;
+            try
+            {
+               (void)tx.template get<test_ref>("pod/x");  // bytes read as T
+            }
+            catch (...)
+            {
+               threw2 = true;
+            }
+            ok(threw2);
+            ok(!tx.template get<test_ref>("typed/absent").has_value());  // not-found stays optional
+            // any_value: dynamic, lock-bundling
+            auto v = tx.get_any("typed/b");
+            ok(bool(v) && v.type() == test_ref::type_id && v.template is<test_ref>());
+            auto h = v.template as<test_ref>();  // retains
+            ok(h.id == 0xB2);
+            bool threw3 = false;
+            try
+            {
+               (void)v.bytes();  // typed pod as bytes = forgeable -> invalid_type
+            }
+            catch (...)
+            {
+               threw3 = true;
+            }
+            ok(threw3);
+            ok(!bool(tx.get_any("typed/absent")));
+            tx.abort();
+         }
          {
             auto tx = ws->start_transaction(0);
-            tx.upsert("typed/a", "A2A2A2A2", kTestType);  // overwrite: release old, retain new
+            tx.upsert("typed/a", test_ref{0xA2});  // overwrite: release old, take new
             tx.commit();
          }
          {
@@ -182,17 +249,16 @@ namespace
          }
          {
             auto tx = ws->start_transaction(0);
-            tx.upsert("typed/c", "CCCCCCCC", kTestType);
-            tx.abort();  // abort: created value released
+            tx.upsert("typed/c", test_ref{0xC3});
+            tx.abort();  // abort: the taken pod is released (create-log symmetry)
          }
-         // quiesce background reclaim, then the books must balance: the ONLY
-         // live typed value is typed/a (one outstanding retain)
+         // quiesce background reclaim; books balance to the live refs:
+         // typed/a in the DB + the get<> copy + the as<> copy (test-held)
          if constexpr (requires { db.flush_releases(); })
             db.flush_releases();
          if constexpr (requires { db.flush_reaper(); })
             db.flush_reaper();
-         const int64_t outstanding = g_hooks.retains.load() - g_hooks.releases.load();
-         ok(outstanding == 1);
+         ok(g_hooks.retains.load() - g_hooks.releases.load() == 3);
          {
             auto tx = ws->start_transaction(0);
             tx.remove("typed/a");
@@ -200,7 +266,7 @@ namespace
          }
          if constexpr (requires { db.flush_releases(); })
             db.flush_releases();
-         ok(g_hooks.retains.load() == g_hooks.releases.load());  // exact balance
+         ok(g_hooks.retains.load() - g_hooks.releases.load() == 2);  // only the test's handles
       }
    }
 

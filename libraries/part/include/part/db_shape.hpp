@@ -54,33 +54,62 @@ namespace part::shape
    // ═══ Concept extensions (locked 2026-06-12, Dan; conformance enforced by
    // kv-compat running these feature batteries on EVERY engine) ═══════════
 
-   // ── typed values with lifecycle hooks ─────────────────────────────────
-   // A value slot is (T, blob); T = 0 = POD (today's behavior, no hooks).
-   // Registered types get retain/release callbacks invoked at EXACTLY the
-   // points subtrees are retained/released (leaf copy/share; leaf destroy:
-   // overwrite, remove, abort, background reclaim). Hooks run on GC threads
-   // too: they must be thread-safe and non-blocking (sal type-ops contract).
-   // Native subtrees are the engine's built-in registration of this same
-   // mechanism; user types (e.g. tiered's ttree ids) bring their own hooks.
-   struct value_type_ops
-   {
-      // payload = the stored blob; both may run on background reclaim threads
-      void (*retain)(std::string_view payload, void* user);
-      void (*release)(std::string_view payload, void* user);
-      void* user = nullptr;
+   // ── typed values: POD tokens + traits (Dan's take/make model, §9/§10) ──
+   // A value slot is (typenum, pod bytes); typenum 0 = plain bytes (today's
+   // zero-cost path). A storable type T provides:
+   //   T::type_id                                    (collisions assert)
+   //   T::t_pod  — trivially copyable token
+   //   t_pod T::take_pod() &&                        (CONSUMES the ref)
+   //   static T T::make_from_pod(const t_pod&, bool retain)   (MINTS a ref)
+   //   static void t_pod::retain (void* session, const t_pod&)
+   //   static void t_pod::release(void* session, const t_pod&)
+   // The engine fires retain at exactly the subtree-retain points (leaf
+   // copy/share) and release at the subtree-release points (overwrite,
+   // remove, abort, background reclaim — hooks run on GC threads: they must
+   // be thread-safe and non-blocking). Reads: THREE OUTCOMES everywhere —
+   // found / not-found / INVALID-TYPE (wrong-pod reads are a type error,
+   // never a fake absence, never a reinterpret).
+   template <class T>
+   concept storable_type = requires(T t, const typename T::t_pod& p, void* ses) {
+      { T::type_id } -> std::convertible_to<uint16_t>;
+      requires std::is_trivially_copyable_v<typename T::t_pod>;
+      { std::move(t).take_pod() } -> std::same_as<typename T::t_pod>;
+      { T::make_from_pod(p, true) } -> std::same_as<T>;
+      T::t_pod::retain(ses, p);
+      T::t_pod::release(ses, p);
    };
 
-   template <class DB>
+   // any_value — the dynamic, LOCK-BUNDLING read form (§10): returned by
+   // get/find without a type argument; holds {typenum, pod, read lock}.
+   // as<T>() retains (the only civilian exit); bytes() on typenum != 0 is
+   // invalid_type (a typed pod exposed raw would be a forgeable handle);
+   // raw_pod() is the expert/merger identity path, balanced by the typed
+   // STORE form firing the retain hook.
+   template <class V, class T>
+   concept any_value_for = requires(V v) {
+      { v.type() } -> std::convertible_to<uint16_t>;
+      { v.template is<T>() } -> std::convertible_to<bool>;
+      { v.template as<T>() } -> std::same_as<T>;
+      { v.bytes() } -> std::convertible_to<std::string_view>;
+      { v.raw_pod() } -> std::convertible_to<std::string_view>;
+      { bool(v) };  // empty = not-found
+   };
+
+   template <class DB, class T>
    concept typed_values =
-       requires(DB& db, uint16_t type_id, value_type_ops ops) {
-          db.register_value_type(type_id, ops);
-       } &&
+       storable_type<T> &&
+       requires(DB& db) { db.template register_value_types<T>(); } &&
        requires(typename std::pointer_traits<decltype(std::declval<DB&>().start_write_session())>::
                     element_type& ws,
-                std::string_view k, std::string_view v, uint16_t t) {
+                std::string_view k, T t) {
           { ws.start_transaction(0) };
-          // typed write: the engine stores (t, v) and fires hooks on t != 0
-          std::declval<decltype(ws.start_transaction(0))&>().upsert(k, v, t);
+          std::declval<decltype(ws.start_transaction(0))&>().upsert(k, std::move(t));
+          {
+             std::declval<decltype(ws.start_transaction(0))&>().template get<T>(k)
+          };  // retained T or throws invalid_type
+          requires any_value_for<
+              std::remove_cvref_t<decltype(std::declval<decltype(ws.start_transaction(0))&>().get_any(k))>,
+              T>;
        };
 
    // ── multi-root transactions (psitri's model) ──────────────────────────

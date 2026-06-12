@@ -90,3 +90,17 @@ val_of_ derived the pointer positionally ((char*)v + sizeof(bv)). In dwal the
 same stale pointer would dangle into a SWAPPED (freed) arena. Needs a dwal
 repro/audit: either art leaves never relocate in dwal's usage (then why did
 the bank's?) or btree_layer should derive the pointer positionally too.
+
+## Round 5: artmap versioning aligned with commit_batch (env knob removed)
+
+commit_batch() now seals a COW generation (bump_cow_seq) — same commit
+semantics as every engine, scaling with --batch-size; the in-place same-size
+hack removed (sealed generations must never be scribbled; always-realloc is
+dwal-exact btree_layer behavior). Consequence measured honestly: standalone
+art_map cannot run bank at 1M-account scale AT ANY batch size (u32 bump
+arena = 4 GB lifetime budget, no reclamation, ~100B+ realloc per update).
+Survivable envelope 100k accounts / 200k txns @ batch=1:
+
+  art_map<btree_value>, commit-aligned: 711,953 tx/s   6,296,790 reads/s solo
+  (vs vpart at the same 100k scale: 474,661 tx/s — and vpart runs 10M+ txns
+   indefinitely; reclamation is the difference, not the tree)

@@ -2415,11 +2415,13 @@ class TidesDbEngine : public BankEngine
 
 // art::art_map exactly as dwal's btree_layer runs it: art_map<btree_value>,
 // value bytes INLINE after the struct (upsert_inline + view fixup — see
-// btree_layer::store). Single-thread baseline: no transactions, immediate
-// visibility. ONE divergence from dwal, required to finish standalone runs:
-// same-size updates overwrite the inline bytes in place (dwal always
-// reallocs the leaf and relies on its arena swaps to reclaim; a standalone
-// bump arena has no swaps and exhausts ~2.5M txns into the bank otherwise).
+// btree_layer::store). COMMIT SEMANTICS match every other engine: each
+// commit_batch() seals a COW generation (bump_cow_seq), so the next batch
+// path-copies against the published boundary — versioning cost scales with
+// --batch-size exactly like the durable engines' commit cost. NOTE: the
+// bump arena has NO reclamation (dwal swaps arenas), so long runs at small
+// batch sizes exhaust the 4 GB offset space — that limit is the finding,
+// not a bug in the bench.
 class ArtMapEngine : public BankEngine
 {
    using bv = psitri::dwal::btree_value;
@@ -2431,14 +2433,10 @@ class ArtMapEngine : public BankEngine
       return {reinterpret_cast<const char*>(v) + sizeof(bv), v->data.size()};
    }
    void put_(const std::string& k, std::string_view bytes)
-   {
-      if (bv* v = _m->get(k); v && v->is_data() && v->data.size() == bytes.size())
-      {  // same-size overwrite of the inline copy (view stays valid)
-         std::memcpy(reinterpret_cast<char*>(v) + sizeof(bv), bytes.data(), bytes.size());
-         return;
-      }
+   {  // always through upsert_inline — exactly btree_layer::store (a sealed
+      // generation's leaves must never be scribbled in place)
       bv* v = _m->upsert_inline(k, bv::make_data({}), bytes);
-      if (v && !bytes.empty())  // point the view at the inline copy (btree_layer::store)
+      if (v && !bytes.empty())
          v->data = {reinterpret_cast<const char*>(v) + sizeof(bv), bytes.size()};
    }
    using map_t = art::art_map<bv, art::heap_arena>;
@@ -2456,16 +2454,10 @@ class ArtMapEngine : public BankEngine
       auto bal = encode_balance(balance);
       for (auto& acct : accounts)
          put_(acct, bal);
+      _m->bump_cow_seq();  // seal the load as generation 0
    }
-   // ARTMAP_VERSIONED=1: mint a COW boundary per batch (upserts path-copy
-   // against the previous generation) — isolates versioning cost from the
-   // allocator. No reclamation exists, so size the run to the bump arena.
-   void begin_batch() override
-   {
-      if (getenv("ARTMAP_VERSIONED"))
-         _m->bump_cow_seq();
-   }
-   void commit_batch() override {}
+   void begin_batch() override {}
+   void commit_batch() override { _m->bump_cow_seq(); }  // seal the generation
    void sync() override {}
 
    bool transfer(const std::string& src,

@@ -298,3 +298,37 @@ hook — exactly the engine-internal clone-retain semantic).
 Contract: holding any_value holds a read lock — scoped inspection, not
 storage; engines bundle their native lock type (vpart: the cursor pin;
 heart/sal: the session read lock).
+
+## 11. One value path: (typenum, bytes) + traits; psio as the default codec
+
+The unification (Dan): EVERY value flows through the same shape —
+
+    value slot = (typenum, bytes)
+
+- std::string / std::vector<uchar> / std::string_view: built-in storable
+  types with NULL retain/release bodies (the trivial registrations). The
+  "bytes fast path" stops being a parallel mechanism — it is typenum 0..N
+  with no hooks; engines fast-path it internally, same perf as today.
+- Refcounted handle types: tiny token pod + real hooks (§9).
+- REFLECTED user types: psio/fracpack (pssz) is the DEFAULT CODEC — a
+  traits adapter ABOVE the engine (psio_storable<T>: type_id, encode on
+  store, psio::view<T> zero-copy on read). If it reflects, it stores:
+      tx.upsert(k, my_struct);
+      auto v = tx.get<psio::view<MyStruct>>(k);   // zero-copy, lock-scoped
+      auto o = tx.get<MyStruct>(k);               // owning decode
+- LAYERING: the engine knows ONLY (typenum, bytes) + the hook registry.
+  The codec lives above as a traits provider — the shape concept stays
+  format-agnostic; no engine ever depends on psio.
+
+any_value REVISED (supersedes the inline-copy wording in §10): it is a
+lock-bundled POINTER to the in-tree bytes — {typenum, view into the leaf,
+read lock} — never a copy. Zero-copy reads generalize to every type;
+as<T>() materializes (decode, or token-copy + retain) only on demand.
+psio views are unaligned-safe by design (wire-format access); hook calls
+still receive aligned temp copies of small tokens.
+
+Contracts added:
+- typenum STABILITY across processes and builds (values persist): ids are
+  user-assigned or schema-hashed; the registry asserts collisions and
+  engines persist nothing that depends on registration order.
+- views are read-only and lock-scoped (the any_value holding rule).

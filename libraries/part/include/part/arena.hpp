@@ -114,6 +114,8 @@ namespace part
       // hold one allocator handle across many transactions; the transaction
       // object only marks the floor/commit boundaries.
       line_idx alloc_lines(uint32_t n);
+      template <uint32_t N>
+      [[gnu::always_inline]] inline line_idx alloc_lines_c();
 
       // Release a node's run through this session: per-line refcounts as
       // arena::release_run, but runs that die entirely at/after the txn floor
@@ -855,6 +857,7 @@ namespace part
          const line_idx g = _fcache[n].back();
          _fcache[n].pop_back();
          finish_alloc_(g, n);
+         _alloc_bytes -= uint64_t(n) * line_bytes;  // reuse, not new allocation
          return g;
       }
       // Window fast path: zero shared-memory traffic. A free announced below
@@ -884,6 +887,42 @@ namespace part
             flush_window_();
       }
       return alloc_slow_(n);
+   }
+
+   template <uint32_t N>
+   [[gnu::always_inline]] inline line_idx session::alloc_lines_c()
+   {
+      static_assert(N >= 1 && N <= max_alloc_lines);
+      if (N <= fcache_max_size && !_fcache[N].empty())
+      {
+         const line_idx g = _fcache[N].back();
+         _fcache[N].pop_back();
+         finish_alloc_(g, N);
+         _alloc_bytes -= uint64_t(N) * line_bytes;
+         return g;
+      }
+      if (_wmask && _wseg == _segment)
+      {
+         seg_freeset&   fs       = _a->freeset_(_segment);
+         const uint32_t lw       = fs.low_water.load(std::memory_order_relaxed);
+         const line_idx seg_base = line_idx(_segment) * lines_per_segment;
+         const uint32_t floor_local =
+             _floor > seg_base ? uint32_t(_floor - seg_base) : 0u;
+         const uint32_t next_local =
+             uint32_t(_wbase % lines_per_segment) + uint32_t(std::countr_zero(_wmask));
+         if (lw >= next_local || lw < floor_local)
+         {
+            const line_idx g = take_from_window_(N);
+            if (g != null_idx)
+            {
+               finish_alloc_(g, N);
+               return g;
+            }
+         }
+         else
+            flush_window_();
+      }
+      return alloc_slow_(N);
    }
 
    inline line_idx session::alloc_slow_(uint32_t n)

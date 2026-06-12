@@ -89,6 +89,15 @@ namespace part
          const line_idx i = ses->alloc_lines(uint32_t(lines_(n * sizeof(T))));
          return static_cast<T*>(a->get(i));
       }
+      static constexpr bool has_alloc_c = true;
+      template <size_t Bytes>
+      T* allocate_c()
+      {
+         assert(ses && "read-only view allocators cannot allocate");
+         constexpr uint32_t NL = uint32_t((Bytes + line_bytes - 1) / line_bytes);
+         const line_idx     i  = ses->template alloc_lines_c<NL>();
+         return static_cast<T*>(a->get(i));
+      }
       void deallocate(T* p, size_t n) noexcept
       {
          const line_idx i =

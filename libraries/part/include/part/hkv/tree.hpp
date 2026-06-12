@@ -564,6 +564,15 @@ namespace detail  // implementation types & node helpers — not part of the pub
          node_alloc_t na(alloc_);
          return node_at::allocate(na, nblocks_(n));
       }
+      template <size_t Bytes>
+      void* node_alloc_c_()
+      {
+         node_alloc_t na(alloc_);
+         if constexpr (requires { na.template allocate_c<Bytes>(); })
+            return na.template allocate_c<Bytes>();
+         else
+            return node_at::allocate(na, nblocks_(Bytes));
+      }
       void node_free_(void* p, size_t n) noexcept
       {
          node_alloc_t na(alloc_);
@@ -695,13 +704,22 @@ namespace detail  // implementation types & node helpers — not part of the pub
             count_ += ins;
             return ins;
          }
-         // Iterative descent (mirrors find): walk to the insertion point keeping a
-         // pointer to the SLOT that holds `cur`, and write only there. No recursion,
-         // no per-level function calls, and pass-through levels do zero writes.
-         packed_ptr* slot   = &root_;
+         return insert_impl_<Assign, false>(key, std::forward<VF>(v), &root_, 0, 0);
+      }
+
+      // template<Shared> (Dan / psitri's proven pattern, ported for apples-to-
+      // apples vs vpart): UNIQUE carries zero ownership work and tail-switches
+      // at the first ref>=2 node; SHARED clones EVERY hop unconditionally and
+      // check-free — correct because cloning a shared parent RETAINS its
+      // children (ref>=2 by construction), i.e. refcounts encode the
+      // unique->shared latch dynamically. This is the old privatize pass
+      // fused into the descent: same clones, same order, one walk.
+      template <bool Assign, bool Shared, class VF>
+      bool insert_impl_(std::string_view key, VF&& v, packed_ptr* slot, size_t depth,
+                        unsigned lowfan_in)
+      {
          [[maybe_unused]] packed_ptr* pslot = nullptr;  // slot holding the parent of *slot (for fusion)
-         size_t      depth  = 0;
-         [[maybe_unused]] unsigned lowfan = 0;  // routers with <3 branches (deep-narrow signature)
+         [[maybe_unused]] unsigned lowfan = lowfan_in;  // routers with <3 branches (deep-narrow signature)
          for (;;)
          {
             packed_ptr cur = *slot;
@@ -711,6 +729,13 @@ namespace detail  // implementation types & node helpers — not part of the pub
                ++count_;
                return true;
             }
+            if constexpr (cow_enabled && !Shared)
+               if (cur.tag() != K::value_inline && cow_shared_(cur))
+                  return insert_impl_<Assign, true>(key, std::forward<VF>(v), slot, depth,
+                                                    lowfan);
+            if constexpr (cow_enabled && Shared)
+               if (cur.tag() != K::value_inline)
+                  cur = cow_clone_into_(slot, cur);  // eager: every hop is shared
             const K k = cur.tag();
             // Adaptive: track the deep-narrow signature. Uniform data widens fast
             // (high fanout → lowfan resets), so it never trips; clustered/deep data
@@ -774,6 +799,13 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   full_index<Ptr>(byte, li, sl);
                   if (x->lines[li].is_null())
                      x->lines[li] = fx_new_line_();  // empty range materializes on demand
+                  else if (alloc_.hkv_ref(line_of(x->lines[li])) >= 2)
+                  {  // per-line COW (was privatize's job): the descent or its
+                     // writeback mutates this direct line — own it first
+                     const Ptr old = x->lines[li];
+                     x->lines[li]  = fx_clone_line_(old);
+                     fx_release_line_(old);
+                  }
                   cline_direct_t<Ptr>* L  = fx_line_(x, li);
                   packed_ptr*          cs = &L->ptr[sl];
                   if (!cs->is_null())
@@ -799,13 +831,20 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      return ins;
                   }
                   const uint8_t byte = uint8_t(key[depth]);
+                  const unsigned sg = byte >> (8 - x->lg);
+                  if (!x->seglines[sg].is_null() &&
+                      alloc_.hkv_ref(line_of(x->seglines[sg])) >= 2)
+                  {  // per-line COW (was privatize's job)
+                     const Ptr old   = x->seglines[sg];
+                     x->seglines[sg] = cx_clone_line_(old, x->lg);
+                     cx_release_line_(old, x->lg);
+                  }
                   if (packed_ptr* cs = router_find_slot(x, byte))
                   {
                      slot = cs;
                      ++depth;
                      continue;
                   }
-                  const unsigned sg = byte >> (8 - x->lg);
                   if (x->seglines[sg].is_null())  // empty range materializes on demand
                      x->seglines[sg] = cx_new_seg_(x->lg);
                   packed_ptr lf = make_value_at(key, depth + 1, std::forward<VF>(v));
@@ -3697,7 +3736,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       }
       setlist* new_setlist()
       {
-         setlist* s = ::new (node_alloc_(sizeof(setlist))) setlist;
+         setlist* s = ::new (node_alloc_c_<sizeof(setlist)>()) setlist;
          s->rh.hdr  = node_hdr{0, 0, 0};
          s->rh.term = packed_ptr::null();
          std::memset(s->bytes, 0xFF, sizeof(s->bytes));  // pad unused lanes with max for sorted SIMD lower_bound
@@ -4461,7 +4500,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       template <class N>
       packed_ptr build_wider(packed_ptr src, K newtag)
       {
-         N* n = ::new (node_alloc_(sizeof(N))) N;
+         N* n = ::new (node_alloc_c_<sizeof(N)>()) N;
          if constexpr (std::is_same_v<N, node_full>)
             full_init(n);
          else
@@ -4539,6 +4578,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
          {
             if constexpr (Assign)
             {
+               if constexpr (cow_enabled)  // fused privatize: own the term leaf
+                  if (rh->term.tag() == K::value_ptr && cow_shared_(rh->term))
+                     cow_clone_into_(&rh->term, rh->term);
                if (rh->term.tag() == K::value_inline)
                   rh->term = pack_inline(vf_make(std::forward<VF>(val)));
                else
@@ -5994,10 +6036,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          rel_budget_ = 64;  // per-op inline release budget
          static_assert(cow_enabled, "allocator has no refcount hooks");
          static_assert(std::is_trivially_copyable_v<T>, "COW memcpy-clones leaf values");
-         {
-            scratch_t ks;
-            cow_privatize_(enc_(k, ks));
-         }
+         // privatize is FUSED into insert_'s template<Shared> descent
          T tmp(std::forward<V>(v));
          return insert_<true>(k, std::move(tmp));
       }

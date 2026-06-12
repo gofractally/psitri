@@ -192,21 +192,25 @@ namespace part
       {
          assert(n >= 1 && n <= max_alloc_lines);
          g_freeset_probes = 0;
-         switch (n)
-         {
-            case 1:
-               return alloc_class_(0, from);
-            case 2:
-               return alloc_class_(1, from);
-            case 4:
-               return alloc_class_(2, from);
-            case 8:
-               return alloc_class_(3, from);
-            case 16:
-               return alloc_16_(from);
-            default:
-               return alloc_run_(n, from);
-         }
+         // (ported from vpart, Dan: apples-to-apples) the per-case constant IS
+         // ctz(n); callers with COMPILE-TIME n use alloc_c<N> below.
+         if (n <= 8 && (n & (n - 1)) == 0)
+            return alloc_class_(uint32_t(std::countr_zero(n)), from);
+         if (n == 16)
+            return alloc_16_(from);
+         return alloc_run_(n, from);
+      }
+
+      template <uint32_t N>
+      uint32_t alloc_c(uint32_t from) noexcept
+      {
+         static_assert(N >= 1 && N <= max_alloc_lines);
+         if constexpr (N <= 8 && (N & (N - 1)) == 0)
+            return alloc_class_(uint32_t(std::countr_zero(N)), from);
+         else if constexpr (N == 16)
+            return alloc_16_(from);
+         else
+            return alloc_run_(N, from);
       }
 
       // Free n lines at `line` (previously allocated together or line-by-line —

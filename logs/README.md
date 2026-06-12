@@ -35,3 +35,4 @@ Conventions:
 - 2026-06-11_vpart-bank-1m/ — vpart L1a stamp-liveness first matrix: beats heart on every metric (+31% writes, +79% conc reads); part A/B reads +9..14%, writes −7.5%
 - 2026-06-11_dict-matrix/ — 5-engine load/find/iterate: heart flagged 1.5-3.4x off (point-op gap, needs sample review); artmap iterate best-in-class; dispatch trade measured
 - 2026-06-11_dense-ab/ — dense-tiers A/B: no static winner; dense +19.5% on cache-resident bank, straight +9-21% dict reads; placement design owns the choice
+- 2026-06-12_part-backport-ab/ — part back-port A/B (identical engineering): 100k writes PAR, 1M vpart +7.7%w/+17%r-solo, dict part load 132.9->98.2; deltas now attribute to liveness scheme + form choice

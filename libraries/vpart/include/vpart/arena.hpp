@@ -262,7 +262,14 @@ namespace vpart
          _ref_base  = reinterpret_cast<std::atomic<uint8_t>*>(
              const_cast<void*>(_refs->mapped_base()));
          for (uint32_t s = 0; s < nseg; ++s)
+         {
             _segs[s].state.store(SEG_UNOWNED, std::memory_order_relaxed);
+            // The freeset's l0 is the only field trusted across processes;
+            // presence bitmaps + free8 counter are recomputed at attach (also
+            // makes rev-1 tier-format free.part files load correctly — l0
+            // lives at the same offset, the derived region is ignored).
+            freeset_(s).rebuild_from_l0();
+         }
          if (getenv("PART_PRINT_REFBASE"))
             fprintf(stderr, "REFBASE %p DATABASE %p\n", (void*)_ref_base, (void*)_base);
       }

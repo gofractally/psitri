@@ -4,6 +4,37 @@ Everything below was built and measured overnight per the three gates:
 near-libart reads/unique-writes, MATCH hkv on read-only, beat heart on bank.
 All numbers: M5, one process at a time, contestants back-to-back per rep.
 
+## 2026-06-12: hybrid freeset landed (vpart)
+
+`freeset.hpp` rev 2 — the g2/g4/g8 + meta/top tier index is replaced by the
+hybrid from myartlib/bench/freeset_ab (4-way gated A/B, placements identical):
+l0 stays the sole authority; derived state shrinks to 5 presence bitmaps
+(1 bit/word/class, XOR responsible-toggler) + an exact free-8-group counter
+(commutative deltas). Odd-run search NEON-verifies 8-word blocks; `alloc_t<N>`
+gives static-N entry points (chains unroll to immediate shifts) for the
+arena's `alloc_lines_c<N>` to route into. Frees drop from full tier
+propagation to one fetch_or + a ~20-op existence check. NEON auto-off under
+TSan. Arena recomputes derived state at attach (rev-1 free.part files load:
+l0 offset unchanged). Tests: 31 cases / 1.12M assertions + TSan MT suite
+green; both old test internals (tiers) rewritten against presence/counter.
+
+Bank A/B (dense ladder both sides, 200k acct / 2M tx, batch=1, sync none):
+
+| metric | tiers | hybrid | Δ |
+|---|---|---|---|
+| write-only | 459.7k tx/s | 478.3k | +4.1% |
+| write+read | 494.7k tx/s | 545.8k | +10.3% |
+| reader solo | 5.65M r/s | 5.78M | +2.3% |
+| file at end | 581.9 MB | 581.9 MB | = |
+
+`VPART_FS_XFIT` (exact-fit-ahead for runs/16, Dan's rule) is implemented and
+DEFAULT OFF: standalone churn shows +5/+18/+7% free-8-group retention at
+50/75/85% occupancy (the qualifies_ currency), but bank's pure-read phases
+lost 6-9% to sibling dispersion (hole-filling vs frontier carving) and file
+size at bank scale is growth-dominated either way. Flip when tuning
+long-horizon segment-reuse pressure; placements with it off are
+gate-identical to rev 1.
+
 ## What exists
 
 | layer | file(s) | state |

@@ -1,7 +1,7 @@
 // SPEC §15 test 1 — seg_freeset, single thread, model-based: every placement is
 // checked against an oracle recomputed from first principles, and every derived
-// tier (hints, meta, top, counters) is compared against truth recomputed from
-// l0 after randomized op tapes.
+// field (presence bitmaps, free8 counter) is compared against truth recomputed
+// from l0 after randomized op tapes.
 #include <catch2/catch_test_macros.hpp>
 
 #include <bit>
@@ -51,54 +51,35 @@ namespace
       return UINT32_MAX;
    }
 
-   // Recompute every derived tier from l0 and compare. The exactness claim of
-   // the responsible-toggler protocol is that this holds at ANY quiescent point.
+   // Recompute every derived field from l0 and compare. The exactness claim of
+   // the responsible-toggler protocol (XOR presence toggles, commutative free8
+   // deltas) is that this holds at ANY quiescent point.
    void check_derived(const seg_freeset& fs)
    {
-      uint32_t cnt[4] = {0, 0, 0, 0};
-      for (uint32_t k = 1; k < 4; ++k)
+      uint32_t f8 = 0;
+      for (uint32_t m = 0; m < seg_freeset::PW; ++m)
       {
-         const uint32_t per = 64u >> k;
-         for (uint32_t hw = 0; hw < seg_freeset::words_of(k); ++hw)
+         uint64_t expect[5] = {0, 0, 0, 0, 0};
+         for (uint32_t b = 0; b < 64; ++b)
          {
-            uint64_t expect = 0;
-            for (uint32_t sub = 0; sub < (1u << k); ++sub)
-            {
-               const uint32_t w0 = (hw << k) + sub;
-               const uint64_t v = fs.l0[w0].load();
-               const auto     fm = vpart::detail::group_masks(v);
-               const uint64_t dense = k == 1 ? fm.f2 : k == 2 ? fm.f4 : fm.f8;
-               expect |= dense << (sub * per);
-            }
-            const uint64_t got = (k == 1 ? fs.g2[hw] : k == 2 ? fs.g4[hw] : fs.g8[hw]).load();
-            REQUIRE(got == expect);
-            cnt[k] += uint32_t(std::popcount(expect));
+            const uint64_t v = fs.l0[m * 64 + b].load();
+            if (v)
+               expect[0] |= 1ull << b;
+            if (vpart::detail::pos2(v))
+               expect[1] |= 1ull << b;
+            if (vpart::detail::pos4(v))
+               expect[2] |= 1ull << b;
+            const uint64_t p8 = vpart::detail::pos8(v);
+            if (p8)
+               expect[3] |= 1ull << b;
+            if (vpart::detail::pos16(v))
+               expect[4] |= 1ull << b;
+            f8 += uint32_t(std::popcount(p8));
          }
+         for (uint32_t c = 0; c < 5; ++c)
+            REQUIRE(fs.pres[c][m].load() == expect[c]);
       }
-      for (uint32_t w = 0; w < seg_freeset::W0; ++w)
-         cnt[0] += uint32_t(std::popcount(fs.l0[w].load()));
-      for (uint32_t k = 0; k < 4; ++k)
-      {
-         REQUIRE(fs.free_count[k].load() == cnt[k]);
-         // meta: bit w == (array word w nonzero); top: bit m == (meta word m nonzero)
-         const auto* arr = const_cast<seg_freeset&>(fs).array_of(k);
-         uint64_t    t   = 0;
-         for (uint32_t m = 0; m < seg_freeset::meta_words_of(k); ++m)
-         {
-            uint64_t expect_meta = 0;
-            for (uint32_t b = 0; b < 64; ++b)
-            {
-               const uint32_t w = m * 64 + b;
-               if (w < seg_freeset::words_of(k) && arr[w].load())
-                  expect_meta |= 1ull << b;
-            }
-            REQUIRE(fs.meta[k][m].load() == expect_meta);
-            if (expect_meta)
-               t |= 1ull << m;
-         }
-         if (seg_freeset::meta_words_of(k) > 1)
-            REQUIRE(fs.top[k].load() == t);
-      }
+      REQUIRE(fs.free_groups8() == f8);
    }
 }  // namespace
 
@@ -206,14 +187,14 @@ TEST_CASE("O(1) probes on a nearly-full segment")
    const uint32_t hi = lines_per_segment - 3;
    fs->free_run(hi, 1);
    REQUIRE(fs->alloc(1, 0) == hi);
-   REQUIRE(vpart::g_freeset_probes <= 8);
+   REQUIRE(vpart::g_freeset_probes <= seg_freeset::PW + 4);
    // Same for an 8-group and an odd run.
    fs->free_run(lines_per_segment - 64, 8);
    REQUIRE(fs->alloc(8, 0) == lines_per_segment - 64);
-   REQUIRE(vpart::g_freeset_probes <= 8);
+   REQUIRE(vpart::g_freeset_probes <= seg_freeset::PW + 12);
    fs->free_run(128, 9);
    REQUIRE(fs->alloc(9, 0) == 128);
-   REQUIRE(vpart::g_freeset_probes <= 16);
+   REQUIRE(vpart::g_freeset_probes <= seg_freeset::PW + 12);
 }
 
 TEST_CASE("randomized op tape: placements match oracle, derived tiers exact")

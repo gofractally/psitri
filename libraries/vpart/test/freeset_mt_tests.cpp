@@ -21,26 +21,30 @@ namespace
 {
    void check_derived_exact(seg_freeset& fs)
    {
-      uint32_t cnt[4] = {0, 0, 0, 0};
-      for (uint32_t w = 0; w < seg_freeset::W0; ++w)
-         cnt[0] += uint32_t(std::popcount(fs.l0[w].load()));
-      for (uint32_t k = 1; k < 4; ++k)
+      uint32_t f8 = 0;
+      for (uint32_t m = 0; m < seg_freeset::PW; ++m)
       {
-         const uint32_t per = 64u >> k;
-         for (uint32_t hw = 0; hw < seg_freeset::words_of(k); ++hw)
+         uint64_t expect[5] = {0, 0, 0, 0, 0};
+         for (uint32_t b = 0; b < 64; ++b)
          {
-            uint64_t expect = 0;
-            for (uint32_t sub = 0; sub < (1u << k); ++sub)
-            {
-               const auto fm = vpart::detail::group_masks(fs.l0[(hw << k) + sub].load());
-               expect |= uint64_t(k == 1 ? fm.f2 : k == 2 ? fm.f4 : fm.f8) << (sub * per);
-            }
-            REQUIRE(fs.array_of(k)[hw].load() == expect);
-            cnt[k] += uint32_t(std::popcount(expect));
+            const uint64_t v = fs.l0[m * 64 + b].load();
+            if (v)
+               expect[0] |= 1ull << b;
+            if (vpart::detail::pos2(v))
+               expect[1] |= 1ull << b;
+            if (vpart::detail::pos4(v))
+               expect[2] |= 1ull << b;
+            const uint64_t p8 = vpart::detail::pos8(v);
+            if (p8)
+               expect[3] |= 1ull << b;
+            if (vpart::detail::pos16(v))
+               expect[4] |= 1ull << b;
+            f8 += uint32_t(std::popcount(p8));
          }
+         for (uint32_t c = 0; c < 5; ++c)
+            REQUIRE(fs.pres[c][m].load() == expect[c]);
       }
-      for (uint32_t k = 0; k < 4; ++k)
-         REQUIRE(fs.free_count[k].load() == cnt[k]);
+      REQUIRE(fs.free_groups8() == f8);
    }
 }  // namespace
 

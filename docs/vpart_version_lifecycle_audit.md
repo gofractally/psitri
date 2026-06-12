@@ -357,3 +357,20 @@ FINAL any_value (supersedes §10/§11 composition): the slot already stores
 type() reads the typenum THROUGH the pointer; bytes()/raw_pod() are spans
 into the slot; as<T>() dispatches on the slot typenum (decode / view /
 token-retain). No copies of anything, ever.
+
+## 13. psio consumption (per psio docs/dependency-pattern.md)
+
+psio is standalone-buildable and a LEAF of the dep graph — consumers reach
+psio, never the reverse. psitri-merge consumes it per its §6b:
+
+    FetchContent_Declare(psio GIT_REPOSITORY ... GIT_TAG <pinned SHA>
+                         SOURCE_DIR ${CMAKE_SOURCE_DIR}/external/psio)
+    # local co-development: FETCHCONTENT_SOURCE_DIR_PSIO=~/gofractally/psio
+
+Layering discipline (mirrors psio's own optional-dep pattern):
+- The shape concept and every ENGINE stay psio-free; the typed-value
+  mechanism works with hand-written traits when psio is absent.
+- ONE adapter target (psio_storable<T> + the db_read_lock Store policy)
+  links psio; gated PSITRI_HAVE_PSIO so the core builds without it.
+- The existing ad-hoc find_path(psio/to_json.hpp) for psitricorder JSON
+  upgrades to the same FetchContent acquisition when the adapter lands.

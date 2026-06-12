@@ -2411,32 +2411,35 @@ class TidesDbEngine : public BankEngine
 #if defined(BANK_ENGINE_ARTMAP)
 #include <art/art_map.hpp>
 #include <art/heap_arena.hpp>
+#include <psitri/dwal/btree_value.hpp>  // the Value dwal's btree_layer stores
 
-// art::art_map (Dan's in-memory ART, heap arena) — single-thread baseline,
-// same contract as the libart engine: no transactions, immediate visibility.
-// Value bytes live INLINE in the leaf (upsert_inline) — no std::string heap
-// hop on reads, no per-update heap traffic: the honest node layout.
+// art::art_map exactly as dwal's btree_layer runs it: art_map<btree_value>,
+// value bytes INLINE after the struct (upsert_inline + view fixup — see
+// btree_layer::store). Single-thread baseline: no transactions, immediate
+// visibility. ONE divergence from dwal, required to finish standalone runs:
+// same-size updates overwrite the inline bytes in place (dwal always
+// reallocs the leaf and relies on its arena swaps to reclaim; a standalone
+// bump arena has no swaps and exhausts ~2.5M txns into the bank otherwise).
 class ArtMapEngine : public BankEngine
 {
-   struct bv
-   {
-      uint32_t len;
-   };  // value bytes follow the struct inside the leaf allocation
+   using bv = psitri::dwal::btree_value;
+   // position-derived view: the inline copy ALWAYS sits right after the
+   // struct, so only the length is trusted from the stored view (a stored
+   // POINTER goes stale if a structural op relocates the leaf).
    static std::string_view val_of_(const bv* v) noexcept
    {
-      return {reinterpret_cast<const char*>(v + 1), v->len};
+      return {reinterpret_cast<const char*>(v) + sizeof(bv), v->data.size()};
    }
-   // single-thread contract (cow_seq 0): same-size updates overwrite the
-   // leaf's inline bytes in place — matching the in-place semantics the
-   // std::string layout had — and only a size CHANGE reallocates the leaf.
    void put_(const std::string& k, std::string_view bytes)
    {
-      if (bv* v = _m->get(k); v && v->len == bytes.size())
-      {
-         std::memcpy(reinterpret_cast<char*>(v + 1), bytes.data(), bytes.size());
+      if (bv* v = _m->get(k); v && v->is_data() && v->data.size() == bytes.size())
+      {  // same-size overwrite of the inline copy (view stays valid)
+         std::memcpy(reinterpret_cast<char*>(v) + sizeof(bv), bytes.data(), bytes.size());
          return;
       }
-      _m->upsert_inline(k, bv{uint32_t(bytes.size())}, bytes);
+      bv* v = _m->upsert_inline(k, bv::make_data({}), bytes);
+      if (v && !bytes.empty())  // point the view at the inline copy (btree_layer::store)
+         v->data = {reinterpret_cast<const char*>(v) + sizeof(bv), bytes.size()};
    }
    using map_t = art::art_map<bv, art::heap_arena>;
    std::unique_ptr<map_t> _m;
@@ -2452,7 +2455,7 @@ class ArtMapEngine : public BankEngine
    {
       auto bal = encode_balance(balance);
       for (auto& acct : accounts)
-         _m->upsert_inline(acct, bv{uint32_t(bal.size())}, bal);  // fresh keys
+         put_(acct, bal);
    }
    // ARTMAP_VERSIONED=1: mint a COW boundary per batch (upserts path-copy
    // against the previous generation) — isolates versioning cost from the

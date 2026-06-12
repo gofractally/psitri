@@ -892,6 +892,7 @@ set_target_properties(bank-bench-walart PROPERTIES
 add_executable(bank-bench-artmap programs/bank_bench.cpp)
 target_compile_definitions(bank-bench-artmap PRIVATE BANK_ENGINE_ARTMAP=1)
 target_link_libraries(bank-bench-artmap PRIVATE art sal Boost::program_options hash)
+target_include_directories(bank-bench-artmap PRIVATE ${CMAKE_SOURCE_DIR}/libraries/psitri/include)
 
 add_executable(bank-bench-part programs/bank_bench.cpp)
 target_compile_definitions(bank-bench-part PRIVATE BANK_ENGINE_PART=1)

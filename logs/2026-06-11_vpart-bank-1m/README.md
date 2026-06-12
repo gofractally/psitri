@@ -71,3 +71,22 @@ the durable allocator + clone-log + drain + implicit whole-node clones cost
 the next ~2.2x (750k -> 329k). vpart READS exceed the transient in-memory
 art_map — the dispatch contract is more than met; the write levers are the
 allocator path and the wide-router clone volume (placement/L1c).
+
+## Round 4: art_map<btree_value> — the dwal-exact Value
+
+ArtMapEngine now stores psitri::dwal::btree_value (kind data|subtree|tombstone
++ string_view data + tree_id), value bytes inline after the struct, view
+fixed up exactly as btree_layer::store does. Same-size in-place overwrite kept
+(standalone bump arena has no swaps).
+
+  art_map<btree_value>:  1,529,285 tx/s write-only   5,080,324 reads/s solo
+  (vs bv{u32 len}:       1,679,023                   5,411,585 — the 32B-vs-4B
+   Value struct costs ~9% writes / ~6% reads at bank value sizes)
+
+LANDMINE (confirmed by validation failure + fix): btree_layer's pattern of
+storing an ABSOLUTE pointer in bv->data and trusting it on read breaks when a
+structural op relocates a leaf — the bank run drifted +3.65B in balances until
+val_of_ derived the pointer positionally ((char*)v + sizeof(bv)). In dwal the
+same stale pointer would dangle into a SWAPPED (freed) arena. Needs a dwal
+repro/audit: either art leaves never relocate in dwal's usage (then why did
+the bank's?) or btree_layer should derive the pointer positionally too.

@@ -196,11 +196,12 @@ namespace
       return live;
    }
 
-   row bench_hkv(const phases& P)
+   template <hkv::mode M>
+   row bench_hkv_(const phases& P, const char* tag)
    {
-      hkv::kv_tree<std::string_view, uint64_t> t;
+      hkv::kv_tree<std::string_view, uint64_t, M> t;
       row                                      r = run(
-          "hkv", P, [&](const std::string& k, uint64_t i) { t.insert(k, i); }, [] {},
+          tag, P, [&](const std::string& k, uint64_t i) { t.insert(k, i); }, [] {},
           [&](const std::string& k) {
              uint64_t out;
              return t.find(std::string_view(k), out) ? 1u : 0u;
@@ -375,7 +376,9 @@ int main(int argc, char** argv)
    std::vector<row> rows;
    auto             want = [&](const char* e) { return engine == "all" || engine == e; };
    if (want("hkv"))
-      rows.push_back(bench_hkv(P));
+      rows.push_back(bench_hkv_<hkv::mode::none>(P, "hkv"));
+   if (want("hkv-dt"))  // dense tiers: the SAME c2/c4/c8 ladder the cow trees use
+      rows.push_back(bench_hkv_<hkv::mode::dense_tiers>(P, "hkv-dt"));
    if (want("artmap"))
       rows.push_back(bench_artmap(P));
    if (want("part"))

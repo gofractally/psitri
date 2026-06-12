@@ -54,3 +54,39 @@ reserve). part-family live is ~half of raw hkv at rand (35.5/39.3 vs 67.7
 iterate crown (fat node256 + rounded leaves). vpart live is +5% over part
 (stamps + size-class rounding) — the price of versioning measured at last:
 five percent of bytes, zero query cost.
+
+## v3: the dict hit/miss gap found and closed — it was the dense-tier ladder
+
+Dan: "sizable gap on dict hit/miss, on the order of 1 cacheline." Hypothesis
+testing: batch=0 acquitted COW layout entropy (numbers unchanged). The
+hkv-dt control (raw hkv built with mode::dense_tiers — the same c2/c4/c8
+ladder cow trees use) reproduced the gap EXACTLY: hit 109->128 ns. The
+ladder's segmented-bitmap hop (CL0-skip to seg line + rank popcount) loses
+~18 ns/find to node_full's direct index on dict-shaped keys.
+
+FIX: vpart widens STRAIGHT TO node_full (the ladder exists for part's
+refcount economics — cheap explicit-tier line sharing — which stamps
+removed). Results (per-process runs, table_*_v3_perproc.txt):
+
+  vpart dict: hit 125.6 -> 108.6, miss 47.6 -> 37.8 — now AT/BETTER than
+  raw hkv (118.5/39.4 this round) while durable + versioned.
+  vpart rand: hit 39.8, miss 5.3 — best in class outright.
+
+TRADE (documented): straight-to-full costs sparse-wide keysets live bytes —
+rand live 39.3 -> 57.0 MB (+45%; part 35.5). Hot-tier rationale: vpart is
+the W tier, it holds HOT data and memory pressure is the demoter's job —
+reads-first is the right default; density/heat-driven form choice is the
+placement/mover design's call (spec §3). NOTE: --engine all in one process
+inflates all rows 30-50% (cache/page pollution) — tables must come from
+per-process runs.
+
+## bank table (same build, tools/bank_table.py, rounds/bank_table.txt)
+
+  engine   write tx/s   w+r tx/s   reads w/wr  reads solo   file MB  live MB
+  vpart       380,459*   348,690*   4,426,773*  5,418,418*   4,362.5  1,876.1
+  part        349,153    333,381    4,274,042   4,940,316    2,391.4  1,842.8
+  heart       247,846    192,897    2,484,547   3,313,105    1,120.0*   665.4*
+
+vpart sweeps every rate column on the real-world-shaped workload; live is
+within 1.8% of part. Honest cost: file high-water 4.4 GB (full-husk churn +
+drain lag — the L1c/placement lever). heart owns both memory columns.

@@ -4606,7 +4606,18 @@ namespace detail  // implementation types & node helpers — not part of the pub
          const K      k  = cur.tag();
          const size_t os = node_size(k);
          packed_ptr   out;
-         if constexpr (cow_enabled)
+         if constexpr (cow_stamped_)
+         {
+            // vpart: NO dense-tier ladder. The c2/c4/c8 tiers exist for part's
+            // refcount economics (cheap explicit-tier line sharing on COW);
+            // with stamps that reason is gone and the ladder costs ~18 ns per
+            // dict find (measured: hkv mode::none 109.3 vs dense_tiers 127.9)
+            // — the segmented-bitmap hop loses to node_full's direct index.
+            // Memory cost: sparse-wide routers carry empty lines (~400 KB on
+            // the full dict tree). Straight to the direct-index tier.
+            out = build_wider<node_full>(cur, K::node_full);
+         }
+         else if constexpr (cow_enabled)
          {
             // part ladder: setlist -> {c2|cx1} -> {c4|cx2} -> {c8|cx3} ->
             // {node_full|full_x}, the form chosen by TARGET occupancy (Dan's

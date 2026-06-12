@@ -1,0 +1,4 @@
+
+# dict_bench keys=rand n=1000000 batch=8192  (lower is better; green* = winner)
+engine       load ns      hit ns     miss ns     iter ns     live MB  reserve MB
+hkv-dt   [1;32m      27.2*[0m [1;32m      42.2*[0m [1;32m       6.3*[0m [1;32m       8.3*[0m [1;32m      39.9*[0m [1;32m     139.1*[0m

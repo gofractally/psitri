@@ -1,0 +1,12 @@
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/dictbench_vpart/meta.part[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=295072[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4711120896, size=295072[0m
+# census vpart: kind              nodes        bytes   avg_br   avg_ln
+# census vpart: value_ptr       1000000     26000000      0.0     1.00
+# census vpart: setlist_u8        73298      6890012      8.6     0.00
+# census vpart: node_full           257       328960    256.0    10.00
+# census vpart: c2                20743      7965312     19.1     3.00
+
+# dict_bench keys=rand n=1000000 batch=8192  (lower is better; green* = winner)
+engine       load ns      hit ns     miss ns     iter ns     live MB  reserve MB
+vpart    [1;32m      32.4*[0m [1;32m      40.7*[0m [1;32m       6.1*[0m [1;32m       9.1*[0m [1;32m      39.3*[0m [1;32m     160.0*[0m

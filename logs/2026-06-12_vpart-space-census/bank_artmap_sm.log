@@ -1,0 +1,62 @@
+=== Bank Benchmark: libart (single-thread, in-memory) ===
+  Accounts:     100,000
+  Transactions: 200,000
+  Batch size:   1
+  Sync every:   never commits
+  Sync mode:    none
+  Seed:         12345
+  Read mode:    latest
+  Key mode:     names
+  DB path:      /tmp/bank_bench_db
+
+Phase 1: Account Generation
+  Loaded 100,000 dictionary words
+  Account generation              0.004 sec      25,317,256 ops/sec
+
+Phase 2: Bulk Load
+  Bulk load                       0.011 sec       8,965,426 ops/sec
+  Size: file=0.0 MB  live=6.9 MB  free=0.0 MB
+
+Warm-up: 20,000 transactions (not measured)
+  Warm-up                         0.013 sec       1,508,874 ops/sec
+  Successful: 18,875  Skipped: 1,125
+  Size: file=0.0 MB  live=8.6 MB  free=0.0 MB
+  commit                avg=   0 us  p50=   1 us  p99=   2 us  p99.9=    2 us  max=    1 us  (n=20000)
+  commit latency distribution:
+         <1 us:    19684  ( 98.4%)
+        1-2 us:      316  (  1.6%)
+
+Phase 3a: Transactions (write-only)
+  Write-only                      0.098 sec       2,035,498 ops/sec
+  Successful: 150,764  Skipped: 49,236
+  Size: file=0.0 MB  live=20.5 MB  free=0.0 MB
+  commit                avg=   0 us  p50=   1 us  p99=   2 us  p99.9=    2 us  max=    8 us  (n=200000)
+  commit latency distribution:
+         <1 us:   196736  ( 98.4%)
+        1-2 us:     3263  (  1.6%)
+       8-16 us:        1  (  0.0%)
+
+Phase 3b: Transactions (engine is SINGLE-THREADED: no concurrent reader)
+  Write+Read                      0.092 sec       2,183,285 ops/sec
+  Successful: 135,739  Skipped: 64,261
+  Size: file=0.0 MB  live=32.8 MB  free=0.0 MB
+  commit                avg=   0 us  p50=   1 us  p99=   2 us  p99.9=    2 us  max=    1 us  (n=200000)
+  commit latency distribution:
+         <1 us:   196608  ( 98.3%)
+        1-2 us:     3392  (  1.7%)
+
+Phase 3c: Reader solo (no concurrent writer, 100 reads/batch)
+  Reader solo: 13,791,800 reads in 2.003s (6,885,609 reads/sec, 13,791,800 found = 100.0%)
+
+  --- Phase 3 Summary ---
+  Write-only: 2,035,498 tx/sec  (10,177,490 KV ops/sec)
+  Write+Read: 2,183,285 tx/sec  (10,916,425 KV ops/sec, write impact: +7.3%)
+
+Phase 4: Validation
+  Validation scan                 0.005 sec      70,554,425 ops/sec
+  Accounts found: 100,000 (expected 100,000)
+  Log entries:    286,503 (expected 286,503)
+  Total balance:  100,000,000,000 (expected 100,000,000,000)  PASS
+  Size: file=0.0 MB  live=32.8 MB  free=0.0 MB
+
+PASS  Total wall clock: 2.238 sec

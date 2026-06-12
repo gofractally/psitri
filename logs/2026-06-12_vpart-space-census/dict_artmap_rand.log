@@ -1,0 +1,4 @@
+
+# dict_bench keys=rand n=1000000 batch=8192  (lower is better; green* = winner)
+engine       load ns      hit ns     miss ns     iter ns     live MB  reserve MB
+artmap   [1;32m      35.5*[0m [1;32m      41.1*[0m [1;32m       5.2*[0m [1;32m       5.5*[0m [1;32m     133.9*[0m [1;32m     135.0*[0m

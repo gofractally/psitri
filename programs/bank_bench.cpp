@@ -81,6 +81,13 @@
 #include <vpart/kv.hpp>  // vpart engine — part with STAMP liveness (no refcounts)
 #endif
 
+#if defined(BANK_ENGINE_TIERED)
+// the L5 pipeline: vpart hot delta over heart, composed as ONE kv_engine
+#include <heart_dwal_engine.hpp>
+#include <tiered/tiered_kv.hpp>
+#include <vpart/kv.hpp>
+#endif
+
 
 #if defined(BANK_ENGINE_WALART)
 #include <walart/walart.hpp>  // part-backed delta WAL over a heart base
@@ -1092,6 +1099,137 @@ class VPartEngine : public BankEngine
             ++count;
          }
          cur.next();
+      }
+      return count;
+   }
+};
+#endif
+
+#if defined(BANK_ENGINE_TIERED)
+// ============================================================
+// Tiered: the L5 pipeline (vpart hot delta -> burst flush -> heart)
+// driven through the SAME engine interface as every other contestant.
+// Writes hit the delta at vpart speed; the merger bursts to heart at
+// hi-water; the retire pump empties the flushed band at commit
+// boundaries; reads use the latest view (delta-first point gets).
+// ============================================================
+class TieredEngine : public BankEngine
+{
+   using TK = tiered::tiered_kv<vpart::kv::engine, heart::radix::dwal_engine>;
+   std::shared_ptr<TK::database>      _db;
+   std::shared_ptr<TK::write_session> _ses;
+   std::optional<TK::transaction>     _tx;
+
+  public:
+   const char* name() const override { return "Tiered(vpart->heart)"; }
+
+   void open(const std::string& path, const std::string& sync_mode) override
+   {
+      std::filesystem::remove_all(path);
+      TK::config cfg;
+      if (sync_mode == "async")
+         cfg.wcfg.sync_mode = sal::sync_type::msync_async;
+      else if (sync_mode == "sync")
+         cfg.wcfg.sync_mode = sal::sync_type::msync_sync;
+      else
+         cfg.wcfg.sync_mode = sal::sync_type::none;
+      _db  = TK::database::open(path, sal::open_mode::create_or_open, cfg);
+      _ses = _db->start_write_session();
+   }
+
+   void close() override
+   {
+      _tx.reset();
+      _ses.reset();
+      _db.reset();
+   }
+
+   void bulk_load(const std::vector<std::string>& accounts, uint64_t balance) override
+   {
+      auto bal = encode_balance(balance);
+      auto tx  = _ses->start_transaction(0);
+      for (auto& acct : accounts)
+         tx.upsert(acct, bal);
+      tx.commit();
+   }
+
+   void begin_batch() override { _tx.emplace(_ses->start_transaction(0)); }
+
+   bool transfer(const std::string& src,
+                 const std::string& dst,
+                 uint64_t           amount,
+                 uint64_t           seq) override
+   {
+      auto src_val = _tx->get<std::string>(src);
+      if (!src_val)
+         return false;
+      uint64_t src_bal = decode_balance(*src_val);
+      if (src_bal < amount)
+         return false;
+
+      auto dst_val = _tx->get<std::string>(dst);
+      if (!dst_val)
+         return false;
+      uint64_t dst_bal = decode_balance(*dst_val);
+
+      _tx->upsert(src, encode_balance(src_bal - amount));
+      _tx->upsert(dst, encode_balance(dst_bal + amount));
+      _tx->upsert(encode_log_key(seq), encode_log_value(src, dst, amount));
+      return true;
+   }
+
+   void commit_batch() override
+   {
+      _tx->commit();
+      _tx.reset();
+   }
+
+   void sync() override {}
+
+   SizeReport report_size(const std::string& db_path) override
+   {
+      SizeReport r;
+      r.file_size = measure_db_size(db_path);  // delta/ + base/ together
+      r.live_size = 0;
+      r.free_size = 0;
+      return r;
+   }
+
+   static inline thread_local std::shared_ptr<TK::read_session> _reader_rs;
+   static inline thread_local std::optional<TK::cursor>         _reader_cur;
+
+   void reader_thread_init() override { _reader_rs = _db->start_read_session(); }
+   void reader_thread_teardown() override
+   {
+      _reader_cur.reset();
+      _reader_rs.reset();
+   }
+   void reader_batch_begin() override { _reader_cur.emplace(_reader_rs->create_cursor(0)); }
+   void reader_batch_end() override { _reader_cur.reset(); }
+
+   bool read_account(const std::string& key, uint64_t& balance_out) override
+   {
+      auto val = _reader_cur->get<std::string>(key);
+      if (!val)
+         return false;
+      balance_out = decode_balance(*val);
+      return true;
+   }
+
+   uint64_t scan_all(std::function<void(const std::string&, uint64_t)> visitor) override
+   {
+      auto     rs  = _db->start_read_session();
+      auto     cur = rs->create_cursor(0);  // latest view: delta ∪ base merge
+      uint64_t count = 0;
+      for (bool ok = cur.seek_begin(); ok; ok = cur.next())
+      {
+         auto val = cur.value<std::string>();
+         if (val)
+         {
+            auto k = cur.key();
+            visitor(std::string(k.data(), k.size()), decode_balance(*val));
+            ++count;
+         }
       }
       return count;
    }
@@ -2799,6 +2937,8 @@ int main(int argc, char** argv)
    engine = std::make_unique<PartEngine>();
 #elif defined(BANK_ENGINE_VPART)
    engine = std::make_unique<VPartEngine>();
+#elif defined(BANK_ENGINE_TIERED)
+   engine = std::make_unique<TieredEngine>();
 #elif defined(BANK_ENGINE_WALART)
    engine = std::make_unique<WalartEngine>();
 #elif defined(BANK_ENGINE_DWAL) || defined(BANK_ENGINE_DWAL_HEART)

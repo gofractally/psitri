@@ -924,6 +924,14 @@ target_link_libraries(dict-bench-straight PRIVATE part vpart art heart hash)
 target_include_directories(dict-bench-straight PRIVATE ${CMAKE_SOURCE_DIR}/libraries/heart/test)
 set_target_properties(dict-bench-straight PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(bank-bench-tiered programs/bank_bench.cpp)
+target_compile_definitions(bank-bench-tiered PRIVATE BANK_ENGINE_TIERED=1)
+target_link_libraries(bank-bench-tiered PRIVATE tiered vpart heart Boost::program_options hash)
+target_include_directories(bank-bench-tiered PRIVATE ${CMAKE_SOURCE_DIR}/libraries/heart/test
+    ${CMAKE_SOURCE_DIR}/libraries/psitri/include)
+set_target_properties(bank-bench-tiered PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 add_executable(bank-bench-vpart-straight programs/bank_bench.cpp)
 target_compile_definitions(bank-bench-vpart-straight PRIVATE BANK_ENGINE_VPART=1 VPART_STRAIGHT_WIDEN=1)
 target_link_libraries(bank-bench-vpart-straight PRIVATE vpart Boost::program_options hash)

@@ -1,0 +1,14 @@
+Size: file=576.5 MB  live=0.0 MB  free=0.0 MB
+Size: file=641.2 MB  live=0.0 MB  free=0.0 MB
+Size: file=2514.7 MB  live=0.0 MB  free=0.0 MB
+Reader: 113,766,100 reads in 22.808s (4,987,939 reads/sec, 113,766,062 found = 100.0%)
+Size: file=4053.5 MB  live=0.0 MB  free=0.0 MB
+Write-only: 439,077 tx/sec  (2,195,385 KV ops/sec)
+Write+Read: 438,438 tx/sec  (2,192,190 KV ops/sec, write impact: -0.1%)
+Reader:     4,987,939 reads/sec (with writer)
+Reader:     6,244,899 reads/sec (solo)  -> writer interference: 1.3x
+Log entries:    13,264,724 (expected 13,264,724)
+Total balance:  1,000,000,000,000 (expected 1,000,000,000,000)  PASS
+Size: file=4053.5 MB  live=0.0 MB  free=0.0 MB
+PASS  Total wall clock: 49.486 sec
+(eval):1: no matches found: /tmp/bt1m/*

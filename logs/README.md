@@ -39,3 +39,4 @@ Conventions:
 - 2026-06-12_vpart-space-census/ — vpart +50% space EXPLAINED (straight-widen form, not stamps: 4B/leaf sub-line only); dense default flipped; 6-row matrix + census; bank PROVISIONAL (co-tenant load 4.5+)
 - 2026-06-12_pipeline-bench-v1/ — L5 prototype: 1GB delta flushes to heart in 4.6s (2.2M keys/s, 5x heart random rate); writer 537k tx/s concurrent; retire 4.2M keys/s
 - 2026-06-12_sustained-matrix/ — sustained throughput: clean baseline 677-743k (537k was co-tenancy); 512MB delta +10%; PACING INVERTS (burst beats trickle — L5 hysteresis validated); qos useless, repin free
+- 2026-06-12_tiered-bank/ — L5 pipeline gate PASSED: tiered 439k tx/s @1M = 103.8% of raw vpart, live bursts + retire pump, validation exact

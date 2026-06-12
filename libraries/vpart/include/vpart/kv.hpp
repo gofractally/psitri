@@ -292,6 +292,11 @@ namespace vpart::kv
          if (_drain_thread.joinable())
             _drain_thread.join();
          drain_(committed_());
+         {  // flush ring-parked runs back to the freeset
+            uint32_t l, n;
+            while (_recycle.pop(l, n))
+               _arena.release_run(l, n);
+         }
          // The live tree is durable state — nothing to release at teardown.
       }
 
@@ -305,6 +310,11 @@ namespace vpart::kv
             _drain_cv.notify_one();
             std::this_thread::yield();
          }
+         // return ring-parked runs to the freeset (the gate counts free BITS;
+         // ring entries are claimed-but-reusable). Caller is the consumer side.
+         uint32_t l, n;
+         while (_recycle.pop(l, n))
+            _arena.release_run(l, n);
       }
       // debug/tools only: the raw live root (no pin — caller must hold off writers)
       root_ptr live_root_dbg() const noexcept
@@ -402,6 +412,7 @@ namespace vpart::kv
       void drain_(uint32_t floor) noexcept
       {
          engine_t v{part_alloc<bval>(&_arena, /*reclaim=*/true)};
+         v.allocator_mut().vring = &_recycle;  // freed runs go back to the writer
          for (;;)
          {
             const uint32_t t = _reg_tail.load(std::memory_order_relaxed);
@@ -473,6 +484,7 @@ namespace vpart::kv
       std::thread               _drain_thread;
       std::atomic<bool>         _drain_stop{false};
 
+      vpart::recycle_ring   _recycle;  // drain -> writer exact-size run reuse
       vpart::arena          _arena;
       std::mutex            _root_mx;             // serializes commit publication
       std::atomic<uint64_t> _live{0};             // (version << 32) | root raw
@@ -498,6 +510,11 @@ namespace vpart::kv
    {
       (void)root_index;  // single root in v1, like heart_kv
       _vlog.reset();
+      {  // adopt drain-recycled runs: exact-size O(1) reuse of COW churn
+         uint32_t l, n, k = 0;
+         while (k++ < 512 && _db->_recycle.pop(l, n))
+            _ses.recycle_drained(l, n);
+      }
       _t.allocator_mut().vtxn = _db->_committed + 1;  // the version IS the txn
       return transaction(this, _ses.start_transaction(0));
    }

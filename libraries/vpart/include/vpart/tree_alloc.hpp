@@ -64,6 +64,41 @@ namespace vpart
       static_assert(sizeof(line_ptr) == 4, "line_ptr is exactly 4 bytes");
    }  // namespace detail
 
+   // Drain -> writer recycle ring (SPSC: the drain thread pushes freed runs,
+   // the writer pops them into its session fcache at transaction start).
+   // Entries keep their freeset bits CLAIMED — recycling skips the freeset
+   // round-trip entirely and hands hot, exact-size runs back to the writer
+   // (Dan: over-allocating steals cache from others; this removes both the
+   // size-class rounding waste AND the odd-size scan). NOTE: recycled lines
+   // re-dirty old pages — a write-amp trade at sync modes (fine at none).
+   struct recycle_ring
+   {
+      static constexpr uint32_t cap = 1u << 14;
+      std::atomic<uint32_t>     head{0}, tail{0};
+      uint64_t                  slot[cap];
+
+      bool push(uint32_t line, uint32_t nl) noexcept  // producer: drain only
+      {
+         const uint32_t h = head.load(std::memory_order_relaxed);
+         if (h - tail.load(std::memory_order_acquire) >= cap)
+            return false;
+         slot[h % cap] = (uint64_t(line) << 6) | nl;
+         head.store(h + 1, std::memory_order_release);
+         return true;
+      }
+      bool pop(uint32_t& line, uint32_t& nl) noexcept  // consumer: writer only
+      {
+         const uint32_t t = tail.load(std::memory_order_relaxed);
+         if (t == head.load(std::memory_order_acquire))
+            return false;
+         const uint64_t v = slot[t % cap];
+         tail.store(t + 1, std::memory_order_release);
+         line = uint32_t(v >> 6);
+         nl   = uint32_t(v & 63);
+         return true;
+      }
+   };
+
    // Per-transaction clone-log state, shared by every allocator copy of one
    // writer (kv::write_session owns it; view/reader allocators carry nullptr).
    // The log is a linked list of 128 B arena lines, push-to-front, allocated
@@ -99,9 +134,10 @@ namespace vpart
       arena*      a        = nullptr;  // deref base (any thread)
       session*    ses      = nullptr;  // allocation context (writer thread only);
                                        // null for read-only snapshot views
-      vlog_state* vlog     = nullptr;  // writer's per-txn logs (null on views)
-      uint32_t    vtxn     = 0;        // current write window id (0 = no window)
-      bool        vreclaim = false;    // drain context: free-now instead of log
+      vlog_state*   vlog     = nullptr;  // writer's per-txn logs (null on views)
+      recycle_ring* vring    = nullptr;  // drain context: freed runs recycle here
+      uint32_t      vtxn     = 0;        // current write window id (0 = no window)
+      bool          vreclaim = false;    // drain context: free-now instead of log
 
       part_alloc() = default;
       explicit part_alloc(session* s) noexcept : a(&s->store()), ses(s) {}
@@ -110,7 +146,7 @@ namespace vpart
       part_alloc(arena* ar, bool reclaim) noexcept : a(ar), vreclaim(reclaim) {}
       template <class U>
       part_alloc(const part_alloc<U>& o) noexcept
-          : a(o.a), ses(o.ses), vlog(o.vlog), vtxn(o.vtxn), vreclaim(o.vreclaim)
+          : a(o.a), ses(o.ses), vlog(o.vlog), vring(o.vring), vtxn(o.vtxn), vreclaim(o.vreclaim)
       {
       }
 
@@ -120,19 +156,15 @@ namespace vpart
       {
          return (bytes + line_bytes - 1) / line_bytes;
       }
-      // Round line counts to the allocator's fast size classes {1,2,4,8,16,..}:
-      // odd run sizes (c2=3, c8=9, node_full=10) otherwise fall into the slow
-      // contiguous-run scan — measured at ~80% of the clone path on bank
-      // (SPEC §4: "the tree layer may still prefer to round to a class").
-      static constexpr uint32_t class_round_(uint32_t nl) noexcept
-      {
-         return nl <= 1 ? 1 : uint32_t(1) << (32 - std::countl_zero(nl - 1));
-      }
+      // EXACT line counts (Dan: over-allocating steals cache from others —
+      // the earlier {1,2,4,8,16} rounding wasted 6 lines per node_full). The
+      // odd-size scan the rounding dodged is now dodged better: steady-state
+      // odd runs come back through the drain->fcache recycle ring O(1).
       T* allocate(size_t n)
       {
          static_assert(alignof(T) <= line_bytes, "vpart lines are 128-byte aligned");
          assert(ses && "read-only view allocators cannot allocate");
-         const line_idx i = ses->alloc_lines(class_round_(uint32_t(lines_(n * sizeof(T)))));
+         const line_idx i = ses->alloc_lines(uint32_t(lines_(n * sizeof(T))));
          return static_cast<T*>(a->get(i));
       }
       // compile-time-N variant: the class is the INSTANTIATION (Dan: since
@@ -142,7 +174,7 @@ namespace vpart
       T* allocate_c()
       {
          assert(ses && "read-only view allocators cannot allocate");
-         constexpr uint32_t NL = class_round_(uint32_t((Bytes + line_bytes - 1) / line_bytes));
+         constexpr uint32_t NL = uint32_t((Bytes + line_bytes - 1) / line_bytes);
          const line_idx     i  = ses->template alloc_lines_c<NL>();
          return static_cast<T*>(a->get(i));
       }
@@ -150,7 +182,9 @@ namespace vpart
       {
          const line_idx i =
              line_idx((reinterpret_cast<const std::byte*>(p) - a->base()) / line_bytes);
-         const uint32_t nl = class_round_(uint32_t(lines_(n * sizeof(T))));
+         const uint32_t nl = uint32_t(lines_(n * sizeof(T)));
+         if (vreclaim && vring && nl <= 16 && vring->push(i, nl))
+            return;  // recycled: bits stay claimed; the writer fcaches the run
          if (ses)
             ses->release_run(i, nl);
          else

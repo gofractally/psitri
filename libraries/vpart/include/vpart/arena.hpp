@@ -114,6 +114,10 @@ namespace vpart
       // hold one allocator handle across many transactions; the transaction
       // object only marks the floor/commit boundaries.
       line_idx alloc_lines(uint32_t n);
+      // Adopt a drain-recycled run into the fcache: bits stay claimed, refs
+      // drop to 0 (finish_alloc_ re-sets them on handout). Exact-size O(1)
+      // reuse of the COW churn — the steady-state path for odd-size nodes.
+      void recycle_drained(line_idx i, uint32_t n) noexcept;
       // compile-time-N fast path: forced inline so N propagates as a true
       // constant through fcache indexing and the window take (verified the
       // runtime chain does NOT fold — alloc_lines is outlined).
@@ -756,6 +760,15 @@ namespace vpart
       return r;
    }
 
+   inline void session::recycle_drained(line_idx i, uint32_t n) noexcept
+   {
+      for (uint32_t k = 0; k < n; ++k)
+         _a->_ref_base[i + k].store(0, std::memory_order_release);
+      if (n <= fcache_max_size && cache_freed_(i, n))
+         return;
+      _a->free_lines_now(i, n);
+   }
+
    inline void session::finish_alloc_(line_idx g, uint32_t n) noexcept
    {
       arena& a = *_a;
@@ -860,6 +873,7 @@ namespace vpart
          const line_idx g = _fcache[n].back();
          _fcache[n].pop_back();
          finish_alloc_(g, n);
+         _alloc_bytes -= uint64_t(n) * line_bytes;  // reuse, not new allocation
          return g;
       }
       // Window fast path: zero shared-memory traffic. A free announced below
@@ -900,6 +914,7 @@ namespace vpart
          const line_idx g = _fcache[N].back();
          _fcache[N].pop_back();
          finish_alloc_(g, N);
+         _alloc_bytes -= uint64_t(N) * line_bytes;  // reuse, not new allocation
          return g;
       }
       if (_wmask && _wseg == _segment)

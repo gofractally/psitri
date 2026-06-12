@@ -51,13 +51,19 @@ namespace tiered
    template <class W, class B>
    class tiered_kv
    {
-      // Retirement needs W's stamp-bounded subtree primitives (Dan's algorithm).
-      static_assert(requires(typename W::transaction& t, uint32_t f, uint64_t n) {
-                       { t.retire_detach(f) } -> std::convertible_to<size_t>;
-                       { t.retire_count() } -> std::convertible_to<uint64_t>;
-                       t.retire_release(n);
+      // The double-buffer rotation needs W's freeze/release/pin primitives
+      // (Dan's design: cutoff at flush start — the flusher owns an IMMUTABLE
+      // warm tree, the writer owns a newborn hot tree; nobody shares).
+      static_assert(requires(typename W::write_session& ws, uint32_t r) {
+                       { ws.freeze_and_reset() } -> std::convertible_to<std::pair<uint32_t, uint32_t>>;
+                       ws.release_warm(r);
                     },
-                    "W must expose retire_detach/count/release — the L5 retire primitives");
+                    "W must expose freeze_and_reset/release_warm — the rotation primitives");
+      static_assert(requires(typename W::database& d, uint32_t v, uint32_t r) {
+                       { d.pin_at(v, r) } -> std::same_as<typename W::cursor>;
+                       { d.pending_warm() } -> std::convertible_to<std::pair<uint32_t, uint32_t>>;
+                    },
+                    "W must expose pin_at/pending_warm — the warm-leg reader primitives");
       static_assert(requires(typename W::database& d) {
                        { d.committed_version() } -> std::convertible_to<uint32_t>;
                     },
@@ -88,6 +94,8 @@ namespace tiered
             if (!_w)
                return _b.seek_begin();
             _w->seek_begin();
+            if (_m)
+               _m->seek_begin();
             _b.seek_begin();
             return settle_fwd_();
          }
@@ -96,6 +104,8 @@ namespace tiered
             if (!_w)
                return _b.seek_last();
             _w->seek_last();
+            if (_m)
+               _m->seek_last();
             _b.seek_last();
             return settle_bwd_();
          }
@@ -104,6 +114,8 @@ namespace tiered
             if (!_w)
                return _b.lower_bound(k);
             _w->lower_bound(k);
+            if (_m)
+               _m->lower_bound(k);
             _b.lower_bound(k);
             return settle_fwd_();
          }
@@ -112,6 +124,8 @@ namespace tiered
             if (!_w)
                return _b.upper_bound(k);
             _w->upper_bound(k);
+            if (_m)
+               _m->upper_bound(k);
             _b.upper_bound(k);
             return settle_fwd_();
          }
@@ -123,6 +137,8 @@ namespace tiered
                return seek_begin();
             if (_on_w)
                _w->next();
+            if (_on_m)
+               _m->next();
             if (_on_b)
                _b.next();
             return settle_fwd_();
@@ -137,6 +153,8 @@ namespace tiered
                return false;
             if (_on_w)
                _w->prev();
+            if (_on_m)
+               _m->prev();
             if (_on_b)
                _b.prev();
             return settle_bwd_();
@@ -145,47 +163,50 @@ namespace tiered
          {
             if (!_w)
                return _b.is_end();
-            return !_rend && !_on_w && !_on_b;
+            return !_rend && !_on_w && !_on_m && !_on_b;
          }
          bool is_rend() const { return _w ? _rend : _b.is_rend(); }
-         bool is_subtree() const { return _w ? (_on_w ? false : _b.is_subtree()) : _b.is_subtree(); }
+         bool is_subtree() const
+         {
+            return _w ? ((_on_w || _on_m) ? false : _b.is_subtree()) : _b.is_subtree();
+         }
          key_view key() const
          {
             if (!_w)
                return _b.key();
-            return _on_w ? _w->key() : _b.key();
+            return _on_w ? _w->key() : _on_m ? _m->key() : _b.key();
          }
          template <class S = std::string>
          std::optional<S> value() const
          {
-            if (!_w || !_on_w)
-            {
-               auto v = _b.template value<std::string>();
-               if (!v)
+            if (_w && (_on_w || _on_m))
+            {  // enveloped legs; settle skipped tombstones already
+               auto v = (_on_w ? *_w : *_m).template value<std::string>();
+               if (!v || v->empty())
                   return std::nullopt;
-               return S(v->data(), v->size());
+               return S(v->data() + 1, v->size() - 1);
             }
-            auto v = _w->template value<std::string>();  // enveloped; settle skipped tombs
-            if (!v || v->empty())
+            auto v = _b.template value<std::string>();
+            if (!v)
                return std::nullopt;
-            return S(v->data() + 1, v->size() - 1);
+            return S(v->data(), v->size());
          }
          template <class F>
          bool get_value(F&& f) const
          {
-            if (!_w || !_on_w)
-               return _b.get_value(std::forward<F>(f));
-            return _w->get_value([&](value_view v) { f(value_view(v.data() + 1, v.size() - 1)); });
+            if (_w && (_on_w || _on_m))
+               return (_on_w ? *_w : *_m).get_value([&](value_view v) {
+                  f(value_view(v.data() + 1, v.size() - 1));
+               });
+            return _b.get_value(std::forward<F>(f));
          }
          // Point read: W first (tombstone = definitely-deleted, stop), then B.
          // Non-const: the base cursor REPOSITIONS on a point get (heart).
          template <class F>
          bool get(key_view k, F&& f)
          {
-            if (_w)
-            {
-               bool hit = false, dead = false;
-               _w->get(k, [&](value_view v) {
+            auto env_get = [&](typename W::cursor& c, bool& hit, bool& dead) {
+               c.get(k, [&](value_view v) {
                   if (!v.empty() && v[0] == TAG_DATA)
                   {
                      hit = true;
@@ -194,10 +215,23 @@ namespace tiered
                   else
                      dead = true;
                });
+            };
+            if (_w)
+            {
+               bool hit = false, dead = false;
+               env_get(*_w, hit, dead);
                if (hit)
                   return true;
                if (dead)
                   return false;
+               if (_m)
+               {
+                  env_get(*_m, hit, dead);
+                  if (hit)
+                     return true;
+                  if (dead)
+                     return false;
+               }
             }
             return _b.get(k, std::forward<F>(f));
          }
@@ -212,35 +246,62 @@ namespace tiered
         private:
          friend class read_session;
          explicit cursor(typename B::cursor&& bc) : _b(std::move(bc)) {}  // stable
-         cursor(typename W::cursor&& wc, typename B::cursor&& bc)        // latest
+         cursor(typename W::cursor&& wc, typename B::cursor&& bc)        // latest, 2-way
              : _w(std::move(wc)), _b(std::move(bc))
          {
          }
-         bool w_tomb_() const
+         cursor(typename W::cursor&& wc, typename W::cursor&& mc,
+                typename B::cursor&& bc)  // latest with a WARM leg (flush in flight)
+             : _w(std::move(wc)), _m(std::move(mc)), _b(std::move(bc))
+         {
+         }
+         static bool tomb_(const typename W::cursor& c)
          {
             bool tomb = false;
-            _w->get_value([&](value_view v) { tomb = v.empty() || v[0] == TAG_TOMB; });
+            c.get_value([&](value_view v) { tomb = v.empty() || v[0] == TAG_TOMB; });
             return tomb;
          }
+         bool w_tomb_() const { return tomb_(*_w); }
          // Position state -> (_on_w, _on_b): which side(s) the current key
          // lives on. Tombstoned keys advance past both sides and re-settle.
          bool settle_fwd_()
          {
             for (;;)
             {
-               const bool we = _w->is_end(), be = _b.is_end();
-               _rend = false;
-               if (we && be)
+               _rend         = false;
+               const bool we = _w->is_end();
+               const bool me = !_m || _m->is_end();
+               const bool be = _b.is_end();
+               if (we && me && be)
                {
-                  _on_w = _on_b = false;
+                  _on_w = _on_m = _on_b = false;
                   return false;
                }
-               int c = we ? 1 : be ? -1 : cmp_(_w->key(), _b.key());
-               _on_w = c <= 0;
-               _on_b = c >= 0;
-               if (_on_w && w_tomb_())
-               {  // the tombstone masks an equal B key; skip both
-                  _w->next();
+               // the minimum key among live legs wins; precedence hot>warm>cold
+               key_view mk;
+               bool     have = false;
+               auto     consider = [&](bool end, key_view k) {
+                  if (end)
+                     return;
+                  if (!have || cmp_(k, mk) < 0)
+                  {
+                     mk   = k;
+                     have = true;
+                  }
+               };
+               consider(we, we ? key_view{} : _w->key());
+               consider(me, me ? key_view{} : _m->key());
+               consider(be, be ? key_view{} : _b.key());
+               _on_w = !we && cmp_(_w->key(), mk) == 0;
+               _on_m = !me && cmp_(_m->key(), mk) == 0;
+               _on_b = !be && cmp_(_b.key(), mk) == 0;
+               const bool dead = (_on_w && w_tomb_()) || (!_on_w && _on_m && tomb_(*_m));
+               if (dead)
+               {  // a tombstone in the winning enveloped leg masks ALL legs here
+                  if (_on_w)
+                     _w->next();
+                  if (_on_m)
+                     _m->next();
                   if (_on_b)
                      _b.next();
                   continue;
@@ -252,20 +313,39 @@ namespace tiered
          {
             for (;;)
             {
-               const bool wr = _w->is_rend() || _w->is_end();  // exhausted backward
+               const bool wr = _w->is_rend() || _w->is_end();
+               const bool mr = !_m || _m->is_rend() || _m->is_end();
                const bool br = _b.is_rend() || _b.is_end();
-               if (wr && br)
+               if (wr && mr && br)
                {
-                  _on_w = _on_b = false;
+                  _on_w = _on_m = _on_b = false;
                   _rend = true;
                   return false;
                }
-               int c = wr ? -1 : br ? 1 : cmp_(_w->key(), _b.key());
-               _on_w = c >= 0;  // backward: larger key wins
-               _on_b = c <= 0;
-               if (_on_w && w_tomb_())
+               key_view mk;
+               bool     have = false;
+               auto     consider = [&](bool ex, key_view k) {
+                  if (ex)
+                     return;
+                  if (!have || cmp_(k, mk) > 0)
+                  {
+                     mk   = k;
+                     have = true;
+                  }
+               };
+               consider(wr, wr ? key_view{} : _w->key());
+               consider(mr, mr ? key_view{} : _m->key());
+               consider(br, br ? key_view{} : _b.key());
+               _on_w = !wr && cmp_(_w->key(), mk) == 0;
+               _on_m = !mr && cmp_(_m->key(), mk) == 0;
+               _on_b = !br && cmp_(_b.key(), mk) == 0;
+               const bool dead = (_on_w && w_tomb_()) || (!_on_w && _on_m && tomb_(*_m));
+               if (dead)
                {
-                  _w->prev();
+                  if (_on_w)
+                     _w->prev();
+                  if (_on_m)
+                     _m->prev();
                   if (_on_b)
                      _b.prev();
                   continue;
@@ -280,9 +360,10 @@ namespace tiered
                return c;
             return a.size() < b.size() ? -1 : a.size() > b.size() ? 1 : 0;
          }
-         std::optional<typename W::cursor> _w;  // absent = stable view
+         std::optional<typename W::cursor> _w;  // hot leg; absent = stable view
+         std::optional<typename W::cursor> _m;  // WARM leg (flush in flight)
          typename B::cursor                _b;
-         bool                              _on_w = false, _on_b = false, _rend = false;
+         bool _on_w = false, _on_m = false, _on_b = false, _rend = false;
       };
 
       class read_session
@@ -293,16 +374,22 @@ namespace tiered
          {
             if (root_index == 1)
                return cursor(_brs->create_cursor(0));
+            std::lock_guard rg(_db->_rot_m);  // legs sampled atomically vs rotation
+            if (_db->_warm_active)
+               return cursor(_wrs->create_cursor(0),
+                             _db->_w->pin_at(_db->_warm_vf, _db->_warm_root),
+                             _brs->create_cursor(0));
             return cursor(_wrs->create_cursor(0), _brs->create_cursor(0));
          }
 
         private:
          friend class database;
-         read_session(std::shared_ptr<typename W::read_session> w,
+         read_session(database* db, std::shared_ptr<typename W::read_session> w,
                       std::shared_ptr<typename B::read_session> b)
-             : _wrs(std::move(w)), _brs(std::move(b))
+             : _db(db), _wrs(std::move(w)), _brs(std::move(b))
          {
          }
+         database*                                  _db;
          std::shared_ptr<typename W::read_session> _wrs;
          std::shared_ptr<typename B::read_session> _brs;
       };
@@ -341,7 +428,7 @@ namespace tiered
          }
          template <class F>
          bool get(key_view k, F&& f) const
-         {  // read-your-writes through the OPEN txn, then the base
+         {  // Dan's 3-way writer cursor: open txn (hot) -> warm -> base
             bool hit = false, dead = false;
             _tx->get(k, [&](value_view v) {
                if (!v.empty() && v[0] == TAG_DATA)
@@ -354,6 +441,10 @@ namespace tiered
             });
             if (hit)
                return true;
+            if (dead)
+               return false;
+            if (_db->warm_get_(_warm, k, hit, dead, f))
+               return hit && !dead ? true : hit;
             if (dead)
                return false;
             return _db->base_get_(k, std::forward<F>(f));
@@ -376,7 +467,8 @@ namespace tiered
          database*                          _db;
          write_session*                     _ws;
          std::unique_lock<std::mutex>       _lk;  // writer serialization (user <-> merger)
-         std::optional<typename W::transaction> _tx;
+         mutable std::optional<typename W::cursor> _warm;  // lazy warm leg (this txn)
+         std::optional<typename W::transaction>    _tx;
          std::string                        _buf;  // envelope scratch (amortized)
          uint64_t                           _bytes = 0;
       };
@@ -418,7 +510,7 @@ namespace tiered
          std::shared_ptr<read_session> start_read_session()
          {
             return std::shared_ptr<read_session>(
-                new read_session(_w->start_read_session(), _b->start_read_session()));
+                new read_session(this, _w->start_read_session(), _b->start_read_session()));
          }
          ~database()
          {
@@ -436,81 +528,74 @@ namespace tiered
          // the retire pump at F. Returns keys flushed.
          uint64_t flush_now()
          {
-            const uint32_t F   = _w->committed_version();  // BEFORE the pin: F <= pin
-            auto wrs = _w->start_read_session();
+            // ── Dan's double buffer ─────────────────────────────────────────
+            // CUTOFF: freeze the committed delta as the WARM tree and reset
+            // the writer to a newborn hot tree — the flusher owns an
+            // IMMUTABLE tree, the writer owns a private one; nobody shares a
+            // mutating delta (the in-place retire WAS the write-amp).
+            uint32_t vf = 0, wroot = 0;
+            {
+               std::scoped_lock lk(_writer_m, _rot_m);
+               // crashed-rotation recovery: a pending warm from a previous run
+               auto pend = _w->pending_warm();
+               if (pend.first && !_warm_active)
+               {
+                  vf    = pend.first;
+                  wroot = pend.second;
+               }
+               else if (!_warm_active)
+               {
+                  auto fr = _wws->freeze_and_reset();
+                  vf      = fr.first;
+                  wroot   = fr.second;
+               }
+               else
+                  return 0;  // a flush is already in flight
+               _warm_active = true;
+               _warm_vf     = vf;
+               _warm_root   = wroot;
+            }
+            // master pin: holds the floor <= vf for every reader warm leg
+            auto warm = _w->pin_at(vf, wroot);
             if (!_bws)
-               _bws = _b->start_write_session();  // ONCE, on the flushing thread:
-                                                  // per-flush churn trips heart's
-                                                  // TLS-shared session teardown
-            auto& bws = _bws;
-            std::optional<decltype(wrs->create_cursor(0))> cur;
-            cur.emplace(wrs->create_cursor(0));
-            uint64_t    n    = 0;
-            std::string resume;  // re-pin resume point (sorted iteration)
-            bool        more = cur->seek_begin();
+               _bws = _b->start_write_session();  // ONCE per flushing thread
+            uint64_t n    = 0;
+            bool     more = warm.seek_begin();
             while (more)
             {
-               auto     btx   = bws->start_transaction(0);
+               auto     btx   = _bws->start_transaction(0);
                uint64_t in_tx = 0;
-               while (!cur->is_end() && in_tx < _k.flush_chunk)
+               while (!warm.is_end() && in_tx < _k.flush_chunk)
                {
-                  if (getenv("TIERED_TRACE"))
-                     fprintf(stderr, "[flush] key=%.*s\n", (int)cur->key().size(),
-                             cur->key().data());
-                  cur->get_value([&](value_view v) {
+                  warm.get_value([&](value_view v) {
                      if (!v.empty() && v[0] == TAG_DATA)
-                        btx.upsert(cur->key(), value_view(v.data() + 1, v.size() - 1));
+                        btx.upsert(warm.key(), value_view(v.data() + 1, v.size() - 1));
                      else
-                        btx.remove(cur->key());  // tombstone: applied, never stored in B
+                        btx.remove(warm.key());  // tombstone: applied, never stored in B
                   });
                   ++in_tx;
-                  if (_k.repin_keys && (n + in_tx) % _k.repin_keys == 0)
-                  {  // drop + retake the pin: the writer's drain floor advances
-                     resume.assign(cur->key());
-                     cur.reset();
-                     cur.emplace(wrs->create_cursor(0));
-                     cur->lower_bound(resume);
-                     if (!cur->is_end() && cur->key() == key_view(resume))
-                        cur->next();
-                  }
-                  else
-                     cur->next();
+                  warm.next();
                }
                btx.commit();
-               _base_epoch.fetch_add(1, std::memory_order_release);  // re-seat cached base cursors
+               _base_epoch.fetch_add(1, std::memory_order_release);
                n += in_tx;
-               more = !cur->is_end();
+               more = !warm.is_end();
+            }
+            // the warm data is durable in B: retire the WHOLE tree. New
+            // readers stop getting warm legs; existing warm pins keep the
+            // drain floor low until they finish (per-version release).
+            {
+               std::scoped_lock lk(_writer_m, _rot_m);
+               _warm_active = false;
+               _wws->release_warm(wroot);
             }
             _unflushed.store(0, std::memory_order_relaxed);
-            // ── retirement (Dan's stamp-bounded subtree algorithm) ───────────
-            // A: writer-locked txn — detach every <=F subtree (O(post-F spine))
-            // B: lock-free — count keys in the detached (private) subtrees
-            // C: writer-locked txn — deep-log the roots; the DRAIN frees them
-            size_t   subtrees = 0;
-            {
-               std::lock_guard lg(_writer_m);
-               auto tx  = _wws->start_transaction(0);
-               subtrees = tx.retire_detach(F);
-               tx.commit();
-            }
-            if (subtrees)
-            {
-               uint64_t counted;
-               {
-                  auto tx = _wws->start_transaction(0);  // read-only use; no lock needed
-                  counted = tx.retire_count();
-                  tx.abort();
-               }
-               std::lock_guard lg(_writer_m);
-               auto            tx = _wws->start_transaction(0);
-               tx.retire_release(counted);
-               tx.commit();
-            }
             return n;
          }
 
         private:
          friend class transaction;
+         friend class read_session;
          friend class tiered_kv;
          database(const std::filesystem::path& dir, sal::open_mode mode, const config& cfg)
              : _k(cfg.knobs)
@@ -538,6 +623,30 @@ namespace tiered
             if (_unflushed.fetch_add(bytes, std::memory_order_relaxed) + bytes >=
                 _k.hi_water_bytes)
                _cv.notify_one();
+         }
+         // warm-leg point get for the writer's 3-way cursor: lazily pin the
+         // current warm boundary for THIS transaction; envelope-decoded.
+         template <class F>
+         bool warm_get_(std::optional<typename W::cursor>& leg, key_view k, bool& hit,
+                        bool& dead, F&& f)
+         {
+            if (!leg)
+            {
+               std::lock_guard rg(_rot_m);
+               if (!_warm_active)
+                  return false;
+               leg.emplace(_w->pin_at(_warm_vf, _warm_root));
+            }
+            leg->get(k, [&](value_view v) {
+               if (!v.empty() && v[0] == TAG_DATA)
+               {
+                  hit = true;
+                  f(value_view(v.data() + 1, v.size() - 1));
+               }
+               else
+                  dead = true;
+            });
+            return hit || dead;
          }
          template <class F>
          bool base_get_(key_view k, F&& f)
@@ -577,7 +686,10 @@ namespace tiered
          std::shared_ptr<typename B::write_session> _bws;  // merger-thread, lazy
          knobs                                 _k;
          std::atomic<uint64_t>                 _unflushed{0};
-         std::mutex                            _writer_m;  // user txns <-> merger retire txns
+         std::mutex                            _writer_m;  // user txns <-> merger rotation txns
+         std::mutex _rot_m;          // warm-state flips vs reader-leg sampling
+         bool       _warm_active = false;
+         uint32_t   _warm_vf = 0, _warm_root = 0;
          std::shared_ptr<typename B::read_session>        _bget_rs;   // writer-thread base reads
          std::optional<typename B::cursor>                _bget_cur;
          std::atomic<uint64_t>                            _base_epoch{0};

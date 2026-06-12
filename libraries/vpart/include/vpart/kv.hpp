@@ -286,6 +286,16 @@ namespace vpart::kv
    {
      public:
       transaction start_transaction(uint32_t root_index);
+      // Rotation (Dan's double buffer): freeze the last committed delta as
+      // the WARM tree and continue on a NEWBORN EMPTY hot tree. Publishes the
+      // reset as a new version; the warm (version, root) persists in root
+      // slots 2/3 until release_warm() so a crash re-flushes it (idempotent).
+      // Caller holds the writer serialization. Returns {V_f, warm_root_raw}.
+      std::pair<uint32_t, uint32_t> freeze_and_reset();
+      // After the warm tree is durably flushed to the base: clear the slots
+      // and deep-log the warm root — the DRAIN frees the whole tree once no
+      // reader version-ref holds it (per-version release).
+      void release_warm(uint32_t warm_root_raw);
       tree        get_root(uint32_t root_index)
       {
          (void)root_index;
@@ -403,6 +413,30 @@ namespace vpart::kv
             std::memcpy(p.b, &r32, 4);
          }
          return p;
+      }
+
+      // A crashed rotation leaves the frozen warm tree in root slots 2/3 —
+      // recovery re-flushes it (idempotent) and releases. {0,0} = none.
+      std::pair<uint32_t, uint32_t> pending_warm() const
+      {
+         const uint32_t vf = uint32_t(_arena.get_root(3));
+         if (!vf)
+            return {0, 0};
+         return {vf, uint32_t(_arena.get_root(2))};
+      }
+
+      // Pin a cursor at a SPECIFIC (version, root) boundary — the WARM leg of
+      // tiered readers. Publish-validate against the floor: valid only while
+      // a master pin (the compactor's) holds floor <= version, which the
+      // rotation protocol guarantees for the whole flush window.
+      cursor pin_at(uint32_t version, uint32_t root_raw)
+      {
+         auto  rs   = _arena.start_read_session();
+         auto& slot = _arena.reader_slot(rs.slot());
+         slot.store((uint64_t(version) << 32) | root_raw, std::memory_order_seq_cst);
+         root_ptr p = root_ptr::null();
+         std::memcpy(p.b, &root_raw, 4);
+         return cursor(&_arena, p, &slot, std::move(rs));
       }
 
       // Writer-side snapshot: claims a read-session slot and pins the latest
@@ -637,6 +671,47 @@ namespace vpart::kv
    inline cursor tree::snapshot_cursor() const
    {
       return _ws->_db->pin_snapshot();
+   }
+
+   inline std::pair<uint32_t, uint32_t> write_session::freeze_and_reset()
+   {
+      database*      db   = _db;
+      const root_ptr warm = _t.root_handle();
+      const uint32_t wraw = uint32_t(warm.raw());
+      const uint32_t vf   = db->_committed;
+      // a fresh, empty hot tree published as its own version (the rotation
+      // is itself a commit: readers pinning "latest" from here see hot=empty
+      // and reach the frozen data through the WARM leg)
+      const uint32_t v = vf + 1;
+      _t.adopt_root(root_ptr::null(), 0);
+      {
+         std::lock_guard g(db->_root_mx);
+         db->_arena.set_root(2, wraw);  // warm survives a crash: recovery re-flushes
+         db->_arena.set_root(3, vf);
+         db->_arena.set_root(0, uint32_t(root_ptr::null().raw()));
+         db->_arena.set_root(1, v);
+         db->_committed = v;
+         db->_live.store((uint64_t(v) << 32) | uint32_t(root_ptr::null().raw()),
+                         std::memory_order_seq_cst);
+      }
+      return {vf, wraw};
+   }
+
+   inline void write_session::release_warm(uint32_t warm_root_raw)
+   {
+      database* db = _db;
+      {
+         std::lock_guard g(db->_root_mx);
+         db->_arena.set_root(2, uint32_t(root_ptr::null().raw()));
+         db->_arena.set_root(3, 0);
+      }
+      // deep-log the warm root inside a txn: the drain cascades the whole
+      // tree once the floor passes every reader still holding its versions
+      root_ptr wp = root_ptr::null();
+      std::memcpy(wp.b, &warm_root_raw, 4);
+      auto tx = start_transaction(0);
+      _t.release_root(wp);
+      tx.commit();
    }
 
    inline void transaction::upsert(key_view k, value_view v)

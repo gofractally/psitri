@@ -3478,6 +3478,14 @@ namespace detail  // implementation types & node helpers — not part of the pub
       //   B retire_count()    lock-free: count keys in the detached (private) list
       //   C retire_release()  writer-locked txn: deep-log roots; the DRAIN
       //                       thread cascades the frees in the background.
+      // Deep-log an externally-held root (the frozen WARM tree after its
+      // flush): the drain cascades the whole tree once no version pin
+      // precedes the logging txn. Must run inside a transaction.
+      void release_root(packed_ptr root)
+      {
+         if (!root.is_null())
+            cow_release(root);
+      }
       size_t retire_detach(uint32_t F)
       {
          retire_list_.clear();

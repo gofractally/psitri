@@ -16,6 +16,12 @@
 #include <radix_engine.hpp>  // heart::radix (heart/test include dir)
 #include <vpart/kv.hpp>
 
+#include <psitri/dwal/kv_engine.hpp>
+// The composition contract (Dan: "the concept for engine needs to include the
+// cursors"): vpart conforms FULLY — sessions, transactions, and the
+// bidirectional cursor surface — before tiered_kv builds on it.
+static_assert(psitri::dwal::kv_engine<vpart::kv::engine>);
+
 #include <hash/xxhash.h>
 
 #include <atomic>

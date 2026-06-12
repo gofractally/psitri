@@ -903,7 +903,8 @@ set_target_properties(bank-bench-part PROPERTIES
 # L5 pipeline prototype — vpart hot delta, sorted bulk flush into heart
 add_executable(pipeline-bench programs/pipeline_bench.cpp)
 target_link_libraries(pipeline-bench PRIVATE vpart heart hash)
-target_include_directories(pipeline-bench PRIVATE ${CMAKE_SOURCE_DIR}/libraries/heart/test)
+target_include_directories(pipeline-bench PRIVATE ${CMAKE_SOURCE_DIR}/libraries/heart/test
+    ${CMAKE_SOURCE_DIR}/libraries/psitri/include)
 set_target_properties(pipeline-bench PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 

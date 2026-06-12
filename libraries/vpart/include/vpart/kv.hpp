@@ -75,7 +75,7 @@ namespace vpart::kv
      public:
       cursor(cursor&& o) noexcept
           : _hp(o._hp), _rs(std::move(o._rs)), _root(o._root), _view(std::move(o._view)),
-            _it(_view.end())
+            _it(_view.end()), _rend(o._rend)
       {
          o._hp = nullptr;
       }
@@ -87,17 +87,62 @@ namespace vpart::kv
             _hp->store(0, std::memory_order_seq_cst);  // drop the version pin
       }
 
-      void seek_begin() { _it = _view.begin(); }
-      void lower_bound(key_view k) { _it = _view.lower_bound(k); }
-      void upper_bound(key_view k)
+      bool seek_begin()
       {
-         _it = _view.lower_bound(k);
+         _rend = false;
+         _it   = _view.begin();
+         return !is_end();
+      }
+      bool seek_last()
+      {
+         _rend = false;
+         _it   = _view.last();
+         return !is_end();
+      }
+      bool lower_bound(key_view k)
+      {
+         _rend = false;
+         _it   = _view.lower_bound(k);
+         return !is_end();
+      }
+      bool upper_bound(key_view k)
+      {
+         _rend = false;
+         _it   = _view.lower_bound(k);
          if (_it != _view.end() && (*_it).first == k)
             ++_it;
+         return !is_end();
       }
-      void find(key_view k) { _it = _view.find(k); }
-      void next() { ++_it; }
-      bool is_end() const { return _it == _view.end(); }
+      bool find(key_view k)
+      {
+         _rend = false;
+         _it   = _view.find(k);
+         return !is_end();
+      }
+      bool next()
+      {
+         if (_rend)
+            return seek_begin();  // psitri convention: next from rend = first key
+         ++_it;
+         return !is_end();
+      }
+      bool prev()
+      {
+         if (_rend)
+            return false;
+         if (_it == _view.end())
+            return seek_last();  // prev from end = last key
+         --_it;
+         if (_it == _view.end())
+         {  // retreated past the first key
+            _rend = true;
+            return false;
+         }
+         return true;
+      }
+      bool is_end() const { return !_rend && _it == _view.end(); }
+      bool is_rend() const { return _rend; }
+      bool is_subtree() const { return false; }  // vpart has no subtree values
 
       key_view key() const { return (*_it).first; }
 
@@ -152,6 +197,7 @@ namespace vpart::kv
       root_ptr                           _root;
       mutable engine_t                   _view;
       engine_t::const_iterator           _it;
+      bool                               _rend = false;  // retreated past the first key
    };
 
    // A reader thread's handle: one vpart::read_session slot for the lifetime of
@@ -649,4 +695,16 @@ namespace vpart::kv
       if (!db->_drain_thread.joinable())
          db->drain_(db->floor_());  // no thread: drain inline on the writer
    }
+   // kv_engine concept surface (psitri::dwal::kv_engine): one aggregate naming
+   // the five types + config. tiered_kv<W, Base> and the conformance
+   // static_assert bind to THIS, never to the classes directly.
+   struct engine
+   {
+      using database      = vpart::kv::database;
+      using write_session = vpart::kv::write_session;
+      using read_session  = vpart::kv::read_session;
+      using transaction   = vpart::kv::transaction;
+      using cursor        = vpart::kv::cursor;
+      using config        = vpart::kv::runtime_config;
+   };
 }  // namespace vpart::kv

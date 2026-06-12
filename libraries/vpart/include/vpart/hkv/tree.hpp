@@ -1837,6 +1837,209 @@ namespace detail  // implementation types & node helpers — not part of the pub
             return t_->with_router(node,
                                    [&](auto* n) noexcept { return t_->router_next_d(n, from, ob, oc); });
          }
+         bool prev_child_(packed_ptr node, int from, uint8_t& ob, packed_ptr& oc) const
+         {
+            // tree's router_prev contract: largest byte STRICTLY BELOW `from`
+            // (from=256 -> max); donor's <=from maps to strictly-below(from+1).
+            if (from < 0)
+               return false;
+            return t_->router_prev_d(node, from + 1, ob, oc);
+         }
+         // Descend to the RIGHTMOST terminal of `child` (mirror of descend_+seek_).
+         void descend_max_(packed_ptr child, size_t base)
+         {
+            for (;;)
+            {
+               switch (child.tag())
+               {
+                  case K::value_ptr:
+                  {
+                     const char* L = static_cast<const char*>(deref_(child));
+                     sfx_          = leaf_suf(L);
+                     sfxlen_       = leaf_slen(L);
+                     if (leaf_has_full(L)) { full_str_ = leaf_str(L); full_len_ = leaf_strlen(L); }
+                     else                    full_str_ = nullptr;
+                     if constexpr (kv_tree::raw_vals)
+                     {
+                        *reinterpret_cast<T*>(cvalbuf_) = T{leaf_bytes(L)};
+                        val_local_ = true;
+                     }
+                     else
+                        set_ptr_(leaf_val(L));
+                     if (maintain_) { key_.len = base; if (!full_str_) key_.append(sfx_, sfxlen_); }
+                     return;
+                  }
+                  case K::value_inline:
+                     sfx_ = nullptr; sfxlen_ = 0; full_str_ = nullptr;
+                     val_local_ = false;
+                     if constexpr (inlineable)
+                        unpack_inline(child, val_);
+                     if (maintain_) key_.len = base;
+                     return;
+                  case K::prefix_node:
+                  {
+                     const char* P  = static_cast<const char*>(deref_(child));
+                     uint32_t    cb = uint32_t(base);
+                     if (maintain_) { key_.len = base; key_.append(pn_pfx<Ptr>(P), pn_plen(P)); cb = uint32_t(key_.len); }
+                     stk_.push_back(Frame{child, 1, uint32_t(base), cb});  // single child: consumed
+                     child = pn_next<Ptr>(const_cast<char*>(P));
+                     base  = cb;
+                     continue;
+                  }
+                  case K::bucket:
+                  {
+                     bucket* b = static_cast<bucket*>(deref_(child));
+                     bord_.clear();
+                     bkt_append_order(b, bord_);
+                     const int n = int(bord_.size());
+                     stk_.push_back(Frame{child, n, uint32_t(base), uint32_t(base)});
+                     const char* e = bkt_entry(b, bord_[size_t(n - 1)]);
+                     sfx_      = bkt_suf(e);
+                     sfxlen_   = bkt_slen(e);
+                     full_str_ = nullptr;
+                     set_ptr_(bkt_val(e));
+                     if (maintain_) { key_.len = base; key_.append(sfx_, sfxlen_); }
+                     return;
+                  }
+                  case K::setlist_u16:
+                  {
+                     const setlist16* s  = static_cast<const setlist16*>(deref_(child));
+                     const int        nb = s->rh.hdr.nbranch;
+                     uint32_t         cb = uint32_t(base);
+                     if (maintain_) { key_.len = base; cb = uint32_t(key_.len); }
+                     if (nb > 0)
+                     {
+                        stk_.push_back(Frame{child, nb, uint32_t(base), cb});
+                        const uint16_t st = s->stems[nb - 1];
+                        if (maintain_)
+                        { key_.push(uint8_t(st >> 8)); key_.push(uint8_t(st & 0xFF)); }
+                        child = s->branch[nb - 1];
+                        base  = maintain_ ? size_t(key_.len) : size_t(cb) + 2;
+                        continue;
+                     }
+                     stk_.push_back(Frame{child, 0, uint32_t(base), cb});  // term-only router
+                     sfx_ = nullptr; sfxlen_ = 0; full_str_ = nullptr;
+                     emit_(s->rh.term);
+                     if (maintain_) key_.len = cb;
+                     return;
+                  }
+                  default:  // byte routers (setlist / c2 / c4 / c8 / node_full / fullx / cx / hdr)
+                  {
+                     const router_hdr* rh = static_cast<const router_hdr*>(deref_(child));
+                     uint32_t          cb = uint32_t(base);
+                     if (maintain_)
+                     {
+                        key_.len = base;
+                        if (child.tag() == K::setlist_u8 && rh->hdr.prefix_len)
+                           key_.append(static_cast<const setlist*>(deref_(child))->prefix,
+                                       rh->hdr.prefix_len);
+                        else if (child.tag() == K::hdr && rh->hdr.prefix_len)
+                           key_.append(reinterpret_cast<const uint8_t*>(deref_(child)) +
+                                           kv_tree::WPFX_OFF,
+                                       rh->hdr.prefix_len);
+                        cb = uint32_t(key_.len);
+                     }
+                     uint8_t    bb;
+                     packed_ptr nc;
+                     if (prev_child_(child, 255, bb, nc))
+                     {
+                        stk_.push_back(Frame{child, int(bb) + 1, uint32_t(base), cb});
+                        if (maintain_) key_.push(bb);
+                        child = nc;
+                        base  = maintain_ ? size_t(key_.len) : size_t(cb) + 1;
+                        continue;
+                     }
+                     stk_.push_back(Frame{child, 0, uint32_t(base), cb});  // childless: term only
+                     sfx_ = nullptr; sfxlen_ = 0; full_str_ = nullptr;
+                     emit_(rh->term);
+                     if (maintain_) key_.len = cb;
+                     return;
+                  }
+               }
+            }
+         }
+         void retreat_()  // step to the PREVIOUS terminal; the mirror of seek_
+         {
+            while (!stk_.empty())
+            {
+               Frame&  f = stk_.back();
+               const K k = f.node.tag();
+               if (k == K::prefix_node)
+               {  // single child, no term: backward-exhausted on re-entry
+                  if (maintain_) key_.len = f.plen;
+                  stk_.pop_back();
+                  continue;
+               }
+               if constexpr (Buckets || Adaptive)
+                  if (k == K::bucket)
+                  {
+                     if (f.cur >= 2)  // current = bord_[cur-1]; previous = bord_[cur-2]
+                     {
+                        --f.cur;
+                        bucket*     b = static_cast<bucket*>(deref_(f.node));
+                        const char* e = bkt_entry(b, bord_[size_t(f.cur - 1)]);
+                        sfx_ = bkt_suf(e); sfxlen_ = bkt_slen(e); full_str_ = nullptr;
+                        set_ptr_(bkt_val(e));
+                        if (maintain_) { key_.len = f.cbase; key_.append(sfx_, sfxlen_); }
+                        return;
+                     }
+                     if (maintain_) key_.len = f.plen;
+                     stk_.pop_back();
+                     continue;
+                  }
+               if (k == K::setlist_u16)
+               {
+                  const setlist16* s = static_cast<const setlist16*>(deref_(f.node));
+                  if (f.cur >= 2)  // current = branch[cur-1]; previous = branch[cur-2]
+                  {
+                     --f.cur;
+                     const int      i  = f.cur - 1;
+                     const uint16_t st = s->stems[i];
+                     if (maintain_)
+                     { key_.len = f.cbase; key_.push(uint8_t(st >> 8)); key_.push(uint8_t(st & 0xFF)); }
+                     descend_max_(s->branch[i], maintain_ ? size_t(key_.len) : 0);
+                     return;
+                  }
+                  if (f.cur == 1 && !s->rh.term.is_null())  // before branch[0] comes the term
+                  {
+                     f.cur = 0;
+                     sfx_ = nullptr; sfxlen_ = 0; full_str_ = nullptr;
+                     emit_(s->rh.term);
+                     if (maintain_) key_.len = f.cbase;
+                     return;
+                  }
+                  if (maintain_) key_.len = f.plen;
+                  stk_.pop_back();
+                  continue;
+               }
+               // byte routers
+               const router_hdr* rh = static_cast<const router_hdr*>(deref_(f.node));
+               if (f.cur >= 1)  // current = child at byte cur-1
+               {
+                  uint8_t    bb;
+                  packed_ptr child;
+                  if (prev_child_(f.node, f.cur - 2, bb, child))
+                  {
+                     f.cur = int(bb) + 1;
+                     if (maintain_) { key_.len = f.cbase; key_.push(bb); }
+                     descend_max_(child, maintain_ ? size_t(key_.len) : 0);
+                     return;
+                  }
+                  if (!rh->term.is_null())  // the term precedes the first child
+                  {
+                     f.cur = 0;
+                     sfx_ = nullptr; sfxlen_ = 0; full_str_ = nullptr;
+                     emit_(rh->term);
+                     if (maintain_) key_.len = f.cbase;
+                     return;
+                  }
+               }
+               if (maintain_) key_.len = f.plen;  // cur <= 0: nothing precedes here
+               stk_.pop_back();
+               continue;
+            }
+            end_ = true;  // retreated past the first key (--begin(), as std::map: rend)
+         }
          // true → positioned at a terminal (sets val_ + suffix); false → pushed a frame.
          // `base` is the key length at this child's start; key_ is grown only when
          // maintain_ is on (the eager fast path), otherwise the path in stk_ suffices.
@@ -2250,6 +2453,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
          using pointer = arrow_proxy;
 
          const_iterator() = default;
+         struct end_tag
+         {
+         };
+         // end() WITH tree identity: compares equal to any end iterator, and --it
+         // re-seats at the rightmost key (std::map's --end() / rbegin()).
+         const_iterator(const kv_tree* t, end_tag) : t_(t) {}
          explicit const_iterator(const kv_tree* t, packed_ptr root) : t_(t)
          {
             if (!root.is_null())
@@ -2374,6 +2583,28 @@ namespace detail  // implementation types & node helpers — not part of the pub
             seek_();
             return tmp;
          }
+         const_iterator& operator--()
+         {
+            if (end_)
+            {  // --end(): seat at the rightmost key (needs a tree-carrying end iterator)
+               if (t_ && !t_->root_.is_null())
+               {
+                  end_ = false;
+                  stk_ = frame_stack();
+                  if (maintain_) key_.len = 0;
+                  descend_max_(t_->root_, 0);
+               }
+               return *this;
+            }
+            retreat_();
+            return *this;
+         }
+         const_iterator operator--(int)
+         {
+            const_iterator tmp = *this;
+            --(*this);
+            return tmp;
+         }
          const T&        value() const noexcept
          {
             if constexpr (inlineable)
@@ -2460,6 +2691,14 @@ namespace detail  // implementation types & node helpers — not part of the pub
 
       const_iterator begin() const { return const_iterator(this, root_); }
       const_iterator end() const { return const_iterator(); }
+      // Iterator seated at the RIGHTMOST key (end() when empty) — the cursor's
+      // seek_last; equivalent to --end() on a tree-carrying end iterator.
+      const_iterator last() const
+      {
+         const_iterator it(this, typename const_iterator::end_tag{});
+         --it;
+         return it;
+      }
       const_iterator cbegin() const { return begin(); }
       const_iterator cend() const { return end(); }
 

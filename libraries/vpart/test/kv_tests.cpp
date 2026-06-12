@@ -486,3 +486,108 @@ TEST_CASE("kv churn: repeated overwrites under generation turnover drain fully")
    }
    require_drained(*db);
 }
+
+TEST_CASE("cursor bidirectional: seek_last/prev/rend conform to std::map order")
+{
+   auto dir = fs::temp_directory_path() / "part_kv_bidir";
+   fs::remove_all(dir);
+   auto db  = vpart::kv::database::create(dir);
+   auto ses = db->start_write_session();
+
+   // Mixed-shape keys: random hex (fans wide), shared-prefix runs (prefix
+   // nodes + hdr routers), and short keys (router terms) — every node kind
+   // the reverse walk must mirror.
+   std::map<std::string, std::string> oracle;
+   std::mt19937_64                    rng(0xbd1f);
+   auto                               put = [&](const std::string& k) {
+      std::string v = "v:" + k;
+      auto        tx = ses->start_transaction(0);
+      tx.upsert(k, v);
+      tx.commit();
+      oracle[k] = v;
+   };
+   for (int i = 0; i < 4000; ++i)
+   {
+      char b[17];
+      uint64_t h = rng();
+      for (int j = 0; j < 16; ++j, h >>= 4)
+         b[j] = "0123456789abcdef"[h & 15];
+      put(std::string(b, 16));
+   }
+   for (int i = 0; i < 1000; ++i)
+      put("shared/prefix/run/" + std::to_string(rng() % 100000));
+   for (int i = 0; i < 300; ++i)
+      put(std::string(1 + i % 3, char('a' + i % 26)));
+
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+
+   SECTION("full backward walk == reverse oracle order")
+   {
+      REQUIRE(cur.seek_last());
+      auto it = oracle.rbegin();
+      uint64_t n = 0;
+      do
+      {
+         REQUIRE(it != oracle.rend());
+         REQUIRE(cur.key() == it->first);
+         REQUIRE(cur.value<std::string>().value() == it->second);
+         ++it;
+         ++n;
+      } while (cur.prev());
+      REQUIRE(n == oracle.size());
+      REQUIRE(it == oracle.rend());
+      REQUIRE(cur.is_rend());
+      REQUIRE_FALSE(cur.is_end());
+      // psitri convention: next from rend re-seats at the first key
+      REQUIRE(cur.next());
+      REQUIRE(cur.key() == oracle.begin()->first);
+   }
+   SECTION("forward walk then prev from end seats at last")
+   {
+      REQUIRE(cur.seek_begin());
+      while (cur.next()) {}
+      REQUIRE(cur.is_end());
+      REQUIRE(cur.prev());
+      REQUIRE(cur.key() == oracle.rbegin()->first);
+   }
+   SECTION("mixed next/prev random walk tracks the oracle")
+   {
+      REQUIRE(cur.seek_begin());
+      auto it = oracle.begin();
+      for (int step = 0; step < 20000; ++step)
+      {
+         if (rng() & 1)
+         {
+            auto nx = std::next(it);
+            if (nx == oracle.end())
+               continue;  // stay in range: end/rend transitions tested above
+            it = nx;
+            REQUIRE(cur.next());
+         }
+         else
+         {
+            if (it == oracle.begin())
+               continue;
+            --it;
+            REQUIRE(cur.prev());
+         }
+         REQUIRE(cur.key() == it->first);
+      }
+   }
+   SECTION("lower_bound then backward walk")
+   {
+      const std::string probe = "shared/prefix/run/5";
+      REQUIRE(cur.lower_bound(probe));
+      auto it = oracle.lower_bound(probe);
+      REQUIRE(cur.key() == it->first);
+      while (it != oracle.begin())
+      {
+         --it;
+         REQUIRE(cur.prev());
+         REQUIRE(cur.key() == it->first);
+      }
+      REQUIRE_FALSE(cur.prev());
+      REQUIRE(cur.is_rend());
+   }
+}

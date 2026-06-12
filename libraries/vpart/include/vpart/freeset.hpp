@@ -192,21 +192,15 @@ namespace vpart
       {
          assert(n >= 1 && n <= max_alloc_lines);
          g_freeset_probes = 0;
-         switch (n)
-         {
-            case 1:
-               return alloc_class_(0, from);
-            case 2:
-               return alloc_class_(1, from);
-            case 4:
-               return alloc_class_(2, from);
-            case 8:
-               return alloc_class_(3, from);
-            case 16:
-               return alloc_16_(from);
-            default:
-               return alloc_run_(n, from);
-         }
+         // vpart (Dan): the per-case constant IS ctz(n) — no jump table. With
+         // class-rounded callers n is always a power of two, so the fast
+         // classes resolve branch-light AND constant-fold when n is known at
+         // the (inlined) call site. alloc_run_ stays for odd legacy sizes.
+         if (n <= 8 && (n & (n - 1)) == 0)
+            return alloc_class_(uint32_t(std::countr_zero(n)), from);
+         if (n == 16)
+            return alloc_16_(from);
+         return alloc_run_(n, from);
       }
 
       // Free n lines at `line` (previously allocated together or line-by-line —

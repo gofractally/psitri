@@ -272,7 +272,32 @@ namespace
           },
           batch);
       tx->abort();
-      ws->tree_dbg().census([&](auto cr) { r.live += cr.bytes; });
+      struct krow { uint64_t n = 0, bytes = 0, branches = 0, lalloc = 0; };
+      krow by_kind[16];
+      ws->tree_dbg().census([&](auto cr) {
+         r.live += cr.bytes;
+         krow& k = by_kind[unsigned(cr.kind) & 15];
+         ++k.n;
+         k.bytes += cr.bytes;
+         k.branches += cr.nbranch;
+         k.lalloc += cr.lines_alloc;
+      });
+      if (getenv("DICT_CENSUS"))
+      {
+         static const char* kname[16] = {"value_ptr", "value_inline", "prefix_node",
+                                         "setlist_u8", "node_full", "c2", "c4", "c8",
+                                         "setlist_u16", "bucket", "full_x", "cx", "hdr",
+                                         "cbucket", "?14", "null"};
+         fprintf(stderr, "# census %s: %-12s %10s %12s %8s %8s\n", tag, "kind", "nodes",
+                 "bytes", "avg_br", "avg_ln");
+         for (unsigned i = 0; i < 16; ++i)
+            if (by_kind[i].n)
+               fprintf(stderr, "# census %s: %-12s %10llu %12llu %8.1f %8.2f\n", tag,
+                       kname[i], (unsigned long long)by_kind[i].n,
+                       (unsigned long long)by_kind[i].bytes,
+                       double(by_kind[i].branches) / double(by_kind[i].n),
+                       double(by_kind[i].lalloc) / double(by_kind[i].n));
+      }
       r.reserve = uint64_t(db->store().num_segments()) * 8u * 1024 * 1024;
       return r;
    }

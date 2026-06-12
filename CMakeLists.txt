@@ -907,17 +907,18 @@ target_include_directories(dict-bench PRIVATE ${CMAKE_SOURCE_DIR}/libraries/hear
 set_target_properties(dict-bench PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
-# dense-tier A/B variants (vpart with the c2/c4/c8 ladder)
-add_executable(dict-bench-dense programs/dict_bench.cpp)
-target_compile_definitions(dict-bench-dense PRIVATE VPART_DENSE_TIERS=1)
-target_link_libraries(dict-bench-dense PRIVATE part vpart art heart hash)
-target_include_directories(dict-bench-dense PRIVATE ${CMAKE_SOURCE_DIR}/libraries/heart/test)
-set_target_properties(dict-bench-dense PROPERTIES
+# straight-widen A/B variants (vpart sans ladder: setlist -> node_full).
+# The DEFAULT vpart build matches part's dense ladder (apples-to-apples).
+add_executable(dict-bench-straight programs/dict_bench.cpp)
+target_compile_definitions(dict-bench-straight PRIVATE VPART_STRAIGHT_WIDEN=1)
+target_link_libraries(dict-bench-straight PRIVATE part vpart art heart hash)
+target_include_directories(dict-bench-straight PRIVATE ${CMAKE_SOURCE_DIR}/libraries/heart/test)
+set_target_properties(dict-bench-straight PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-add_executable(bank-bench-vpart-dense programs/bank_bench.cpp)
-target_compile_definitions(bank-bench-vpart-dense PRIVATE BANK_ENGINE_VPART=1 VPART_DENSE_TIERS=1)
-target_link_libraries(bank-bench-vpart-dense PRIVATE vpart Boost::program_options hash)
-set_target_properties(bank-bench-vpart-dense PROPERTIES
+add_executable(bank-bench-vpart-straight programs/bank_bench.cpp)
+target_compile_definitions(bank-bench-vpart-straight PRIVATE BANK_ENGINE_VPART=1 VPART_STRAIGHT_WIDEN=1)
+target_link_libraries(bank-bench-vpart-straight PRIVATE vpart Boost::program_options hash)
+set_target_properties(bank-bench-vpart-straight PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 # vpart bank bench — part with stamp liveness (docs/unified_tier_design.md L1a)

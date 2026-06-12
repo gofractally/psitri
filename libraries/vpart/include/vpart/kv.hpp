@@ -50,14 +50,18 @@ namespace vpart::kv
    // ELEGANT value mode: the leaf IS the value (raw bytes sized to the data);
    // reads hand back views.
    using bval = vhkv::bytes_value;
-   // VPART_DENSE_TIERS=1 builds the engine with the c2/c4/c8 ladder (denser
-   // sparse-wide routers, +1 rank hop) instead of straight-to-node_full
-   // (fastest dispatch, fatter sparse wides) — the A/B Dan asked for.
-#if defined(VPART_DENSE_TIERS) && VPART_DENSE_TIERS
+   // DEFAULT = the c2/c4/c8 ladder, matching part's form exactly (Dan: the
+   // only part/vpart diff is supposed to be refcount vs version header; the
+   // census proved straight-widen was +19 MB of node_full on rand 1M, ~the
+   // whole "extra space" — the stamps themselves cost zero extra lines).
+   // VPART_STRAIGHT_WIDEN=1 keeps the form experiment buildable: widen goes
+   // setlist -> node_full directly (fastest dispatch, fatter sparse wides);
+   // the placement/mover design owns the per-node choice long-term.
+#if defined(VPART_STRAIGHT_WIDEN) && VPART_STRAIGHT_WIDEN
+   using engine_t = vhkv::kv_tree<std::string_view, bval, vhkv::mode::none, part_alloc<bval>>;
+#else
    using engine_t =
        vhkv::kv_tree<std::string_view, bval, vhkv::mode::dense_tiers, part_alloc<bval>>;
-#else
-   using engine_t = vhkv::kv_tree<std::string_view, bval, vhkv::mode::none, part_alloc<bval>>;
 #endif
    using root_ptr = vpart::detail::line_ptr;
 

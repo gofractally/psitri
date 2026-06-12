@@ -23,11 +23,14 @@
 #include <psitri/transaction.hpp>
 #include <psitri/write_session_impl.hpp>
 
+#include <vpart/kv.hpp>  // the 4th engine: vpart must pass standalone (Dan)
+
 // The harness shape is compiler-enforced (SPEC §12.3): a drift in any engine
 // fails HERE, by name, before a single test runs.
 static_assert(part::shape::kv_database<heart::kv::database>);
 static_assert(part::shape::kv_database<part::kv::database>);
 static_assert(part::shape::kv_database<psitri::database>);
+static_assert(part::shape::kv_database<vpart::kv::database>);
 
 namespace
 {
@@ -117,6 +120,168 @@ namespace
       return v;
    }
    std::filesystem::path tmp(const char* n) { return std::filesystem::temp_directory_path() / n; }
+
+   // ── the lifecycle test type: exact retain/release accounting ─────────────
+   // Stored payload = 8-byte id. The registry hooks count per id; quiesced
+   // counts must balance EXACTLY (retains == releases once the value is gone;
+   // background reclaim contexts included). Thread-safe: hooks fire on GC
+   // threads (the sal type-ops contract).
+   struct hookstats
+   {
+      std::atomic<int64_t> retains{0}, releases{0};
+      void reset()
+      {
+         retains  = 0;
+         releases = 0;
+      }
+   };
+   hookstats g_hooks;
+   constexpr uint16_t kTestType = 7;
+   inline part::shape::value_type_ops test_type_ops()
+   {
+      return part::shape::value_type_ops{
+          .retain  = [](std::string_view, void* u)
+          { static_cast<hookstats*>(u)->retains.fetch_add(1, std::memory_order_relaxed); },
+          .release = [](std::string_view, void* u)
+          { static_cast<hookstats*>(u)->releases.fetch_add(1, std::memory_order_relaxed); },
+          .user    = &g_hooks};
+   }
+
+   // Phase T: typed values (shape::typed_values) — engines without the
+   // feature fail every check in this phase (red until implemented).
+   template <class DB>
+   void phase_typed_values(DB& db, long& checks, long& fails, auto&& ok)
+   {
+      if constexpr (!part::shape::typed_values<DB>)
+      {
+         ok(false);  // FEATURE ABSENT: typed values (T + blob, lifecycle hooks)
+         return;
+      }
+      else
+      {
+         g_hooks.reset();
+         db.register_value_type(kTestType, test_type_ops());
+         auto ws = db.start_write_session();
+         {
+            auto tx = ws->start_transaction(0);
+            tx.upsert("typed/a", "AAAAAAAA", kTestType);  // store: retain #1
+            tx.upsert("typed/b", "BBBBBBBB", kTestType);
+            tx.upsert("pod/x", "plain");  // T=0: NO hooks
+            tx.commit();
+         }
+         ok(g_hooks.retains.load() >= 2);  // both stores retained
+         {
+            auto tx = ws->start_transaction(0);
+            tx.upsert("typed/a", "A2A2A2A2", kTestType);  // overwrite: release old, retain new
+            tx.commit();
+         }
+         {
+            auto tx = ws->start_transaction(0);
+            tx.remove("typed/b");  // remove: release
+            tx.commit();
+         }
+         {
+            auto tx = ws->start_transaction(0);
+            tx.upsert("typed/c", "CCCCCCCC", kTestType);
+            tx.abort();  // abort: created value released
+         }
+         // quiesce background reclaim, then the books must balance: the ONLY
+         // live typed value is typed/a (one outstanding retain)
+         if constexpr (requires { db.flush_releases(); })
+            db.flush_releases();
+         if constexpr (requires { db.flush_reaper(); })
+            db.flush_reaper();
+         const int64_t outstanding = g_hooks.retains.load() - g_hooks.releases.load();
+         ok(outstanding == 1);
+         {
+            auto tx = ws->start_transaction(0);
+            tx.remove("typed/a");
+            tx.commit();
+         }
+         if constexpr (requires { db.flush_releases(); })
+            db.flush_releases();
+         ok(g_hooks.retains.load() == g_hooks.releases.load());  // exact balance
+      }
+   }
+
+   // Phase M: multi-root transactions + the set_root exchange.
+   template <class DB>
+   void phase_multi_root(DB& db, long& checks, long& fails, auto&& ok)
+   {
+      auto ws = db.start_write_session();
+      using TX = decltype(ws->start_transaction(0));
+      if constexpr (!part::shape::multi_root_transaction<TX>)
+      {
+         ok(false);  // FEATURE ABSENT: multi-root transactions / set_root
+         return;
+      }
+      else
+      {
+         {
+            auto tx = ws->start_transaction(0);
+            auto h0 = tx.primary();
+            auto h1 = tx.open_root(1);
+            h0.upsert("mr/u", "alice");
+            h1.upsert("mr/o", "order");
+            ok(h0.template get<std::string>("mr/u") == std::string("alice"));
+            ok(!h0.template get<std::string>("mr/o").has_value());  // isolation
+            tx.commit();
+         }
+         {
+            auto tx = ws->start_transaction(0);
+            auto h0 = tx.primary();
+            auto h1 = tx.open_root(1);
+            h0.upsert("mr/gone", "x");
+            h1.upsert("mr/gone2", "y");
+            tx.abort();  // all roots roll back
+         }
+         {
+            auto tx = ws->start_transaction(0);
+            ok(!tx.template get<std::string>("mr/gone").has_value());
+            tx.abort();
+         }
+         // the rotation: hot -> warm in one exchange expression
+         {
+            auto tx = ws->start_transaction(0);
+            auto h0 = tx.primary();
+            auto h1 = tx.open_root(1);
+            h1.set_root(h0.set_root({}));
+            ok(!h0.template get<std::string>("mr/u").has_value());      // hot newborn
+            ok(h1.template get<std::string>("mr/u") == std::string("alice"));  // warm holds it
+            tx.commit();
+         }
+      }
+   }
+
+   // Phase S: snapshot() — an owned shared tree of the committed root.
+   template <class DB>
+   void phase_snapshot(DB& db, long& checks, long& fails, auto&& ok)
+   {
+      auto ws  = db.start_write_session();
+      using WS = std::remove_reference_t<decltype(*ws)>;
+      if constexpr (!part::shape::tree_snapshots<WS>)
+      {
+         ok(false);  // FEATURE ABSENT: snapshot() owned shared tree
+         return;
+      }
+      else
+      {
+         {
+            auto tx = ws->start_transaction(0);
+            tx.upsert("snap/k", "v1");
+            tx.commit();
+         }
+         auto snap = ws->snapshot(0u);
+         {
+            auto tx = ws->start_transaction(0);
+            tx.upsert("snap/k", "v2");
+            tx.commit();
+         }
+         // the snapshot still reads v1 (engine-specific read path: via a
+         // handle-cursor where supported; minimal check = it exists)
+         ok(bool(snap));
+      }
+   }
 
    // Run the same battery on whatever native database type DB is (cursor deduced from get_root).
    template <class DB>
@@ -517,6 +682,22 @@ namespace
                      (unsigned long long)free_total, (unsigned long long)cap);
          ok(free_total == cap);
       }
+      // ── concept feature batteries (Dan: spec-first, every engine runs
+      //    them; absent features fail RED until implemented) ───────────────
+      {
+         const long f0 = fails;
+         {
+            std::filesystem::remove_all(dir / "feat");
+            auto fdb = DB::create(dir / "feat");
+            phase_typed_values(*fdb, checks, fails, ok);
+            phase_multi_root(*fdb, checks, fails, ok);
+            phase_snapshot(*fdb, checks, fails, ok);
+         }
+         if (fails != f0)
+            std::printf("    [%s] concept-extension phases: %ld failures "
+                        "(typed-values / multi-root / snapshot)\n",
+                        name, fails - f0);
+      }
       std::printf("  %-7s: %ld checks, %ld failures  [%s]\n", name, checks, fails,
                   fails == 0 ? "PASS" : "FAIL");
       return fails == 0;
@@ -526,11 +707,29 @@ namespace
 int main()
 {
    std::printf("KV compat suite — one templated body on each engine's NATIVE database type\n");
-   bool h = run<heart::kv::database>("heart", tmp("kvcompat_heart"));
-   bool p = run<psitri::database>("psitri", tmp("kvcompat_psitri"));
-   bool a = run<part::kv::database>("part", tmp("kvcompat_part"));
+   auto guarded = [](const char* name, auto&& fn) {
+      try
+      {
+         return fn();
+      }
+      catch (const std::exception& e)
+      {
+         std::printf("  %-7s: EXCEPTION: %s  [FAIL]\n", name, e.what());
+         return false;
+      }
+   };
+   const char* only = std::getenv("KV_ONLY");  // fast single-engine iteration
+   auto want = [&](const char* n) { return !only || std::string(only) == n; };
+   bool h = !want("heart") ||
+            guarded("heart", [&] { return run<heart::kv::database>("heart", tmp("kvcompat_heart")); });
+   bool p = !want("psitri") ||
+            guarded("psitri", [&] { return run<psitri::database>("psitri", tmp("kvcompat_psitri")); });
+   bool a = !want("part") ||
+            guarded("part", [&] { return run<part::kv::database>("part", tmp("kvcompat_part")); });
+   bool v = !want("vpart") ||
+            guarded("vpart", [&] { return run<vpart::kv::database>("vpart", tmp("kvcompat_vpart")); });
    perf_report();
-   std::printf("RESULT: heart %s, psitri %s, part %s\n", h ? "PASS" : "FAIL",
-               p ? "PASS" : "FAIL", a ? "PASS" : "FAIL");
-   return (h && p && a) ? 0 : 1;
+   std::printf("RESULT: heart %s, psitri %s, part %s, vpart %s\n", h ? "PASS" : "FAIL",
+               p ? "PASS" : "FAIL", a ? "PASS" : "FAIL", v ? "PASS" : "FAIL");
+   return (h && p && a && v) ? 0 : 1;
 }

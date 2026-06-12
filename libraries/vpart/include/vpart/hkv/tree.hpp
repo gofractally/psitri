@@ -757,16 +757,45 @@ namespace detail  // implementation types & node helpers — not part of the pub
          // and tail-switches into SHARED at the first old node; below that the
          // children-of-shared-are-shared invariant means SHARED needs no checks
          // either: own_suffix_(transition index) clones with NO scan.
-         packed_ptr* path_[72];
+         ins_path path_;
          path_[0] = &root_;
          return insert_impl_<Assign, false>(key, std::forward<VF>(v), path_, 1, 0, 0, 0);
       }
+
+      // Insert descend stack: inline for every practical depth, heap-spilled
+      // for pathological/long keys (each frame is one descend hop; long keys
+      // can hop once per byte in the worst pre-compression shapes).
+      struct ins_path
+      {
+         static constexpr uint32_t INLINE = 72;
+         packed_ptr*  sbo[INLINE];
+         packed_ptr** d   = sbo;
+         uint32_t     cap = INLINE;
+         ~ins_path()
+         {
+            if (d != sbo)
+               ::operator delete(d);
+         }
+         packed_ptr*& operator[](uint32_t i) noexcept { return d[i]; }
+         void         ensure(uint32_t n)
+         {
+            if (n < cap) [[likely]]
+               return;
+            const uint32_t ncap = cap * 2;
+            auto** nd = static_cast<packed_ptr**>(::operator new(size_t(ncap) * sizeof(packed_ptr*)));
+            std::memcpy(nd, d, size_t(cap) * sizeof(packed_ptr*));
+            if (d != sbo)
+               ::operator delete(d);
+            d   = nd;
+            cap = ncap;
+         }
+      };
 
       // The one insert descent body, instantiated per (Assign, Shared).
       // slot == path[pdep-1]; fshared = the Shared-mode transition index; the
       // transition tail-call resumes at the SAME position (depth/lowfan carry).
       template <bool Assign, bool Shared, class VF>
-      bool insert_impl_(std::string_view key, VF&& v, packed_ptr** path_, uint32_t pdep_,
+      bool insert_impl_(std::string_view key, VF&& v, ins_path& path_, uint32_t pdep_,
                         uint32_t fshared_, size_t depth, unsigned lowfan_in)
       {
          packed_ptr* slot   = path_[pdep_ - 1];
@@ -835,6 +864,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   if constexpr (WideStems) pslot = slot;
                   slot               = cs;
                   assert(pdep_ < 72);
+                  path_.ensure(pdep_ + 1);
                   path_[pdep_++] = slot;
                   ++depth;
                   continue;
@@ -872,7 +902,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   if (!cs->is_null())
                   {
                      slot           = cs;
-                     path_[pdep_++] = slot;
+                     path_.ensure(pdep_ + 1);
+                  path_[pdep_++] = slot;
                      ++depth;
                      continue;
                   }
@@ -896,7 +927,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   if (packed_ptr* cs = router_find_slot(x, byte))
                   {
                      slot           = cs;
-                     path_[pdep_++] = slot;
+                     path_.ensure(pdep_ + 1);
+                  path_[pdep_++] = slot;
                      ++depth;
                      continue;
                   }
@@ -1029,7 +1061,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      if constexpr (WideStems) pslot = slot;
                      slot           = reinterpret_cast<packed_ptr*>(P + 2);  // the next-pointer slot
                      assert(pdep_ < 72);
-                     path_[pdep_++] = slot;
+                     path_.ensure(pdep_ + 1);
+                  path_[pdep_++] = slot;
                      depth += PP.size();
                      continue;
                   }
@@ -1085,7 +1118,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      if constexpr (WideStems) pslot = slot;
                      slot           = &s->branch[i];
                      assert(pdep_ < 72);
-                     path_[pdep_++] = slot;
+                     path_.ensure(pdep_ + 1);
+                  path_[pdep_++] = slot;
                      ++depth;
                      continue;
                   }
@@ -1135,7 +1169,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      if constexpr (WideStems) pslot = slot;
                      slot           = cs;
                      assert(pdep_ < 72);
-                     path_[pdep_++] = slot;
+                     path_.ensure(pdep_ + 1);
+                  path_[pdep_++] = slot;
                      depth += 2;
                      continue;
                   }
@@ -1191,7 +1226,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      if constexpr (WideStems) pslot = slot;
                      slot           = hcs;
                      assert(pdep_ < 72);
-                     path_[pdep_++] = slot;
+                     path_.ensure(pdep_ + 1);
+                  path_[pdep_++] = slot;
                      ++depth;
                      continue;
                   }
@@ -1230,7 +1266,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      if constexpr (WideStems) pslot = slot;
                      slot           = cs;
                      assert(pdep_ < 72);
-                     path_[pdep_++] = slot;
+                     path_.ensure(pdep_ + 1);
+                  path_[pdep_++] = slot;
                      ++depth;
                      continue;
                   }
@@ -8968,7 +9005,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       // nodes are shared). Idempotent: post-mutation re-entry (restride
       // continue paths) finds private entries and skips them. Each next
       // slot is re-based by OFFSET into the fresh clone (memcpy ⇒ stable).
-      packed_ptr* own_suffix_(packed_ptr** path, uint32_t n, uint32_t from)
+      packed_ptr* own_suffix_(ins_path& path, uint32_t n, uint32_t from)
       {
          for (uint32_t i = from; i < n; ++i)
          {

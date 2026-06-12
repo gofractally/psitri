@@ -493,7 +493,7 @@ set_target_properties(kv-u64-bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_
 
 # Engine-agnostic KV compatibility suite: one templated body run on heart AND psitri.
 add_executable(kv-compat-test programs/kv_compat_test.cpp)
-target_link_libraries(kv-compat-test PRIVATE psitri heart part)
+target_link_libraries(kv-compat-test PRIVATE psitri heart part vpart)
 target_include_directories(kv-compat-test PRIVATE ${CMAKE_SOURCE_DIR}/libraries/heart/test)
 target_compile_definitions(kv-compat-test PRIVATE XXH_INLINE_ALL)
 set_target_properties(kv-compat-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

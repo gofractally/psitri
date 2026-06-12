@@ -1133,6 +1133,13 @@ class TieredEngine : public BankEngine
          cfg.wcfg.sync_mode = sal::sync_type::msync_sync;
       else
          cfg.wcfg.sync_mode = sal::sync_type::none;
+      if (const char* mb = getenv("TIERED_HI_WATER_MB"))
+         cfg.knobs.hi_water_bytes = strtoull(mb, nullptr, 10) << 20;
+      if (const char* rb = getenv("TIERED_RETIRE_BATCH"))
+         cfg.knobs.retire_batch = strtoull(rb, nullptr, 10);
+      printf("  Tiered knobs: hi_water=%llu MB retire_batch=%llu\n",
+             (unsigned long long)(cfg.knobs.hi_water_bytes >> 20),
+             (unsigned long long)cfg.knobs.retire_batch);
       _db  = TK::database::open(path, sal::open_mode::create_or_open, cfg);
       _ses = _db->start_write_session();
    }

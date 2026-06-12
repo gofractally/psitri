@@ -1431,6 +1431,45 @@ namespace detail  // implementation types & node helpers — not part of the pub
          T v;
          return find(k, v) ? std::optional<T>(std::move(v)) : std::nullopt;
       }
+      // Write-stamp of the key's LEAF (the version that last wrote it) — the
+      // retire-if-unchanged primitive (L5: retire only keys with stamp <= F).
+      // UINT32_MAX = unknown-or-missing (inline/bucket terminals carry no own
+      // stamp): callers must treat it as "do not retire" — conservative-safe.
+      static constexpr uint32_t no_stamp = UINT32_MAX;
+      uint32_t write_stamp(key_param k) const
+      {
+         scratch_t        ks_;
+         std::string_view key = enc_(k, ks_);
+         struct op_t
+         {
+            const kv_tree* self;
+            uint32_t leaf(const char* p, const char* rem, size_t rl) const
+            {
+               if (std::string_view(reinterpret_cast<const char*>(leaf_suf(p)), leaf_slen(p)) !=
+                   std::string_view(rem, rl))
+                  return no_stamp;
+               if constexpr (k_has_vstamp_(K::value_ptr))
+               {
+                  uint32_t v;
+                  std::memcpy(&v, p + vstamp_off_(K::value_ptr), 4);
+                  return v;
+               }
+               return no_stamp;
+            }
+            uint32_t inl(uint64_t, bool) const { return no_stamp; }
+            uint32_t bkt(const bucket*, const char*, size_t) const { return no_stamp; }
+            uint32_t term(const router_hdr* rh) const
+            {
+               if (!rh->term.is_null() && rh->term.tag() == K::value_ptr)
+                  return self->vstamp_get_(rh->term);
+               return no_stamp;
+            }
+            uint32_t miss() const { return no_stamp; }
+            uint32_t cbkt(const uint8_t*) const { return no_stamp; }
+         };
+         return descend_read(key, op_t{this});
+      }
+
       // Presence test WITHOUT reading the value — find() copies it out (a real cost for
       // allocating T like std::string), a membership test never needs to.
       bool contains(key_param k) const

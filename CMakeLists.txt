@@ -282,6 +282,7 @@ add_subdirectory(libraries/heart)
 # tree (depends only on sal + ucc, not psitri). See libraries/part/SPEC.md.
 add_subdirectory(libraries/part)
 add_subdirectory(libraries/vpart)
+add_subdirectory(libraries/tiered)
 
 # PsiTriLevelDB: LevelDB-compatible wrapper around psitri (Bitcoin Core target)
 # Always built — small, header-light, and the primary external integration target.

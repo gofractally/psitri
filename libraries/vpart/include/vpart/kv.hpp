@@ -222,6 +222,11 @@ namespace vpart::kv
       void insert(key_view k, value_view v) { upsert(k, v); }
       void upsert(key_view k, value_view v);
       int  remove(key_view k);
+      // Retire primitive (L5): remove ONLY if the key's last write-version is
+      // <= vmax (i.e., it was already flushed at the merge floor). Keys
+      // rewritten after the floor — and keys whose stamp is unknowable
+      // (inline terminals) — are left alone. 0 = removed, -1 = kept/absent.
+      int remove_if_older(key_view k, uint32_t vmax);
       void commit();
       // CONTRACT (kv-compat 4.7b): dropping or aborting an uncommitted
       // transaction ROLLS BACK — the session tree returns to the txn-start
@@ -425,6 +430,13 @@ namespace vpart::kv
 
       uint32_t committed_() const noexcept { return _committed; }
 
+     public:
+      // Last published version — the merge floor F a flusher captures BEFORE
+      // pinning its snapshot (F <= pin version: conservative-safe for retire).
+      uint32_t committed_version() const noexcept { return _committed; }
+
+     private:
+
       // floor = oldest pinned version (committed when nothing is pinned).
       // seq_cst slot publication (reader) vs seq_cst scan (drain) closes the
       // race exactly like part's root_published dance.
@@ -612,6 +624,13 @@ namespace vpart::kv
    }
    inline int transaction::remove(key_view k)
    {
+      return _ws->_t.cow_remove(k) ? 0 : -1;
+   }
+   inline int transaction::remove_if_older(key_view k, uint32_t vmax)
+   {
+      const uint32_t st = _ws->_t.write_stamp(k);
+      if (st == engine_t::no_stamp || st > vmax)
+         return -1;
       return _ws->_t.cow_remove(k) ? 0 : -1;
    }
    template <class F>

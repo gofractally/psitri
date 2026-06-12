@@ -24,7 +24,7 @@ TEST_CASE("allocator open resets stale session bitmap", "[sal][session][recovery
 
    {
       sal::allocator alloc(path, sal::runtime_config{}, false);
-      auto           session = alloc.get_session();
+      auto           session = alloc.create_session();
       REQUIRE(session.get() != nullptr);
    }
 
@@ -40,7 +40,7 @@ TEST_CASE("allocator open resets stale session bitmap", "[sal][session][recovery
    {
       sal::allocator alloc(path, sal::runtime_config{}, false);
       CHECK(alloc.dump().active_sessions == 0);
-      auto session = alloc.get_session();
+      auto session = alloc.create_session();
       REQUIRE(session.get() != nullptr);
       CHECK(alloc.dump().active_sessions == 1);
    }

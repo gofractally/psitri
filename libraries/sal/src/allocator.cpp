@@ -509,7 +509,7 @@ namespace sal
       uint64_t bytes_copied   = 0;
 
       {  // Scope the dest session so it's released before truncation
-         auto  dst_ses  = dest.get_session();
+         auto  dst_ses  = dest.create_session();
          auto& dst_sesr = *dst_ses;
 
          uint32_t num_segs = _block_alloc.num_blocks();
@@ -1361,7 +1361,7 @@ namespace sal
       // Set thread name for sal debug system
       sal::set_current_thread_name("compactor");
 
-      auto ses = get_session();
+      auto ses = create_session();
       auto& sesr = *ses;
 
       /**
@@ -1446,12 +1446,21 @@ namespace sal
    {
       sal::set_current_thread_name("release");
 
-      auto  ses  = get_session();
+      auto  ses  = create_session();
       auto& sesr = *ses;
 
       ptr_address read_ids[1024];
       while (thread.yield())
       {
+         {  // sessionless cross-thread releases (Dan's release queue)
+            std::vector<ptr_address> q;
+            {
+               std::lock_guard g(_post_release_mx);
+               q.swap(_post_release_q);
+            }
+            for (ptr_address adr : q)
+               sesr.release(adr);
+         }
          for (uint32_t snum = 0; snum < _mapped_state->_session_data.session_capacity(); ++snum)
          {
             auto& rqueue =
@@ -2464,54 +2473,28 @@ namespace sal
       _mapped_state->_segment_data.set_pinned(seg_num, is_pinned);
    }
 
-   /// each thread has an array of allocator_session pointers, indexed by allocator_index
-   static thread_local std::array<allocator_session*, 64>* current_session = nullptr;
-   void allocator::end_session(allocator_session* ses)
+   // get_session/TLS REMOVED (Dan): sessions are explicit objects, never
+   // thread_local handouts. Cross-thread shared roots travel as atomic shared
+   // pointers; sessionless releases post to the thread-safe release queue;
+   // shared->local conversion calls create_session(). A session's only
+   // concurrency rule: two threads must not be ACTIVE on it simultaneously
+   // (strand-style serialized cross-thread use is legal).
+   allocator_session_ptr allocator::create_session()
    {
-      assert(current_session and "end_session called with no current session");
-      auto cs = current_session->at(_allocator_index);
-      assert(cs == ses and "end_session called with a different thread's session");
-      (void)ses;  // release warning suppression
-      delete cs;
-      current_session->at(_allocator_index) = nullptr;
+      return allocator_session_ptr(new allocator_session(*this, alloc_session_num()));
    }
-   allocator_session_ptr allocator::get_session()
+   allocator_session_ptr allocator::create_session() const
    {
-      if (not current_session)
-      {
-         SAL_INFO("get_session: creating new session array {} ", _allocator_index);
-         current_session = new std::array<allocator_session*, 64>();
-         for (auto& s : *current_session)
-            s = nullptr;
-      }
-
-      auto& session = current_session->at(_allocator_index);
-      if (session && &session->get_allocator() != this)
-      {
-         SAL_WARN("get_session: discarding stale session for allocator index {}", _allocator_index);
-         session = nullptr;
-      }
-
-      if (not session)
-      {
-         SAL_INFO("get_session: creating new session {} ", _allocator_index);
-         return allocator_session_ptr(session =
-                                          new allocator_session(*this, alloc_session_num()));
-      }
-      SAL_INFO("get_session: returning existing session");
-      auto cs = session;
-      cs->retain_session();
-      SAL_INFO("get_session: returning existing session {}  allocidx: {}  sessptr: {} ",
-               cs->get_session_num(), _allocator_index, current_session->at(_allocator_index));
-      return allocator_session_ptr(cs);
+      return const_cast<allocator*>(this)->create_session();
+   }
+   void allocator::post_release(ptr_address adr) noexcept
+   {
+      std::lock_guard g(_post_release_mx);
+      _post_release_q.push_back(adr);
    }
    void allocator::release_session_num(allocator_session_number sn) noexcept
    {
-      SAL_INFO("release_session_num: {}  allocidx: {}  sessptr: {} ", sn, _allocator_index,
-               current_session->at(_allocator_index));
-      assert(current_session);
-      assert(current_session->at(_allocator_index));
-      (*current_session)[_allocator_index] = nullptr;
+      SAL_INFO("release_session_num: {}", sn);
       _mapped_state->_session_data.release_session_num(sn);
    }
 }  // namespace sal

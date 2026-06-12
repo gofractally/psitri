@@ -328,7 +328,7 @@ class PsiTriEngine : public KVEngine
    {
       auto clone = std::make_unique<PsiTriEngine>();
       clone->_db         = _db;
-      // Don't create session here — get_session() is thread_local,
+      // Don't create session here — sessions are per-thread-owned,
       // so it must be created on the writer thread (lazy init in begin_batch)
       clone->_root_index = writer_id + 1;
       clone->_owns_db    = false;

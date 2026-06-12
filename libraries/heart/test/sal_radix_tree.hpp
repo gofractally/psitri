@@ -567,7 +567,7 @@ namespace heart::sal_proto
    {
      public:
       explicit sal_radix_tree(const std::filesystem::path& dir)
-          : _alloc(make_alloc(dir)), _ses(_alloc->get_session())
+          : _alloc(make_alloc(dir)), _ses(_alloc->create_session())
       {
          _alloc->register_type_ops<leaf_node>();
          _alloc->register_type_ops<setlist_node>();

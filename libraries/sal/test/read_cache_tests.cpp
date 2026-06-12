@@ -145,7 +145,7 @@ TEST_CASE("read-only sampled reads enqueue MFU cache promotion", "[sal][read_cac
 
    {
       sal::allocator alloc(path, cfg, false);
-      auto           ses = alloc.get_session();
+      auto           ses = alloc.create_session();
       auto           adr = ses->alloc<cache_test_node>(uint32_t{64}, sal::alloc_hint{});
 
       ses->sync(sal::sync_type::mprotect, cfg);
@@ -183,7 +183,7 @@ TEST_CASE("promoter skips young HOT advisories before copying", "[sal][read_cach
 
    {
       sal::allocator alloc(path, cfg, false);
-      auto           ses = alloc.get_session();
+      auto           ses = alloc.create_session();
       auto           adr = ses->alloc<cache_test_node>(uint32_t{64}, sal::alloc_hint{});
 
       ses->sync(sal::sync_type::mprotect, cfg);
@@ -236,7 +236,7 @@ TEST_CASE("disabled read cache does not enqueue sampled reads", "[sal][read_cach
 
    {
       sal::allocator alloc(path, cfg, false);
-      auto           ses = alloc.get_session();
+      auto           ses = alloc.create_session();
       auto           adr = ses->alloc<cache_test_node>(uint32_t{64}, sal::alloc_hint{});
 
       ses->sync(sal::sync_type::mprotect, cfg);

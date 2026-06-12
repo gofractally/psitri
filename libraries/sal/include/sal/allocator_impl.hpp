@@ -5,7 +5,18 @@ namespace sal
 {
    inline void allocator::release(ptr_address adr) noexcept
    {
-      get_session()->release(adr);
+      // Sessionless SYNCHRONOUS release: a mutex-guarded shared utility
+      // session — legal under the session contract (two threads must not be
+      // ACTIVE simultaneously; serialized use is fine). Callers with their
+      // own session should use it directly; truly-async callers can
+      // post_release() to the release thread instead.
+      std::lock_guard g(_utility_mx);
+      if (!_utility_init)
+      {
+         _utility_ses  = create_session();
+         _utility_init = true;
+      }
+      _utility_ses->release(adr);
    }
    /**
         * When an object is moved its space is freed and we need to record the freed space

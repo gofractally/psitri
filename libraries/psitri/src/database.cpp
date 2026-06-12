@@ -800,7 +800,7 @@ namespace psitri::detail
          result.key_range_lower = *options.key_lower;
       if (options.key_upper)
          result.key_range_upper = *options.key_upper;
-      auto              session = alloc.get_session();
+      auto              session = alloc.create_session();
       auto              lock    = session->lock();
 
       std::unordered_set<uint64_t> visited;
@@ -1059,7 +1059,7 @@ namespace psitri::detail
       version_audit_result result;
       result.requested_prune_floor = options.prune_floor;
 
-      auto session = alloc.get_session();
+      auto session = alloc.create_session();
       auto& roots  = alloc.root_objects();
       auto  count  = std::min<uint32_t>(roots.size(), num_top_roots);
 

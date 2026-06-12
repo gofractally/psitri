@@ -7,7 +7,7 @@
 namespace sal
 {
    /**
-    * @brief A lock-free, thread-safe shared slot for smart_ptr — "global_ptr".
+    * @brief A lock-free shared slot for smart_ptr — "global_ptr".
     *
     * Any thread may store into it, any thread may load from it, and a refcount
     * owned by one thread is transferred to another with a guarantee that no
@@ -23,130 +23,178 @@ namespace sal
     *
     * ── THE WORD ────────────────────────────────────────────────────────────
     *
-    *     [ addr : 32 | epoch : 16 | count : 16 ]   one std::atomic<uint64_t>
+    *     [ addr : 32 | lock : 1 | epoch : 15 | consumed : 16 ]   one atomic u64
     *
-    *   addr   the ptr_address currently published (null_ptr_address if empty).
-    *   count  readers "in flight": they have claimed the address but not yet
-    *          settled their reference (see protocol). count sits in the low
-    *          bits so a claim is a single fetch_add(1).
-    *   epoch  bumped by every store/exchange so a stale reader's settle can
-    *          never succeed against a *different generation* that happens to
-    *          republish the same address (the recycled-address ABA).
+    *   addr      the ptr_address currently published (null_ptr_address = empty).
+    *   consumed  how many of the slot's PRE-PAID credits readers have taken.
+    *             Low bits, so a load's claim is a single fetch_add(1).
+    *   epoch     bumped by every publish; distinguishes generations for the
+    *             empty-slot count fixup (and diagnostics).
+    *   lock      serializes the SLOW paths only (publish, credit re-arm).
+    *             Loads on the fast path never take it.
     *
-    * ── WHY A PLAIN { load; retain; } IS BROKEN ─────────────────────────────
+    * ── WHY A PLAIN { load addr; retain addr; } IS BROKEN ───────────────────
     * Loading the address and retaining it are two steps. Between them a writer
     * can swap the slot and drop the old object's last reference — the retain
-    * then lands on freed (or recycled) memory. Every correct design closes the
-    * gap by making the SLOT itself hold claims that readers take in one RMW.
-    * This is external (split) reference counting — the same family as
-    * folly::atomic_shared_ptr — simplified by two sal properties: addresses
-    * are 32-bit (the whole triple fits one u64), and control-block retain is
-    * already a sessionless relaxed fetch_add any thread may perform.
+    * then lands on freed (or recycled — the ABA class) memory. Every correct
+    * design closes the gap by making the SLOT hand out references in ONE RMW.
+    * This is external (split) reference counting, the same architecture as
+    * folly::atomic_shared_ptr, simplified by two sal properties: addresses are
+    * 32 bits (the whole state fits one u64) and control-block retain/release
+    * are raw atomics any thread may perform through its own session.
     *
-    * ── THE PROTOCOL ────────────────────────────────────────────────────────
-    * Invariant: while the slot publishes addr A, the slot itself owns exactly
-    * ONE strong reference on A, and `count` equals the number of claims taken
-    * against this (addr, epoch) generation that have not yet settled.
+    * ── THE PROTOCOL: PRE-PAID CREDITS ──────────────────────────────────────
+    * Invariant (slot unlocked, addr = A ≠ null):
     *
-    * load(ses):
-    *   1. CLAIM:  w = word.fetch_add(1)  — one RMW yields the address AND a
-    *      transient claim. From this instant A cannot die (writer side below).
-    *   2. RETAIN: ses->retain(A) — safe under the claim's protection.
-    *   3. SETTLE: CAS {A, e, c} -> {A, e, c-1} to withdraw the claim.
-    *      - Success: done — the retain from step 2 is the owned reference.
-    *      - The slot changed (addr or epoch differs): a writer harvested this
-    *        claim and ALREADY credited one strong reference on A for us
-    *        (writer step 2). We now hold two (credit + our retain), so give
-    *        one back — safe, the count is >= 2 so this cannot free — and own
-    *        the remainder.
-    *      Either way the caller ends with exactly one owned reference.
+    *     strong(A)  >=  1 (the slot's own base ref)  +  (bias − consumed)
     *
-    * store/exchange(p):
-    *   1. PRE-CREDIT: read the word {A, e, C}; retain(A) C times — one credit
-    *      per in-flight reader. The credits MUST be on A's strong count before
-    *      the publish lands: a reader observes "slot changed" the instant the
-    *      CAS below succeeds, balances its own retain with a release, and
-    *      walks away owning the credit — if the credit were added after the
-    *      publish (harvest-after), the reader's reference could be the last,
-    *      drop the count to zero, and free A under the writer's late retain.
-    *      Skipped when A is null (claims against an empty slot are vacuous).
-    *   2. PUBLISH: CAS the word {A, e, C} -> {p.addr, e+1, 0}, donating p's
-    *      reference to the slot. The CAS compares the FULL word, so it fails
-    *      if any new claim arrived since step 1 — then return the exact
-    *      pre-credits taken (releasing counts one owns is always sound, even
-    *      to zero; retaining freed memory never is) and retry from a fresh
-    *      read. (A CAS loop, not a blind exchange, also because epoch must be
-    *      read-modify-written to stay monotonic.)
-    *   3. The slot's own reference on old A is returned to the caller as a
-    *      smart_ptr (exchange) or released (store).
+    * Publishing BANKS `bias` extra references on A up front (the credits).
+    * A load claims one credit with a single fetch_add on `consumed` — the
+    * reference it walks away with was already on A's strong count, so there
+    * is no load-then-retain window at all: loads are WAIT-FREE, one RMW, and
+    * never touch the word again (no ABA exposure on the read side).
+    *
+    * A claim is VOID — confers nothing, claimant must retry — when its
+    * fetch_add's PRE-value had the lock bit set, or consumed >= bias, or a
+    * null address. Void +1s physically land in the count field, but every
+    * void claimant OBSERVED its own voidness (its pre-value says so), and the
+    * count is rewritten absolutely by the next lock holder, so they are
+    * harmless: physical count >= bias always means "real consumption = bias,
+    * remainder void".
+    *
+    * Slow paths take the lock bit (writer-vs-writer only; loads in the fast
+    * path are unaffected):
+    *
+    * publish (store/exchange/reset), under the lock:
+    *   1. Settle the OLD value: real consumed C = min(count, bias); release
+    *      the (bias − C) unconsumed credits. Safe: the slot still holds the
+    *      base ref, so these releases cannot free A early; they are counts the
+    *      slot itself banked.
+    *   2. Arm the NEW value: bank `bias` credits on it BEFORE it is exposed.
+    *   3. Expose: one release-store of {new_addr, epoch+1, consumed = 0,
+    *      unlocked}. p's reference is donated as the new base ref.
+    *   4. The old base ref is returned to the caller (exchange) or released
+    *      (store/reset).
+    *
+    * credit re-arm (a load found consumed >= bias), under the lock:
+    *   Bank `bias` fresh credits on A, then store {A, epoch, consumed = 1,
+    *   unlocked} — the re-arming reader takes credit #1. The banking is safe
+    *   because the base ref can only be surrendered by a publish, publishes
+    *   need the lock, and we hold it: A is pinned for the duration. (This
+    *   pin-under-lock is what makes re-arm sound; without the lock, banking
+    *   races a concurrent publish's teardown — a retain on freed memory.)
     *
     * ── WHY NO COUNT IS LOST (the accounting) ───────────────────────────────
-    * All word operations are RMWs on one atomic, so they are totally ordered.
-    * Between two publishes, count = (#claims) - (#fast settles): exactly the
-    * readers still in flight. A fast-settling reader removed its own unit and
-    * self-retained; a reader that misses the window is included in C and is
-    * credited by the harvest. Each in-flight reader consumes exactly one
-    * credit (it observes the slot changed and skips its own settle). The
-    * transient overshoot on A's strong count is bounded by the number of
-    * concurrently in-flight readers — the same slack the control block
-    * already reserves (max_ref_count = 2^18 - max_threads).
+    * Credits move in only three ways: banked under the lock (+bias), consumed
+    * by a fast load (one fetch_add, observed valid), or released as
+    * unconsumed remainder at publish (bias − C). Fast loads keep exactly the
+    * one credit they consumed; void claims keep nothing and are excluded from
+    * C by the min(count, bias) rule. The slot's transient contribution to an
+    * object's strong count is bounded by bias + 1 — budget against the
+    * control block's 18-bit field (max_ref_count = 2^18 − max_threads) when
+    * sizing how many slots may publish the same object.
     *
-    * ── EPOCH SUFFICIENCY ───────────────────────────────────────────────────
-    * A settle compares the full 64-bit word, so it can only succeed against
-    * the same (addr, epoch, count) triple it claimed. Republishing even the
-    * SAME address bumps the epoch, forcing stale settles onto the (correct)
-    * credit path. The 16-bit epoch would have to wrap to the same value — with
-    * the same address republished and the same count in flight — within one
-    * reader's claim-to-settle window (a handful of instructions) to be
-    * confused: 65,536 publishes to one slot inside that window. If that ever
-    * keeps anyone up at night, the word widens to a 128-bit CAS; the protocol
-    * is unchanged.
+    * ── COSTS / PROGRESS ────────────────────────────────────────────────────
+    *   load fast path :  1 RMW, wait-free. Never blocks on writers.
+    *   load slow path :  every bias-th load of an unchanging value re-arms
+    *                     under the lock (~bias retains).
+    *   publish        :  lock + ~bias retains on new + up to bias releases on
+    *                     old. Deliberate trade: stores pay O(bias) relaxed
+    *                     RMWs so that loads are a single RMW — right for
+    *                     read-hot slots (roots, config, handoff points).
+    *   Claims that land while the lock is held spin-retry; lock sections are
+    *   short and bounded (no loads, no allocation inside).
     *
     * ── USAGE CONTRACT ──────────────────────────────────────────────────────
-    * - The slot transfers LIFETIME, not exclusivity. Objects published here
-    *   are visible to other threads: the publisher must be done mutating them
+    * - The slot transfers LIFETIME, not exclusivity. Published objects are
+    *   visible to other threads: the publisher must be done mutating them
     *   (committed / logically read-only), or readers race on the bytes. Not
     *   asserted — is_read_only() tracks segment write-protection, which is
     *   legitimately off in many configs (write_protect_on_commit = false).
-    *   Lifetime is what this class manages; to read the bytes, dereference the
-    *   returned smart_ptr through your own session as usual (read_lock pins
-    *   residency against the compactor exactly as for any smart_ptr).
-    * - Every operation takes/uses a session: load(ses) binds the result to the
-    *   caller's session; store/exchange use the session already inside the
-    *   incoming smart_ptr (asserted) to release/return the previous value.
-    * - reset(ses) before the atomic_ptr is destroyed (or destroy it empty).
-    *   The destructor asserts emptiness in debug: it has no session to
-    *   release a leftover value with, and an atomic_ptr must not outlive its
-    *   allocator anyway. In release, a non-empty slot's reference leaks.
-    * - Destroying the atomic_ptr concurrently with load/store on it is UB,
+    *   To read the bytes, dereference the returned smart_ptr through your own
+    *   session as usual (read_lock pins residency against the compactor
+    *   exactly as for any smart_ptr).
+    * - Every operation goes through a session: load(ses) binds the result to
+    *   the CALLER's session; store/exchange/reset use the session inside the
+    *   incoming smart_ptr (asserted non-null) for the credit accounting.
+    * - reset(ses) before destruction (or destroy it never-set): the
+    *   destructor has no session to settle a leftover value with, and an
+    *   atomic_ptr must not outlive its allocator anyway. Asserted in debug;
+    *   in release a non-empty slot's references leak.
+    * - Destroying the atomic_ptr concurrently with operations on it is UB,
     *   like destroying any object in use.
     */
    template <typename T = alloc_header>
    class atomic_ptr
    {
-      // [ addr:32 | epoch:16 | count:16 ] — count in the low bits: claim = +1.
+     public:
+      /// Credits banked per published value. Each slot transiently adds up to
+      /// bias + 1 to its object's strong count (18-bit budget, see class doc).
+      static constexpr uint32_t credit_bias = 256;
+
+     private:
+      // [ addr:32 | lock:1 | epoch:15 | consumed:16 ]
       static constexpr uint64_t count_one  = 1;
       static constexpr uint64_t count_mask = 0xFFFFull;
       static constexpr uint64_t epoch_one  = 1ull << 16;
-      static constexpr uint64_t slot_mask  = ~count_mask;  // addr+epoch: the generation
+      static constexpr uint64_t epoch_mask = 0x7FFFull << 16;
+      static constexpr uint64_t lock_bit   = 1ull << 31;
 
-      static constexpr uint64_t pack(ptr_address a, uint64_t epoch_and_count) noexcept
+      static constexpr uint64_t pack(ptr_address a, uint64_t epoch_count_lock) noexcept
       {
-         return (uint64_t(*a) << 32) | epoch_and_count;
+         return (uint64_t(*a) << 32) | epoch_count_lock;
       }
       static constexpr ptr_address addr_of(uint64_t w) noexcept
       {
          return ptr_address(uint32_t(w >> 32));
       }
+      static constexpr uint64_t next_epoch(uint64_t w) noexcept
+      {
+         return (w + epoch_one) & epoch_mask;
+      }
 
       mutable std::atomic<uint64_t> _w{pack(null_ptr_address, 0)};
+
+      /// Acquire the slow-path lock; returns the pre-lock word (its count is
+      /// the authoritative consumption snapshot — claims landing after the
+      /// successful CAS observe the lock bit and void themselves).
+      uint64_t lock_() const noexcept
+      {
+         // fetch_or, NOT a CAS loop: reader claims fetch_add this word
+         // continuously, so a CAS acquirer can be starved indefinitely
+         // (measured: the MT hammer livelocked — writers never won the lock,
+         // readers never saw writers_left drop). fetch_or wins immediately
+         // and atomically returns the authoritative pre-lock snapshot; if
+         // another locker beat us, spin on plain loads and re-or.
+         for (;;)
+         {
+            const uint64_t w = _w.fetch_or(lock_bit, std::memory_order_acq_rel);
+            if (!(w & lock_bit))
+               return w;  // we own the lock; w is the pre-lock word
+            uint64_t s;
+            do
+               s = _w.load(std::memory_order_acquire);
+            while (s & lock_bit);
+         }
+      }
 
      public:
       atomic_ptr() noexcept = default;
 
-      /// Adopt an initial value: p's reference is donated to the slot.
-      /// (No session needed — there is no previous value to settle.)
-      explicit atomic_ptr(smart_ptr<T> p) noexcept : _w(pack(p.address(), 0)) { p.take(); }
+      /// Adopt an initial value: p's reference becomes the base ref, and
+      /// `credit_bias` credits are banked through p's own session — BEFORE the
+      /// address is published, so a claim can never consume an unbanked credit.
+      explicit atomic_ptr(smart_ptr<T> p) noexcept : _w(pack(null_ptr_address, 0))
+      {
+         if (p.is_valid())
+         {
+            const allocator_session_ptr& ses = p.session();
+            for (uint32_t i = 0; i < credit_bias; ++i)
+               ses->retain(p.address());
+         }
+         _w.store(pack(p.address(), 0), std::memory_order_release);
+         p.take();
+      }
 
       atomic_ptr(const atomic_ptr&)            = delete;
       atomic_ptr(atomic_ptr&&)                 = delete;
@@ -156,91 +204,112 @@ namespace sal
       ~atomic_ptr() noexcept
       {
          // Must be reset() (or never set) before destruction — see usage
-         // contract. A live value here has no session to be released with.
+         // contract: there is no session here to settle a leftover value with.
          assert(addr_of(_w.load(std::memory_order_relaxed)) == null_ptr_address &&
                 "atomic_ptr destroyed while holding a value — reset(ses) first");
-         assert((_w.load(std::memory_order_relaxed) & count_mask) == 0 &&
-                "atomic_ptr destroyed with readers in flight");
       }
 
       /// Acquire a reference to the current value, bound to the CALLER's
-      /// session. Returns an empty smart_ptr if the slot is empty. Lock-free;
-      /// never blocks a concurrent store.
+      /// session; empty smart_ptr if the slot is empty. Fast path: one RMW,
+      /// wait-free — the fetch_add consumes a pre-paid credit that is already
+      /// on the object's strong count.
       [[nodiscard]] smart_ptr<T> load(const allocator_session_ptr& ses) const noexcept
       {
-         // CLAIM — one RMW: address + transient protection.
-         const uint64_t w = _w.fetch_add(count_one, std::memory_order_acquire);
-         assert((w & count_mask) != count_mask && "atomic_ptr claim count saturated");
-         const ptr_address a = addr_of(w);
-
-         if (a == null_ptr_address)
-         {
-            // Withdraw the (vacuous) claim. If the generation moved first, the
-            // publisher skipped the harvest for null — nothing to undo.
-            uint64_t cur = w + count_one;
-            while ((cur & slot_mask) == (w & slot_mask) &&
-                   !_w.compare_exchange_weak(cur, cur - count_one, std::memory_order_acq_rel,
-                                             std::memory_order_acquire))
-            {
-            }
-            return smart_ptr<T>();
-         }
-
-         // RETAIN under the claim's protection, then SETTLE.
-         ses->retain(a);
-         uint64_t cur = w + count_one;
          for (;;)
          {
-            if ((cur & slot_mask) != (w & slot_mask))
+            const uint64_t    w = _w.fetch_add(count_one, std::memory_order_acquire);
+            const ptr_address a = addr_of(w);
+
+            if (a == null_ptr_address)
             {
-               // The slot changed: the publisher PRE-credited one reference on
-               // `a` for this claim before its publish could be observed, so we
-               // hold credit + our own retain — give one back (the count is
-               // >= 2: credit and retain both landed before this release).
-               ses->release(a);
-               return smart_ptr<T>(ses, a, false);
+               // Vacuous claim on an empty slot. Withdraw it so empty-load
+               // storms cannot carry the 16-bit count into the epoch bits; if
+               // the generation moves (or a lock holder rewrote the count
+               // absolutely — count 0 means our +1 is already erased), it is
+               // gone already and there is nothing to undo.
+               uint64_t cur = w + count_one;
+               while ((cur & ~count_mask) == (w & ~count_mask) && (cur & count_mask) != 0 &&
+                      !_w.compare_exchange_weak(cur, cur - count_one, std::memory_order_relaxed,
+                                                std::memory_order_relaxed))
+               {
+               }
+               return smart_ptr<T>();
             }
-            if (_w.compare_exchange_weak(cur, cur - count_one, std::memory_order_acq_rel,
-                                         std::memory_order_acquire))
-               return smart_ptr<T>(ses, a, false);  // fast path: our retain is the ref
+
+            if (!(w & lock_bit) && (w & count_mask) < credit_bias) [[likely]]
+               return smart_ptr<T>(ses, a, false);  // consumed credit = our ref
+
+            if (w & lock_bit)
+            {
+               // Void claim during a slow path. Spin on plain LOADS until the
+               // lock clears before re-claiming — re-claiming while locked
+               // would pump void +1s into the count (and, sustained for a
+               // whole lock section, overflow it into the epoch bits). This
+               // bounds voids to ~one per reader per lock section.
+               uint64_t s;
+               do
+                  s = _w.load(std::memory_order_acquire);
+               while (s & lock_bit);
+               continue;
+            }
+
+            // Credits exhausted: re-arm under the lock. The base ref pins the
+            // published object for as long as we hold the lock (publishes also
+            // need it).
+            const uint64_t    lw = lock_();
+            const ptr_address la = addr_of(lw);
+            // RE-VALIDATE on the locked snapshot: another re-arm or a publish
+            // may have won the race. Re-arming on anything but a genuinely
+            // exhausted bank would store count = 1 and ERASE the real
+            // consumption record — the next publish would then over-release
+            // the "unconsumed" remainder and free the object under its
+            // readers' credits.
+            if (la == null_ptr_address || (lw & count_mask) < credit_bias)
+            {
+               _w.store(lw, std::memory_order_release);  // unlock, preserving valid claims
+               continue;                                 // retry with a fresh claim
+            }
+            for (uint32_t i = 0; i < credit_bias; ++i)
+               ses->retain(la);
+            // consumed = 1: this load takes credit #1 of the fresh bank. The
+            // old bank is fully consumed (count >= bias; the excess is void
+            // claims) — those credits are now their readers' own references.
+            _w.store(pack(la, (lw & epoch_mask) | count_one), std::memory_order_release);
+            return smart_ptr<T>(ses, la, false);
          }
       }
 
       /// Publish `p` (donating its reference) and return the PREVIOUS value as
-      /// an owned smart_ptr bound to p's session (empty smart_ptr if the slot
-      /// was empty). p must carry a session even when null — it is needed to
-      /// credit in-flight readers of the previous value.
+      /// an owned smart_ptr bound to p's session (empty if the slot was
+      /// empty). p must carry a session even when null — the credit
+      /// accounting for the previous value needs one.
       [[nodiscard]] smart_ptr<T> exchange(smart_ptr<T> p) noexcept
       {
          assert(p.session().get() != nullptr &&
-                "exchange/store needs a session to settle the previous value");
+                "exchange/store/reset needs a session for credit accounting");
          allocator_session_ptr ses = p.session();
 
-         constexpr uint64_t epoch_mask = count_mask << 16;
-         uint64_t           w          = _w.load(std::memory_order_acquire);
-         for (;;)
+         const uint64_t    w     = lock_();
+         const ptr_address old_a = addr_of(w);
+
+         // Settle the old value's credits: real consumption is capped at bias
+         // (anything beyond is void claims); release the unconsumed remainder.
+         // The slot's base ref is still in place, so this cannot free old_a.
+         if (old_a != null_ptr_address)
          {
-            const ptr_address old_a = addr_of(w);
-            const uint64_t    c     = w & count_mask;
-            // PRE-CREDIT the in-flight readers (see protocol: the credits must
-            // be on the strong count BEFORE the publish is observable).
-            if (old_a != null_ptr_address)
-               for (uint64_t i = 0; i < c; ++i)
-                  ses->retain(old_a);
-            if (_w.compare_exchange_strong(w, pack(p.address(), (w + epoch_one) & epoch_mask),
-                                           std::memory_order_acq_rel, std::memory_order_acquire))
-            {
-               p.take();  // the slot owns the new value now
-               // The slot's reference on the old value goes to the caller.
-               return smart_ptr<T>(ses, old_a, false);
-            }
-            // Lost the race (a claim arrived or another writer published):
-            // return the exact pre-credits taken and retry from the fresh `w`.
-            // Releasing counts we own is sound even if one of them is the last.
-            if (old_a != null_ptr_address)
-               for (uint64_t i = 0; i < c; ++i)
-                  ses->release(old_a);
+            const uint64_t consumed =
+                (w & count_mask) < credit_bias ? (w & count_mask) : credit_bias;
+            for (uint64_t i = consumed; i < credit_bias; ++i)
+               ses->release(old_a);
          }
+         // Arm the new value BEFORE exposing it.
+         if (p.is_valid())
+            for (uint32_t i = 0; i < credit_bias; ++i)
+               ses->retain(p.address());
+
+         _w.store(pack(p.address(), next_epoch(w)), std::memory_order_release);
+         p.take();                                // donated: the new base ref
+         return smart_ptr<T>(ses, old_a, false);  // the old base ref → caller
       }
 
       /// Publish `p`, releasing the previous value through p's session.

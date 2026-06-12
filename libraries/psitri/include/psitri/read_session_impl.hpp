@@ -10,7 +10,7 @@ namespace psitri
    template <class LockPolicy>
    inline basic_read_session<LockPolicy>::basic_read_session(database_type& db)
        : _db(db.shared_from_this()),
-         _allocator_session(db._allocator.get_session())
+         _allocator_session(db._allocator.create_session())
    {
    }
 

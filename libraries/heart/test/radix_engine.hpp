@@ -142,7 +142,7 @@ namespace heart::radix
       explicit radix_tree(const std::filesystem::path& dir,
                           bool                         wipe      = true,
                           bool                         read_only = false)
-          : _alloc(make_alloc(dir, wipe, read_only)), _ses(_alloc->get_session())
+          : _alloc(make_alloc(dir, wipe, read_only)), _ses(_alloc->create_session())
       {
          _alloc->register_type_ops<leaf_node>();
          _alloc->register_type_ops<setlist_u8>();
@@ -164,7 +164,7 @@ namespace heart::radix
          // first commit.)
          // Start SAL's background threads ONLY AFTER the register_type_ops calls above —
          // exactly as psitri's database does (it also finishes RECOVERY first). The threads
-         // are NOT waiting on this thread's session: get_session() is a thread_local handout
+         // are NOT waiting on this thread's session: create_session() is an explicit owned session
          // (each thread claims its own slot atomically), so session order is independent —
          // verified empirically, both orders clean under a debug build's ownership checks.
          // What actually forces the ordering is _type_ops: registration is a plain pointer
@@ -4308,7 +4308,7 @@ namespace heart::radix
                        ses->get_root<sal::alloc_header>(sal::root_object_number(idx)));
       }
       // One SAL session per thread: call on the thread that will use it (psitri read_session model).
-      sal::allocator_session_ptr make_session() { return _alloc->get_session(); }
+      sal::allocator_session_ptr make_session() { return _alloc->create_session(); }
       sal::allocator&            underlying_allocator() noexcept { return *_alloc; }
       sal::seg_alloc_dump        dump() const { return _alloc->dump(); }
       void                       sync(sal::sync_type st) { _alloc->sync(st); }

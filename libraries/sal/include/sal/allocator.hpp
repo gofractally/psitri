@@ -55,7 +55,7 @@ namespace sal
     * Example Usage:
     * ```
     *  allocator a( "db")
-    *  alloc_session_ptr s = db.get_session();
+    *  alloc_session_ptr s = db.create_session();
     *  smart_ptr<node> n = s->alloc<node>( size, alloc_hint(), constructor args...);
     *  /// use n, then save it to a global #0 
     *  s.set_root( root_object_number(0), std::move(n) );
@@ -152,12 +152,15 @@ namespace sal
       /// none exists.  Sessions are stored in thread_local storage and are
       /// 1:1 with (thread, allocator) pairs.
       ///
-      /// IMPORTANT: The returned session is bound to the calling thread.
-      /// Do not create a session on one thread and use it from another.
-      /// In multi-threaded code, each thread must call get_session()
-      /// (or start_write_session / start_read_session) from its own
-      /// context.
-      allocator_session_ptr get_session();
+      /// Sessions are EXPLICIT objects (get_session/TLS removed, Dan): each
+      /// component owns the sessions it creates. The only concurrency rule:
+      /// two threads must not be ACTIVE on one session at the same time —
+      /// serialized cross-thread use (e.g. an asio strand) is legal.
+      allocator_session_ptr create_session();
+      /// Thread-safe sessionless release: post from ANY thread; the release
+      /// thread (which owns its own session) applies it. The path for
+      /// dropping cross-thread shared roots without holding a session.
+      void post_release(ptr_address adr) noexcept;
 
       seg_alloc_dump dump() const;
 
@@ -262,7 +265,7 @@ namespace sal
 
       void retain(ptr_address adr) noexcept { _ptr_alloc.get(adr).retain(); }
 
-      /// forwards to get_session()->release(adr)
+      /// posts to the thread-safe release queue (sessionless, any thread)
       void release(ptr_address adr) noexcept;
 
       /// Total number of live (allocated) pointers across all sessions.
@@ -462,9 +465,8 @@ namespace sal
       }
       ///@}
 
-      /// @see get_session() — same thread-affinity constraints apply.
-      allocator_session_ptr get_session() const;
-      void                  end_session(allocator_session* ses);
+      /// @see create_session() — const access path.
+      allocator_session_ptr create_session() const;
 
       friend class allocator_session;
       friend class read_lock;
@@ -559,6 +561,11 @@ namespace sal
       implicit_ref_pool               _iref;  // per-range branch-set refcounts (doc/micro_refcount.md)
       sal::block_allocator            _block_alloc;
       uint32_t                        _allocator_index;
+      std::mutex               _post_release_mx;  // sessionless ASYNC release queue
+      std::vector<ptr_address> _post_release_q;
+      std::mutex               _utility_mx;   // sessionless SYNC release (serialized session)
+      allocator_session_ptr    _utility_ses{nullptr};
+      bool                     _utility_init = false;
       mapping                         _seg_alloc_state_file;
       mapping                         _root_object_file;
       mapping                         _session_op_stats_file;
@@ -738,7 +745,7 @@ namespace sal
          {
             SAL_WARN("record_freed_space: {} adr: {} ptr: {}", obj->size(), obj->address(),
                      int64_t(obj));
-            auto nref = get_session()->get_ref<leaf_node>(obj->address());
+            auto nref = create_session()->get_ref<leaf_node>(obj->address());
             SAL_WARN("record_freed_space: {} adr: {} ptr: {}", obj->size(), obj->address(),
                      int64_t(nref.obj()));
          }
@@ -826,6 +833,14 @@ namespace sal
           bool alloc_to_pinned = true)
       {
          segment_number segnum;
+         // THE recorded trap: without the segment_provider thread these pops
+         // wait FOREVER once initial segments are consumed (memory:
+         // "pass start_threads_now=true or get_new_segment() stalls").
+         // A hang is the bug — fail loudly instead.
+         assert(_segment_provider_thread.has_value() &&
+                "get_new_segment without the segment_provider thread: start "
+                "threads (allocator ctor start_threads_now=true) or this pop "
+                "waits forever");
          if (alloc_to_pinned)
          {
             // takes the highest priority pinned segment available, and if not pinned

@@ -14,7 +14,7 @@ TEST_CASE("trie_tests", "[psitri][trie]")
    std::filesystem::remove_all(dir);
 
    auto alloc = std::make_shared<sal::allocator>(dir);
-   auto ses   = alloc->get_session();
+   auto ses   = alloc->create_session();
 
    {
       auto                      trx = ses->start_transaction(sal::root_object_number(0));

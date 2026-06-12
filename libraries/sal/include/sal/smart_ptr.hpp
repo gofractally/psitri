@@ -285,7 +285,8 @@ namespace sal
             _internal->_allocator->release(_internal->_ptr);
       }
       operator bool() const noexcept { return _internal != nullptr; }
-      smart_ptr_base get() const noexcept;
+      smart_ptr_base get() const noexcept;          // creates its own session
+      smart_ptr_base get(allocator_session_ptr ses) const noexcept;  // caller's session
 
       smart_ptr_base operator->() const noexcept { return get(); }
       smart_ptr_base operator*() const noexcept { return get(); }

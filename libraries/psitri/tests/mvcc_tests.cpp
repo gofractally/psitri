@@ -35,7 +35,7 @@ namespace
          std::filesystem::remove_all(dir);
          alloc = std::make_unique<sal::allocator>(dir, sal::runtime_config());
          detail::register_node_types(*alloc);
-         ses = alloc->get_session();
+         ses = alloc->create_session();
       }
       ~mvcc_db() { std::filesystem::remove_all(dir); }
 

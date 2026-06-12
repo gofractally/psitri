@@ -401,13 +401,11 @@ namespace sal
 
       bool check_thread_ownership() const
       {
-         if (_owning_thread != std::this_thread::get_id()) [[unlikely]]
-         {
-            fprintf(stderr,
-                    "\n!!! SESSION THREAD VIOLATION: session %u accessed from wrong thread\n",
-                    *_session_num);
-            return false;
-         }
+         // Thread identity is NOT the contract (Dan): sessions may move
+         // between threads as long as two threads are never ACTIVE on one
+         // simultaneously (strand-style serialization is legal). Overlap
+         // detection would need enter/exit pairing; identity checks here
+         // produced false violations, so the check is retired.
          return true;
       }
 #else

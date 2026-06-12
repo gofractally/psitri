@@ -26,9 +26,20 @@ namespace sal
    {
       if (_internal)
       {
-         auto result =
-             smart_ptr_base(_internal->_allocator->get_session(), _internal->_ptr, true);
-         return result;
+         // shared->local conversion REQUIRES a session (Dan): this overload
+         // creates one, owned by the returned smart_ptr for its lifetime.
+         // Hot paths should pass their own session via get(ses).
+         return smart_ptr_base(_internal->_allocator->create_session(), _internal->_ptr, true);
+      }
+      return {};
+   }
+
+   inline smart_ptr_base shared_smart_ptr_base::get(allocator_session_ptr ses) const noexcept
+   {
+      if (_internal)
+      {
+         assert(&ses->get_allocator() == _internal->_allocator.get());
+         return smart_ptr_base(std::move(ses), _internal->_ptr, true);
       }
       return {};
    }

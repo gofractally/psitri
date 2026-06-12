@@ -648,8 +648,17 @@ TEST_CASE("tree_root: refcounted version roots — held trees live, last drop re
       t.join();
    }
 
-   // ── last drop -> the reaper reclaims the whole frozen tree ──
+   // ── handles are VIEWS now: the tree is owned by ROOT 1 (the rotation
+   // shim) — dropping every handle reaps NOTHING; the data stays readable ──
    h2.reset();
+   db->flush_reaper();
+   {
+      auto rs2 = db->start_read_session();
+      auto c1  = rs2->create_cursor(1);
+      REQUIRE(c1.get<std::string>(frozen.begin()->first).has_value());
+   }
+   // reclamation = emptying root 1 (displaced tree arms at commit -> reaper)
+   ses->clear_warm_slots();
    db->flush_reaper();
    db->flush_releases();
    // everything the frozen tree held is back: only the 1-key hot tree (and
@@ -663,4 +672,133 @@ TEST_CASE("tree_root: refcounted version roots — held trees live, last drop re
    }
    const uint64_t used = cap - free_total;
    REQUIRE(used < 2000);  // 20k-key tree was ~10k+ lines; hot tree is ~tens
+}
+
+TEST_CASE("multi-root: basic commit, RYW per root, abort rolls back all roots")
+{
+   auto dir = fs::temp_directory_path() / "part_kv_multiroot";
+   fs::remove_all(dir);
+   auto db  = vpart::kv::database::create(dir);
+   auto ses = db->start_write_session();
+
+   // basic commit across two roots in one txn
+   {
+      auto tx = ses->start_transaction(0);
+      auto h0 = tx.primary();
+      auto h1 = tx.open_root(1);
+      h0.upsert("users:42", "alice");
+      h1.upsert("orders:100", "order_data");
+      REQUIRE(h0.get<std::string>("users:42").value() == "alice");   // RYW root 0
+      REQUIRE(h1.get<std::string>("orders:100").value() == "order_data");
+      REQUIRE_FALSE(h0.get<std::string>("orders:100").has_value());  // isolation
+      tx.commit();
+   }
+   auto rs = db->start_read_session();
+   {
+      auto c0 = rs->create_cursor(0);
+      auto c1 = rs->create_cursor(1);
+      REQUIRE(c0.get<std::string>("users:42").value() == "alice");
+      REQUIRE_FALSE(c0.get<std::string>("orders:100").has_value());
+      REQUIRE(c1.get<std::string>("orders:100").value() == "order_data");
+   }
+   // abort rolls back BOTH roots
+   {
+      auto tx = ses->start_transaction(0);
+      auto h0 = tx.primary();
+      auto h1 = tx.open_root(1);
+      h0.upsert("users:43", "bob");
+      h1.upsert("orders:101", "x");
+      tx.abort();
+   }
+   {
+      auto c0 = rs->create_cursor(0);
+      auto c1 = rs->create_cursor(1);
+      REQUIRE_FALSE(c0.get<std::string>("users:43").has_value());
+      REQUIRE_FALSE(c1.get<std::string>("orders:101").has_value());
+      REQUIRE(c0.get<std::string>("users:42").value() == "alice");  // prior intact
+   }
+}
+
+TEST_CASE("multi-root: set_root exchange — the rotation, abort-safe, leak-exact")
+{
+   auto dir = fs::temp_directory_path() / "part_kv_setroot";
+   fs::remove_all(dir);
+   auto db  = vpart::kv::database::create(dir);
+   auto ses = db->start_write_session();
+
+   std::map<std::string, std::string> oracle;
+   {
+      auto tx = ses->start_transaction(0);
+      for (int i = 0; i < 8000; ++i)
+      {
+         auto k    = "k" + std::to_string(i * 2654435761u % 1000000);
+         oracle[k] = "v" + k;
+         tx.upsert(k, oracle[k]);
+      }
+      tx.commit();
+   }
+
+   SECTION("aborted rotation leaves both roots untouched; nothing reaped")
+   {
+      {
+         auto tx = ses->start_transaction(0);
+         auto h0 = tx.primary();
+         auto h1 = tx.open_root(1);
+         h1.set_root(h0.set_root(vpart::kv::tree_root{}));
+         REQUIRE(h0.key_count() == 0);             // exchanged within the txn
+         REQUIRE(h1.key_count() == oracle.size());
+         tx.abort();
+      }
+      db->flush_reaper();
+      auto rs = db->start_read_session();
+      auto c0 = rs->create_cursor(0);
+      auto c1 = rs->create_cursor(1);
+      REQUIRE(c0.get<std::string>(oracle.begin()->first).has_value());  // restored
+      REQUIRE_FALSE(c1.seek_begin());                                   // still empty
+   }
+   SECTION("committed rotation: hot reborn empty, warm holds the tree; emptying warm reaps")
+   {
+      {
+         auto tx = ses->start_transaction(0);
+         auto h0 = tx.primary();
+         auto h1 = tx.open_root(1);
+         h1.set_root(h0.set_root(vpart::kv::tree_root{}));
+         tx.commit();
+      }
+      auto rs = db->start_read_session();
+      {
+         auto c0 = rs->create_cursor(0);
+         auto c1 = rs->create_cursor(1);
+         REQUIRE_FALSE(c0.seek_begin());  // hot newborn
+         uint64_t n = 0;
+         for (bool ok = c1.seek_begin(); ok; ok = c1.next())
+         {
+            REQUIRE(oracle.at(std::string(c1.key())) == c1.value<std::string>().value());
+            ++n;
+         }
+         REQUIRE(n == oracle.size());  // warm = the frozen tree, byte-exact
+      }
+      // hot keeps working independently
+      {
+         auto tx = ses->start_transaction(0);
+         tx.upsert("hot/new", "x");
+         tx.commit();
+      }
+      // empty the warm root: displaced tree arms at commit -> reaper frees it
+      {
+         auto tx = ses->start_transaction(1);
+         (void)tx.primary().set_root(vpart::kv::tree_root{});
+         tx.commit();
+      }
+      db->flush_reaper();
+      db->flush_releases();
+      vpart::arena& a          = db->store();
+      uint64_t      free_total = 0, cap = 0;
+      for (uint32_t s = 0; s < a.num_segments(); ++s)
+      {
+         free_total += a.freeset_of(s).free_lines();
+         cap += vpart::lines_per_segment;
+      }
+      REQUIRE(cap - free_total < 2000);  // 8k-key tree fully reclaimed
+   }
 }

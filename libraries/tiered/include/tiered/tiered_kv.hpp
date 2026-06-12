@@ -40,7 +40,12 @@ namespace tiered
 
    struct knobs
    {
-      uint64_t hi_water_bytes = 512ull << 20;  // burst trigger (Dan: ~512 MB keeps W shallow)
+      // ARENA budget for the delta (Dan): the observer flushes when the
+      // arena FOOTPRINT crosses half of this — free space is the sensor,
+      // not bytes written (footprint includes COW churn, and a large arena
+      // also poisons segment-claim scans). Keep the delta SMALL.
+      uint64_t arena_budget_bytes = 1ull << 30;
+      uint64_t hi_water_bytes = 512ull << 20;  // legacy bytes-written backstop
       uint64_t lo_water_bytes = 64ull << 20;   // flush down to here (hysteresis band)
       uint64_t flush_chunk    = 10'000'000;    // keys per B txn (plateau >= 100k; Dan: big)
       uint64_t repin_keys     = 1'000'000;     // re-pin the flush snapshot every N keys:
@@ -637,8 +642,12 @@ namespace tiered
          }
          void after_commit_(uint64_t bytes)
          {
-            if (_unflushed.fetch_add(bytes, std::memory_order_relaxed) + bytes >=
-                _k.hi_water_bytes)
+            const uint64_t un = _unflushed.fetch_add(bytes, std::memory_order_relaxed) + bytes;
+            // primary trigger: arena footprint at HALF the budget (flush
+            // EARLY — memory keeps growing while the flush runs). The
+            // footprint read is two loads; cheap enough per commit.
+            if (un >= _k.hi_water_bytes ||
+                _w->footprint_bytes() >= _k.arena_budget_bytes / 2)
                _cv.notify_one();
          }
          // warm-leg point get for the writer's 3-way cursor: lazily pin the
@@ -689,7 +698,9 @@ namespace tiered
             {
                std::unique_lock lk(_m);
                _cv.wait(lk, [&] {
-                  return _stop || _unflushed.load(std::memory_order_relaxed) >= _k.hi_water_bytes;
+                  return _stop ||
+                         _unflushed.load(std::memory_order_relaxed) >= _k.hi_water_bytes ||
+                         _w->footprint_bytes() >= _k.arena_budget_bytes / 2;
                });
                if (_stop)
                   return;

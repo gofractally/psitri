@@ -70,6 +70,11 @@ namespace vpart::kv
 #endif
    using root_ptr = vpart::detail::line_ptr;
 
+   // Multi-root layout: arena slots [0, kMaxRoots) hold root raws; slot
+   // kMaxRoots holds the (global) committed version. One version counter
+   // spans all roots: version == transaction, whichever roots it touched.
+   inline constexpr uint32_t kMaxRoots = 8;
+
    class database;
 
    // Refcounted handle to a FROZEN version root (the smart_ptr/"tree_root"
@@ -83,17 +88,22 @@ namespace vpart::kv
       tree_root() = default;
       uint32_t version() const noexcept { return _c ? _c->vf : 0; }
       uint32_t root_raw() const noexcept { return _c ? _c->raw : 0; }
+      uint64_t key_count() const noexcept { return _c ? _c->count : 0; }
       explicit operator bool() const noexcept { return bool(_c); }
       void     reset() noexcept { _c.reset(); }
 
      private:
       friend class database;
       friend class write_session;
+      friend class transaction;
+      friend class tree_handle;
       struct ctrl
       {
          database* db;
          uint32_t  vf, raw;
-         ~ctrl();  // last handle dropped -> reaper queue
+         uint64_t  count = 0;     // keys in the tree (size() continuity)
+         bool      armed = true;  // false until the displacing txn COMMITS
+         ~ctrl();  // last handle dropped (and armed) -> reaper queue
       };
       explicit tree_root(std::shared_ptr<ctrl> c) : _c(std::move(c)) {}
       std::shared_ptr<ctrl> _c;
@@ -248,12 +258,21 @@ namespace vpart::kv
 
    class write_session;
 
+   class tree_handle;
+
    class transaction
    {
      public:
       void insert(key_view k, value_view v) { upsert(k, v); }
       void upsert(key_view k, value_view v);
       int  remove(key_view k);
+      // ── multi-root (psitri's model; concept-locked) ─────────────────────
+      // primary() targets the root this transaction started on; open_root(i)
+      // opens an additional root — STRICTLY ASCENDING indices (deadlock
+      // freedom by construction, asserted). All roots commit/abort together
+      // (ordered publish, DESCENDING index: rotation's warm-before-hot).
+      tree_handle primary();
+      tree_handle open_root(uint32_t root_index);
       // Retire primitive (L5): remove ONLY if the key's last write-version is
       // <= vmax (i.e., it was already flushed at the merge floor). Keys
       // rewritten after the floor — and keys whose stamp is unknowable
@@ -273,8 +292,8 @@ namespace vpart::kv
       void abort() noexcept;
       ~transaction() { abort(); }
       transaction(transaction&& o) noexcept
-          : _ws(o._ws), _tx(std::move(o._tx)), _start_root(o._start_root),
-            _start_count(o._start_count), _done(o._done)
+          : _ws(o._ws), _tx(std::move(o._tx)), _displaced(std::move(o._displaced)),
+            _roots(std::move(o._roots)), _done(o._done)
       {
          o._done = true;  // moved-from: nothing to roll back
       }
@@ -288,12 +307,49 @@ namespace vpart::kv
 
      private:
       friend class write_session;
-      transaction(write_session* ws, vpart::transaction&& tx);
+      friend class tree_handle;
+      transaction(write_session* ws, uint32_t root_index, vpart::transaction&& tx);
+      struct root_state
+      {
+         uint32_t                     index;
+         root_ptr                     start_root;
+         size_t                       start_count;
+         std::unique_lock<std::mutex> lock;  // per-root writer lock (ordered)
+      };
+      engine_t&   tree_(uint32_t slot_i);  // tree for held-root slot i
+      root_state* find_root_(uint32_t root_index);
       write_session*     _ws;
       vpart::transaction _tx;
-      root_ptr           _start_root;
-      size_t             _start_count = 0;
-      bool               _done        = false;
+      // displaced trees ARM (reap-on-drop) only when this txn commits;
+      // an abort leaves them disarmed — the rollback restores the slot.
+      std::vector<std::shared_ptr<tree_root::ctrl>> _displaced;
+      std::vector<root_state> _roots;  // [0] = primary; ascending order
+      bool                    _done = false;
+   };
+
+   // Lightweight targeting scope (psitri's tree_handle): directs ops at one
+   // root inside a multi-root transaction. Non-owning; no commit/abort.
+   class tree_handle
+   {
+     public:
+      void insert(key_view k, value_view v) { upsert(k, v); }
+      void upsert(key_view k, value_view v);
+      int  remove(key_view k);
+      template <class F>
+      bool get(key_view k, F&& fn) const;
+      template <class S = std::string>
+      std::optional<S> get(key_view k) const;
+      uint64_t key_count() const;
+      // THE exchange (Dan): assign a tree to this root, RETURN the displaced
+      // tree. tree_root{} assigns empty. The returned handle arms (reaps on
+      // last drop) only when the transaction commits; abort rolls back.
+      tree_root set_root(tree_root t);
+
+     private:
+      friend class transaction;
+      tree_handle(transaction* tx, uint32_t root_index) : _tx(tx), _ri(root_index) {}
+      transaction* _tx;
+      uint32_t     _ri;
    };
 
    // Root handle for read-only access through the write session (kv_compat's
@@ -301,12 +357,16 @@ namespace vpart::kv
    class tree
    {
      public:
-      explicit tree(write_session* ws) noexcept : _ws(ws) {}
+      explicit tree(write_session* ws, uint32_t root_index = 0) noexcept
+          : _ws(ws), _ri(root_index)
+      {
+      }
       cursor   snapshot_cursor() const;
       explicit operator bool() const noexcept { return _ws != nullptr; }
 
      private:
       write_session* _ws;
+      uint32_t       _ri;
    };
 
    class write_session
@@ -324,28 +384,36 @@ namespace vpart::kv
       // crash-recovery slots (the tree itself is reclaimed by the REAPER when
       // the last tree_root handle drops — GC lives in vpart, not callers).
       void clear_warm_slots();
-      tree        get_root(uint32_t root_index)
+      tree get_root(uint32_t root_index) { return tree(this, root_index); }
+
+      // vpart: the working trees' nodes are the committed state (or were
+      // logged when superseded) — teardown owns nothing to free.
+      ~write_session()
       {
-         (void)root_index;
-         return tree(this);
+         _t.adopt_root(root_ptr::null());
+         for (auto& t : _aux)
+            if (t)
+               t->adopt_root(root_ptr::null());
       }
 
-      // vpart: the working tree's nodes are the committed state (or were
-      // logged when superseded) — teardown owns nothing to free.
-      ~write_session() { _t.adopt_root(root_ptr::null()); }
-
       engine_t& tree_dbg() noexcept { return _t; }  // debug/tools only
+      // Tree for root i: root 0 is THE hot member (zero added indirection on
+      // the classic path); roots >= 1 materialize lazily, adopting the
+      // committed root from the database boundary.
+      engine_t& tree_for(uint32_t i);
 
      private:
       friend class database;
       friend class transaction;
       friend class tree;
+      friend class tree_handle;
       explicit write_session(database* db);
 
       database*      _db;
       vpart::session _ses;
-      vlog_state     _vlog;  // per-transaction clone/create logs
-      engine_t       _t;     // the working tree (continues across transactions)
+      vlog_state     _vlog;  // per-transaction clone/create logs (ALL roots)
+      engine_t       _t;     // root 0's working tree (the classic hot path)
+      std::array<std::optional<engine_t>, kMaxRoots> _aux;  // roots >= 1, lazy
    };
 
    class database
@@ -443,7 +511,7 @@ namespace vpart::kv
       root_ptr live_root_dbg() const noexcept
       {
          root_ptr       p    = root_ptr::null();
-         const uint64_t live = _live.load(std::memory_order_seq_cst);
+         const uint64_t live = _live_arr[0].load(std::memory_order_seq_cst);
          // raw 0 is a VALID root (line 0, tag value_ptr): "nothing published"
          // is version 0 — test the WHOLE packed word, never the root half.
          if (live != 0)
@@ -474,12 +542,18 @@ namespace vpart::kv
 
       // A crashed rotation leaves the frozen warm tree in root slots 2/3 —
       // recovery re-flushes it (idempotent) and releases. {0,0} = none.
+      // TRANSITIONAL shim (#32): warm = root 1; pending = root 1 non-empty.
       std::pair<uint32_t, uint32_t> pending_warm() const
       {
-         const uint32_t vf = uint32_t(_arena.get_root(3));
-         if (!vf)
+         const uint64_t live = _live_arr[1].load(std::memory_order_seq_cst);
+         if (live == 0)
             return {0, 0};
-         return {vf, uint32_t(_arena.get_root(2))};
+         root_ptr p = root_ptr::null();
+         const uint32_t r32 = uint32_t(live);
+         std::memcpy(p.b, &r32, 4);
+         if (p.is_null())
+            return {0, 0};
+         return {uint32_t(live >> 32), r32};
       }
 
       // Pin a cursor at a SPECIFIC (version, root) boundary — the WARM leg of
@@ -504,9 +578,9 @@ namespace vpart::kv
          auto& slot = _arena.reader_slot(rs.slot());
          for (;;)
          {
-            const uint64_t live = _live.load(std::memory_order_seq_cst);
+            const uint64_t live = _live_arr[0].load(std::memory_order_seq_cst);
             slot.store(live, std::memory_order_seq_cst);
-            if (_live.load(std::memory_order_seq_cst) == live)
+            if (_live_arr[0].load(std::memory_order_seq_cst) == live)
             {
                root_ptr p = root_ptr::null();
                if (live != 0)  // raw 0 is a valid root; version 0 = unpublished
@@ -528,11 +602,18 @@ namespace vpart::kv
           : _arena(make_cfg_(std::move(dir), cfg))
       {
          // resume the version counter past every stamp that could be durable,
-         // and re-expose the durable root (slot 0) as the live boundary.
-         const uint64_t v0 = _arena.get_root(0);
-         const uint64_t v1 = _arena.get_root(1);
-         _committed        = uint32_t(v1);
-         _live.store((uint64_t(_committed) << 32) | uint32_t(v0), std::memory_order_seq_cst);
+         // and re-expose every durable root as its live boundary. Version is
+         // global (slot kMaxRoots); roots live in slots [0, kMaxRoots).
+         _committed = uint32_t(_arena.get_root(kMaxRoots));
+         for (uint32_t i = 0; i < kMaxRoots; ++i)
+         {
+            const uint32_t r32 = uint32_t(_arena.get_root(i));
+            _live_arr[i].store(
+                _committed ? (uint64_t(_committed) << 32) | r32 : 0,
+                std::memory_order_seq_cst);
+         }
+         _live.store(_live_arr[0].load(std::memory_order_seq_cst),
+                     std::memory_order_seq_cst);
          if (cfg.background_release)
             _drain_thread = std::thread([this] { drain_loop_(); });
          _reaper = std::thread([this] { reaper_loop_(); });
@@ -544,6 +625,13 @@ namespace vpart::kv
       // Last published version — the merge floor F a flusher captures BEFORE
       // pinning its snapshot (F <= pin version: conservative-safe for retire).
       uint32_t committed_version() const noexcept { return _committed; }
+      // Arena footprint (segments held x segment bytes): the observer signal
+      // (Dan: the compactor watches FREE SPACE and flushes early — bytes
+      // written is the wrong sensor; a big arena also poisons claim_ scans).
+      uint64_t footprint_bytes() const noexcept
+      {
+         return uint64_t(_arena.num_segments()) * (uint64_t(vpart::lines_per_segment) * 128u);
+      }
 
      private:
       friend struct tree_root::ctrl;
@@ -757,6 +845,8 @@ namespace vpart::kv
       vpart::recycle_ring   _recycle;  // drain -> writer exact-size run reuse
       vpart::arena          _arena;
       std::mutex            _root_mx;             // serializes commit publication
+      std::mutex            _root_locks[kMaxRoots];  // per-root writer locks (ordered)
+      std::atomic<uint64_t> _live_arr[kMaxRoots];    // (version<<32|root_i) per root
       std::atomic<uint64_t> _live{0};             // (version << 32) | root raw
       uint32_t              _committed = 0;  // last published version (writer-owned)
    };
@@ -767,7 +857,7 @@ namespace vpart::kv
    {
       _t.allocator_mut().vlog = &_vlog;
       // re-adopt the durable root on reopen (parity plus: part started empty)
-      const uint64_t live = db->_live.load(std::memory_order_seq_cst);
+      const uint64_t live = db->_live_arr[0].load(std::memory_order_seq_cst);
       if (live != 0)  // raw 0 is a valid root; version 0 = unpublished
       {
          const uint32_t r32 = uint32_t(live);
@@ -777,17 +867,39 @@ namespace vpart::kv
       }
    }
 
+   inline engine_t& write_session::tree_for(uint32_t i)
+   {
+      assert(i < kMaxRoots);
+      if (i == 0)
+         return _t;
+      if (!_aux[i])
+      {
+         _aux[i].emplace(part_alloc<bval>(&_ses));
+         _aux[i]->allocator_mut().vlog = &_vlog;  // shared per-txn chains
+         const uint64_t live = _db->_live_arr[i].load(std::memory_order_seq_cst);
+         if (live != 0)
+         {
+            const uint32_t r32 = uint32_t(live);
+            root_ptr       p;
+            std::memcpy(p.b, &r32, 4);
+            _aux[i]->adopt_root(p);
+         }
+      }
+      return *_aux[i];
+   }
+
    inline transaction write_session::start_transaction(uint32_t root_index)
    {
-      (void)root_index;  // single root in v1, like heart_kv
+      assert(root_index < kMaxRoots);
       _vlog.reset();
       {  // adopt drain-recycled runs: exact-size O(1) reuse of COW churn
          uint32_t l, n, k = 0;
          while (k++ < 512 && _db->_recycle.pop(l, n))
             _ses.recycle_drained(l, n);
       }
-      _t.allocator_mut().vtxn = _db->_committed + 1;  // the version IS the txn
-      return transaction(this, _ses.start_transaction(0));
+      const uint32_t v = _db->_committed + 1;  // the version IS the txn
+      _t.allocator_mut().vtxn = v;             // shared allocator state: all roots
+      return transaction(this, root_index, _ses.start_transaction(0));
    }
 
    inline read_session::read_session(database* db)
@@ -795,14 +907,15 @@ namespace vpart::kv
    {
    }
 
-   inline cursor read_session::create_cursor(uint32_t)
+   inline cursor read_session::create_cursor(uint32_t root_index)
    {
+      assert(root_index < kMaxRoots);
       auto& slot = _db->_arena.reader_slot(_rs.slot());
       for (;;)
       {
-         const uint64_t live = _db->_live.load(std::memory_order_seq_cst);
+         const uint64_t live = _db->_live_arr[root_index].load(std::memory_order_seq_cst);
          slot.store(live, std::memory_order_seq_cst);  // publish the pin FIRST...
-         if (_db->_live.load(std::memory_order_seq_cst) == live)
+         if (_db->_live_arr[root_index].load(std::memory_order_seq_cst) == live)
          {  // ...then validate: the boundary was live after our publish, so
             // any drain that could free it must see our pinned version.
             root_ptr p = root_ptr::null();
@@ -821,44 +934,42 @@ namespace vpart::kv
       return _ws->_db->pin_snapshot();
    }
 
+   // TRANSITIONAL shim for tiered (#32 deletes it): the rotation in concept
+   // vocabulary — one multi-root txn, h1.set_root(h0.set_root({})). The warm
+   // tree lives in ROOT 1 (durable there: crash recovery = root 1 non-empty).
+   // Returns a DISARMED view handle (the tree is owned by root 1, not by the
+   // handle); emptying root 1 later is what releases it.
    inline tree_root write_session::freeze_and_reset()
    {
-      database*      db   = _db;
-      const root_ptr warm = _t.root_handle();
-      const uint32_t wraw = uint32_t(warm.raw());
-      const uint32_t vf   = db->_committed;
-      // a fresh, empty hot tree published as its own version (the rotation
-      // is itself a commit: readers pinning "latest" from here see hot=empty
-      // and reach the frozen data through the WARM leg)
-      const uint32_t v = vf + 1;
-      _t.adopt_root(root_ptr::null(), 0);
-      {
-         std::lock_guard g(db->_root_mx);
-         db->_arena.set_root(2, wraw);  // warm survives a crash: recovery re-flushes
-         db->_arena.set_root(3, vf);
-         db->_arena.set_root(0, uint32_t(root_ptr::null().raw()));
-         db->_arena.set_root(1, v);
-         db->_committed = v;
-         db->_live.store((uint64_t(v) << 32) | uint32_t(root_ptr::null().raw()),
-                         std::memory_order_seq_cst);
-      }
-      auto c = std::make_shared<tree_root::ctrl>();
-      c->db  = db;
-      c->vf  = vf;
-      c->raw = wraw;
+      auto tx = start_transaction(0);
+      auto h0 = tx.primary();
+      auto h1 = tx.open_root(1);
+      assert(h1.key_count() == 0 && "rotation requires an empty warm slot");
+      tree_root displaced = h0.set_root(tree_root{});
+      h1.set_root(std::move(displaced));
+      tx.commit();
+      auto c   = std::make_shared<tree_root::ctrl>();
+      c->db    = _db;
+      c->vf    = _db->_committed;
+      c->raw   = uint32_t(uint32_t(_db->_live_arr[1].load(std::memory_order_seq_cst)));
+      c->count = 0;
+      c->armed = false;  // VIEW: root 1 owns the tree
       return tree_root(std::move(c));
    }
    inline tree_root::ctrl::~ctrl()
    {
-      db->reap_root_(raw);
+      if (armed)
+         db->reap_root_(raw);
    }
 
+   // TRANSITIONAL shim (#32 deletes): empty root 1 — the displaced tree ARMS
+   // at commit and vpart's GC reaps it (the model: GC is vpart's, period).
    inline void write_session::clear_warm_slots()
    {
-      database* db = _db;
-      std::lock_guard g(db->_root_mx);
-      db->_arena.set_root(2, uint32_t(root_ptr::null().raw()));
-      db->_arena.set_root(3, 0);
+      auto tx = start_transaction(1);
+      auto h1 = tx.primary();
+      (void)h1.set_root(tree_root{});  // displaced arms at commit -> reaper
+      tx.commit();
    }
 
 
@@ -907,10 +1018,112 @@ namespace vpart::kv
       return S(out.v.data(), out.v.size());
    }
 
-   inline transaction::transaction(write_session* ws, vpart::transaction&& tx)
-       : _ws(ws), _tx(std::move(tx)), _start_root(ws->_t.root_handle()),
-         _start_count(ws->_t.size_hint())
+   inline transaction::transaction(write_session* ws, uint32_t root_index,
+                                   vpart::transaction&& tx)
+       : _ws(ws), _tx(std::move(tx))
    {
+      auto&      t = ws->tree_for(root_index);
+      root_state rs{root_index, t.root_handle(), t.size_hint(),
+                    std::unique_lock<std::mutex>(ws->_db->_root_locks[root_index])};
+      _roots.push_back(std::move(rs));
+   }
+
+   inline transaction::root_state* transaction::find_root_(uint32_t root_index)
+   {
+      for (auto& r : _roots)
+         if (r.index == root_index)
+            return &r;
+      return nullptr;
+   }
+
+   inline engine_t& transaction::tree_(uint32_t root_index)
+   {
+      return _ws->tree_for(root_index);
+   }
+
+   inline tree_handle transaction::primary()
+   {
+      return tree_handle(this, _roots[0].index);
+   }
+
+   inline tree_handle transaction::open_root(uint32_t root_index)
+   {
+      assert(root_index < kMaxRoots);
+      assert(!_roots.empty());
+      assert(root_index > _roots.back().index &&
+             "roots must be opened in ascending index order (deadlock freedom)");
+      auto&      t = _ws->tree_for(root_index);
+      root_state rs{root_index, t.root_handle(), t.size_hint(),
+                    std::unique_lock<std::mutex>(_ws->_db->_root_locks[root_index])};
+      _roots.push_back(std::move(rs));
+      return tree_handle(this, root_index);
+   }
+
+   inline void tree_handle::upsert(key_view k, value_view v)
+   {
+      _tx->tree_(_ri).cow_insert(k, bval{v});
+   }
+   inline int tree_handle::remove(key_view k)
+   {
+      return _tx->tree_(_ri).cow_remove(k) ? 0 : -1;
+   }
+   template <class F>
+   inline bool tree_handle::get(key_view k, F&& fn) const
+   {
+      bval out;
+      if (!_tx->tree_(_ri).find(k, out))
+         return false;
+      fn(out.v);
+      return true;
+   }
+   template <class S>
+   inline std::optional<S> tree_handle::get(key_view k) const
+   {
+      bval out;
+      if (!_tx->tree_(_ri).find(k, out))
+         return std::nullopt;
+      return S(out.v.data(), out.v.size());
+   }
+   inline uint64_t tree_handle::key_count() const
+   {
+      return _tx->tree_(_ri).size_hint();
+   }
+
+   inline tree_root tree_handle::set_root(tree_root t)
+   {
+      auto&          tr      = _tx->tree_(_ri);
+      const root_ptr old     = tr.root_handle();
+      const uint64_t old_cnt = tr.size_hint();
+      // adopt the incoming tree (empty handle = empty tree); DISARM it — its
+      // tree is live in this root now, never reaped by the handle's death
+      root_ptr nr = root_ptr::null();
+      uint64_t nc = 0;
+      if (t._c)
+      {
+         const uint32_t r32 = t._c->raw;
+         std::memcpy(nr.b, &r32, 4);
+         nc          = t._c->count;
+         t._c->armed = false;  // its tree is live in this root now
+         // displaced-then-readopted IN THE SAME TXN (the rotation): commit
+         // must NOT re-arm it — pull it off the displaced list
+         auto& d = _tx->_displaced;
+         for (size_t i = 0; i < d.size(); ++i)
+            if (d[i] == t._c)
+            {
+               d.erase(d.begin() + long(i));
+               break;
+            }
+      }
+      tr.adopt_root(nr, size_t(nc));
+      // the displaced tree: ARMS at COMMIT (abort restores the slot instead)
+      auto c   = std::make_shared<tree_root::ctrl>();
+      c->db    = _tx->_ws->_db;
+      c->vf    = _tx->_ws->_t.allocator_mut().vtxn;
+      c->raw   = uint32_t(old.raw());
+      c->count = old_cnt;
+      c->armed = false;
+      _tx->_displaced.push_back(c);
+      return tree_root(std::move(c));
    }
 
    namespace detail2
@@ -933,19 +1146,27 @@ namespace vpart::kv
       if (_done)
          return;
       _done    = true;
-      auto& t  = _ws->_t;
       auto& vl = _ws->_vlog;
       auto& a  = _ws->_db->_arena;
-      // free the diverged window by WALKING it (recursion stops at pre-txn
-      // nodes — they are shared with the restored root), then restore the
-      // boundary root and drop the supersession chain unpublished.
-      const root_ptr diverged = t.root_handle();
-      if (diverged.raw() != _start_root.raw())
-         t.vabort_release(diverged);
-      t.adopt_root(_start_root, _start_count);
+      // ALL roots roll back together: free each diverged window by WALKING
+      // it (recursion stops at pre-txn nodes — shared with the restored
+      // root), restore each boundary root, drop the chain unpublished.
+      // Displaced tree_roots stay DISARMED: the rollback re-seats their
+      // trees, so their handles must never reap.
+      for (auto it = _roots.rbegin(); it != _roots.rend(); ++it)
+      {
+         auto&          t        = _ws->tree_for(it->index);
+         const root_ptr diverged = t.root_handle();
+         if (diverged.raw() != it->start_root.raw())
+            t.vabort_release(diverged);
+         t.adopt_root(it->start_root, it->start_count);
+         it->lock.unlock();  // reverse order
+      }
+      _roots.clear();
+      _displaced.clear();
       detail2::free_chain_lines_(a, vl.clone_head);
       vl.reset();
-      t.allocator_mut().vtxn = 0;
+      _ws->_t.allocator_mut().vtxn = 0;
    }
 
    inline void transaction::commit()
@@ -955,23 +1176,34 @@ namespace vpart::kv
       database*      db = _ws->_db;
       auto&          vl = _ws->_vlog;
       const uint32_t v  = _ws->_t.allocator_mut().vtxn;
-      root_ptr       nr = _ws->_t.root_handle();
       {
          std::lock_guard g(db->_root_mx);
-         // null root publishes its REAL bit pattern (all-FF): raw 0 is a VALID
-         // root (line 0, tag value_ptr) — encoding null as 0 made a committed
-         // empty tree read as a phantom leaf at line 0 (and, before the reader
-         // fix, made a real line-0 leaf root invisible). Version 0 alone means
-         // "nothing ever published".
-         const uint32_t  r32 = uint32_t(nr.raw());
-         db->_arena.set_root(0, r32);
-         db->_arena.set_root(1, v);
+         // Publish every held root in DESCENDING index order (the rotation's
+         // crash-idempotence: warm (1) becomes durable before hot (0) — a
+         // crash between leaves the tree in BOTH roots, masked by read
+         // precedence and re-flushed idempotently). Null roots publish their
+         // REAL bit pattern (all-FF): raw 0 is a VALID root (line 0, tag
+         // value_ptr). Version 0 alone means "nothing ever published".
+         for (auto it = _roots.rbegin(); it != _roots.rend(); ++it)
+         {
+            const root_ptr nr  = _ws->tree_for(it->index).root_handle();
+            const uint32_t r32 = uint32_t(nr.raw());
+            db->_arena.set_root(it->index, r32);
+            db->_live_arr[it->index].store((uint64_t(v) << 32) | r32,
+                                           std::memory_order_seq_cst);
+         }
+         db->_arena.set_root(kMaxRoots, v);  // the global version slot
          db->_committed = v;
-         db->_live.store((uint64_t(v) << 32) | r32, std::memory_order_seq_cst);
       }
       db->reg_push_(v, vl.clone_head);  // publish the supersession chain
       vl.reset();
       _ws->_t.allocator_mut().vtxn = 0;
+      for (auto& c : _displaced)
+         c->armed = true;  // committed: displaced trees now reap on last drop
+      _displaced.clear();
+      for (auto it = _roots.rbegin(); it != _roots.rend(); ++it)
+         it->lock.unlock();
+      _roots.clear();
       if (!db->_drain_thread.joinable())
          db->drain_(db->floor_());  // no thread: drain inline on the writer
    }

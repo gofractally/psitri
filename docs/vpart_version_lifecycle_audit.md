@@ -367,10 +367,17 @@ psio, never the reverse. psitri-merge consumes it per its §6b:
                          SOURCE_DIR ${CMAKE_SOURCE_DIR}/external/psio)
     # local co-development: FETCHCONTENT_SOURCE_DIR_PSIO=~/gofractally/psio
 
-Layering discipline (mirrors psio's own optional-dep pattern):
-- The shape concept and every ENGINE stay psio-free; the typed-value
-  mechanism works with hand-written traits when psio is absent.
-- ONE adapter target (psio_storable<T> + the db_read_lock Store policy)
-  links psio; gated PSITRI_HAVE_PSIO so the core builds without it.
-- The existing ad-hoc find_path(psio/to_json.hpp) for psitricorder JSON
-  upgrades to the same FetchContent acquisition when the adapter lands.
+REVISED (Dan): psio is a REQUIRED dependency. A psio-optional design forces
+the API to carry a fallback — two shapes of every read, a forked battery,
+"if it reflects it stores" becoming conditional — the exact dual-path
+complexity the unified value path eliminates. psio is a leaf, standalone-
+buildable, and needs only what we already require (C++23, Boost headers),
+so requiring it is cheaper than gating it.
+- FetchContent REQUIRED (pinned SHA; FETCHCONTENT_SOURCE_DIR_PSIO override
+  for local co-development against ~/gofractally/psio).
+- The shape concept and engines may reference psio types directly where
+  natural (get<psio::view<T>> as the canonical zero-copy read; the Store
+  policy lock seam). Handle types (sal::smart_ptr, ttree) still provide
+  their own traits — through the same single mechanism, no second path.
+- The ad-hoc find_path(psio/to_json.hpp) for psitricorder JSON folds into
+  the same acquisition.

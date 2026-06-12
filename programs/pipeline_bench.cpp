@@ -24,6 +24,10 @@ static_assert(psitri::dwal::kv_engine<vpart::kv::engine>);
 
 #include <hash/xxhash.h>
 
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
+
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
@@ -83,6 +87,8 @@ namespace
       uint64_t chunk     = 10'000'000; // keys per heart txn at flush (Dan: big)
       uint64_t retire_b  = 4096;       // removes per retire txn
       bool     matrix    = false;      // Phase B chunk-size matrix
+      bool     repin     = false;      // re-pin a fresh snapshot per chunk (drain advances mid-flush)
+      bool     qos       = false;      // flusher thread at QOS_CLASS_UTILITY (writer keeps the P-cores)
    };
 
    uint64_t now_us()
@@ -107,6 +113,10 @@ int main(int argc, char** argv)
          o.chunk = std::strtoull(argv[++i], nullptr, 10);
       else if (eq("--matrix"))
          o.matrix = true;
+      else if (eq("--repin"))
+         o.repin = true;
+      else if (eq("--qos"))
+         o.qos = true;
    }
    printf("=== pipeline_bench: vpart hot delta -> heart bulk flush ===\n");
    printf("keys=%" PRIu64 " sustain=%" PRIu64 " chunk=%" PRIu64 "\n\n", o.keys, o.sustain,
@@ -150,24 +160,39 @@ int main(int argc, char** argv)
    }
 
    // ── Phase B: bulk flush — pinned sorted snapshot -> heart txn chunks ─────
-   auto flush_once = [&](uint64_t chunk_keys) -> std::pair<uint64_t, double> {
-      auto     rs = vdb->start_read_session();
-      auto     cur = rs->create_cursor(0);  // pins the latest committed version
-      uint64_t n   = 0;
-      auto     t0  = clk::now();
-      cur.seek_begin();
-      while (!cur.is_end())
+   auto flush_once = [&](uint64_t chunk_keys, bool repin) -> std::pair<uint64_t, double> {
+      uint64_t    n = 0;
+      std::string resume;  // last flushed key (repin mode: resume point after the fresh pin)
+      bool        more = true;
+      auto        t0   = clk::now();
+      auto        rs   = vdb->start_read_session();
+      std::optional<decltype(rs->create_cursor(0))> cur;
+      cur.emplace(rs->create_cursor(0));  // pins the latest committed version
+      cur->seek_begin();
+      while (more)
       {
-         auto     tx   = hws->start_transaction(0);
+         auto     tx    = hws->start_transaction(0);
          uint64_t in_tx = 0;
-         while (!cur.is_end() && in_tx < chunk_keys)
+         while (!cur->is_end() && in_tx < chunk_keys)
          {
-            cur.get_value([&](std::string_view v) { tx.upsert(cur.key(), v); });
+            cur->get_value([&](std::string_view v) { tx.upsert(cur->key(), v); });
             ++in_tx;
-            cur.next();
+            if (repin)
+               resume.assign(cur->key());
+            cur->next();
          }
          tx.commit();
          n += in_tx;
+         more = !cur->is_end();
+         if (more && repin)
+         {  // drop the pin between chunks: the drain floor advances while we flush
+            cur.reset();
+            cur.emplace(rs->create_cursor(0));
+            cur->lower_bound(resume);
+            if (!cur->is_end() && cur->key() == std::string_view(resume))
+               cur->next();
+            more = !cur->is_end();
+         }
       }
       return {n, secs(t0, clk::now())};
    };
@@ -175,14 +200,14 @@ int main(int argc, char** argv)
    {
       for (uint64_t c : {uint64_t(10'000), uint64_t(100'000), uint64_t(1'000'000), o.chunk})
       {
-         auto [n, s] = flush_once(c);
+         auto [n, s] = flush_once(c, o.repin);
          printf("Phase B  flush chunk=%-9" PRIu64 ": %9.0f keys/s  (%" PRIu64 " keys, %.2fs)\n",
                 c, n / s, n, s);
       }
    }
    else
    {
-      auto [n, s] = flush_once(o.chunk);
+      auto [n, s] = flush_once(o.chunk, o.repin);
       printf("Phase B  bulk flush -> heart: %9.0f keys/s  (%" PRIu64 " keys, %.2fs, chunk=%" PRIu64
              ")\n",
              n / s, n, s, o.chunk);
@@ -194,7 +219,11 @@ int main(int argc, char** argv)
       std::atomic<uint64_t> fl_keys{0};
       double                fl_secs = 0;
       std::thread           flusher([&] {
-         auto [n, s] = flush_once(o.chunk);
+#ifdef __APPLE__
+         if (o.qos)
+            pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+#endif
+         auto [n, s] = flush_once(o.chunk, o.repin);
          fl_keys     = n;
          fl_secs     = s;
          fl_done     = true;
@@ -211,8 +240,11 @@ int main(int argc, char** argv)
       }
       auto t1 = clk::now();
       flusher.join();
-      printf("Phase C  sustained writer   : %9.0f tx/s  (flusher concurrent: %9.0f keys/s)\n",
-             wn / secs(t0, t1), fl_keys.load() / fl_secs);
+      printf("Phase C  sustained writer   : %9.0f tx/s  (flusher concurrent: %9.0f keys/s)%s%s\n",
+             wn / secs(t0, t1), fl_keys.load() / fl_secs, o.repin ? " [repin]" : "",
+             o.qos ? " [qos]" : "");
+      printf("         vpart arena after C: %.0f MB (%u segments)\n",
+             double(vdb->store().num_segments()) * 8.0, vdb->store().num_segments());
    }
 
    // ── Phase D: retire — sorted removes of flushed keys, batched txns ───────

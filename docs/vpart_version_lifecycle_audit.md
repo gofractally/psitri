@@ -381,3 +381,20 @@ so requiring it is cheaper than gating it.
   their own traits — through the same single mechanism, no second path.
 - The ad-hoc find_path(psio/to_json.hpp) for psitricorder JSON folds into
   the same acquisition.
+
+## 14. Schema-persisted type registry (Dan)
+
+register_value_types<Ts...>() persists each T's CANONICAL psio schema
+(psch digest) into the database meta region alongside its typenum. On load,
+stored typenums bind to the current process's registrations by COMPARING
+CANONICAL SCHEMAS — never by trusting raw ids:
+- id drift across builds: detected and remapped (stored id -> matching
+  registered schema's callbacks);
+- stored types with no matching registration: flagged loudly (values
+  readable as raw any_value, never misdispatched);
+- compatible schema evolution: pssz's forward/backward rules apply.
+This supersedes the "user-assigned or schema-hashed, registry asserts"
+stability contract in §11 with an enforced mechanism.
+Staging: the in-memory registry + hooks land first (the battery's current
+scope); schema persistence + reopen-mapping is the follow-up increment with
+its own battery case (register, store, reopen with permuted ids, read back).

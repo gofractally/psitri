@@ -122,3 +122,39 @@ Rotation, entirely in concept vocabulary, one multi-root transaction:
 Enforcement (Dan): tiered is templated on the concept ONLY and its test
 suite instantiates heart/heart, vpart/heart, part/heart. vpart passes the
 full engine conformance body standalone. No engine customization for tiered.
+
+## 7. Composable subtrees — the generic snapshot story (Dan, locked)
+
+Every engine supports subtree composition as part of the concept. Snapshots
+are NOT a mechanism: they are trees stored as values.
+
+    handle.snapshot() -> tree                 // O(1) shared root of the live tree
+    handle.upsert_subtree(key, tree)          // store a tree as a value
+    handle.is_subtree(key) / cursor.is_subtree()
+    handle.open_subtree(key) -> tree_handle   // COW into a stored subtree
+    handle.create_subtree(key) -> tree_handle
+
+User snapshot management = upsert_subtree("snapshots/<name>", h.snapshot());
+remove(key) deletes a snapshot; iteration lists them. The engine's lifecycle
+machinery (refcounts in psitri/heart/part; version GC + version_handle in
+vpart) is what makes the shared roots safe — invisible at the API.
+
+Engine status:
+- psitri: FULL (invented the model: tree-as-value, open/create_subtree).
+- heart:  FULL (subtree-as-value landed: value_type discriminator,
+          leaf-backed, ref-cascade clean; cursor is_subtree/subtree_cursor).
+- vpart:  MISSING — vhkv has no subtree value kind (cursor is_subtree()
+          stubs false). Needs: a subtree-value encoding in the leaf, the
+          stamp-GC treating stored roots as references (cascade/share rules
+          — the version_handle work is the prerequisite), snapshot() as a
+          shared committed root.
+- part:   MISSING — same build against refcounts (cheaper: ref++ on store).
+
+Sequencing in #31: version_handle/ordered GC FIRST (subtree sharing rides
+it), then the subtree value kind, then snapshot(). Conformance: the engine
+test body's subtree cases must pass on vpart/part standalone.
+
+Tiered design note (#32): a subtree value crossing the flush boundary means
+the merger materializes a TREE from W into B — both speak the concept, so
+the merger recurses: create_subtree in B, replay the W subtree through it.
+Cost is proportional to subtree size; fine for v1, revisit if hot.

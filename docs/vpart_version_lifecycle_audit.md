@@ -212,3 +212,54 @@ Sequencing change for #31: the vhkv subtree-value-kind from §7 is NOT
 needed; build instead (a) version GC, (b) typed-value registry + hooks,
 (c) claim index. tiered (#32) builds the ttree registry + ordered snapshot
 materialization on top.
+
+## 9. Public API review: typed values via POD tokens + traits (Dan's sketch)
+
+    value slot  = { typenum, pod bytes }          // pod = trivially copyable token
+    storing     : t_pod take_pod(T&&)             // CONSUMES the handle's reference
+    reading     : T make_from_pod<T>(const t_pod&, bool retain = true)  // MINTS a ref
+    traits      : T::type_id, t_pod::retain(session*, const t_pod&),
+                  t_pod::release(session*, const t_pod&)
+    registration: db.register_value_types<sal::smart_ptr<X>, user_ref<Y>>()
+    engine fires retain on node clone, release on node death (incl. GC threads)
+
+**User-perspective verdict: right shape.** One namespace of storable types;
+upsert(key, std::move(handle)) / get<T>(key) is symmetric with bytes values;
+take/make names the ownership transfer explicitly (move in = donate your
+ref; get out = your own retained ref); traits registration is one
+compile-checked line. Subtrees become the natural fallout: a tree handle is
+just a registered type whose pod is its root address.
+
+**What generalizes cleanly (subtree APIs subsumed):**
+- upsert_subtree(key, tree)      -> upsert(key, std::move(tree))
+- get_subtree(key)               -> get<tree>(key)
+- is_subtree(key)/cursor.is_subtree() -> value_type() == tree::type_id
+  (generic typenum query — ALSO what the tiered merger needs for ttree ids)
+- raw smart_ptr<alloc_header> overloads -> the same take_pod path
+- recursive destroy: release hooks fire uniformly; the NATIVE tree type's
+  release cascades; a user type's release does whatever it owns
+
+**What does NOT generalize (and shouldn't):** the STRUCTURAL composition
+layer — open_subtree(key)/create_subtree(key) in-place COW editing and
+transparent cursor descent INTO subtrees. Those require the engine to
+understand the pod as a tree of its own kind (descend it, COW it, write the
+new root back atomically with the parent txn). They remain tree-typed APIs
+LAYERED ON TOP of the generic storage: the native tree type is simply an
+implicitly-registered type the engine additionally knows structurally.
+Nothing breaks — the storage layer they sit on becomes the generic one.
+
+**Contract details to lock:**
+1. typenum space: 0 = plain bytes (no hooks, today's fast path); native
+   tree type implicitly registered; collisions assert at registration.
+2. pod bytes are memcpy'd to an aligned temp before hook calls (no
+   alignment contract on in-leaf storage).
+3. get<T> with mismatched stored typenum -> nullopt (+ value_type() for
+   dispatch); never a reinterpret.
+4. release may be DEFERRED to GC threads (vpart drain/reaper; sal release
+   thread): hooks are thread-safe, non-blocking, take the GC's session*.
+5. Overwrite releases the old pod; abort releases pods taken by the dying
+   txn (create-log symmetry — same as subtrees today).
+6. tiered: W and B must register the same typenums (the merger reads
+   typenum in W, writes in B); ttree ids are durable tokens by design.
+7. Engines without native sessions pass session* = their GC context;
+   types that need no session ignore it.

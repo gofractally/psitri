@@ -1,57 +1,68 @@
 # Reorg plan — psitri-merge → @gofractally/psitri (+ siblings)
 
-Refines `~/myartlib/ThePlan.md` (Dan, 2026-06). This file is the working copy
-for the psitri portion: target tree, rename map, gaps found during review,
-the carried-forward TODO ledger mapped to its new homes, and migration
-mechanics. Mechanics are copy-paste + find-replace renames — NO rewrites.
+Refines `~/myartlib/ThePlan.md`. Revision 2 — Dan's annotations of 2026-06-12
+are folded in as rulings (§6 records them). This file is the working copy for
+the psitri portion: target tree, rename map, review findings, the
+carried-forward TODO ledger mapped to its new homes, and migration mechanics.
+Mechanics are copy-paste + find-replace renames — NO rewrites.
 
-## 0. Status of the sibling plan items
+## 0. Sibling repos
 
 - **@gofractally/libart++ — substantially DONE.** The repo exists
   (`~/gofractally/libart++`): hkv → `artpp::map`, header-only, optional psio
   key codec (`artpp/psio_codec.hpp`, ARTPP_WITH_PSIO), bench suite vs
   absl::btree / std::map / upstream libart, GitHub Pages site with charts.
-  Remaining: one-time fix-sync sweep vs the part/vpart hkv descendants
-  (bug-class diffs only — e.g. growable insert paths; part/artpp lack vpart's
-  recorded-descent so the `path_[72]` smash class does not apply to them,
-  verified by the 1500-byte big-key battery), standardized third-party
-  comparison suites if any exist, publish cadence.
-- **@gofractally/psitri-multiindex** — exists at `~/psitri-multiindex`;
-  move under `~/gofractally/`, port to the adb transaction concept, audit
+  Remaining: one-time bug-class diff sweep vs the part/vpart hkv descendants,
+  standardized third-party comparison suites if any exist, publish cadence.
+- **@gofractally/ucc — NEW repo (Dan).** ucc extracted via the composition
+  process (psio dependency-pattern: FetchContent + FETCHCONTENT_SOURCE_DIR_UCC
+  co-dev override), **hash merged into it** (headers move to `ucc/hash/…`,
+  the separate `hash` target dies). Header-only + its test suite. Consumed by
+  psitri as vendor/ucc exactly like vendor/psio.
+- **@gofractally/psitri-multiindex** — exists at `~/psitri-multiindex`; move
+  under `~/gofractally/`, port to the adb transaction concept, audit
   heterogeneous lookup (literal / string_view queries must not materialize
-  temporary std::string). Depends on where adb lands (decision A).
+  temporary std::string). Consumes adb from the psitri repo (ruling A).
 
 ## 1. Target tree for @gofractally/psitri
 
 ```
 libraries/adb          abstract database concepts (today: part/db_shape.hpp
                        + the kv_engine concept) — namespace adb::
+                       independently consumable subdir (psio dependency-
+                       pattern) so multiindex and others can FetchContent it
 libraries/sal          smart alloc — unchanged
-libraries/ucc          SIMD unsigned-char ops          [MISSING FROM PLAN]
-libraries/hash         xxhash wrapper                  [MISSING FROM PLAN]
 libraries/start_ref    static ART, refcount liveness   (today: part)
 libraries/start_ver    static ART, version/stamp       (today: vpart)
 libraries/sal_art_ref  ART on sal                      (today: heart)
 libraries/psitri       legacy sal btree — unchanged name
-libraries/wal_art      two adb engines composed: hot delta tree, batch
+libraries/delta_art    two adb engines composed: hot delta tree, batch
                        merge into materialized base, adb on the surface
-                       (today: tiered)
-libraries/walart       WAL + art_map write-set engine  [NAMING — decision C]
+                       (today: tiered) [Dan: "tiered db becomes delta_art"]
+libraries/walart       WAL + art_map write-set engine — REMAINS for now,
+                       as does dwal (rides with sal_art_ref today); both
+                       pending a use-case review (later decision); dwal can
+                       exist and use adb
 shims/psi-sqlite       sqlite btree.c replacement      (today: psitri-sqlite)
 shims/psi-duckdb       (today: psitri-duckdb)
 shims/psi-rocksdb      (today: psitrirocks)
 shims/psi-leveldb      (today: psitrileveldb)
 shims/psi-mdbx         (today: psitrimdbx)
-vendor/psio            pssz internal representation (FetchContent already
-                       wired; co-dev override; move SOURCE_DIR external/ →
-                       vendor/)
+                       shims are FIRST-CLASS PRODUCTS: we will eventually
+                       mimic every 3rd-party API over our backend — the
+                       onboarding path for existing code bases. ALL move.
+vendor/psio            pssz internal representation (FetchContent wired;
+                       co-dev override; SOURCE_DIR external/ → vendor/)
+vendor/ucc             @gofractally/ucc (same pattern; hash now inside)
 tests/                 the behavioral battery, written against adb,
-                       instantiated per engine (today: programs/kv_compat_test
-                       + crash/recovery + scale gates + quick_gate.sh)
+                       instantiated per engine (kv_compat + crash/recovery +
+                       scale gates + quick_gate). TEST-SHIMS — wrappers that
+                       make 3rd-party DBs (mdbx, rocksdb, libart, tidesdb…)
+                       satisfy the battery/bench drivers — live HERE; they
+                       are not products.
 benchmarks/            against adb, per-engine instantiation: bank, dict,
-                       random/scale, pipeline, TATP; vendored COMPARATORS
-                       (libart, rocksdb, mdbxrocks, tidesdb, absl) live here
-                       behind CMake gates — they are not shims
+                       random/scale, pipeline, TATP; drives the test-shims
+                       for third-party comparison rows
 docs/                  design records (vpart_version_lifecycle_audit,
                        unified_tier_design, pdwal_design, node_design_patterns,
                        this file, BUGS.md convention)
@@ -61,57 +72,56 @@ scripts/               run_tests.sh, quick_gate.sh, watchdog, bench matrices
 
 ## 2. Rename map (find-replace pass)
 
+Namespace rule (Dan): **namespace == file structure**; private implementation
+details go in a nested `detail{}` namespace (e.g. `vhkv::` →
+`start_ver::detail`).
+
 | today | new path | namespace today → new |
 |---|---|---|
-| libraries/part | libraries/start_ref | `part::` → `start_ref::` (OPEN — decision B) |
-| libraries/vpart | libraries/start_ver | `vpart::`/`vhkv::` → `start_ver::` (OPEN) |
-| libraries/heart | libraries/sal_art_ref | `heart::` → ? (OPEN) |
-| libraries/tiered | libraries/wal_art | `tiered::` → `wal_art::` |
+| libraries/part | libraries/start_ref | `part::` → `start_ref::` |
+| libraries/vpart | libraries/start_ver | `vpart::`/`vhkv::` → `start_ver::` / `start_ver::detail` |
+| libraries/heart | libraries/sal_art_ref | `heart::` → `sal_art_ref::` |
+| libraries/tiered | libraries/delta_art | `tiered::` → `delta_art::` |
 | part/db_shape.hpp | libraries/adb | `part::shape::` → `adb::` |
-| libraries/psitri* (API shims) | shims/psi-* | unchanged |
-| libraries/mdbxrocks, libraries/art | benchmarks/vendor | comparators, not shims |
+| libraries/psitri-sqlite, -duckdb, psitrirocks, psitrileveldb, psitrimdbx | shims/psi-* | unchanged |
+| libraries/ucc + libraries/hash | @gofractally/ucc repo → vendor/ucc | `<hash/x.h>` → `<ucc/hash/x.h>`; `hash` target dies |
+| libraries/mdbxrocks, libraries/art, tidesdb wrapper | tests/ (test-shims) | comparators, not products |
 | programs/kv_compat_test.cpp | tests/ | — |
 | programs/*_bench* | benchmarks/ | — |
 | external/psio | vendor/psio | — |
 
-## 3. Gaps found in the plan (review, 2026-06-12)
+## 3. Review findings (resolved where annotated)
 
-1. **ucc + hash are load-bearing and unlisted.** sal, part, vpart, heart all
-   depend on ucc; hash is used across benches/engines. Keep both as
-   libraries/.
-2. **adb cross-repo consumption** — psitri-multiindex must see the adb
-   concepts. Options: (a) adb stays a psitri subdir but is designed
-   independently consumable (psio dependency-pattern: FetchContent +
-   SOURCE_SUBDIR), (b) its own tiny repo. → decision A.
-3. **Two kinds of "foreign API" code are conflated.** psitri-behind-foreign-
-   API (rocksdb/leveldb/sqlite/duckdb/mdbx faces) are shims/. Foreign-engine-
-   behind-our-bench (mdbxrocks, vendored libart, tidesdb, rocksdb itself) are
-   benchmark comparators → benchmarks/vendor, CMake-gated. The plan's
-   "shims/psi-lmdbx" reads as the former; mdbxrocks is the latter.
-4. **Shims currently bind the legacy psitri engine specifically** (sqlite's
-   DWAL backend, etc.). Long-term they should bind adb so wal_art can back
-   sqlite. Carry as future work; do NOT block the move on it.
+1. **ucc + hash were unlisted.** RULING: ucc becomes its own repo via the
+   composition process; hash merges into it; psitri consumes vendor/ucc.
+2. **adb cross-repo consumption.** RULING (A): in-repo subdir, designed
+   independently consumable (psio dependency-pattern).
+3. **Shims vs comparators.** RULING: psi-* foreign-API faces are first-class
+   onboarding products (eventually every 3rd-party API). Wrappers that exist
+   to run other DBs through OUR tests/benches are test-shims under tests/ —
+   not products.
+4. **Shims currently bind the legacy psitri engine** (sqlite's DWAL backend).
+   Future: bind adb so delta_art can back sqlite. Not a move blocker.
 5. **Three permanent hkv descendants** — artpp (heap, single-thread),
-   start_ref (arena, refcount), start_ver (arena, stamps). The divergence is
-   intentional (different liveness models); record it, do a one-time
-   bug-class diff sweep at extraction time, then stop trying to keep them in
-   sync.
-6. **Test split rule needs to be explicit**: behavioral battery + concept
-   phases + crash/recovery + drain census + scale gates → tests/ (adb-typed,
-   per-engine instantiation). Engine-INTERNAL tests (freeset, arena, node
-   layout, TSan suites, fuzz of private invariants) stay in
-   libraries/X/tests. "Vast majority against adb" = the behavioral set.
-7. **Repo-name/library-name shadow**: repo psitri contains libraries/psitri.
-   Accepted (it is the eponymous engine) — just noting it.
-8. **CI not mentioned**: new repo needs the build matrix (clang/gcc,
-   Debug+asserts, TSan job for the MT suites) and the battery as the merge
-   gate from day one — the gates below assume it.
-9. **walart vs wal_art near-collision** → decision C.
-10. **adb concept is not yet complete** — the carried TODO ledger (§4) has
-    concept-level items (schema persistence API, psio storable adapter,
-    subtree-value storage); land them in adb as part of the move, not after.
+   start_ref (arena, refcount), start_ver (arena, stamps). Intentional
+   divergence; one-time bug-class diff sweep at extraction, then stop
+   syncing.
+6. **Test split rule**: behavioral battery + concept phases + crash/recovery
+   + census + scale gates → tests/ (adb-typed). Engine-INTERNAL tests
+   (freeset, arena, node layout, TSan, private-invariant fuzz) stay in
+   libraries/X/tests.
+7. **Repo/library name shadow** (repo psitri ⊃ libraries/psitri): accepted.
+8. **CI from day one**: clang/gcc matrix, Debug+asserts, TSan job, the
+   battery as merge gate.
+9. **walart vs wal_art collision.** RULING (C): tiered → delta_art; walart
+   keeps its name and remains for now alongside dwal; whether they still
+   serve a use case is a LATER decision (walart ≈ dwal's role; dwal can be
+   made to use adb).
+10. **adb concept incomplete** — land the §4 concept items (schema
+    persistence API, psio storable adapter, owned-tree values) as part of
+    the move, not after.
 
-## 4. Carried-forward TODO ledger (this session's context, mapped to new homes)
+## 4. Carried-forward TODO ledger (mapped to new homes)
 
 **libraries/adb**
 - [x] storable_type / typed_values / any_value / three-outcome reads (LOCKED,
@@ -127,10 +137,10 @@ scripts/               run_tests.sh, quick_gate.sh, watchdog, bench matrices
       as the Store policy; strings/vectors stay null-hook builtins
 - [ ] owned-tree values: storing a tree_root/subtree AS a typed value
       (the smart_ptr storable — retain/release = root refcount)
-- [ ] concept: cursor typed surface (value_type()/is_type<T>()) — vpart has
-      it; promote to the concept when a second engine lands it
+- [ ] concept: cursor typed surface (value_type()/is_type<T>()) — start_ver
+      has it; promote to the concept when a second engine lands it
 
-**libraries/start_ver (vpart) — first GREEN engine (1d97f950)**
+**libraries/start_ver — first GREEN engine (1d97f950)**
 - [x] full kv-compat PASS: 152219 checks, typed values + multi-root +
       snapshot + exact drain census; unit suite green; bank 676k tx/s
 - [ ] GC/writer-isolation rework: O(1) bucketed claim_ (today O(nseg) scans
@@ -138,23 +148,24 @@ scripts/               run_tests.sh, quick_gate.sh, watchdog, bench matrices
       vs batch-1000 production. GATE: 150M no-flush writer isolation
       (today degrades 164ns → 5.3µs by ~46M)
 
-**libraries/start_ref (part), sal_art_ref (heart), psitri — green-ups, in order**
+**libraries/start_ref, sal_art_ref, psitri — green-ups, in order**
 - [ ] each: typed values (envelope+hooks per its liveness model), multi-root
       + set_root, snapshot; battery flips phase-by-phase, no adapter layers
 - [ ] psitri additionally: wrong-pod read must be invalid_type, never
       not-found (it has open_root/primary already; missing set_root)
 
-**libraries/wal_art (tiered) — #32 rewrite**
+**libraries/delta_art (tiered) — #32 rewrite**
 - [ ] concept-only: templated on two adb engines; THREE instantiations under
-      test (heart/heart, vpart/heart, part/heart)
+      test (sal_art_ref/sal_art_ref, start_ver/sal_art_ref,
+      start_ref/sal_art_ref)
 - [ ] rotation expressed via multi-root set_root (h1.set_root(h0.set_root({})))
-      — DELETE vpart's contraband shims (freeze_and_reset, clear_warm_slots,
-      pending_warm) from the engine's public surface
+      — DELETE start_ver's contraband shims (freeze_and_reset,
+      clear_warm_slots, pending_warm) from the engine's public surface
 - [ ] snapshot migration (§8 identity model): ttree = {hot ref, cold ref |
       resolved cold ref}; persistent lock-free bitset registry; merger swaps
       identities — never copy-constructs a tree; ordered boundary
       materialization; subtree values opaque to the hot engine
-- [ ] 1B scale run vs heart baseline (#28) — blocked on start_ver GC gate
+- [ ] 1B scale run vs sal_art_ref baseline (#28) — blocked on start_ver GC
 
 **tests/**
 - [x] battery semantics locked: take_pod counts +1 (custody enters the pod);
@@ -165,36 +176,36 @@ scripts/               run_tests.sh, quick_gate.sh, watchdog, bench matrices
 - [ ] crash-fuzz gate for walart (was still gating when parked)
 
 **other carried items**
+- [ ] walart + dwal use-case review (Dan: later decision); dwal → adb if kept
 - [ ] dwal btree_layer compact stored values + stale-view audit (#20)
-- [ ] heart point-op gap, sample-driven (#22, 1.5–3.4x vs part family)
+- [ ] sal_art_ref point-op gap, sample-driven (#22, 1.5–3.4x vs part family)
 - [ ] psitri-multiindex: port to adb concept + heterogeneous lookup audit
 
 ## 5. Migration mechanics
 
 1. Freeze: tag psitri-merge (`reorg-baseline`); psitri-merge becomes the
    read-only archive — branches, logs/, history stay here.
-2. Scaffold @gofractally/psitri: target tree, root CMake, CI, vendor/psio.
-3. Move in dependency order, ONE library per commit, full battery + that
-   library's unit suite green before the next: ucc, hash → sal → adb →
-   start_ref → start_ver → sal_art_ref → psitri → wal_art/walart → shims →
+2. Extract @gofractally/ucc first (ucc + hash merged, standalone tests green).
+3. Scaffold @gofractally/psitri: target tree, root CMake, CI, vendor/psio +
+   vendor/ucc.
+4. Move in dependency order, ONE library per commit, full battery + that
+   library's unit suite green before the next: sal → adb → start_ref →
+   start_ver → sal_art_ref → psitri → delta_art/walart → shims →
    tests/benchmarks last (they compile against everything).
-4. Renames are mechanical find-replace per §2 table; no logic edits ride
+5. Renames are mechanical find-replace per §2 table; no logic edits ride
    along. Anything broken by a rename gets fixed in the SAME commit.
-5. Does not move: build dirs, scratch testdbs, dead experiments living on
+6. Does not move: build dirs, scratch testdbs, dead experiments living on
    other branches (wtree2, big_index, fast_index v4 stay archived in their
    repos/branches).
-6. After the move: psitri-merge gets a README pointer to the new repo and
+7. After the move: psitri-merge gets a README pointer to the new repo and
    the path-mapping table.
 
-## 6. Decisions needed (Dan)
+## 6. Rulings record (Dan, 2026-06-12)
 
-A. **adb consumption**: in-repo subdir consumable standalone (recommended,
-   psio-pattern) vs own tiny repo?
-B. **Namespaces**: start_ref::/start_ver:: as written? heart's namespace →
-   sal_art_ref:: or keep heart::? (Paths and namespaces can rename in the
-   same pass either way.)
-C. **walart vs wal_art**: keep both (they are different architectures —
-   WAL+write-set vs delta-tree rotation)? If both, one should be renamed —
-   the near-collision will bite.
-D. **Shim survivors**: sqlite + rocksdb earn their keep (TATP, benches).
-   leveldb / mdbx / duckdb faces — move, or archive in psitri-merge?
+A. adb: in-repo subdir, independently consumable.
+B. Namespaces match the file structure; private impl details in `detail{}`.
+C. tiered → **delta_art**. walart keeps its name and remains for now, along
+   with dwal — use-case review is a later decision; dwal can use adb.
+D. Shims: keep them ALL — first-class onboarding products. Test-shims
+   (3rd-party DB wrappers for our tests/benches) live under tests/.
+E. ucc: own repo via the composition process; hash merged into it.

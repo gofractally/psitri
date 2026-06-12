@@ -239,6 +239,12 @@ just a registered type whose pod is its root address.
 - recursive destroy: release hooks fire uniformly; the NATIVE tree type's
   release cascades; a user type's release does whatever it owns
 
+(Transparent cursor descent into subtrees STRUCK from this review — it
+exists in no engine and is an anti-feature: iterating a snapshots-by-hash
+tree must yield one row per snapshot, not explode each snapshot's contents;
+key semantics and recursion are unsolvable; typed values cannot support it.
+All descent is EXPLICIT: subtree_cursor() to read, open_subtree() to edit.)
+
 **What does NOT generalize (and shouldn't):** the STRUCTURAL composition
 layer — open_subtree(key)/create_subtree(key) in-place COW editing and
 transparent cursor descent INTO subtrees. Those require the engine to
@@ -253,8 +259,15 @@ Nothing breaks — the storage layer they sit on becomes the generic one.
    tree type implicitly registered; collisions assert at registration.
 2. pod bytes are memcpy'd to an aligned temp before hook calls (no
    alignment contract on in-leaf storage).
-3. get<T> with mismatched stored typenum -> nullopt (+ value_type() for
-   dispatch); never a reinterpret.
+3. Reading a value with the WRONG pod type is "INVALID TYPE", never
+   "not found" (the key exists — reporting absence lies) and never a
+   reinterpret. Three outcomes everywhere: found / not-found / invalid-type.
+   Throwing forms (get<T>, cursor.value<T>()) throw a bad-variant-access-
+   style invalid_type error; status forms return a distinct code (e.g.
+   -2 invalid_type vs -1 not-found). value_type() remains the dispatch
+   query for code that legitimately handles multiple types. NOTE: psitri's
+   current "subtree values read as not-found" behavior is a deviation to
+   correct during its green-up.
 4. release may be DEFERRED to GC threads (vpart drain/reaper; sal release
    thread): hooks are thread-safe, non-blocking, take the GC's session*.
 5. Overwrite releases the old pod; abort releases pods taken by the dying

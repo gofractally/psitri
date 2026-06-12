@@ -1,0 +1,86 @@
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/ts_sweep_db/delta/meta.part[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=295072[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4345430016, size=295072[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/ts_sweep_db/base/ptrs/header.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4345741312, size=4224[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/ts_sweep_db/base/iref/header.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4345757696, size=4224[0m
+allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (7449 GB) — capping[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/ts_sweep_db/base/header[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/ts_sweep_db/base/roots[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/ts_sweep_db/base/session_ops.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=93650944[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4758568960, size=93650944[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4345774080, size=32768[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4345806848, size=32768[0m
+tiered scale bench: 100000000 keys, batch 1000, probes every 1000000 (100000 rds + 100000 iter steps), hi_water 1024 MB
+      keys    ins ns     rd ns    hit%   iter ns   file GB   rss GB  chunk s
+   1000000       161        67  100.0%      44.2      0.59     0.50     0.17
+   2000000       233        65  100.0%      44.4      0.88     0.76     0.24
+   3000000       260        72  100.0%      46.1      1.13     1.04     0.27
+   4000000       312        77  100.0%      47.4      1.38     1.29     0.32
+   5000000       326        78  100.0%      49.4      1.60     1.51     0.34
+   6000000       357        82  100.0%      51.5      1.86     1.77     0.37
+   7000000       348        80  100.0%      52.0      2.11     1.99     0.36
+   8000000       374        85  100.0%      53.7      2.36     2.24     0.39
+   9000000       403        88  100.0%      54.4      2.61     2.49     0.42
+  10000000       424        89  100.0%      55.2      2.83     2.74     0.44
+  11000000       443        91  100.0%      56.4      3.09     3.00     0.46
+  12000000       432        91  100.0%      57.4      3.34     3.25     0.45
+  13000000       429        90  100.0%      57.3      3.56     3.47     0.44
+  14000000       435        92  100.0%      57.5      3.81     3.72     0.45
+  15000000       441        92  100.0%      58.5      4.07     3.97     0.46
+  16000000       450        94  100.0%      60.2      4.32     4.23     0.47
+  17000000      2279       158  100.0%      89.4      4.60     4.51     2.30
+  18000000       548       107  100.0%      65.5      4.85     4.76     0.57
+  19000000       490       100  100.0%      63.4      5.11     5.02     0.51
+  20000000       480       100  100.0%      62.2      5.36     5.27     0.50
+  21000000       475       101  100.0%      63.8      5.64     5.53     0.49
+  22000000       481        98  100.0%      68.2      5.90     5.80     0.50
+  23000000       482        99  100.0%      64.7      6.15     6.06     0.50
+  24000000       483       103  100.0%      63.5      6.40     6.31     0.50
+  25000000       488       101  100.0%      63.1      6.68     6.58     0.50
+  26000000       486       100  100.0%      63.4      6.94     6.85     0.50
+  27000000       470        98  100.0%      64.6      7.19     7.10     0.49
+  28000000       482       102  100.0%      64.9      7.47     7.35     0.50
+  29000000       491       104  100.0%      69.0      7.73     7.63     0.51
+  30000000       503       103  100.0%      65.1      7.98     7.89     0.52
+  31000000       501       104  100.0%      65.8      8.23     8.14     0.52
+  32000000      1582       105  100.0%      65.8      8.48     8.39     1.60
+  33000000      2486       107  100.0%      66.7      8.74     8.64     2.50
+  34000000      3972       107  100.0%      67.4      8.99     8.90     3.99
+  35000000      3610       109  100.0%      67.7      9.27     9.18     3.63
+  36000000      3474       107  100.0%      68.0      9.52     9.43     3.49
+  37000000      4516       108  100.0%      68.4      9.78     9.68     4.53
+  38000000      9951       135  100.0%      80.1     10.03     9.94     9.97
+  39000000      4184       113  100.0%      70.5     10.28    10.19     4.20
+  40000000      4170       111  100.0%      70.4     10.53    10.44     4.19
+  41000000      5097       115  100.0%      73.2     10.79    10.70     5.12
+  42000000      3969       110  100.0%      69.7     11.04    10.95     3.99
+  43000000      5301       116  100.0%      73.1     11.29    11.20     5.32
+  44000000      4804       115  100.0%      71.4     11.54    11.45     4.82
+  45000000      4671       113  100.0%      71.3     11.83    11.71     4.69
+  46000000      4662       112  100.0%      72.3     12.08    11.99     4.68
+  47000000      4596       112  100.0%      72.6     12.33    12.24     4.61
+  48000000      4557       112  100.0%      70.7     12.62    12.53     4.57
+  49000000      4457       116  100.0%      74.9     12.90    12.81     4.48
+  50000000      8077       139  100.0%      82.9     13.15    13.06     8.10
+  51000000      4516       120  100.0%      80.5     13.44    13.34     4.54
+  52000000      4542       118  100.0%      73.4     13.69    13.60     4.56
+  53000000      5263       113  100.0%      73.5     13.97    13.86     5.28
+  54000000      4448       119  100.0%      73.6     14.23    14.14     4.47
+  55000000      8562       173  100.0%      97.0     14.51    14.42     8.59
+  56000000      5296       130  100.0%      76.6     14.76    14.67     5.32
+  57000000      4475       119  100.0%      75.4     15.02    14.92     4.49
+  58000000      5289       122  100.0%      79.6     15.30    15.21     5.31
+  59000000      5245       117  100.0%      72.1     15.58    15.47     5.26
+  60000000      7168       131  100.0%      79.5     15.84    15.74     7.19
+  61000000      5366       118  100.0%      74.0     16.12    16.00     5.39
+  62000000      5308       119  100.0%      74.0     16.37    16.28     5.33
+  63000000      4428       118  100.0%      72.3     16.66    16.54     4.45

@@ -1,0 +1,39 @@
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/ts_sweep_db/delta/meta.part[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=295072[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4377673728, size=295072[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/ts_sweep_db/base/ptrs/header.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4377985024, size=4224[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/ts_sweep_db/base/iref/header.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4378001408, size=4224[0m
+allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (7449 GB) — capping[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/ts_sweep_db/base/header[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/ts_sweep_db/base/roots[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/ts_sweep_db/base/session_ops.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=93650944[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=5328224256, size=93650944[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4378017792, size=32768[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4378050560, size=32768[0m
+tiered scale bench: 100000000 keys, batch 1000, probes every 1000000 (100000 rds + 100000 iter steps), hi_water 256 MB
+      keys    ins ns     rd ns    hit%   iter ns   file GB   rss GB  chunk s
+   1000000       166        64  100.0%      42.7      0.59     0.50     0.18
+   2000000       240        71  100.0%      45.6      0.85     0.76     0.25
+   3000000       268        71  100.0%      45.1      1.13     1.04     0.28
+   4000000       305        74  100.0%      48.1      1.38     1.29     0.32
+   5000000       323        78  100.0%      50.1      1.60     1.51     0.34
+   6000000       332        80  100.0%      51.0      1.86     1.76     0.34
+   7000000       344        83  100.0%      51.4      2.08     1.99     0.36
+   8000000       371        84  100.0%      53.5      2.36     2.25     0.38
+   9000000       397        89  100.0%      54.8      2.61     2.52     0.41
+  10000000       420        90  100.0%      55.6      2.87     2.78     0.43
+  11000000       431        91  100.0%      57.2      3.09     3.00     0.45
+  12000000       438        91  100.0%      57.2      3.34     3.25     0.45
+  13000000       441        91  100.0%      57.3      3.59     3.50     0.46
+  14000000       442        95  100.0%      58.2      3.84     3.75     0.46
+  15000000       452        96  100.0%      59.0      4.10     4.01     0.47
+  16000000       457        98  100.0%      63.5      4.70     4.58     0.47

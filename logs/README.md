@@ -42,3 +42,4 @@ Conventions:
 - 2026-06-12_tiered-bank/ — L5 pipeline gate PASSED: tiered 439k tx/s @1M = 103.8% of raw vpart, live bursts + retire pump, validation exact
 - 2026-06-12_keymode-matrix/ — key-mode disambiguation: Dan's 484k = xxh64 band (part 450k, vpart 530k, tiered 526k today); all prior reports were names mode
 - 2026-06-12_lineage-matrix/ — full lineage: tiered +77%w/+80%r over raw heart; legacy dwal +30% writes over tiered (heap+WAL delta vs persistent COW delta) but -37% reads; psitri raw 160k floor
+- 2026-06-12_tiered-scale-sweep/ — scale sweep found the real bottleneck: per-key retire tax (12us windows, 250k/s steady = loses to raw heart); v2 = subtree retirement; hi-water counts wrong unit; 256MB silent death

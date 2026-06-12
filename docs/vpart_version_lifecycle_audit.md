@@ -93,3 +93,32 @@ Measured chain of causes, in order of likely contribution:
 - Writer-isolation: batch-1000 insert-only run holds vpart-native ins ns to
   150M+ keys with a bounded arena (THE regression gate for this audit —
   fails today at ~46M).
+
+## 6. Concept extension (LOCKED after Dan's review, 2026-06-12)
+
+psitri's multi-root transaction design REVIEWED AND ADOPTED: ascending-index
+lock acquisition enforced by assert (deadlock-free by construction), ONE
+tree_handle abstraction for primary/additional roots and subtrees, abort
+rolls back all roots, ordered (not atomic) cross-root publish — the concept
+documents "ordered durability"; rotation makes the crash window idempotent
+by publishing warm before hot.
+
+The exchange primitive (Dan: swap_trees makes no sense):
+
+    tree handle.set_root(tree)   // assign, RETURN the displaced tree
+
+with `tree` the engine's owned-tree value type (psitri::tree exists; heart
+has tree values; vpart/part implement as an owning root handle — in vpart
+this IS the refcounted version-root: dropping the returned tree feeds the
+version GC, unifying set_root with the standalone lifecycle).
+
+Rotation, entirely in concept vocabulary, one multi-root transaction:
+
+    auto h0 = tx.primary();              // hot
+    auto h1 = tx.open_root(1);           // warm slot (empty in steady state)
+    h1.set_root(h0.set_root(tree{}));    // hot reborn empty; warm = frozen
+    tx.commit();                         // publish order: warm, then hot
+
+Enforcement (Dan): tiered is templated on the concept ONLY and its test
+suite instantiates heart/heart, vpart/heart, part/heart. vpart passes the
+full engine conformance body standalone. No engine customization for tiered.

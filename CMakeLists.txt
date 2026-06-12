@@ -900,6 +900,13 @@ target_link_libraries(bank-bench-part PRIVATE part Boost::program_options hash)
 set_target_properties(bank-bench-part PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+# L5 pipeline prototype — vpart hot delta, sorted bulk flush into heart
+add_executable(pipeline-bench programs/pipeline_bench.cpp)
+target_link_libraries(pipeline-bench PRIVATE vpart heart hash)
+target_include_directories(pipeline-bench PRIVATE ${CMAKE_SOURCE_DIR}/libraries/heart/test)
+set_target_properties(pipeline-bench PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 # dict bench matrix — load/find/iterate across hkv/artmap/part/vpart/heart
 add_executable(dict-bench programs/dict_bench.cpp)
 target_link_libraries(dict-bench PRIVATE part vpart art heart hash)

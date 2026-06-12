@@ -332,3 +332,28 @@ Contracts added:
   user-assigned or schema-hashed; the registry asserts collisions and
   engines persist nothing that depends on registration order.
 - views are read-only and lock-scoped (the any_value holding rule).
+
+## 12. psio/pssz study notes + the final any_value form (Dan)
+
+Studied ~/gofractally/psio (cpp + pssz-spec). The load-bearing facts:
+- pssz: SSZ-derived; adaptive offset widths (pssz_<W>, auto from
+  max_encoded_size<T>); CANONICAL deterministic encoding (equal values =
+  equal bytes -> content-addressable stored values, snapshot identity /
+  dedup for free); single-pass encode; DWNC frozen-layout types collapse to
+  memcpy (reflected structs store at raw-bytes cost); validators check
+  without decoding (free read-path integrity).
+- view<T, Fmt, Store>: one view template per shape, formats plug in via
+  view_layout::traits; sub-views share the backing span; and the Store
+  STORAGE-POLICY PARAMETER is the lock-bundling seam — the engine supplies
+  a read-lock-holding storage policy and view<T, pssz, db_read_lock> over
+  the in-leaf span IS the zero-copy typed read; lifetime bound to the lock
+  by construction.
+
+FINAL any_value (supersedes §10/§11 composition): the slot already stores
+(typenum, bytes), so
+
+    any_value = { const value_slot*, read_lock }
+
+type() reads the typenum THROUGH the pointer; bytes()/raw_pod() are spans
+into the slot; as<T>() dispatches on the slot typenum (decode / view /
+token-retain). No copies of anything, ever.

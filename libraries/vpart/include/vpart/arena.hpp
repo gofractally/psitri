@@ -562,10 +562,10 @@ namespace vpart
       {
          return uint32_t(_cfg.reuse_threshold * (lines_per_segment / 8));
       }
-      bool qualifies_(uint32_t s) noexcept
+      bool qualifies_(uint32_t s, uint32_t thr8) noexcept
       {
          return _segs[s].state.load(std::memory_order_relaxed) == SEG_UNOWNED &&
-                freeset_(s).free_groups8() >= thr8_();
+                freeset_(s).free_groups8() >= thr8;
       }
 
       // Slow path, mutex-held: adjacent continuation, else longest qualifying
@@ -576,29 +576,38 @@ namespace vpart
       {
          std::lock_guard g(_claim_mutex);
          const uint32_t  nseg = num_segments();
-         if (cur != UINT32_MAX && cur + 1 < nseg && qualifies_(cur + 1))
+         if (cur != UINT32_MAX && cur + 1 < nseg && qualifies_(cur + 1, thr8_()))
          {
             _segs[cur + 1].state.store(SEG_OWNED, std::memory_order_relaxed);
             _stats.segments_reused.fetch_add(1, std::memory_order_relaxed);
             return cur + 1;
          }
-         // MOST-EMPTY qualifying segment (Dan): the emptier the segment, the
-         // more bump-like the allocation inside it (long runs, virgin
-         // locality) — this replaces the longest-run heuristic. Tie-break
-         // nearest forward of cur (keeps window adjacency when scores tie).
-         uint32_t best = UINT32_MAX, best_free = 0;
-         for (uint32_t s = 0; s < nseg; ++s)
-         {
-            if (s == cur || !qualifies_(s))
-               continue;
-            const uint32_t f8 = freeset_(s).free_groups8();
-            if (f8 > best_free || (f8 == best_free && best != UINT32_MAX &&
-                                   cur != UINT32_MAX && s > cur && best <= cur))
+         // MOST-EMPTY segment at the configured bar (Dan: emptier = more
+         // bump-like allocation inside; the bar is a PREFERENCE, not a
+         // prohibition). Insert-heavy workloads spread partial frees so
+         // nothing may reach a high bar — a hard gate there makes claim_
+         // grow the file forever (measured: 1.2 KB/key runaway to the 32 GB
+         // wall on the u64 scale workload). Fallback: most-empty at the
+         // 12.5% floor before growing; grow only when even that is empty.
+         auto most_empty = [&](uint32_t thr8) -> uint32_t {
+            uint32_t best = UINT32_MAX, best_free = 0;
+            for (uint32_t s = 0; s < nseg; ++s)
             {
-               best_free = f8;
-               best      = s;
+               if (s == cur || !qualifies_(s, thr8))
+                  continue;
+               const uint32_t f8 = freeset_(s).free_groups8();
+               if (f8 > best_free || (f8 == best_free && best != UINT32_MAX &&
+                                      cur != UINT32_MAX && s > cur && best <= cur))
+               {
+                  best_free = f8;
+                  best      = s;
+               }
             }
-         }
+            return best;
+         };
+         uint32_t best = most_empty(thr8_());
+         if (best == UINT32_MAX)
+            best = most_empty(uint32_t(0.125 * (lines_per_segment / 8)));
          if (best != UINT32_MAX)
          {
             _segs[best].state.store(SEG_OWNED, std::memory_order_relaxed);

@@ -44,6 +44,8 @@ namespace tiered
       uint64_t lo_water_bytes = 64ull << 20;   // flush down to here (hysteresis band)
       uint64_t flush_chunk    = 10'000'000;    // keys per B txn (plateau >= 100k; Dan: big)
       uint64_t retire_batch   = 4096;          // remove_if_older per writer commit
+      uint64_t repin_keys     = 1'000'000;     // re-pin the flush snapshot every N keys:
+                                               // the drain floor advances DURING long flushes
       bool     background     = true;          // false: no merger thread (flush_now only; tests)
    };
 
@@ -432,28 +434,40 @@ namespace tiered
             const uint32_t F   = _w->committed_version();  // BEFORE the pin: F <= pin
             auto           wrs = _w->start_read_session();
             auto           bws = _b->start_write_session();
-            auto           cur = wrs->create_cursor(0);
-            uint64_t       n   = 0;
-            bool           more = cur.seek_begin();
+            std::optional<decltype(wrs->create_cursor(0))> cur;
+            cur.emplace(wrs->create_cursor(0));
+            uint64_t    n    = 0;
+            std::string resume;  // re-pin resume point (sorted iteration)
+            bool        more = cur->seek_begin();
             while (more)
             {
                auto     btx   = bws->start_transaction(0);
                uint64_t in_tx = 0;
-               while (!cur.is_end() && in_tx < _k.flush_chunk)
+               while (!cur->is_end() && in_tx < _k.flush_chunk)
                {
-                  cur.get_value([&](value_view v) {
+                  cur->get_value([&](value_view v) {
                      if (!v.empty() && v[0] == TAG_DATA)
-                        btx.upsert(cur.key(), value_view(v.data() + 1, v.size() - 1));
+                        btx.upsert(cur->key(), value_view(v.data() + 1, v.size() - 1));
                      else
-                        btx.remove(cur.key());  // tombstone: applied, never stored in B
+                        btx.remove(cur->key());  // tombstone: applied, never stored in B
                   });
                   ++in_tx;
-                  cur.next();
+                  if (_k.repin_keys && (n + in_tx) % _k.repin_keys == 0)
+                  {  // drop + retake the pin: the writer's drain floor advances
+                     resume.assign(cur->key());
+                     cur.reset();
+                     cur.emplace(wrs->create_cursor(0));
+                     cur->lower_bound(resume);
+                     if (!cur->is_end() && cur->key() == key_view(resume))
+                        cur->next();
+                  }
+                  else
+                     cur->next();
                }
                btx.commit();
                _base_epoch.fetch_add(1, std::memory_order_release);  // re-seat cached base cursors
                n += in_tx;
-               more = !cur.is_end();
+               more = !cur->is_end();
             }
             {
                std::lock_guard rg(_retire_m);  // pump reads resume/floor under the same lock

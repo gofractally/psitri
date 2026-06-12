@@ -304,6 +304,21 @@ hours-old snapshot — is exactly what the L1 bench gate must report
 - Clean shutdown: drain logs (reclaim to quiescence), persist stamps + L0,
   set clean flag — same dance as today's refcounts, same files, new payload.
 
+### 2.8 Stored values are encodings, not structs (Dan)
+
+API value types (e.g. dwal's `btree_value`: kind data|subtree|tombstone +
+view + tree_id) are NEVER memcpy'd into nodes as literal structs. The node
+stores a compact encoded form — `[tag|len][payload bytes]` — and the API
+type materializes at the read boundary with views derived POSITIONALLY
+from the stored bytes. Two reasons, both measured in the bank: (a) the
+literal struct wastes ~28 B/leaf at small value sizes (~9% writes / ~6%
+reads); (b) a stored POINTER (string_view) goes stale when a structural op
+relocates a leaf — the bank drifted +3.65 B in balances until the view was
+derived positionally, and in dwal the same stale view dangles into a
+SWAPPED arena (read-after-free). AUDIT: dwal's btree_layer stores the
+literal struct and trusts the stored view today. walart's bval
+`[tag][payload]` staging is the pattern of record.
+
 ## 3. Memory model — tagged dual allocation
 
 - **Two allocators, one tree, one tag bit per branch**: direct fixed-address
@@ -424,9 +439,15 @@ identified during the stamp-placement investigation; vpart corrects them):
    `mode::buckets`/`mode::adaptive` bucket terminals, `K::bucket` and
    `K::cbucket` retired. (Side effect: the cbucket stamp-budget problem
    vanishes.)
-2. **Header slack becomes common-prefix storage.** Every node kind with
-   spare header capacity carries an inline cprefix (part wastes this slack
-   today and pays prefix_node hops for it). Presence is signaled by **one
+2. **Header slack becomes common-prefix storage — and a prefix_node above
+   a node whose buffer could hold the prefix is a BUG (Dan).** prefix_node
+   exists ONLY for exceptionally long common prefixes, never the common
+   case. Today the violation is structural: widen() LIFTS a setlist's
+   inline prefix into a prefix_node because the wide tiers have no buffer
+   (census: ~105 prefix_nodes per engine, parked above the hottest wide
+   routers). Every node kind with spare header capacity carries an inline
+   cprefix (part wastes this slack today and pays prefix_node hops for
+   it); the deep-validate/census walk asserts the invariant. Presence is signaled by **one
    reserved tag code — "see header"** — not per-kind variants: tagged
    pointers exist for *dynamically typed* dispatch, so any node whose
    header must be read anyway carries tag = see-header and the header

@@ -2424,22 +2424,25 @@ class TidesDbEngine : public BankEngine
 // not a bug in the bench.
 class ArtMapEngine : public BankEngine
 {
-   using bv = psitri::dwal::btree_value;
-   // position-derived view: the inline copy ALWAYS sits right after the
-   // struct, so only the length is trusted from the stored view (a stored
-   // POINTER goes stale if a structural op relocates the leaf).
-   static std::string_view val_of_(const bv* v) noexcept
+   // btree_value is the API value; the NODE stores a compact memcpy'd form:
+   // [tag:2 bits | len:30 bits][payload bytes]. No pointer is ever stored
+   // (a stored string_view goes stale if a structural op relocates the
+   // leaf); views materialize positionally at read time.
+   struct stored_v
    {
-      return {reinterpret_cast<const char*>(v) + sizeof(bv), v->data.size()};
+      uint32_t tag_len;  // kind << 30 | payload length
+      static stored_v data(uint32_t len) noexcept { return {len}; }
+      uint32_t         len() const noexcept { return tag_len & 0x3FFFFFFFu; }
+   };
+   static std::string_view val_of_(const stored_v* v) noexcept
+   {
+      return {reinterpret_cast<const char*>(v + 1), v->len()};
    }
    void put_(const std::string& k, std::string_view bytes)
-   {  // always through upsert_inline — exactly btree_layer::store (a sealed
-      // generation's leaves must never be scribbled in place)
-      bv* v = _m->upsert_inline(k, bv::make_data({}), bytes);
-      if (v && !bytes.empty())
-         v->data = {reinterpret_cast<const char*>(v) + sizeof(bv), bytes.size()};
+   {
+      _m->upsert_inline(k, stored_v::data(uint32_t(bytes.size())), bytes);
    }
-   using map_t = art::art_map<bv, art::heap_arena>;
+   using map_t = art::art_map<stored_v, art::heap_arena>;
    std::unique_ptr<map_t> _m;
 
   public:
@@ -2465,14 +2468,14 @@ class ArtMapEngine : public BankEngine
                  uint64_t           amount,
                  uint64_t           seq) override
    {
-      const bv* sv = _m->get(src);
+      const stored_v* sv = _m->get(src);
       if (!sv)
          return false;
       const auto     svv     = val_of_(sv);
       const uint64_t src_bal = decode_balance(svv.data(), svv.size());
       if (src_bal < amount)
          return false;
-      const bv* dv = _m->get(dst);
+      const stored_v* dv = _m->get(dst);
       if (!dv)
          return false;
       const auto     dvv     = val_of_(dv);
@@ -2493,7 +2496,7 @@ class ArtMapEngine : public BankEngine
    }
    bool read_account(const std::string& key, uint64_t& balance_out) override
    {
-      const bv* v = _m->get(key);
+      const stored_v* v = _m->get(key);
       if (!v)
          return false;
       const auto vv = val_of_(v);

@@ -582,32 +582,28 @@ namespace vpart
             _stats.segments_reused.fetch_add(1, std::memory_order_relaxed);
             return cur + 1;
          }
-         // longest run of qualifying segments; tie-break nearest forward of cur
-         uint32_t best_start = UINT32_MAX, best_len = 0;
-         uint32_t run_start = UINT32_MAX, run_len = 0;
+         // MOST-EMPTY qualifying segment (Dan): the emptier the segment, the
+         // more bump-like the allocation inside it (long runs, virgin
+         // locality) — this replaces the longest-run heuristic. Tie-break
+         // nearest forward of cur (keeps window adjacency when scores tie).
+         uint32_t best = UINT32_MAX, best_free = 0;
          for (uint32_t s = 0; s < nseg; ++s)
          {
-            if (s != cur && qualifies_(s))
+            if (s == cur || !qualifies_(s))
+               continue;
+            const uint32_t f8 = freeset_(s).free_groups8();
+            if (f8 > best_free || (f8 == best_free && best != UINT32_MAX &&
+                                   cur != UINT32_MAX && s > cur && best <= cur))
             {
-               if (run_len == 0)
-                  run_start = s;
-               ++run_len;
-            }
-            else
-               run_len = 0;
-            if (run_len > best_len ||
-                (run_len == best_len && run_len && cur != UINT32_MAX && run_start > cur &&
-                 (best_start == UINT32_MAX || best_start <= cur)))
-            {
-               best_len   = run_len;
-               best_start = run_start;
+               best_free = f8;
+               best      = s;
             }
          }
-         if (best_len)
+         if (best != UINT32_MAX)
          {
-            _segs[best_start].state.store(SEG_OWNED, std::memory_order_relaxed);
+            _segs[best].state.store(SEG_OWNED, std::memory_order_relaxed);
             _stats.segments_reused.fetch_add(1, std::memory_order_relaxed);
-            return best_start;
+            return best;
          }
          return grow_locked_();
       }

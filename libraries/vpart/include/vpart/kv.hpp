@@ -45,6 +45,11 @@ namespace vpart::kv
       // When false, no drain thread is spawned: every committed chain drains
       // synchronously on the writer after commit (identical semantics).
       bool           background_release      = true;
+      // Segment-reuse bar: only segments at least this empty are reclaimed
+      // for the write window; emptier = more bump-like allocation. Dan:
+      // standalone expects 50%; the DELTA role (tiered) overrides to 80%
+      // (flush+retire drains segments nearly clean there).
+      double         reuse_threshold         = 0.50;
    };
 
    // ELEGANT value mode: the leaf IS the value (raw bytes sized to the data);
@@ -537,7 +542,7 @@ namespace vpart::kv
          // COW churn frees whole generations but long-lived survivors pepper
          // old segments; 1/8 keeps the can-this-segment-serve-allocs
          // guarantee while reclaiming aggressively.
-         c.reuse_threshold = 0.125;
+         c.reuse_threshold = cfg.reuse_threshold;
          return c;
       }
 

@@ -451,12 +451,16 @@ namespace tiered
                   cur.next();
                }
                btx.commit();
+               _base_epoch.fetch_add(1, std::memory_order_release);  // re-seat cached base cursors
                n += in_tx;
                more = !cur.is_end();
             }
-            _retire_floor.store(F, std::memory_order_release);
-            _retire_resume.clear();  // pump restarts from the smallest key
-            _retire_live.store(true, std::memory_order_release);
+            {
+               std::lock_guard rg(_retire_m);  // pump reads resume/floor under the same lock
+               _retire_floor  = F;
+               _retire_resume.clear();  // pump restarts from the smallest key
+               _retire_live.store(true, std::memory_order_release);
+            }
             _unflushed.store(0, std::memory_order_relaxed);
             return n;
          }
@@ -469,7 +473,14 @@ namespace tiered
          {
             std::filesystem::create_directories(dir / "delta");
             std::filesystem::create_directories(dir / "base");
-            _w = W::database::open(dir / "delta", mode, cfg.wcfg);
+            auto wcfg = cfg.wcfg;
+            // Delta role (Dan): flush+retire drains segments nearly clean, so
+            // only near-empty segments are worth reusing — 80% bar keeps
+            // allocation bump-like (long runs, virgin locality). Standalone
+            // W keeps its own default (50%).
+            if constexpr (requires { wcfg.reuse_threshold; })
+               wcfg.reuse_threshold = 0.80;
+            _w = W::database::open(dir / "delta", mode, wcfg);
             _b = B::database::open(dir / "base", mode, cfg.bcfg);
             if (_k.background)
                _merger = std::thread([this] { merge_loop_(); });
@@ -485,8 +496,16 @@ namespace tiered
          {
             if (!_bget_rs)
                _bget_rs = _b->start_read_session();
-            if (!_bget_cur)
+            // The cached cursor pins ONE base root: it must be re-seated every
+            // time the merger publishes, or post-retire reads see PRE-FLUSH
+            // values (caught by the bank balance check: stale reads inflate).
+            const uint64_t e = _base_epoch.load(std::memory_order_acquire);
+            if (!_bget_cur || _bget_epoch != e)
+            {
+               _bget_cur.reset();
                _bget_cur.emplace(_bget_rs->create_cursor(0));
+               _bget_epoch = e;
+            }
             return _bget_cur->get(k, std::forward<F>(f));
          }
          // Writer-side retire pump (the writer thread calls this at commit
@@ -495,9 +514,13 @@ namespace tiered
          {
             if (!_retire_live.load(std::memory_order_acquire))
                return;
-            // collect the next sorted batch of candidate keys from a snapshot
+            // collect the next sorted batch of candidate keys from a snapshot;
+            // resume/floor are shared with the merger's arm step -> same lock
+            uint32_t F;
             _pump_keys.clear();
             {
+               std::lock_guard rg(_retire_m);
+               F        = _retire_floor;
                auto rs  = _w->start_read_session();
                auto cur = rs->create_cursor(0);
                bool ok  = _retire_resume.empty() ? cur.seek_begin()
@@ -516,7 +539,6 @@ namespace tiered
                }
                _retire_resume = _pump_keys.back();
             }
-            const uint32_t F  = _retire_floor.load(std::memory_order_acquire);
             auto           tx = ws._ws->start_transaction(0);
             for (const auto& k : _pump_keys)
                tx.remove_if_older(k, F);  // rewritten-after-F keys stay (the cache band)
@@ -541,12 +563,15 @@ namespace tiered
          std::shared_ptr<typename B::database> _b;
          knobs                                 _k;
          std::atomic<uint64_t>                 _unflushed{0};
-         std::atomic<uint32_t>                 _retire_floor{0};
+         std::mutex                            _retire_m;  // floor/resume handoff (merger <-> pump)
+         uint32_t                              _retire_floor = 0;
          std::atomic<bool>                     _retire_live{false};
          std::string                           _retire_resume;
          std::vector<std::string>              _pump_keys;  // writer-thread scratch
          std::shared_ptr<typename B::read_session>        _bget_rs;   // writer-thread base reads
          std::optional<typename B::cursor>                _bget_cur;
+         std::atomic<uint64_t>                            _base_epoch{0};
+         uint64_t                                         _bget_epoch = 0;
          std::thread             _merger;
          std::mutex              _m;
          std::condition_variable _cv;

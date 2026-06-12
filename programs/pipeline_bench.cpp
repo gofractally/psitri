@@ -89,6 +89,7 @@ namespace
       bool     matrix    = false;      // Phase B chunk-size matrix
       bool     repin     = false;      // re-pin a fresh snapshot per chunk (drain advances mid-flush)
       bool     qos       = false;      // flusher thread at QOS_CLASS_UTILITY (writer keeps the P-cores)
+      uint64_t pace      = 0;          // flusher target keys/s (0 = flat out); drain only as fast as needed
    };
 
    uint64_t now_us()
@@ -117,6 +118,8 @@ int main(int argc, char** argv)
          o.repin = true;
       else if (eq("--qos"))
          o.qos = true;
+      else if (eq("--pace") && i + 1 < argc)
+         o.pace = std::strtoull(argv[++i], nullptr, 10);
    }
    printf("=== pipeline_bench: vpart hot delta -> heart bulk flush ===\n");
    printf("keys=%" PRIu64 " sustain=%" PRIu64 " chunk=%" PRIu64 "\n\n", o.keys, o.sustain,
@@ -183,6 +186,14 @@ int main(int argc, char** argv)
          }
          tx.commit();
          n += in_tx;
+         if (o.pace)
+         {  // duty-cycle the flusher: drain at the TARGET rate, not flat out —
+            // every cycle it does not spend on memory traffic belongs to the writer
+            const double want = double(n) / double(o.pace);
+            const double have = secs(t0, clk::now());
+            if (want > have)
+               std::this_thread::sleep_for(std::chrono::duration<double>(want - have));
+         }
          more = !cur->is_end();
          if (more && repin)
          {  // drop the pin between chunks: the drain floor advances while we flush
@@ -243,6 +254,8 @@ int main(int argc, char** argv)
       printf("Phase C  sustained writer   : %9.0f tx/s  (flusher concurrent: %9.0f keys/s)%s%s\n",
              wn / secs(t0, t1), fl_keys.load() / fl_secs, o.repin ? " [repin]" : "",
              o.qos ? " [qos]" : "");
+      if (o.pace)
+         printf("         (flusher paced to %" PRIu64 " keys/s)\n", o.pace);
       printf("         vpart arena after C: %.0f MB (%u segments)\n",
              double(vdb->store().num_segments()) * 8.0, vdb->store().num_segments());
    }

@@ -71,6 +71,8 @@ int main(int argc, char** argv)
    TK::config cfg;
    if (const char* mb = getenv("TIERED_HI_WATER_MB"))
       cfg.knobs.hi_water_bytes = strtoull(mb, nullptr, 10) << 20;
+   if (const char* ab = getenv("TIERED_ARENA_MB"))
+      cfg.knobs.arena_budget_bytes = strtoull(ab, nullptr, 10) << 20;
    auto db  = TK::database::open(dir, sal::open_mode::create_or_open, cfg);
    auto ws  = db->start_write_session();
    auto rs  = db->start_read_session();

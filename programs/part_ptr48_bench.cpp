@@ -146,6 +146,8 @@ struct part_alloc6
    }
 
    static constexpr bool hkv_cow = true;
+   bool    defer = false;  // no background releaser in this bench
+   bool    hkv_defer(uint32_t raw) noexcept { return defer && a->try_defer(raw); }
    uint8_t hkv_ref(uint32_t line) const noexcept { return a->ref(line); }
    bool    hkv_retain(uint32_t line) noexcept { return a->retain(line); }
    template <class D>

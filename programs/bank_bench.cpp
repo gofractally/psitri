@@ -1135,6 +1135,8 @@ class TieredEngine : public BankEngine
          cfg.wcfg.sync_mode = sal::sync_type::none;
       if (const char* mb = getenv("TIERED_HI_WATER_MB"))
          cfg.knobs.hi_water_bytes = strtoull(mb, nullptr, 10) << 20;
+      if (const char* ab = getenv("TIERED_ARENA_MB"))
+         cfg.knobs.arena_budget_bytes = strtoull(ab, nullptr, 10) << 20;
       printf("  Tiered knobs: hi_water=%llu MB (retire = merger-side subtree detach)\n",
              (unsigned long long)(cfg.knobs.hi_water_bytes >> 20));
       _db  = TK::database::open(path, sal::open_mode::create_or_open, cfg);

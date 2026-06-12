@@ -269,6 +269,22 @@ else()
     set(HEART_BUILD_TESTS ${BUILD_TESTS})
 endif()
 
+# ── psio: REQUIRED serialization layer (Dan, 2026-06-12) ─────────────────────
+# Consumed per psio docs/dependency-pattern.md §6b. Co-development default:
+# the local checkout at ~/gofractally/psio when present; override with
+# FETCHCONTENT_SOURCE_DIR_PSIO, or unset to fetch the pinned revision.
+include(FetchContent)
+if(NOT DEFINED FETCHCONTENT_SOURCE_DIR_PSIO AND EXISTS "$ENV{HOME}/gofractally/psio/cpp/CMakeLists.txt")
+    set(FETCHCONTENT_SOURCE_DIR_PSIO "$ENV{HOME}/gofractally/psio")
+    message(STATUS "psio: co-developing against ${FETCHCONTENT_SOURCE_DIR_PSIO}")
+endif()
+FetchContent_Declare(psio
+    GIT_REPOSITORY https://github.com/gofractally/psio.git
+    GIT_TAG        main
+    SOURCE_DIR     ${CMAKE_SOURCE_DIR}/external/psio
+    SOURCE_SUBDIR  cpp)
+FetchContent_MakeAvailable(psio)
+
 add_subdirectory(libraries/sal)
 add_subdirectory(libraries/psitri)
 add_subdirectory(libraries/hash)

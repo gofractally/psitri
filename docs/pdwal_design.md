@@ -1,6 +1,11 @@
 # WALART — part-backed Delta WAL over a heart base
 
-Status: DESIGN (2026-06-11, rev 2 after Dan's review). No code.
+Status: DESIGN (2026-06-11, rev 2 after Dan's review). Walart v1 was built
+and bank-validated from this spec. **The W/S/H 3-root shape is SUPERSEDED
+for the vpart pipeline** by `unified_tier_design.md` §7-L5 (2026-06-12):
+vpart's stamps collapse the stolen root into a version floor on one tree —
+no steal, 2-tier reads (latest = vpart ∪ base, stable = base only). The
+gap list (§5), landmines, and measured numbers below remain authoritative.
 **Packaging decision: walart is a WRAPPER layer over heart + part** (exactly as
 dwal wraps psitri) — heart stays a clean single-writer COW page engine, part
 stays a clean delta store; walart owns the W/S/H protocol, view composition,

@@ -578,12 +578,80 @@ attribution honest).
   W retire. Gates: the migration differential test (§4) under fuzz; pins
   surviving migration mid-iteration (cursor refresh path).
 
-### L5 — vwalart: lazy tiered composition
-- walart shape on vpart (W) + vheart (H); demoter with settled-first +
-  pressure setpoints; **3-tier merge cursor** (closes walart's kv_engine
-  cursor gap → the engine-recursion static_assert is the finish line).
-- Gates: kv-compat over the composition; bank + TATP A/B vs dwal and
-  walart-today; write-amp accounting (bytes to cold tier / bytes written).
+### L5 — tiered pipeline: vpart hot delta over heart/psitri (LOCKED 2026-06-12, Dan)
+
+Supersedes walart's W/S/H 3-root shape (docs/pdwal_design.md §1): stamps
+collapse the stolen root. There is ONE vpart tree and TWO version floors —
+no separate S tree, no 3-tier reads, no steal machinery.
+
+**Model.** vpart(dense) is the accumulated delta over the base: every write
+since its data last retired, plus a write-recency cache band. Two floors
+partition it logically:
+- **Merge floor F** — the merger pins the committed snapshot at F (free:
+  committed roots are immutable under cross-commit always-COW), iterates it
+  in key order, applies to the base in big sorted bulk transactions, and
+  publishes the base root once per chunk. The snapshot iteration IS the
+  dedup: exactly one version per key reaches the merger (overwrites already
+  collapsed; old-version garbage went to the drain, never to the merger).
+  Dedup × sorted-bulk amortization (each base path/leaf COW'd once per
+  chunk, not once per key) is the keep-up argument — LSM compaction
+  economics with the WAL deleted.
+- **Retire floor R ≤ F** — after the base root containing F publishes, any
+  key whose newest stamp ≤ F is provably identical in the base; removing it
+  from vpart is correctness-free at any moment. The band (R, F] = merged-
+  but-retained keys = the hot cache, for free. Eviction policy = how fast R
+  chases F (write-recency retention; reads never write heat bits).
+
+**Sizing (Dan, tunable config):** arena budget **4 GB**; hi-water trigger
+**3 GB** → flush **1 GB** of oldest delta. Retire in big chunks — target
+**10M keys per merge/retire chunk** — to maximize base bulk performance,
+**as long as no snapshots are pinned**; under pins, defer big retires (the
+bytes cannot drain below the pin anyway). Hard wall = the 4 B line_ptr
+address space (28-bit index = 32 GB arena); stamp-horizon proximity (§8.3)
+is the aging backstop. Soft limit only — the writer never stalls short of
+true address exhaustion.
+
+**Reads — two views, two cursors:**
+- `latest`: vpart-first point reads (hot keys never pay the base's
+  indirection; ~40 ns rand hit) falling through on miss; ranges via the
+  2-tier merge cursor (slower except over recently written ranges).
+- `stable`: one plain cursor on the last published base root; staleness
+  bounded by merge cadence.
+
+**Retirement mechanics.** The merger emits the sorted key ranges it merged;
+the writer applies sorted retire batches at transaction boundaries (bounded
+per commit — the recycle-ring idiom). Sorted removes share path clones
+across each batch and walk regions still cache-warm from the merge read;
+cost ∝ retired bytes, not live bytes. v2: routers carry a max-child-stamp
+hint in header slack (max() on the write path) so a subtree with max ≤ R
+unlinks in ONE txn (path mutation + cascade release). v3 (off by default,
+own bench): reader→writer SPSC promote ring turns vpart into a read cache
+for long-cold keys.
+
+**Tombstones** exist only in diff mode: encoded values per §2.8, mask the
+base in `latest`, applied as base removes at merge, never enter the base,
+retire with their floor.
+
+**Durability & crash.** No WAL: a committed vpart root is the durable,
+already-applied state. Recovery = adopt vpart root + base root + merged
+watermark; re-merge from the watermark is idempotent (upsert/remove at
+same values), so a crash between base publish and watermark advance is
+harmless. The watermark lives in a vpart root slot beside the version.
+
+**Composition.** `tiered_kv<W, Base>` templated on psitri::dwal::kv_engine
+(fully static, no virtuals — composes with ~zero overhead). Base bias =
+heart, with psitri's numbers kept in sight through the same differential
+harness: at bank batch 100k psitri took the lead over heart and won solo
+reads; at smaller batches heart had the definitive edge — so the merge
+chunk size × base bench matrix picks the operating point empirically.
+Prerequisites: vpart kv_engine cursor conformance (seek_last/prev/is_rend;
+task #17) and diff-mode tombstones.
+
+- Gates: kv-compat over the composition; `latest` writes ≥ ~90% of raw
+  vpart on bank; merger keep-up under sustained bank load (writer tx/s +
+  merger lag + arena high-water curves); bank + TATP A/B vs dwal and
+  walart; write-amp accounting (bytes to cold tier / bytes written);
+  crash-fuzz the pair (gating, as it was for walart).
 
 ### L6 — tagged dual allocation (deferred until L1–L5 prove the substrate)
 - The per-branch direct/indirect hybrid + COW-time placement. Requires the

@@ -48,3 +48,26 @@ All runs validate: balances, log entries, account counts exact.
   read fast.
 - artmap reference: 1.32M tx/s writes = the in-memory ceiling (no durability,
   no freeset, bump-only); reads BELOW both (std::string leaf values indirect).
+
+## Round 3: honest artmap layout + the versioning-cost ladder
+
+ArtMapEngine fixed to INLINE value bytes (upsert_inline; same-size updates
+overwrite in place — the std::string layout paid a heap hop per read and a
+heap alloc per update). ARTMAP_VERSIONED=1 mints a COW boundary per batch
+(isolates versioning cost; no reclamation exists, so it cannot run 10M txns —
+the bump arena exhausts at ~2.5M: reclamation is not optional at bank scale).
+
+WRITES (tx/s)                                   READS solo (reads/s)
+  artmap inline, NO versioning   1,679,023        vpart           5,745,513
+  artmap versioned (transient,     ~680-830k      artmap inline   5,411,585
+    no reclaim, OOMs at 2.5M)                     part            4,652,108
+  part                             356,562        heart           4,182,685
+  vpart                            328,780
+  heart                            263,209
+
+Reading the ladder: persistence is the OS (mmap, sync=none) — NOT the gap.
+Version-per-txn COW costs ~2x even on a pure bump arena (1.68M -> ~750k);
+the durable allocator + clone-log + drain + implicit whole-node clones cost
+the next ~2.2x (750k -> 329k). vpart READS exceed the transient in-memory
+art_map — the dispatch contract is more than met; the write levers are the
+allocator path and the wide-router clone volume (placement/L1c).

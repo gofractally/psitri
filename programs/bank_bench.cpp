@@ -2414,9 +2414,31 @@ class TidesDbEngine : public BankEngine
 
 // art::art_map (Dan's in-memory ART, heap arena) — single-thread baseline,
 // same contract as the libart engine: no transactions, immediate visibility.
+// Value bytes live INLINE in the leaf (upsert_inline) — no std::string heap
+// hop on reads, no per-update heap traffic: the honest node layout.
 class ArtMapEngine : public BankEngine
 {
-   using map_t = art::art_map<std::string, art::heap_arena>;
+   struct bv
+   {
+      uint32_t len;
+   };  // value bytes follow the struct inside the leaf allocation
+   static std::string_view val_of_(const bv* v) noexcept
+   {
+      return {reinterpret_cast<const char*>(v + 1), v->len};
+   }
+   // single-thread contract (cow_seq 0): same-size updates overwrite the
+   // leaf's inline bytes in place — matching the in-place semantics the
+   // std::string layout had — and only a size CHANGE reallocates the leaf.
+   void put_(const std::string& k, std::string_view bytes)
+   {
+      if (bv* v = _m->get(k); v && v->len == bytes.size())
+      {
+         std::memcpy(reinterpret_cast<char*>(v + 1), bytes.data(), bytes.size());
+         return;
+      }
+      _m->upsert_inline(k, bv{uint32_t(bytes.size())}, bytes);
+   }
+   using map_t = art::art_map<bv, art::heap_arena>;
    std::unique_ptr<map_t> _m;
 
   public:
@@ -2430,9 +2452,16 @@ class ArtMapEngine : public BankEngine
    {
       auto bal = encode_balance(balance);
       for (auto& acct : accounts)
-         _m->insert(acct, bal);
+         _m->upsert_inline(acct, bv{uint32_t(bal.size())}, bal);  // fresh keys
    }
-   void begin_batch() override {}
+   // ARTMAP_VERSIONED=1: mint a COW boundary per batch (upserts path-copy
+   // against the previous generation) — isolates versioning cost from the
+   // allocator. No reclamation exists, so size the run to the bump arena.
+   void begin_batch() override
+   {
+      if (getenv("ARTMAP_VERSIONED"))
+         _m->bump_cow_seq();
+   }
    void commit_batch() override {}
    void sync() override {}
 
@@ -2441,19 +2470,21 @@ class ArtMapEngine : public BankEngine
                  uint64_t           amount,
                  uint64_t           seq) override
    {
-      auto si = _m->find(src);
-      if (si == _m->end())
+      const bv* sv = _m->get(src);
+      if (!sv)
          return false;
-      const uint64_t src_bal = decode_balance(si.value().data(), si.value().size());
+      const auto     svv     = val_of_(sv);
+      const uint64_t src_bal = decode_balance(svv.data(), svv.size());
       if (src_bal < amount)
          return false;
-      auto di = _m->find(dst);
-      if (di == _m->end())
+      const bv* dv = _m->get(dst);
+      if (!dv)
          return false;
-      const uint64_t dst_bal = decode_balance(di.value().data(), di.value().size());
-      _m->insert(src, encode_balance(src_bal - amount));
-      _m->insert(dst, encode_balance(dst_bal + amount));
-      _m->insert(encode_log_key(seq), encode_log_value(src, dst, amount));
+      const auto     dvv     = val_of_(dv);
+      const uint64_t dst_bal = decode_balance(dvv.data(), dvv.size());
+      put_(src, encode_balance(src_bal - amount));
+      put_(dst, encode_balance(dst_bal + amount));
+      put_(encode_log_key(seq), encode_log_value(src, dst, amount));
       return true;
    }
 
@@ -2467,17 +2498,21 @@ class ArtMapEngine : public BankEngine
    }
    bool read_account(const std::string& key, uint64_t& balance_out) override
    {
-      auto it = _m->find(key);
-      if (it == _m->end())
+      const bv* v = _m->get(key);
+      if (!v)
          return false;
-      balance_out = decode_balance(it.value().data(), it.value().size());
+      const auto vv = val_of_(v);
+      balance_out   = decode_balance(vv.data(), vv.size());
       return true;
    }
    uint64_t scan_all(std::function<void(const std::string&, uint64_t)> visitor) override
    {
       uint64_t n = 0;
       for (auto it = _m->begin(); it != _m->end(); ++it, ++n)
-         visitor(std::string(it.key()), decode_balance(it.value().data(), it.value().size()));
+      {
+         const auto vv = val_of_(&it.value());
+         visitor(std::string(it.key()), decode_balance(vv.data(), vv.size()));
+      }
       return n;
    }
 };

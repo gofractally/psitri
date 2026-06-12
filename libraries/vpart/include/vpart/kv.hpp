@@ -72,6 +72,33 @@ namespace vpart::kv
 
    class database;
 
+   // Refcounted handle to a FROZEN version root (the smart_ptr/"tree_root"
+   // equivalent): copy freely across threads; the tree stays alive while any
+   // handle (merger, reader warm legs) exists; the LAST drop enqueues the
+   // root for vpart's own REAPER thread — garbage collection is built into
+   // vpart, never a caller responsibility.
+   class tree_root
+   {
+     public:
+      tree_root() = default;
+      uint32_t version() const noexcept { return _c ? _c->vf : 0; }
+      uint32_t root_raw() const noexcept { return _c ? _c->raw : 0; }
+      explicit operator bool() const noexcept { return bool(_c); }
+      void     reset() noexcept { _c.reset(); }
+
+     private:
+      friend class database;
+      friend class write_session;
+      struct ctrl
+      {
+         database* db;
+         uint32_t  vf, raw;
+         ~ctrl();  // last handle dropped -> reaper queue
+      };
+      explicit tree_root(std::shared_ptr<ctrl> c) : _c(std::move(c)) {}
+      std::shared_ptr<ctrl> _c;
+   };
+
    // Snapshot cursor: a version pin (reader slot publishing version<<32|root)
    // + a non-owning view tree + an hkv iterator. The dtor clears the slot;
    // reclamation is the drain thread's job (floor rule) — readers never free.
@@ -289,13 +316,14 @@ namespace vpart::kv
       // Rotation (Dan's double buffer): freeze the last committed delta as
       // the WARM tree and continue on a NEWBORN EMPTY hot tree. Publishes the
       // reset as a new version; the warm (version, root) persists in root
-      // slots 2/3 until release_warm() so a crash re-flushes it (idempotent).
-      // Caller holds the writer serialization. Returns {V_f, warm_root_raw}.
-      std::pair<uint32_t, uint32_t> freeze_and_reset();
-      // After the warm tree is durably flushed to the base: clear the slots
-      // and deep-log the warm root — the DRAIN frees the whole tree once no
-      // reader version-ref holds it (per-version release).
-      void release_warm(uint32_t warm_root_raw);
+      // slots 2/3 until clear_warm_slots() so a crash re-flushes it. Caller
+      // holds the writer serialization. Returns the refcounted HANDLE — the
+      // tree lives while any handle exists; the last drop wakes the reaper.
+      tree_root freeze_and_reset();
+      // After the warm tree is durably flushed to the base: clear the
+      // crash-recovery slots (the tree itself is reclaimed by the REAPER when
+      // the last tree_root handle drops — GC lives in vpart, not callers).
+      void clear_warm_slots();
       tree        get_root(uint32_t root_index)
       {
          (void)root_index;
@@ -368,9 +396,15 @@ namespace vpart::kv
 
       ~database()
       {
-         // clean shutdown: stop and join the drain thread FIRST (single
-         // consumer), then drain every committed chain (no readers remain by
-         // contract, so the floor is the last committed version).
+         // clean shutdown: reaper first (eats any last dead roots), then the
+         // drain, then the final inline sweeps.
+         {
+            std::lock_guard g(_dead_mx);
+            _reaper_stop = true;
+         }
+         _dead_cv.notify_one();
+         if (_reaper.joinable())
+            _reaper.join();
          _drain_stop.store(true, std::memory_order_release);
          _drain_cv.notify_one();
          if (_drain_thread.joinable())
@@ -418,6 +452,24 @@ namespace vpart::kv
             std::memcpy(p.b, &r32, 4);
          }
          return p;
+      }
+
+      // Merger-side warm-tree reclamation: WAIT until no reader pins a
+      // version <= vf (the warm boundary), then cascade-free the detached
+      // root INLINE on the calling thread with a reclaim-mode engine. The
+      // single drain thread cannot keep pace cascading multi-GB warm trees
+      // (measured: generations queued behind one deep entry until the 32 GB
+      // wall at 142M keys); the merger is idle between flushes — it frees
+      // what it flushed. Caller must NOT hold the writer lock while waiting.
+      // Crash recovery: wrap an orphaned frozen root (slots 2/3 from a dead
+      // run) in a handle so the normal flush+drop+reap lifecycle applies.
+      tree_root make_orphan_root(uint32_t vf, uint32_t raw)
+      {
+         auto c = std::make_shared<tree_root::ctrl>();
+         c->db  = this;
+         c->vf  = vf;
+         c->raw = raw;
+         return tree_root(std::move(c));
       }
 
       // A crashed rotation leaves the frozen warm tree in root slots 2/3 —
@@ -483,6 +535,7 @@ namespace vpart::kv
          _live.store((uint64_t(_committed) << 32) | uint32_t(v0), std::memory_order_seq_cst);
          if (cfg.background_release)
             _drain_thread = std::thread([this] { drain_loop_(); });
+         _reaper = std::thread([this] { reaper_loop_(); });
       }
 
       uint32_t committed_() const noexcept { return _committed; }
@@ -491,6 +544,58 @@ namespace vpart::kv
       // Last published version — the merge floor F a flusher captures BEFORE
       // pinning its snapshot (F <= pin version: conservative-safe for retire).
       uint32_t committed_version() const noexcept { return _committed; }
+
+     private:
+      friend struct tree_root::ctrl;
+      void reap_root_(uint32_t raw) noexcept
+      {
+         {
+            std::lock_guard g(_dead_mx);
+            _dead_roots.push_back(raw);
+         }
+         _reap_enq.fetch_add(1, std::memory_order_release);
+         _dead_cv.notify_one();
+      }
+      void reaper_loop_() noexcept
+      {
+         engine_t v{part_alloc<bval>(&_arena, /*reclaim=*/true)};
+         // NO ring: _recycle is SPSC with the DRAIN as its sole producer —
+         // a second producer corrupts it (measured: allocation livelock).
+         // Reaper frees go straight to the thread-safe freesets; the writer
+         // reclaims them through claim_.
+         std::unique_lock lk(_dead_mx);
+         for (;;)
+         {
+            _dead_cv.wait(lk, [&] { return _reaper_stop || !_dead_roots.empty(); });
+            if (_reaper_stop && _dead_roots.empty())
+               return;
+            std::vector<uint32_t> work;
+            work.swap(_dead_roots);
+            lk.unlock();
+            for (uint32_t raw : work)
+            {
+               root_ptr wp = root_ptr::null();
+               std::memcpy(wp.b, &raw, 4);
+               if (!wp.is_null())
+                  v.vdrain_entry(raw, 0x80000000u);  // DEEP: cascade the whole tree
+               _reap_done.fetch_add(1, std::memory_order_release);
+            }
+            lk.lock();
+         }
+      }
+
+     public:
+      // tests/shutdown: wait until every enqueued dead root is fully reaped
+      // (queue-empty alone races the cascade running outside the lock)
+      void flush_reaper() noexcept
+      {
+         while (_reap_done.load(std::memory_order_acquire) !=
+                _reap_enq.load(std::memory_order_acquire))
+         {
+            _dead_cv.notify_one();
+            std::this_thread::yield();
+         }
+      }
 
      private:
 
@@ -636,6 +741,12 @@ namespace vpart::kv
       static constexpr uint32_t kRegRing = 1u << 16;  // 512 KB; covers deep pin backlogs
       reg_entry                 _reg[kRegRing];
       std::atomic<uint32_t>     _reg_head{0}, _reg_tail{0};
+      std::mutex                _dead_mx;   // dead version roots -> the reaper
+      std::condition_variable   _dead_cv;
+      std::vector<uint32_t>     _dead_roots;
+      std::atomic<uint64_t>     _reap_enq{0}, _reap_done{0};
+      std::thread               _reaper;
+      bool                      _reaper_stop = false;
       std::mutex                _reg_spill_mx;  // ring-overflow side list (writer never blocks)
       std::vector<reg_entry>    _reg_spill;
       std::mutex                _drain_mx;
@@ -710,7 +821,7 @@ namespace vpart::kv
       return _ws->_db->pin_snapshot();
    }
 
-   inline std::pair<uint32_t, uint32_t> write_session::freeze_and_reset()
+   inline tree_root write_session::freeze_and_reset()
    {
       database*      db   = _db;
       const root_ptr warm = _t.root_handle();
@@ -731,25 +842,25 @@ namespace vpart::kv
          db->_live.store((uint64_t(v) << 32) | uint32_t(root_ptr::null().raw()),
                          std::memory_order_seq_cst);
       }
-      return {vf, wraw};
+      auto c = std::make_shared<tree_root::ctrl>();
+      c->db  = db;
+      c->vf  = vf;
+      c->raw = wraw;
+      return tree_root(std::move(c));
+   }
+   inline tree_root::ctrl::~ctrl()
+   {
+      db->reap_root_(raw);
    }
 
-   inline void write_session::release_warm(uint32_t warm_root_raw)
+   inline void write_session::clear_warm_slots()
    {
       database* db = _db;
-      {
-         std::lock_guard g(db->_root_mx);
-         db->_arena.set_root(2, uint32_t(root_ptr::null().raw()));
-         db->_arena.set_root(3, 0);
-      }
-      // deep-log the warm root inside a txn: the drain cascades the whole
-      // tree once the floor passes every reader still holding its versions
-      root_ptr wp = root_ptr::null();
-      std::memcpy(wp.b, &warm_root_raw, 4);
-      auto tx = start_transaction(0);
-      _t.release_root(wp);
-      tx.commit();
+      std::lock_guard g(db->_root_mx);
+      db->_arena.set_root(2, uint32_t(root_ptr::null().raw()));
+      db->_arena.set_root(3, 0);
    }
+
 
    inline void transaction::upsert(key_view k, value_view v)
    {

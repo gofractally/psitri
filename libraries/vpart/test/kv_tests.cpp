@@ -591,3 +591,76 @@ TEST_CASE("cursor bidirectional: seek_last/prev/rend conform to std::map order")
       REQUIRE(cur.is_rend());
    }
 }
+
+TEST_CASE("tree_root: refcounted version roots — held trees live, last drop reaps exactly")
+{
+   auto dir = fs::temp_directory_path() / "part_kv_treeroot";
+   fs::remove_all(dir);
+   auto db  = vpart::kv::database::create(dir);
+   auto ses = db->start_write_session();
+
+   // ── fill the delta, then freeze it behind a handle ──
+   std::map<std::string, std::string> frozen;
+   {
+      auto tx = ses->start_transaction(0);
+      for (int i = 0; i < 20000; ++i)
+      {
+         auto k    = "frozen/" + std::to_string(i * 7919 % 100000);
+         frozen[k] = "v" + k;
+         tx.upsert(k, frozen[k]);
+      }
+      tx.commit();
+   }
+   vpart::kv::tree_root h1 = ses->freeze_and_reset();
+   REQUIRE(bool(h1));
+   REQUIRE(h1.version() > 0);
+
+   // hot tree is NEWBORN: independent of the frozen one
+   {
+      auto tx = ses->start_transaction(0);
+      tx.upsert("hot/alpha", "a");
+      tx.commit();
+   }
+   {
+      auto rs  = db->start_read_session();
+      auto hot = rs->create_cursor(0);
+      REQUIRE(hot.get<std::string>("hot/alpha").value() == "a");
+      REQUIRE_FALSE(hot.get<std::string>(frozen.begin()->first).has_value());
+   }
+
+   // ── the frozen tree reads correctly through ANY holder, cross-thread ──
+   auto check_frozen = [&](const vpart::kv::tree_root& h) {
+      auto cur = db->pin_at(h.version(), h.root_raw());
+      int  n   = 0;
+      for (auto& [k, v] : frozen)
+      {
+         if (++n > 500)
+            break;  // sample
+         REQUIRE(cur.get<std::string>(k).value() == v);
+      }
+   };
+   check_frozen(h1);
+   vpart::kv::tree_root h2 = h1;  // second holder
+   h1.reset();                    // first drop: tree must SURVIVE (h2 lives)
+   check_frozen(h2);
+   {
+      std::thread t([&] { check_frozen(h2); });  // handles cross threads
+      t.join();
+   }
+
+   // ── last drop -> the reaper reclaims the whole frozen tree ──
+   h2.reset();
+   db->flush_reaper();
+   db->flush_releases();
+   // everything the frozen tree held is back: only the 1-key hot tree (and
+   // its bounded COW residue) remains allocated
+   vpart::arena& a          = db->store();
+   uint64_t      free_total = 0, cap = 0;
+   for (uint32_t s = 0; s < a.num_segments(); ++s)
+   {
+      free_total += a.freeset_of(s).free_lines();
+      cap += vpart::lines_per_segment;
+   }
+   const uint64_t used = cap - free_total;
+   REQUIRE(used < 2000);  // 20k-key tree was ~10k+ lines; hot tree is ~tens
+}

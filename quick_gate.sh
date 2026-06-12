@@ -4,7 +4,7 @@
 # times: it's the machinery (freeze/flush/release/3-way reads) under test,
 # not the scale. Full-scale runs are milestone-only.
 set -e
-B=${B:-$(pwd)/build/release/bin}
+B=${B:-$(cd "$(dirname "$0")" && pwd)/build/release/bin}
 OUT=/tmp/qgate; rm -rf $OUT; mkdir -p $OUT; cd /tmp
 # bank: 100k accts / 1M txns, hi_water 8MB -> dozens of rotations mid-load
 d=/tmp/qg_bank; rm -rf $d; mkdir -p $d; cd $d

@@ -54,11 +54,18 @@ namespace tiered
       // The double-buffer rotation needs W's freeze/release/pin primitives
       // (Dan's design: cutoff at flush start — the flusher owns an IMMUTABLE
       // warm tree, the writer owns a newborn hot tree; nobody shares).
-      static_assert(requires(typename W::write_session& ws, uint32_t r) {
-                       { ws.freeze_and_reset() } -> std::convertible_to<std::pair<uint32_t, uint32_t>>;
-                       ws.release_warm(r);
+      // Rotation rides W's refcounted version-root handles: freeze returns a
+      // tree_root; holders (merger, reader warm legs) just copy/drop it and
+      // W's OWN reaper reclaims on the last drop (Dan: GC is vpart's job).
+      using warm_root_t = decltype(std::declval<typename W::write_session&>().freeze_and_reset());
+      static_assert(requires(warm_root_t& h) {
+                       { h.version() } -> std::convertible_to<uint32_t>;
+                       { h.root_raw() } -> std::convertible_to<uint32_t>;
+                       { bool(h) };
                     },
-                    "W must expose freeze_and_reset/release_warm — the rotation primitives");
+                    "W's freeze_and_reset must return a refcounted tree_root handle");
+      static_assert(requires(typename W::write_session& ws) { ws.clear_warm_slots(); },
+                    "W must expose clear_warm_slots (crash-recovery marker)");
       static_assert(requires(typename W::database& d, uint32_t v, uint32_t r) {
                        { d.pin_at(v, r) } -> std::same_as<typename W::cursor>;
                        { d.pending_warm() } -> std::convertible_to<std::pair<uint32_t, uint32_t>>;
@@ -250,9 +257,10 @@ namespace tiered
              : _w(std::move(wc)), _b(std::move(bc))
          {
          }
-         cursor(typename W::cursor&& wc, typename W::cursor&& mc,
+         template <class H>
+         cursor(typename W::cursor&& wc, typename W::cursor&& mc, H&& mh,
                 typename B::cursor&& bc)  // latest with a WARM leg (flush in flight)
-             : _w(std::move(wc)), _m(std::move(mc)), _b(std::move(bc))
+             : _w(std::move(wc)), _m(std::move(mc)), _mh(std::forward<H>(mh)), _b(std::move(bc))
          {
          }
          static bool tomb_(const typename W::cursor& c)
@@ -362,6 +370,7 @@ namespace tiered
          }
          std::optional<typename W::cursor> _w;  // hot leg; absent = stable view
          std::optional<typename W::cursor> _m;  // WARM leg (flush in flight)
+         warm_root_t _mh;  // keeps the warm tree alive: the reaper counts handles
          typename B::cursor                _b;
          bool _on_w = false, _on_m = false, _on_b = false, _rend = false;
       };
@@ -378,7 +387,7 @@ namespace tiered
             if (_db->_warm_active)
                return cursor(_wrs->create_cursor(0),
                              _db->_w->pin_at(_db->_warm_vf, _db->_warm_root),
-                             _brs->create_cursor(0));
+                             _db->_warm_handle, _brs->create_cursor(0));
             return cursor(_wrs->create_cursor(0), _brs->create_cursor(0));
          }
 
@@ -443,7 +452,7 @@ namespace tiered
                return true;
             if (dead)
                return false;
-            if (_db->warm_get_(_warm, k, hit, dead, f))
+            if (_db->warm_get_(_warm, _warm_h, k, hit, dead, f))
                return hit && !dead ? true : hit;
             if (dead)
                return false;
@@ -468,6 +477,7 @@ namespace tiered
          write_session*                     _ws;
          std::unique_lock<std::mutex>       _lk;  // writer serialization (user <-> merger)
          mutable std::optional<typename W::cursor> _warm;  // lazy warm leg (this txn)
+         mutable warm_root_t                        _warm_h;  // keeps it alive
          std::optional<typename W::transaction>    _tx;
          std::string                        _buf;  // envelope scratch (amortized)
          uint64_t                           _bytes = 0;
@@ -533,27 +543,22 @@ namespace tiered
             // the writer to a newborn hot tree — the flusher owns an
             // IMMUTABLE tree, the writer owns a private one; nobody shares a
             // mutating delta (the in-place retire WAS the write-amp).
-            uint32_t vf = 0, wroot = 0;
+            warm_root_t handle;
+            uint32_t    vf = 0, wroot = 0;
             {
                std::scoped_lock lk(_writer_m, _rot_m);
-               // crashed-rotation recovery: a pending warm from a previous run
-               auto pend = _w->pending_warm();
-               if (pend.first && !_warm_active)
-               {
-                  vf    = pend.first;
-                  wroot = pend.second;
-               }
-               else if (!_warm_active)
-               {
-                  auto fr = _wws->freeze_and_reset();
-                  vf      = fr.first;
-                  wroot   = fr.second;
-               }
-               else
+               if (_warm_active)
                   return 0;  // a flush is already in flight
+               if (auto pend = _w->pending_warm(); pend.first)
+                  handle = _w->make_orphan_root(pend.first, pend.second);  // crashed run
+               else
+                  handle = _wws->freeze_and_reset();
+               vf     = handle.version();
+               wroot  = handle.root_raw();
                _warm_active = true;
                _warm_vf     = vf;
                _warm_root   = wroot;
+               _warm_handle = handle;  // reader warm legs copy THIS
             }
             // master pin: holds the floor <= vf for every reader warm leg.
             // optional: it MUST drop before the final writer-lock acquisition
@@ -587,15 +592,21 @@ namespace tiered
                more = !warm->is_end();
             }
             warm.reset();  // DROP the floor pin before touching _writer_m
-            // the warm data is durable in B: retire the WHOLE tree. New
-            // readers stop getting warm legs; existing warm pins keep the
-            // drain floor low until they finish (per-version release).
+            // the warm data is durable in B: stop handing out warm legs and
+            // clear the crash slots, then cascade-free the tree INLINE on
+            // this (merger) thread once every warm reader is gone — the
+            // drain thread cannot keep pace with multi-GB tree cascades
+            // (measured: generation backlog to the 32 GB wall at 142M keys).
             {
                std::scoped_lock lk(_writer_m, _rot_m);
                _warm_active = false;
-               _wws->release_warm(wroot);
+               _warm_handle.reset();  // OUR ref; readers may still hold theirs
+               _wws->clear_warm_slots();
             }
             _unflushed.store(0, std::memory_order_relaxed);
+            // `handle` (this frame's copy) drops at return: when the LAST
+            // holder (reader warm legs included) lets go, W's reaper frees
+            // the tree — the merger does no garbage collection (Dan).
             return n;
          }
 
@@ -633,14 +644,15 @@ namespace tiered
          // warm-leg point get for the writer's 3-way cursor: lazily pin the
          // current warm boundary for THIS transaction; envelope-decoded.
          template <class F>
-         bool warm_get_(std::optional<typename W::cursor>& leg, key_view k, bool& hit,
-                        bool& dead, F&& f)
+         bool warm_get_(std::optional<typename W::cursor>& leg, warm_root_t& legh, key_view k,
+                        bool& hit, bool& dead, F&& f)
          {
             if (!leg)
             {
                std::lock_guard rg(_rot_m);
                if (!_warm_active)
                   return false;
+               legh = _warm_handle;  // hold the tree (reaper counts handles)
                leg.emplace(_w->pin_at(_warm_vf, _warm_root));
             }
             leg->get(k, [&](value_view v) {
@@ -693,9 +705,10 @@ namespace tiered
          knobs                                 _k;
          std::atomic<uint64_t>                 _unflushed{0};
          std::mutex                            _writer_m;  // user txns <-> merger rotation txns
-         std::mutex _rot_m;          // warm-state flips vs reader-leg sampling
-         bool       _warm_active = false;
-         uint32_t   _warm_vf = 0, _warm_root = 0;
+         std::mutex  _rot_m;          // warm-state flips vs reader-leg sampling
+         bool        _warm_active = false;
+         uint32_t    _warm_vf = 0, _warm_root = 0;
+         warm_root_t _warm_handle;
          std::shared_ptr<typename B::read_session>        _bget_rs;   // writer-thread base reads
          std::optional<typename B::cursor>                _bget_cur;
          std::atomic<uint64_t>                            _base_epoch{0};

@@ -756,6 +756,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
                ++count_;
                return true;
             }
+            // FUSED privatize (vpart): clone-if-shared as we descend — ONE walk
+            // owns the path instead of a separate privatize pass. A clone is
+            // content-identical, so grafting eagerly is throw-safe.
+            if constexpr (cow_stamped_)
+               if (alloc_.hkv_vtxn() && cur.tag() != K::value_inline && cow_shared_(cur))
+                  cur = cow_clone_into_(slot, cur);
             const K k = cur.tag();
             // Adaptive: track the deep-narrow signature. Uniform data widens fast
             // (high fanout → lowfan resets), so it never trips; clustered/deep data
@@ -2822,8 +2828,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
       void rm_collapse_(packed_ptr* slot, packed_ptr nd, const uint8_t* pfx, unsigned pl,
                         packed_ptr child) noexcept
       {
-         if (child.tag() == K::setlist_u8)
-         {
+         if (child.tag() == K::setlist_u8 &&
+             !(cow_stamped_ && alloc_.hkv_vtxn() && cow_shared_(child)))
+         {  // in-place absorb requires an OWNED child; shared falls to make_prefix
             setlist*       cs  = static_cast<setlist*>(deref_(child));
             const unsigned cpl = cs->rh.hdr.prefix_len;
             if (cpl + pl <= setlist::PREFIX_CAP)
@@ -3079,7 +3086,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
          };
          for (;;)
          {
-            const packed_ptr cur = *slot;
+            packed_ptr cur = *slot;
+            // FUSED privatize (vpart): own the path in the same walk
+            if constexpr (cow_stamped_)
+               if (alloc_.hkv_vtxn() && !cur.is_null() && cur.tag() != K::value_inline &&
+                   cow_shared_(cur))
+                  cur = cow_clone_into_(slot, cur);
             switch (cur.tag())
             {
                case K::null:
@@ -4740,6 +4752,10 @@ namespace detail  // implementation types & node helpers — not part of the pub
          {
             if constexpr (Assign)
             {
+               if constexpr (cow_stamped_)  // fused privatize: own the term leaf
+                  if (alloc_.hkv_vtxn() && rh->term.tag() == K::value_ptr &&
+                      cow_shared_(rh->term))
+                     cow_clone_into_(&rh->term, rh->term);
                if (rh->term.tag() == K::value_inline)
                   rh->term = pack_inline(vf_make(std::forward<VF>(val)));
                else
@@ -6293,10 +6309,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          rel_budget_ = 64;  // per-op inline release budget
          static_assert(cow_enabled, "allocator has no refcount hooks");
          static_assert(std::is_trivially_copyable_v<T>, "COW memcpy-clones leaf values");
-         {
-            scratch_t ks;
-            cow_privatize_(enc_(k, ks));
-         }
+         // privatize is FUSED into insert_'s descent (clone-if-shared per hop)
          T tmp(std::forward<V>(v));
          return insert_<true>(k, std::move(tmp));
       }
@@ -6307,10 +6320,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
          rel_budget_ = 64;  // per-op inline release budget
          static_assert(cow_enabled, "allocator has no refcount hooks");
-         {
-            scratch_t ks;
-            cow_privatize_(enc_(k, ks));
-         }
+         // privatize is FUSED into remove's descent (clone-if-shared per hop)
          return remove(k);
       }
 

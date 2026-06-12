@@ -34,3 +34,23 @@ FINDINGS (the matrix's purpose — technique wins + unreported gaps):
    batch-boundary COW during load already demotes part's wide routers to
    the explicit form; vpart stays implicit (census-proven on bank).
 5. find-miss is cheap everywhere (divergence early-out works in all five).
+
+## v2 (same evening): fused privatize + u64 values + live/reserve columns
+
+Changes since v1: (a) vpart's privatize pass FUSED into insert/remove
+descents (clone-if-shared per hop, one walk instead of two) — dict load
+128->98 ns (-23%), now 25% faster than part and within 8% of raw hkv;
+(b) zero-copy callback finds for all engines (the get<string> per-hit
+materialization was most of the "query gap" — with it gone vpart WINS
+rand find-hit outright at 38.4 ns, ahead of raw hkv 41.5 and artmap 38.8);
+(c) u64 values everywhere; (d) live bytes (tree walk) + reserve bytes
+(allocator footprint) columns; (e) single-binary --engine all with an
+aligned, color-coded, winner-marked table (tables: table_{dict,rand}_v2.txt).
+
+Memory findings: HEART has the densest live tree (12.3 MB dict — its
+design goal showing; the cost is indirection latency + 32MB-segment
+reserve). part-family live is ~half of raw hkv at rand (35.5/39.3 vs 67.7
+— line packing + leaf density). artmap pays 2-3.8x live bytes for its
+iterate crown (fat node256 + rounded leaves). vpart live is +5% over part
+(stamps + size-class rounding) — the price of versioning measured at last:
+five percent of bytes, zero query cost.

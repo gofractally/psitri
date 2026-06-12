@@ -49,8 +49,16 @@ namespace vpart::kv
 
    // ELEGANT value mode: the leaf IS the value (raw bytes sized to the data);
    // reads hand back views.
-   using bval     = vhkv::bytes_value;
+   using bval = vhkv::bytes_value;
+   // VPART_DENSE_TIERS=1 builds the engine with the c2/c4/c8 ladder (denser
+   // sparse-wide routers, +1 rank hop) instead of straight-to-node_full
+   // (fastest dispatch, fatter sparse wides) — the A/B Dan asked for.
+#if defined(VPART_DENSE_TIERS) && VPART_DENSE_TIERS
+   using engine_t =
+       vhkv::kv_tree<std::string_view, bval, vhkv::mode::dense_tiers, part_alloc<bval>>;
+#else
    using engine_t = vhkv::kv_tree<std::string_view, bval, vhkv::mode::none, part_alloc<bval>>;
+#endif
    using root_ptr = vpart::detail::line_ptr;
 
    class database;

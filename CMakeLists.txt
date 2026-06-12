@@ -907,6 +907,19 @@ target_include_directories(dict-bench PRIVATE ${CMAKE_SOURCE_DIR}/libraries/hear
 set_target_properties(dict-bench PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+# dense-tier A/B variants (vpart with the c2/c4/c8 ladder)
+add_executable(dict-bench-dense programs/dict_bench.cpp)
+target_compile_definitions(dict-bench-dense PRIVATE VPART_DENSE_TIERS=1)
+target_link_libraries(dict-bench-dense PRIVATE part vpart art heart hash)
+target_include_directories(dict-bench-dense PRIVATE ${CMAKE_SOURCE_DIR}/libraries/heart/test)
+set_target_properties(dict-bench-dense PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(bank-bench-vpart-dense programs/bank_bench.cpp)
+target_compile_definitions(bank-bench-vpart-dense PRIVATE BANK_ENGINE_VPART=1 VPART_DENSE_TIERS=1)
+target_link_libraries(bank-bench-vpart-dense PRIVATE vpart Boost::program_options hash)
+set_target_properties(bank-bench-vpart-dense PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 # vpart bank bench — part with stamp liveness (docs/unified_tier_design.md L1a)
 add_executable(bank-bench-vpart programs/bank_bench.cpp)
 target_compile_definitions(bank-bench-vpart PRIVATE BANK_ENGINE_VPART=1)

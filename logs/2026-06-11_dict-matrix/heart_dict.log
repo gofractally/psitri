@@ -1,0 +1,5 @@
+# dict_bench engine=heart keys=dict n=235976 batch=8192
+heart   load          292.6 ns/op  (235976 keys)
+heart   find-hit      190.2 ns/op  (707928 found)
+heart   find-miss      74.7 ns/op  (0 false hits)
+heart   iterate        21.9 ns/op  (707928 seen, keysum 675bdf)

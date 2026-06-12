@@ -464,6 +464,13 @@ identified during the stamp-placement investigation; vpart corrects them):
 3. **Leaves (suffix+value, optional prefix if space): no issue** — exact-fit
    allocations have line-rounding slack in most cases (~97% absorb the 4 B
    stamp; ~3% gain a line).
+   **Setlist prefix capacity is DERIVATIVE, not a constant (Dan)**: branch
+   arrays take precedence; the prefix uses whatever the current branch
+   count leaves free (~34 B of slack at full fanout at the 4 B ptr, far
+   more when narrow), and overflow is always legal via a prefix_node —
+   which is exactly what makes "prefix_node = exceptionally long only"
+   achievable. Implementation queued: tail-anchored prefix bytes +
+   evict-to-prefix_node when a branch insert needs the room.
 4. **The clone-log is a first-class node type** (§2.2): 128 B lines,
    push-to-front, 31 × 4 B entries + 4 B prev — allocated through the
    session so all log writes land in active segments (dirty-anyway pages,

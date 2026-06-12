@@ -900,6 +900,13 @@ target_link_libraries(bank-bench-part PRIVATE part Boost::program_options hash)
 set_target_properties(bank-bench-part PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+# dict bench matrix — load/find/iterate across hkv/artmap/part/vpart/heart
+add_executable(dict-bench programs/dict_bench.cpp)
+target_link_libraries(dict-bench PRIVATE part vpart art heart hash)
+target_include_directories(dict-bench PRIVATE ${CMAKE_SOURCE_DIR}/libraries/heart/test)
+set_target_properties(dict-bench PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 # vpart bank bench — part with stamp liveness (docs/unified_tier_design.md L1a)
 add_executable(bank-bench-vpart programs/bank_bench.cpp)
 target_compile_definitions(bank-bench-vpart PRIVATE BANK_ENGINE_VPART=1)

@@ -1,0 +1,5 @@
+# dict_bench engine=hkv keys=rand n=1000000 batch=8192
+hkv     load           27.2 ns/op  (1000000 keys)
+hkv     find-hit       43.9 ns/op  (3000000 found)
+hkv     find-miss       6.0 ns/op  (0 false hits)
+hkv     iterate        13.4 ns/op  (3000000 seen, keysum 16e3600)

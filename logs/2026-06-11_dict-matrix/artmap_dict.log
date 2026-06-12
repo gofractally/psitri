@@ -1,0 +1,5 @@
+# dict_bench engine=artmap keys=dict n=235976 batch=8192
+artmap  load          101.2 ns/op  (235976 keys)
+artmap  find-hit      151.2 ns/op  (707928 found)
+artmap  find-miss      60.5 ns/op  (0 false hits)
+artmap  iterate        12.7 ns/op  (707928 seen, keysum 675bdf)

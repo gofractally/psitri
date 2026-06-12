@@ -1,0 +1,5 @@
+# dict_bench engine=part keys=dict n=235976 batch=8192
+part    load          127.0 ns/op  (235976 keys)
+part    find-hit      128.6 ns/op  (707928 found)
+part    find-miss      48.3 ns/op  (0 false hits)
+part    iterate        20.8 ns/op  (707928 seen, keysum 675bdf)

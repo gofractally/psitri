@@ -1,0 +1,5 @@
+# dict_bench engine=vpart keys=dict n=235976 batch=8192
+vpart   load          131.9 ns/op  (235976 keys)
+vpart   find-hit      124.1 ns/op  (707928 found)
+vpart   find-miss      47.3 ns/op  (0 false hits)
+vpart   iterate        21.6 ns/op  (707928 seen, keysum 675bdf)

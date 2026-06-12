@@ -20,6 +20,7 @@
 // (refs.part still initializes to 1 per allocation — it now serves only as
 // the allocated/free bit for release_run; retire it entirely in a follow-up.)
 #pragma once
+#include <bit>
 #include <vpart/arena.hpp>
 #include <vpart/hkv/tagged_ptr.hpp>
 
@@ -119,21 +120,30 @@ namespace vpart
       {
          return (bytes + line_bytes - 1) / line_bytes;
       }
+      // Round line counts to the allocator's fast size classes {1,2,4,8,16,..}:
+      // odd run sizes (c2=3, c8=9, node_full=10) otherwise fall into the slow
+      // contiguous-run scan — measured at ~80% of the clone path on bank
+      // (SPEC §4: "the tree layer may still prefer to round to a class").
+      static constexpr uint32_t class_round_(uint32_t nl) noexcept
+      {
+         return nl <= 1 ? 1 : uint32_t(1) << (32 - std::countl_zero(nl - 1));
+      }
       T* allocate(size_t n)
       {
          static_assert(alignof(T) <= line_bytes, "vpart lines are 128-byte aligned");
          assert(ses && "read-only view allocators cannot allocate");
-         const line_idx i = ses->alloc_lines(uint32_t(lines_(n * sizeof(T))));
+         const line_idx i = ses->alloc_lines(class_round_(uint32_t(lines_(n * sizeof(T)))));
          return static_cast<T*>(a->get(i));
       }
       void deallocate(T* p, size_t n) noexcept
       {
          const line_idx i =
              line_idx((reinterpret_cast<const std::byte*>(p) - a->base()) / line_bytes);
+         const uint32_t nl = class_round_(uint32_t(lines_(n * sizeof(T))));
          if (ses)
-            ses->release_run(i, uint32_t(lines_(n * sizeof(T))));
+            ses->release_run(i, nl);
          else
-            a->release_run(i, uint32_t(lines_(n * sizeof(T))));
+            a->release_run(i, nl);
       }
 
       template <class U>

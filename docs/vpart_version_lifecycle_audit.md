@@ -158,3 +158,57 @@ Tiered design note (#32): a subtree value crossing the flush boundary means
 the merger materializes a TREE from W into B — both speak the concept, so
 the merger recurses: create_subtree in B, replay the W subtree through it.
 Cost is proportional to subtree size; fine for v1, revisit if hot.
+
+## 8. SUPERSEDES §7's migration note — snapshot identity, typed values (Dan)
+
+NO copy-construction of subtrees at migration — subtree values share state
+under the hood; materializing copies breaks identity and ends badly.
+
+**Use case (blockchain):** block-state snapshots stored in another tree,
+indexed by block hash:
+
+    auto blk_root = db.get_root(0);          // snapshot of the state tree
+    db.root[1].insert(hash, blk_root);       // a tree stored as a value
+
+**The tiered identity model.** A snapshot taken in the hot layer must
+materialize IN ORDER in the base layer. The merger merges up to the first
+snapshot boundary, captures the heart tree corresponding to the vpart tree
+at that point, and the two acquire SHARED IDENTITY:
+
+    ttree = { vpart_tree_ref + heart_tree_ref }   // active (unmerged) state
+          | { resolved heart_tree_ref }            // after its boundary merges
+
+- tiered owns a PERSISTENT INDEX of unique ttree handles (lock-free
+  bitset-style allocator, sal-idiom): id -> pair-or-resolved. Refcounted.
+- Retained active versions commit in order; at each snapshot boundary the
+  merger captures the sal::smart_ptr of the heart root and stores it in the
+  registry, dropping the vpart component.
+- When the merger encounters a vpart LEAF whose value is a ttree id, it
+  looks up the registry and stores the RESOLVED heart identity in its
+  place. Identity mapping, never tree copying.
+- Ordered materialization makes snapshot-to-snapshot DIFF merging natural
+  in vpart: nodes with stamp > S_prev are exactly the S_prev -> S_next
+  delta (the stamps ARE the diff index).
+- Subtree values are OPAQUE TO VPART: just value bytes written by the
+  higher abstraction. vpart needs NO subtree node kind for tiered.
+
+**The API hole (Dan): typed values with lifecycle hooks.** The concept
+handles POD; a refcounted object stored as a value needs the engine to call
+its lifecycle. Sal-like type registry on the database:
+
+    db.register_type_ops(type_id, retain_fn, release_fn)
+    value slot = (T, blob); T = 0 = POD (default, no hooks)
+
+Engines invoke retain at exactly the points subtrees are retained today
+(leaf copy/share) and release where subtrees release (leaf destroy: drain /
+reap / abort / overwrite). Native subtrees in psitri/heart become the
+built-in case of the SAME mechanism; user types (tiered's ttree ids) supply
+their own hooks. In vpart the hook points already exist as customization
+seams (copy_value / v_destroy in vhkv); the work is the T byte in the value
+encoding + routing through the registry — including from the RECLAIM
+contexts (drain/reaper call release hooks too).
+
+Sequencing change for #31: the vhkv subtree-value-kind from §7 is NOT
+needed; build instead (a) version GC, (b) typed-value registry + hooks,
+(c) claim index. tiered (#32) builds the ttree registry + ordered snapshot
+materialization on top.

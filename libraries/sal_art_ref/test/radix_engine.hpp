@@ -4045,6 +4045,18 @@ namespace sal_art_ref::radix
             _t->mutate_root(_working, [&](ptr_address pre)
                             { return _t->upsert_step(pre, as_bytes(k), as_bytes(v)); });
          }
+         // THE exchange (adb multi_root): assign `t` as this handle's working root,
+         // RETURN the displaced root as an owned tree. tree{} assigns empty; the
+         // rotation composes — h1.set_root(h0.set_root(tree{})). The swap is
+         // immediate (reads reflect it before commit); commit publishes whatever
+         // each handle holds. Opened children belong to the OLD root → cleared.
+         tree set_root(tree t)
+         {
+            tree old(_t, std::move(_working));  // wrap the current working (ref transfers)
+            _working = std::move(t._root);      // adopt the incoming root (ref transfers)
+            _children.clear();
+            return old;
+         }
          int remove(key_view k)
          {
             if (!_working) return -1;

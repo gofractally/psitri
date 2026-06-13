@@ -320,7 +320,9 @@ namespace
       }
    }
 
-   // Phase S: snapshot() — an owned shared tree of the committed root.
+   // Phase S: a tree IS a snapshot. get_root(i) returns an owned, FROZEN
+   // snapshot of root i; it keeps reading its as-of contents across a later
+   // commit (COW keeps the version alive while the owned tree holds it).
    template <class DB>
    void phase_snapshot(DB& db, long& checks, long& fails, auto&& ok)
    {
@@ -328,7 +330,7 @@ namespace
       using WS = std::remove_reference_t<decltype(*ws)>;
       if constexpr (!adb::tree_snapshots<WS>)
       {
-         ok(false);  // FEATURE ABSENT: snapshot() owned shared tree
+         ok(false);  // FEATURE ABSENT: get_root() owned frozen snapshot
          return;
       }
       else
@@ -338,15 +340,21 @@ namespace
             tx.upsert("snap/k", "v1");
             tx.commit();
          }
-         auto snap = ws->snapshot(0u);
+         auto snap = ws->get_root(0u);  // owned frozen snapshot at v1
+         ok(bool(snap));
          {
             auto tx = ws->start_transaction(0);
             tx.upsert("snap/k", "v2");
             tx.commit();
          }
-         // the snapshot still reads v1 (engine-specific read path: via a
-         // handle-cursor where supported; minimal check = it exists)
-         ok(bool(snap));
+         // the snapshot still reads v1 — frozen by the owned reference
+         auto c = snap.snapshot_cursor();
+         auto v = c.template get<std::string>(std::string_view("snap/k"));
+         ok(v && *v == std::string("v1"));
+         // a fresh snapshot sees v2
+         auto c2 = ws->get_root(0u).snapshot_cursor();
+         auto v2 = c2.template get<std::string>(std::string_view("snap/k"));
+         ok(v2 && *v2 == std::string("v2"));
       }
    }
 

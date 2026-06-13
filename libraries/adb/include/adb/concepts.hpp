@@ -134,13 +134,17 @@ namespace adb
       { tx.open_root(idx) } -> root_handle;
    };
 
-   // ── snapshots are stored trees (composable subtrees, §8 identity) ─────
-   // snapshot() = O(1) shared owned-tree of the live root; storing one is
-   // just a (typed) value write at a HIGHER layer (engine-opaque), or the
-   // engine's native subtree support where it exists. The concept requires
-   // only the snapshot primitive; identity management lives above.
+   // ── a tree IS a snapshot ──────────────────────────────────────────────
+   // There is no separate snapshot() primitive: kv_write_session::get_root(i)
+   // (base concept above) returns the owned-tree value, which is a FROZEN
+   // snapshot of root i's committed state — under COW the owned reference
+   // keeps that version alive across later commits, so the holder keeps
+   // reading the contents as of the get_root() call (call get_root again to
+   // observe later state). That same owned tree is what set_root() exchanges
+   // and what a higher layer stores as a value (composable subtrees, §8).
+   // No live-vs-frozen duality, no owned_tree alias — one type per engine.
    template <class WS>
    concept tree_snapshots = requires(WS& ws) {
-      { ws.snapshot(0u) };  // owned-tree value for root 0's committed state
+      { ws.get_root(0u) };  // the owned, frozen snapshot of root 0
    };
 }  // namespace adb

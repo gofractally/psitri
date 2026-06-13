@@ -76,6 +76,7 @@ namespace start_ver::kv
    inline constexpr uint32_t kMaxRoots = 8;
 
    class database;
+   class cursor;  // tree_root::snapshot_cursor() returns it (defined below)
 
    // ── typed values (the LOCKED API, audit §9-§12) ───────────────────────
    // EVERY stored slot is [u16 LE typenum][payload]. Typenum 0 = raw bytes
@@ -206,6 +207,11 @@ namespace start_ver::kv
       uint64_t key_count() const noexcept { return _c ? _c->count : 0; }
       explicit operator bool() const noexcept { return bool(_c); }
       void     reset() noexcept { _c.reset(); }
+      // A tree IS a snapshot: read it through a cursor pinned at its frozen
+      // (version, root). Defined out-of-line (needs database + cursor).
+      cursor snapshot_cursor() const;
+      template <class S = std::string>
+      std::optional<S> get(key_view k) const;
 
      private:
       friend class database;
@@ -491,23 +497,6 @@ namespace start_ver::kv
       uint32_t     _ri;
    };
 
-   // Root handle for read-only access through the write session (kv_compat's
-   // get_root(i).snapshot_cursor()).
-   class tree
-   {
-     public:
-      explicit tree(write_session* ws, uint32_t root_index = 0) noexcept
-          : _ws(ws), _ri(root_index)
-      {
-      }
-      cursor   snapshot_cursor() const;
-      explicit operator bool() const noexcept { return _ws != nullptr; }
-
-     private:
-      write_session* _ws;
-      uint32_t       _ri;
-   };
-
    class write_session
    {
      public:
@@ -523,12 +512,12 @@ namespace start_ver::kv
       // crash-recovery slots (the tree itself is reclaimed by the REAPER when
       // the last tree_root handle drops — GC lives in vpart, not callers).
       void clear_warm_slots();
-      tree get_root(uint32_t root_index) { return tree(this, root_index); }
-      // Snapshot (concept: tree_snapshots): O(1) owned shared tree of root
-      // i's last COMMITTED state. The handle pins the boundary in a reader
-      // slot (the drain can't reclaim under it) and is DISARMED — the nodes
-      // belong to the live lineage; dropping a snapshot never reaps them.
-      tree_root snapshot(uint32_t root_index);
+      // get_root(i) IS the snapshot primitive (a tree is a snapshot): an
+      // owned, FROZEN tree_root of root i's committed state — a reader-slot
+      // pin holds the drain floor at its version (the nodes stay readable)
+      // and it is DISARMED (a view of the live lineage, never reaped from
+      // here). Call get_root again to observe later state.
+      tree_root get_root(uint32_t root_index);
 
       // vpart: the working trees' nodes are the committed state (or were
       // logged when superseded) — teardown owns nothing to free.
@@ -549,7 +538,6 @@ namespace start_ver::kv
      private:
       friend class database;
       friend class transaction;
-      friend class tree;
       friend class tree_handle;
       explicit write_session(database* db);
 
@@ -727,6 +715,21 @@ namespace start_ver::kv
          std::memcpy(p.b, &root_raw, 4);
          return cursor(&_arena, p, &slot, std::move(rs));
       }
+      // Pinned cursor for a tree_root snapshot at (version, root). version 0 &&
+      // root 0 = the empty/unpublished tree (raw 0 is a valid root at v>0, so
+      // the empty test is the pair == {0,0}); its cursor reads as empty.
+      cursor snapshot_cursor_for(uint32_t version, uint32_t root_raw)
+      {
+         auto  rs   = _arena.start_read_session();
+         auto& slot = _arena.reader_slot(rs.slot());
+         slot.store((uint64_t(version) << 32) | root_raw, std::memory_order_seq_cst);
+         root_ptr p = root_ptr::null();
+         if (!(version == 0 && root_raw == 0))
+            std::memcpy(p.b, &root_raw, 4);
+         return cursor(&_arena, p, &slot, std::move(rs));
+      }
+      // An owned cursor over the empty tree (default tree_root has no db).
+      static cursor empty_cursor() { return cursor(nullptr, root_ptr::null(), nullptr); }
 
       // Writer-side snapshot: claims a read-session slot and pins the latest
       // committed boundary exactly like a reader.
@@ -1143,9 +1146,18 @@ namespace start_ver::kv
       }
    }
 
-   inline cursor tree::snapshot_cursor() const
+   inline cursor tree_root::snapshot_cursor() const
    {
-      return _ws->_db->pin_snapshot();
+      if (!_c)
+         return database::empty_cursor();
+      return _c->db->snapshot_cursor_for(_c->vf, _c->raw);
+   }
+   template <class S>
+   inline std::optional<S> tree_root::get(key_view k) const
+   {
+      if (!_c)
+         return std::nullopt;
+      return snapshot_cursor().template get<S>(k);
    }
 
    // TRANSITIONAL shim for tiered (#32 deletes it): the rotation in concept
@@ -1178,7 +1190,7 @@ namespace start_ver::kv
          pin_slot->store(0, std::memory_order_seq_cst);  // drop the version pin
    }
 
-   inline tree_root write_session::snapshot(uint32_t root_index)
+   inline tree_root write_session::get_root(uint32_t root_index)
    {
       auto& arena = _db->_arena;
       auto  rs    = arena.start_read_session();

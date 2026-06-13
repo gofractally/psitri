@@ -200,16 +200,66 @@ namespace sal_art_ref::kv
       mutable sal_art_ref::radix::radix_tree::cursor _c;
    };
 
-   // Owning tree handle: snapshot_cursor() wraps the native one.
+   // A tree IS a snapshot: an owned, frozen handle to a committed root (the
+   // native owning tree holds a smart_ptr ref, so COW keeps the version alive
+   // while this exists). It is the single owned-tree type — what get_root
+   // returns, what set_root exchanges, and what reads strip the envelope
+   // through. Default = empty.
    class tree
    {
      public:
-      explicit tree(sal_art_ref::radix::radix_tree::tree&& t) : _t(std::move(t)) {}
+      tree() = default;
+      explicit tree(sal_art_ref::radix::radix_tree::tree t) : _t(std::move(t)) {}
       cursor snapshot_cursor() const { return cursor(_t.snapshot_cursor()); }
+      template <class S = std::string>
+      std::optional<S> get(key_view k) const
+      {
+         auto e = _t.template get<std::string>(k);
+         if (!e)
+            return std::nullopt;
+         return slot_decode<S>(*e);
+      }
       explicit operator bool() const noexcept { return bool(_t); }
 
      private:
+      friend class root_handle;
       sal_art_ref::radix::radix_tree::tree _t;
+   };
+
+   // Targets one root inside a multi-root transaction (adb root_handle).
+   // Non-owning: points at a native tree_handle held by the transaction.
+   class root_handle
+   {
+     public:
+      explicit root_handle(sal_art_ref::radix::radix_tree::tree_handle* h) : _h(h) {}
+      void insert(key_view k, value_view v) { _h->upsert(k, env_raw_(v)); }
+      void upsert(key_view k, value_view v) { _h->upsert(k, env_raw_(v)); }
+      template <class T>
+         requires storable<std::remove_cvref_t<T>>
+      void upsert(key_view k, T&& v)
+      {
+         using U                     = std::remove_cvref_t<T>;
+         const typename U::t_pod pod = std::move(v).take_pod();
+         char                    buf[2 + sizeof(pod)];
+         const uint16_t          id = U::type_id;
+         std::memcpy(buf, &id, 2);
+         std::memcpy(buf + 2, &pod, sizeof(pod));
+         _h->upsert(k, value_view(buf, sizeof(buf)));
+      }
+      int remove(key_view k) { return _h->remove(k); }
+      template <class T = std::string>
+      std::optional<T> get(key_view k) const
+      {
+         auto e = _h->template get<std::string>(k);
+         if (!e)
+            return std::nullopt;
+         return slot_decode<T>(*e);
+      }
+      // THE exchange: assign, return the displaced tree (adb set_root).
+      tree set_root(tree t) { return tree(_h->set_root(std::move(t._t))); }
+
+     private:
+      sal_art_ref::radix::radix_tree::tree_handle* _h;
    };
 
    class transaction
@@ -218,6 +268,9 @@ namespace sal_art_ref::kv
       explicit transaction(sal_art_ref::radix::radix_tree::transaction&& t) : _tx(std::move(t)) {}
       void insert(key_view k, value_view v) { _tx.upsert(k, env_raw_(v)); }
       void upsert(key_view k, value_view v) { _tx.upsert(k, env_raw_(v)); }
+      // ── multi-root (adb): primary()/open_root() target additional roots ──
+      root_handle primary() { return root_handle(&_tx.primary()); }
+      root_handle open_root(uint32_t idx) { return root_handle(&_tx.open_root(idx)); }
       // typed store: take_pod() CONSUMES v — custody moves into the database.
       template <class T>
          requires storable<std::remove_cvref_t<T>>
@@ -277,6 +330,10 @@ namespace sal_art_ref::kv
       {
          return transaction(_ws->start_transaction(root_index));
       }
+      // get_root(i) IS the snapshot primitive: an owned, frozen tree of root
+      // i's committed state (the native owning tree holds a smart_ptr ref, so
+      // COW keeps that version alive while the handle exists). Call it again
+      // to observe later state.
       tree get_root(uint32_t root_index) { return tree(_ws->get_root(root_index)); }
 
      private:

@@ -816,3 +816,30 @@ TEST_CASE("multi-root: set_root exchange — the rotation, abort-safe, leak-exac
 }
 
 
+
+TEST_CASE("BENCH density read")  // [.bench] inline-children density-lookup win — RANDOM U64 keys
+{
+   auto dir = fs::temp_directory_path() / "bench_density";
+   fs::remove_all(dir);
+   auto db  = start_ver::kv::database::create(dir);
+   auto ses = db->start_write_session();
+   const int N = getenv("BN")? atoi(getenv("BN")) : 1000000; const int B = 4096;
+   std::mt19937_64 rng(0xD1C7);
+   std::vector<std::string> keys; keys.reserve(N);
+   for (int i = 0; i < N; ++i) { uint64_t x = rng(); keys.push_back(std::string(reinterpret_cast<const char*>(&x), 8)); }
+   std::string val(8, 'v');
+   double t0; { auto T=std::chrono::steady_clock::now();
+      for (size_t base=0; base<keys.size(); base+=B) { auto tx=ses->start_transaction(0);
+         size_t e=std::min(keys.size(),base+size_t(B)); for(size_t i=base;i<e;++i) tx.upsert(keys[i], val); tx.commit(); }
+      t0 = std::chrono::duration<double>(std::chrono::steady_clock::now()-T).count(); }
+   std::vector<uint32_t> order(N); for (int i=0;i<N;++i) order[i]=i; std::shuffle(order.begin(),order.end(),rng);
+   volatile uint64_t sink=0;
+   double tg; { auto T=std::chrono::steady_clock::now(); auto tx=ses->start_transaction(0);
+      for (int i=0;i<N;++i){ sink+=tx.get(keys[order[i]], [&](std::string_view v){ sink+=v.size(); }); }
+      tx.abort(); tg = std::chrono::duration<double>(std::chrono::steady_clock::now()-T).count(); }
+   double tm; { auto T=std::chrono::steady_clock::now(); auto tx=ses->start_transaction(0);
+      for (int i=0;i<N;++i){ uint64_t x=rng(); std::string m(reinterpret_cast<const char*>(&x),8); sink+=tx.get(m,[&](std::string_view){}); }
+      tx.abort(); tm = std::chrono::duration<double>(std::chrono::steady_clock::now()-T).count(); }
+   fprintf(stderr, "DENSITY-U64 N=%d load=%.0fns get-hit=%.1fns get-miss=%.1fns (sink=%llu)\n",
+           N, t0/N*1e9, tg/N*1e9, tm/N*1e9, (unsigned long long)sink);
+}

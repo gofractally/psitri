@@ -4251,8 +4251,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
          const unsigned stamp  = cow_stamped_ ? unsigned(vstamp_off_(K::setlist_u8)) : SL_LINE;
          return copied < stamp ? copied : stamp;
       }
-      // Inline leaf start aligns so leaf_value_off() lands on alignof(T) (raw_vals -> 1).
-      static constexpr unsigned SL_VAL_ALIGN = alignof(T) < 1 ? 1u : unsigned(alignof(T));
+      // Inline leaf start aligns so leaf_value_off() lands on alignof(T). For raw_vals the
+      // value is RAW BYTES (leaf_bytes, offset 10, no object alignment) — align 1, else the
+      // alignof(bytes_value)=8 padding wastes the small inline region and blocks compaction
+      // (2 typical leaves no longer fit), making the whole feature dormant.
+      static constexpr unsigned SL_VAL_ALIGN =
+          raw_vals ? 1u : (alignof(T) < 1 ? 1u : unsigned(alignof(T)));
 
       static bool sl_inl_active(const setlist* s) noexcept { return s->inl & 0x80; }
       static bool sl_is_inline(const setlist* s, int i) noexcept

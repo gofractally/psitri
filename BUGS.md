@@ -2,7 +2,10 @@
 
 ## Open
 
-(none)
+### psitri `shared_smart_ptr` cross-thread reader SIGSEGV
+- **Repro**: `psitri-tests "shared_smart_ptr passes root to another thread for reading"` (smart_ptr_tests.cpp:178); the two later `[smart_ptr][shared][threads]` cases are also implicated.
+- **Symptom**: SIGSEGV on the reader thread iterating a cursor built from `shared.get()`.
+- **Status**: pre-existing at `reorg-baseline` (fails identically in psitri-merge) — almost certainly fallout from the sal session redesign (get_session/TLS removal); psitri's shared_smart_ptr reader path was not converted. Tracked for the psitri green-up pass.
 
 ## Fixed (recent)
 

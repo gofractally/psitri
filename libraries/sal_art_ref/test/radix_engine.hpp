@@ -40,6 +40,7 @@
 #include <sal_art_ref/leaf_node.hpp>
 #include <sal_art_ref/key_val_node.hpp>
 #include <sal_art_ref/leaf_page.hpp>
+#include <sal_art_ref/value_hooks.hpp>
 #include <sal_art_ref/radix_nodes.hpp>
 
 namespace sal_art_ref::radix
@@ -1921,6 +1922,11 @@ namespace sal_art_ref::radix
                _ses->retain(pg->external_addr(i));
             else if (iv->is_subtree() && iv->subtree_root() != sal::null_ptr_address)
                _ses->retain(iv->subtree_root());
+            else if (iv->value_type == inline_value::vt_bytes)
+               // the clone duplicates these value bytes; the original/clone
+               // each die through leaf_page::destroy -> balanced release
+               fire_value_retain({reinterpret_cast<const char*>(iv->value().data()),
+                                  iv->value().size()});
          }
       }
 
@@ -2001,6 +2007,13 @@ namespace sal_art_ref::radix
             {
                if (!shared)
                {
+                  {  // the replaced inline value's bytes die in place
+                     const inline_value* oiv = pg->record(uint32_t(idx));
+                     if (oiv->value_type == inline_value::vt_bytes)
+                        fire_value_release(
+                            {reinterpret_cast<const char*>(oiv->value().data()),
+                             oiv->value().size()});
+                  }
                   ref.modify().get()->apply(upd);
                   if (old_child != sal::null_ptr_address)
                      _ses->release(old_child);  // the replaced external/subtree child
@@ -2084,6 +2097,9 @@ namespace sal_art_ref::radix
             return page;
          if (!shared)
          {
+            if (old->value_type == inline_value::vt_bytes)  // removed value's bytes die
+               fire_value_release({reinterpret_cast<const char*>(old->value().data()),
+                                   old->value().size()});
             ref.modify().get()->apply(leaf_page::remove_op{uint16_t(idx)});
             if (old_child != sal::null_ptr_address)
                _ses->release(old_child);

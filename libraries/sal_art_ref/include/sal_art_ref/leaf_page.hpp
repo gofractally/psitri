@@ -7,6 +7,7 @@
 #include <sal_art_ref/paged.hpp>
 #include <sal_art_ref/radix_type_ids.hpp>
 #include <sal_art_ref/smart_address.hpp>  // tail_ptr
+#include <sal_art_ref/value_hooks.hpp>    // typed-value retain/release registry
 #include <ucc/lower_bound.hpp>      // lower_bound_u16_padded, find_byte, find_u32x16
 #include <ucc/round.hpp>
 
@@ -219,10 +220,19 @@ namespace sal_art_ref
 
       /// SAL destroy hook: a dying page releases its children (external value objects
       /// and nested subtree roots) — the cascade that frees what only this page owned.
+      /// Inline typed values (vt_bytes carrying a [typenum][payload] envelope) fire
+      /// the user release hook here — this is the page's physical-death point.
       template <typename Session>
       void destroy(const Session& s) const
       {
          for_each_child([&](sal::ptr_address c) { s->release(c); });
+         for (uint32_t i = 0; i < _nkeys; ++i)
+         {
+            const inline_value* iv = record(i);
+            if (iv->value_type == inline_value::vt_bytes)
+               fire_value_release({reinterpret_cast<const char*>(iv->value().data()),
+                                   iv->value().size()});
+         }
       }
 
       /// Visit SAL children (external values + nested subtree roots) — the release/

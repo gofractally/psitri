@@ -45,5 +45,6 @@ FetchContent_Declare(ucc
 FetchContent_MakeAvailable(psio ucc)
 
 # ── libraries, in dependency order (added as each one migrates) ──────────────
+add_subdirectory(libraries/adb)
 set(SAL_BUILD_TESTS ${BUILD_TESTS})
 add_subdirectory(libraries/sal)

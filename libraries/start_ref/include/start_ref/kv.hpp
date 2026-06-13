@@ -61,6 +61,117 @@ namespace start_ref::kv
 
    class database;
 
+   // ── typed values (the LOCKED adb API) ─────────────────────────────────
+   // EVERY stored slot is [u16 LE typenum][payload]. Typenum 0 = raw bytes
+   // (the null-hook builtin); registered ids >= 1 dispatch retain/release
+   // through the database registry from the tree's value-lifecycle hooks —
+   // overwrite, remove, abort, privatize clone, generation retirement and
+   // background-releaser cascades included. Reads are THREE-OUTCOME:
+   // found / not-found / invalid_type.
+   inline constexpr uint16_t kRawType = 0;
+
+   struct invalid_type : std::runtime_error
+   {
+      invalid_type(uint16_t stored, uint16_t asked)
+          : std::runtime_error("start_ref: value is type " + std::to_string(stored) +
+                               ", read as type " + std::to_string(asked))
+      {
+      }
+   };
+
+   template <class T>
+   concept storable = requires(T t, const typename T::t_pod& p, void* ses) {
+      { T::type_id } -> std::convertible_to<uint16_t>;
+      requires std::is_trivially_copyable_v<typename T::t_pod>;
+      { std::move(t).take_pod() } -> std::same_as<typename T::t_pod>;
+      { T::make_from_pod(p, true) } -> std::same_as<T>;
+      T::t_pod::retain(ses, p);
+      T::t_pod::release(ses, p);
+   };
+
+   inline uint16_t slot_type(value_view s) noexcept
+   {
+      uint16_t t;
+      std::memcpy(&t, s.data(), 2);
+      return t;
+   }
+   inline value_view slot_payload(value_view s) noexcept
+   {
+      return s.substr(2);
+   }
+   inline value_view env_raw_(value_view v)  // [0][bytes], thread_local scratch
+   {
+      thread_local std::string buf;
+      buf.resize(2 + v.size());
+      buf[0] = buf[1] = 0;
+      std::memcpy(buf.data() + 2, v.data(), v.size());
+      return {buf.data(), buf.size()};
+   }
+   template <class S>
+   S slot_decode(value_view slot)
+   {
+      const uint16_t t = slot_type(slot);
+      if constexpr (storable<S>)
+      {
+         if (t != S::type_id)
+            throw invalid_type{t, S::type_id};
+         typename S::t_pod pod;
+         if (slot.size() - 2 != sizeof(pod))
+            throw invalid_type{t, S::type_id};
+         std::memcpy(&pod, slot.data() + 2, sizeof(pod));
+         return S::make_from_pod(pod, true);  // a RETAINED handle out
+      }
+      else
+      {
+         if (t != kRawType)
+            throw invalid_type{t, kRawType};
+         const value_view p = slot_payload(slot);
+         return S(p.data(), p.size());
+      }
+   }
+
+   // any_value — pointer to the value SLOT in the tree, no copy; inside a
+   // write transaction the transaction itself is the pin (invalidated by a
+   // later write to the same key). as<T>() retains; bytes() on a typed slot
+   // is invalid_type; raw_pod() is the expert/merger identity path.
+   class any_value
+   {
+     public:
+      any_value() = default;
+      uint16_t type() const noexcept { return _s ? slot_type({_s, _n}) : kRawType; }
+      template <class T>
+      bool is() const noexcept
+      {
+         return _s && slot_type({_s, _n}) == T::type_id;
+      }
+      template <class T>
+      T as() const
+      {
+         if (!is<T>())
+            throw invalid_type{type(), T::type_id};
+         typename T::t_pod pod;
+         std::memcpy(&pod, _s + 2, sizeof(pod));
+         return T::make_from_pod(pod, true);
+      }
+      std::string_view bytes() const
+      {
+         if (type() != kRawType)
+            throw invalid_type{type(), kRawType};
+         return {_s + 2, _n - 2};
+      }
+      std::string_view raw_pod() const noexcept
+      {
+         return _s ? std::string_view{_s + 2, _n - 2} : std::string_view{};
+      }
+      explicit operator bool() const noexcept { return _s != nullptr; }
+
+     private:
+      friend class transaction;
+      any_value(const char* s, size_t n) : _s(s), _n(n) {}
+      const char* _s = nullptr;
+      size_t      _n = 0;  // the FULL slot (envelope included), in the tree
+   };
+
    // Snapshot cursor: a pinned root + a non-owning view tree + an hkv iterator.
    // The dtor drops the pin; if that was the generation's last reference the
    // old version drains back to the arena.
@@ -115,16 +226,24 @@ namespace start_ref::kv
       {
          if (is_end())
             return std::nullopt;
-         const value_view v = (*_it).second.v;
-         return S(v.data(), v.size());
+         return slot_decode<S>((*_it).second.v);
       }
       template <class F>
       bool get_value(F&& f) const
       {
          if (is_end())
             return false;
-         f((*_it).second.v);
+         const value_view s = (*_it).second.v;
+         if (slot_type(s) != kRawType)
+            throw invalid_type{slot_type(s), kRawType};
+         f(slot_payload(s));
          return true;
+      }
+      uint16_t value_type() const { return is_end() ? kRawType : slot_type((*_it).second.v); }
+      template <class T>
+      bool is_type() const
+      {
+         return !is_end() && slot_type((*_it).second.v) == T::type_id;
       }
 
       // Point read against the snapshot (the bank reader hot path).
@@ -136,12 +255,12 @@ namespace start_ref::kv
             std::string_view out;
             if (!_view.pg_find(k, out))
                return std::nullopt;
-            return S(out.data(), out.size());
+            return slot_decode<S>(out);
          }
          bval out;
          if (!_view.find(k, out))
             return std::nullopt;
-         return S(out.v.data(), out.v.size());
+         return slot_decode<S>(out.v);
       }
       template <class F>
       bool get(key_view k, F&& f) const
@@ -151,22 +270,30 @@ namespace start_ref::kv
             std::string_view out;
             if (!_view.pg_find(k, out))
                return false;
-            f(out);
+            if (slot_type(out) != kRawType)
+               throw invalid_type{slot_type(out), kRawType};
+            f(slot_payload(out));
             return true;
          }
          bval out;
          if (!_view.find(k, out))
             return false;
-         f(out.v);
+         if (slot_type(out.v) != kRawType)
+            throw invalid_type{slot_type(out.v), kRawType};
+         f(slot_payload(out.v));
          return true;
       }
 
      private:
       friend class database;
       friend class read_session;
-      cursor(start_ref::arena* a, root_ptr root, std::atomic<uint64_t>* hp = nullptr)
+      cursor(start_ref::arena*  a,
+             root_ptr            root,
+             std::atomic<uint64_t>* hp = nullptr,
+             const value_hooks*  vh = nullptr)
           : _a(a), _hp(hp), _root(root), _view(part_alloc<bval>(a)), _it(_view.end())
       {
+         _view.allocator_mut().vhooks = vh;  // write-side cursors can release
          _view.adopt_root(_root);
       }
 
@@ -198,6 +325,12 @@ namespace start_ref::kv
      public:
       void insert(key_view k, value_view v) { upsert(k, v); }
       void upsert(key_view k, value_view v);
+      // typed store: take_pod() CONSUMES v — custody (one reference) moves
+      // into the database; the slot's later death fires the release hook.
+      template <class T>
+         requires storable<std::remove_cvref_t<T>>
+      void upsert(key_view k, T&& v);
+      any_value get_any(key_view k) const;
       int  remove(key_view k);
       void commit();
       // CONTRACT (kv-compat 4.7b): dropping or aborting an uncommitted
@@ -343,16 +476,29 @@ namespace start_ref::kv
             const uint32_t r32 = uint32_t(raw);
             std::memcpy(p.b, &r32, 4);
             engine_t v{part_alloc<bval>(&_arena)};
+            v.allocator_mut().vhooks = &_vh;
             v.cow_release(p);
          }
          if (!_live_root.is_null())
          {
             engine_t v{part_alloc<bval>(&_arena)};
+            v.allocator_mut().vhooks = &_vh;
             v.cow_release(_live_root);
          }
       }
 
       start_ref::arena& store() noexcept { return _arena; }
+
+      // ── typed-value registry (locked adb API) ───────────────────────────
+      // Registered ids dispatch retain/release from the tree's value-
+      // lifecycle hooks — the writer AND the background releaser fire through
+      // here (hooks must be thread-safe and non-blocking). Register types
+      // BEFORE storing values of T; id 0 is the raw-bytes builtin.
+      template <class... Ts>
+      void register_value_types()
+      {
+         (reg_type_<Ts>(), ...);
+      }
       // SPEC §19: wait until the background releaser has emptied its ring
       // (drain gates and shutdown ordering call this)
       void flush_releases() noexcept
@@ -373,7 +519,7 @@ namespace start_ref::kv
          const root_ptr  r = _live_root;
          if (!r.is_null())
             _arena.add_ref_or_throw(uint32_t(r.raw() >> 4));
-         return cursor(&_arena, r);
+         return cursor(&_arena, r, nullptr, &_vh);
       }
 
      private:
@@ -414,6 +560,7 @@ namespace start_ref::kv
       void rel_loop_() noexcept
       {
          engine_t v{part_alloc<bval>(&_arena, /*defer=*/false)};  // inline worker
+         v.allocator_mut().vhooks = &_vh;  // typed values die in releaser cascades
          for (;;)
          {
             const uint32_t t = _rel_tail.load(std::memory_order_relaxed);
@@ -465,6 +612,7 @@ namespace start_ref::kv
             const uint32_t r32 = uint32_t(_retired[i]);
             std::memcpy(p.b, &r32, 4);
             engine_t v{part_alloc<bval>(&_arena, /*defer=*/true)};
+            v.allocator_mut().vhooks = &_vh;
             v.cow_release(p);  // big generations route to the releaser
             _retired[i] = _retired.back();
             _retired.pop_back();
@@ -498,12 +646,65 @@ namespace start_ref::kv
       root_ptr              _live_root;
       std::atomic<uint64_t> _live_raw{0};
       std::vector<uint64_t> _retired;
+
+      // ── typed-value dispatch (slot envelope -> registered hooks) ────────
+      struct type_entry
+      {
+         void (*retain)(void*, const char*, size_t)  = nullptr;
+         void (*release)(void*, const char*, size_t) = nullptr;
+      };
+      std::vector<type_entry> _types = std::vector<type_entry>(65536);
+      template <class T>
+      void reg_type_()
+      {
+         static_assert(storable<T>);
+         static_assert(T::type_id != kRawType, "type_id 0 is the raw-bytes builtin");
+         _types[T::type_id] = {&vh_retain_t_<T>, &vh_release_t_<T>};
+      }
+      template <class T>
+      static void vh_retain_t_(void* db, const char* p, size_t n)
+      {
+         typename T::t_pod pod;
+         assert(n == sizeof(pod));
+         std::memcpy(&pod, p, sizeof(pod));
+         T::t_pod::retain(db, pod);
+      }
+      template <class T>
+      static void vh_release_t_(void* db, const char* p, size_t n)
+      {
+         typename T::t_pod pod;
+         assert(n == sizeof(pod));
+         std::memcpy(&pod, p, sizeof(pod));
+         T::t_pod::release(db, pod);
+      }
+      void vh_fire_(const char* b, size_t n, bool retain) noexcept
+      {
+         if (n < 2)
+            return;
+         uint16_t t;
+         std::memcpy(&t, b, 2);
+         if (t == kRawType)
+            return;
+         const auto& e = _types[t];
+         if (auto f = retain ? e.retain : e.release)
+            f(this, b + 2, n - 2);
+      }
+      static void vh_copy_s_(const char* b, size_t n, void* u)
+      {
+         static_cast<database*>(u)->vh_fire_(b, n, true);
+      }
+      static void vh_release_s_(const char* b, size_t n, void* u)
+      {
+         static_cast<database*>(u)->vh_fire_(b, n, false);
+      }
+      value_hooks _vh{&vh_copy_s_, &vh_release_s_, this};
    };
 
    // ── bodies ────────────────────────────────────────────────────────────────
    inline write_session::write_session(database* db)
        : _db(db), _ses(db->_arena.start_session()), _t(part_alloc<bval>(&_ses))
    {
+      _t.allocator_mut().vhooks = &db->_vh;
    }
 
    inline read_session::read_session(database* db)
@@ -539,10 +740,41 @@ namespace start_ref::kv
 
    inline void transaction::upsert(key_view k, value_view v)
    {
+      const value_view env = env_raw_(v);  // [0][bytes]
       if constexpr (engine_t::cb_create)
-         _ws->_t.pg_upsert(k, v);  // bytes straight to the page
+         _ws->_t.pg_upsert(k, env);  // bytes straight to the page
       else
-         _ws->_t.cow_insert(k, bval{v});  // view in; the leaf copies once
+         _ws->_t.cow_insert(k, bval{env});  // view in; the leaf copies once
+   }
+   template <class T>
+      requires storable<std::remove_cvref_t<T>>
+   inline void transaction::upsert(key_view k, T&& v)
+   {
+      using U                     = std::remove_cvref_t<T>;
+      const typename U::t_pod pod = std::move(v).take_pod();  // custody -> db
+      char                    buf[2 + sizeof(pod)];
+      const uint16_t          id = U::type_id;
+      std::memcpy(buf, &id, 2);
+      std::memcpy(buf + 2, &pod, sizeof(pod));
+      const value_view env(buf, sizeof(buf));
+      if constexpr (engine_t::cb_create)
+         _ws->_t.pg_upsert(k, env);
+      else
+         _ws->_t.cow_insert(k, bval{env});
+   }
+   inline any_value transaction::get_any(key_view k) const
+   {
+      if constexpr (engine_t::cb_create)
+      {
+         std::string_view out;
+         if (!_ws->_t.pg_find(k, out))
+            return {};
+         return any_value{out.data(), out.size()};
+      }
+      bval out;
+      if (!_ws->_t.find(k, out))
+         return {};
+      return any_value{out.v.data(), out.v.size()};  // slot view, txn-pinned
    }
    inline int transaction::remove(key_view k)
    {
@@ -559,13 +791,17 @@ namespace start_ref::kv
          std::string_view out;
          if (!_ws->_t.pg_find(k, out))
             return false;
-         fn(out);
+         if (slot_type(out) != kRawType)
+            throw invalid_type{slot_type(out), kRawType};
+         fn(slot_payload(out));
          return true;
       }
       bval out;
       if (!_ws->_t.find(k, out))
          return false;
-      fn(out.v);
+      if (slot_type(out.v) != kRawType)
+         throw invalid_type{slot_type(out.v), kRawType};
+      fn(slot_payload(out.v));
       return true;
    }
    template <class S>
@@ -576,12 +812,12 @@ namespace start_ref::kv
          std::string_view out;
          if (!_ws->_t.pg_find(k, out))
             return std::nullopt;
-         return S(out.data(), out.size());
+         return slot_decode<S>(out);
       }
       bval out;
       if (!_ws->_t.find(k, out))
          return std::nullopt;
-      return S(out.v.data(), out.v.size());
+      return slot_decode<S>(out.v);
    }
 
    inline transaction::transaction(write_session* ws, start_ref::transaction&& tx)

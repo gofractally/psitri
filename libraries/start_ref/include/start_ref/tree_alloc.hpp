@@ -54,6 +54,19 @@ namespace start_ref
       static_assert(sizeof(line_ptr) == 4, "line_ptr is exactly 4 bytes");
    }  // namespace detail
 
+   // Typed-value lifecycle hooks (LOCKED API, adb): fired when stored value
+   // bytes are copied between leaves (retain) or physically die with their
+   // leaf (release) — including refcount-zero cascades on the background
+   // releaser. Installed by the kv database on EVERY tree it constructs;
+   // hooks parse the (typenum, payload) envelope and dispatch the registry.
+   // Namespace-scope (not nested) so allocator REBINDS share the pointer.
+   struct value_hooks
+   {
+      void (*on_copy)(const char* bytes, size_t n, void* user);
+      void (*on_release)(const char* bytes, size_t n, void* user);
+      void* user;
+   };
+
    template <class T>
    struct part_alloc
    {
@@ -65,6 +78,7 @@ namespace start_ref
                                // null for read-only snapshot views
       bool defer = false;      // writer-side trees may hand release-to-zero
                                // cascades to the background releaser
+      const value_hooks* vhooks = nullptr;
 
       part_alloc() = default;
       explicit part_alloc(session* s) noexcept : a(&s->store()), ses(s), defer(true) {}
@@ -72,7 +86,8 @@ namespace start_ref
       explicit part_alloc(arena* ar) noexcept : a(ar) {}  // read-only views
       part_alloc(arena* ar, bool d) noexcept : a(ar), defer(d) {}  // writer temp views
       template <class U>
-      part_alloc(const part_alloc<U>& o) noexcept : a(o.a), ses(o.ses), defer(o.defer)
+      part_alloc(const part_alloc<U>& o) noexcept
+          : a(o.a), ses(o.ses), defer(o.defer), vhooks(o.vhooks)
       {
       }
 

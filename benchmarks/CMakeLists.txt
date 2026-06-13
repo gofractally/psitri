@@ -43,3 +43,14 @@ target_compile_definitions(bank-compare-bench PRIVATE XXH_INLINE_ALL)
 target_compile_options(bank-compare-bench PRIVATE -O3 -DNDEBUG)
 set_target_properties(bank-compare-bench PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# delta_art threshold sweep: same sustained transfer workload at a range of
+# flush high-water marks (Dan: smaller hot delta = faster).
+add_executable(delta_art-threshold-sweep delta_art_threshold_sweep.cpp)
+target_link_libraries(delta_art-threshold-sweep PRIVATE delta_art start_ver sal_art_ref psitri)
+target_include_directories(delta_art-threshold-sweep PRIVATE
+    ${CMAKE_SOURCE_DIR}/libraries/sal_art_ref/test)
+target_compile_definitions(delta_art-threshold-sweep PRIVATE XXH_INLINE_ALL)
+target_compile_options(delta_art-threshold-sweep PRIVATE -O3 -DNDEBUG)
+set_target_properties(delta_art-threshold-sweep PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

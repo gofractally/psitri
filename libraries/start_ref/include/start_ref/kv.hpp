@@ -207,10 +207,11 @@ namespace start_ref::kv
             _view.cow_release(r);  // write-side pinned cursor (scan_all path)
       }
 
-      bool seek_begin() { _it = _view.begin(); return _it != _view.end(); }
-      bool lower_bound(key_view k) { _it = _view.lower_bound(k); return _it != _view.end(); }
+      bool seek_begin() { _rend = false; _it = _view.begin(); return _it != _view.end(); }
+      bool lower_bound(key_view k) { _rend = false; _it = _view.lower_bound(k); return _it != _view.end(); }
       bool upper_bound(key_view k)
       {
+         _rend = false;
          _it = _view.lower_bound(k);
          if (_it != _view.end() && (*_it).first == k)
             ++_it;
@@ -218,6 +219,7 @@ namespace start_ref::kv
       }
       void find(key_view k)
       {
+         _rend = false;
          if constexpr (engine_t::cb_create)
          {  // pages: position at lower_bound and demand an exact key match
             _it = _view.lower_bound(k);
@@ -227,8 +229,55 @@ namespace start_ref::kv
          else
             _it = _view.find(k);
       }
-      bool next() { ++_it; return _it != _view.end(); }
-      bool is_end() const { return _it == _view.end(); }
+      bool next()
+      {
+         if (_rend)
+            return seek_begin();  // psitri convention: next from rend = first
+         ++_it;
+         return _it != _view.end();
+      }
+      bool is_end() const { return !_rend && _it == _view.end(); }
+      bool is_rend() const { return _rend; }
+      bool is_subtree() const { return false; }  // start_ref has no subtree values
+      // Reverse iteration via FORWARD SCAN (start_ref's hkv has no native
+      // reverse). O(n)/op — correct but slow; the forward bank/scale workload
+      // never calls these. The native fix is porting start_ver's reverse hkv.
+      bool seek_last()
+      {
+         _rend = false;
+         _it   = _view.begin();
+         if (_it == _view.end())
+            return false;
+         auto last = _it;
+         for (auto i = _it; i != _view.end(); ++i)
+            last = i;
+         _it = last;
+         return true;
+      }
+      bool prev()
+      {
+         if (_rend)
+            return false;
+         if (_it == _view.end())
+            return seek_last();  // prev from end = last
+         const std::string cur((*_it).first);
+         auto              best = _view.end();
+         for (auto i = _view.begin(); i != _view.end(); ++i)
+         {
+            if (std::string_view((*i).first) < std::string_view(cur))
+               best = i;
+            else
+               break;  // sorted: nothing past here is < cur
+         }
+         if (best == _view.end())
+         {
+            _rend = true;
+            _it   = _view.end();
+            return false;
+         }
+         _it = best;
+         return true;
+      }
 
       key_view key() const { return (*_it).first; }
 
@@ -314,6 +363,7 @@ namespace start_ref::kv
       root_ptr                 _root;
       mutable engine_t         _view;
       engine_t::const_iterator _it;
+      bool                     _rend = false;  // retreated past first
    };
 
    // A reader thread's handle: one start_ref::read_session slot for the lifetime of
@@ -405,8 +455,18 @@ namespace start_ref::kv
          }
          return *this;
       }
-      tree(const tree&)            = delete;
-      tree& operator=(const tree&) = delete;
+      tree(const tree& o);             // copy retains its own ref (out-of-line)
+      tree& operator=(const tree& o)
+      {
+         if (this != &o)
+         {
+            release_();
+            tree cp(o);  // retain
+            _db = cp._db, _root = cp._root, _count = cp._count;
+            cp._db = nullptr, cp._root = root_ptr::null();
+         }
+         return *this;
+      }
       ~tree() { release_(); }
       cursor snapshot_cursor() const;  // out-of-line (needs database)
       template <class S = std::string>
@@ -832,6 +892,12 @@ namespace start_ref::kv
       v.cow_release(_root);  // drop THIS handle's ref (cascades only at zero)
       _root = root_ptr::null();
       _db   = nullptr;
+   }
+   // copy: each handle owns its OWN ref (warm legs share a snapshot)
+   inline tree::tree(const tree& o) : _db(o._db), _root(o._root), _count(o._count)
+   {
+      if (_db && !_root.is_null())
+         _db->_arena.add_ref_or_throw(uint32_t(_root.raw() >> 4));
    }
    template <class S>
    inline std::optional<S> tree::get(key_view k) const

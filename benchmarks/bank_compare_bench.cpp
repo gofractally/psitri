@@ -30,6 +30,7 @@
 
 using Clock = std::chrono::steady_clock;
 using TK    = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::dwal_engine>;
+using TKR   = delta_art::tiered_kv<start_ref::kv::engine, sal_art_ref::radix::dwal_engine>;
 
 namespace
 {
@@ -209,6 +210,15 @@ int main(int argc, char** argv)
          cfg.knobs.arena_budget_bytes = strtoull(ab, nullptr, 10) << 20;
       auto db = TK::database::open(base + "/tiered", sal::open_mode::create_or_open, cfg);
       rows.push_back(run_bank("delta_art(sv→sar)", db, p));
+   }
+   {  // delta_art<start_ref, sal_art_ref>
+      std::filesystem::remove_all(base + "/tiered_ref");
+      std::filesystem::create_directories(base + "/tiered_ref");
+      TKR::config cfg;
+      if (const char* mb = getenv("DELTA_HI_WATER_MB"))
+         cfg.knobs.hi_water_bytes = strtoull(mb, nullptr, 10) << 20;
+      auto db = TKR::database::open(base + "/tiered_ref", sal::open_mode::create_or_open, cfg);
+      rows.push_back(run_bank("delta_art(sr→sar)", db, p));
    }
    {  // start_ver standalone
       std::filesystem::remove_all(base + "/start_ver");

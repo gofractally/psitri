@@ -163,6 +163,10 @@ int main(int argc, char** argv)
       printf("delta arena: %.2f GB used / %.2f GB total (%.0f%% used)\n",
              double(used) * 128 / 1e9, double(total) * 128 / 1e9,
              total ? 100.0 * double(used) / double(total) : 0.0);
+      auto st = db->delta_seg_stats_dbg();
+      printf("delta segs: grown=%llu reused=%llu (reuse %.0f%%)\n",
+             (unsigned long long)st.first, (unsigned long long)st.second,
+             (st.first + st.second) ? 100.0 * double(st.second) / double(st.first + st.second) : 0.0);
    }
    printf("DONE: %llu keys in %.1f min\n", (unsigned long long)done, total_s / 60.0);
    return 0;

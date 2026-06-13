@@ -668,7 +668,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
          {
             case K::value_ptr:   return 0;                    // leaf prepend
             case K::prefix_node: return 2 + int(sizeof(Ptr));  // after [plen][next]
-            case K::setlist_u8:  return 96;   // slack past prefix[8] (94 used)
+            case K::setlist_u8:  return 124;  // LAST 4 B of the line — leaves [94,124) free for
+                                              // inline children (the clone copies the full line)
             case K::setlist_u16: return 104;  // tail pad (102 used)
             case K::c2:
             case K::c4:
@@ -1199,8 +1200,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      cur  = *slot;
                   }
                   s   = static_cast<setlist*>(deref_(cur));
-                  // a new branch grows the array into the tail — dissolve any inline payloads
-                  // first (re-compacted at the next split); widen below then sees no inline.
+                  // a new branch grows the array into the tail — dissolve inline payloads so
+                  // setlist_set can write the new slot (re-compacted at the next split).
+                  // NOTE: grow-keeps-inline (re-compact here) raised coverage 19%->47% but is
+                  // unsafe under COW — compact would free a SHARED child and breaks SHALLOW
+                  // supersession (the clone must carry the husk's children). Deferred.
                   if constexpr (inline_children_ok)
                      if (sl_inl_active(s)) sl_externalize_all_(s);
                   packed_ptr lf = make_value_at(key, depth + 1, std::forward<VF>(v));
@@ -4247,7 +4251,10 @@ namespace detail  // implementation types & node helpers — not part of the pub
       // bound on the COW path; take the min so a payload is never truncated on clone.
       static constexpr unsigned sl_inline_top() noexcept
       {
-         const unsigned copied = unsigned(sizeof(setlist));
+         // cow_node_bytes_(setlist_u8) now copies the WHOLE 128 B line, so the only cap is the
+         // version stamp (relocated to the line end, offset 124). Stampless instantiations use
+         // the full line. -> region is [used_branch_end, 124) for the 4 B COW handle (was 94).
+         const unsigned copied = SL_LINE;
          const unsigned stamp  = cow_stamped_ ? unsigned(vstamp_off_(K::setlist_u8)) : SL_LINE;
          return copied < stamp ? copied : stamp;
       }
@@ -8921,6 +8928,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
             case K::prefix_node:
                return pn_size<Ptr>(pn_plen(n));
             case K::setlist_u8:
+               // copy/free the WHOLE 128 B line, not just sizeof==94: inline children live in
+               // [94,124) and the version stamp is at [124,128) — both must survive a COW clone.
+               return cacheline_bytes;
             case K::setlist_u16:
             case K::c2:
             case K::c4:

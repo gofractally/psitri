@@ -94,15 +94,14 @@ static constexpr size_t   max_psitri_key_size = 1024;
 static constexpr uint32_t mdbx_data_root_index = 1;
 static constexpr size_t   mdbx_namespace_prefix_size = 1;
 
-// The delta_art hot delta (start_ver) stores each value in ONE word-confined
-// line run: max_alloc_lines (64) * line_bytes (128) = 8192 bytes per leaf,
-// which must also hold the key suffix + a ~13-byte header (vstamp/slen/vlen +
-// the data/type envelope bytes). Values larger than this cannot be stored;
-// the shim rejects them with MDBX_BAD_VALSIZE (native MDBX's oversize error)
-// instead of letting the backend allocator throw an opaque PANIC. NOTE: this
-// caps single-value size well below native MDBX — a real engine limitation of
-// the tiered hot delta, not a mapping defect.
-static constexpr size_t   backend_value_leaf_budget = 64 * 128;  // 8192
+// Values up to the line arena's 8 KB leaf go in a value_ptr leaf; bigger ones
+// (up to the large arena's 64 * 8192 = 0.5 MB object) go in a large_suffix_value
+// node (K::value_large). The leaf must also hold the key suffix + a ~13-byte
+// header (vstamp/slen/vlen + the data/type envelope). Values above the large cap
+// are rejected with MDBX_BAD_VALSIZE (native MDBX's oversize error). 0.5 MB
+// covers Ethereum (bytecode caps at 24 KB/EIP-170); a 16 KB grain would lift it
+// to 1 MB if ever needed.
+static constexpr size_t   backend_value_leaf_budget = 64 * 8192;  // 524288 (large arena)
 static constexpr size_t   max_backend_value_size =
    backend_value_leaf_budget - max_psitri_key_size - 16;  // conservative
 static constexpr size_t   max_mdbx_logical_key_size =

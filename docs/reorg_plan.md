@@ -179,13 +179,17 @@ details go in a nested `detail{}` namespace (e.g. `vhkv::` →
 - [ ] remaining bench migration: bank (multi-engine), dict, pipeline, TATP +
       comparator test-shims
 
-**libraries/delta_art (tiered) — #32 rewrite**
-- [ ] concept-only: templated on two adb engines; THREE instantiations under
-      test (sal_art_ref/sal_art_ref, start_ver/sal_art_ref,
-      start_ref/sal_art_ref)
-- [ ] rotation expressed via multi-root set_root (h1.set_root(h0.set_root({})))
-      — DELETE start_ver's contraband shims (freeze_and_reset,
-      clear_warm_slots, pending_warm) from the engine's public surface
+**libraries/delta_art (tiered) — #32 DONE (concept-only)**
+- [x] concept-only rotation via multi-root set_root (h1.set_root(h0.set_root
+      ({}))); warm read via get_root(1) frozen snapshot; clear via set_root
+      ({}); crash recovery = re-drain root 1 on open. ALL W contraband shims
+      dropped from delta_art's requirements (freeze_and_reset/clear_warm_slots
+      /pin_at/pending_warm/committed_version/make_orphan_root/footprint).
+      20M-key forced-flush stress = 100% hit through every rotation.
+- [ ] still TODO: DELETE the now-unused shims from start_ver's public surface
+      (delta_art no longer calls them); add the sal_art_ref/sal_art_ref +
+      start_ref/sal_art_ref instantiations to the test (need start_ref
+      multi-root first)
 - [ ] snapshot migration (§8 identity model): ttree = {hot ref, cold ref |
       resolved cold ref}; persistent lock-free bitset registry; merger swaps
       identities — never copy-constructs a tree; ordered boundary

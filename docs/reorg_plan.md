@@ -85,7 +85,8 @@ details go in a nested `detail{}` namespace (e.g. `vhkv::` →
 | part/db_shape.hpp | libraries/adb | `part::shape::` → `adb::` |
 | libraries/psitri-sqlite, -duckdb, psitrirocks, psitrileveldb, psitrimdbx | shims/psi-* | unchanged |
 | libraries/ucc + libraries/hash | @gofractally/ucc repo → vendor/ucc | `<hash/x.h>` → `<ucc/hash/x.h>`; `hash` target dies |
-| libraries/mdbxrocks, libraries/art, tidesdb wrapper | tests/ (test-shims) | comparators, not products |
+| libraries/mdbxrocks, third_party/libart, tidesdb wrapper | tests/ (test-shims) | comparators, not products |
+| libraries/art (our art_map — psitri dwal dependency) | libraries/art | unchanged (plan correction) |
 | programs/kv_compat_test.cpp | tests/ | — |
 | programs/*_bench* | benchmarks/ | — |
 | external/psio | vendor/psio | — |

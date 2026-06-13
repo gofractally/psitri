@@ -4,16 +4,25 @@
 #include <mdbx.h>
 #include <mdbx.h++>
 
-#include <psitri/database.hpp>
-#include <psitri/dwal/dwal_database.hpp>
-#include <psitri/dwal/dwal_transaction.hpp>
-#include <psitri/dwal/merge_cursor.hpp>
-#include <psitri/dwal/transaction.hpp>
-#include <psitri/read_session_impl.hpp>
-#include <psitri/transaction.hpp>
-#include <psitri/value_pin.hpp>
-#include <psitri/write_session.hpp>
-#include <psitri/write_session_impl.hpp>
+// ════════════════════════════════════════════════════════════════════
+// Storage backend selection.
+//
+// The MDBX mapping (dbi namespace prefixing, DUPSORT composite-key
+// encoding, cursor ops, txn lifecycle) is engine-agnostic. Only the
+// backend binding lives behind PSITRIMDBX_BACKEND_DELTA_ART: the new
+// fast model is the delta_art tiered engine (start_ver hot delta over a
+// sal_art_ref dwal cold base). It exposes ONE ordered KV space with
+// bidirectional, mergeable cursors — exactly what this single-keyspace
+// shim needs. The legacy psitri direct/dwal backend has been dropped.
+// ════════════════════════════════════════════════════════════════════
+#ifndef PSITRIMDBX_BACKEND_DELTA_ART
+#define PSITRIMDBX_BACKEND_DELTA_ART 1
+#endif
+
+#include <delta_art/tiered_kv.hpp>
+#include <heart_dwal_engine.hpp>  // sal_art_ref::radix::dwal_engine (cold base)
+#include <sal/config.hpp>         // sal::open_mode
+#include <start_ver/kv.hpp>       // start_ver::kv::engine (hot delta)
 
 #include <algorithm>
 #include <array>
@@ -37,6 +46,24 @@
 #include <vector>
 
 #include <unistd.h>
+
+// ── delta_art tiered backend aliases ─────────────────────────────────
+// W = start_ver hot delta, B = sal_art_ref dwal cold base. The composed
+// engine is one kv_engine: a single ordered KV space (root 0 = latest,
+// W∪B merge) with bidirectional cursors. The shim funnels everything
+// through this one physical space; the MDBX dbi number is encoded as a
+// one-byte key namespace prefix (mapping logic, unchanged).
+using TK         = delta_art::tiered_kv<start_ver::kv::engine,
+                                        sal_art_ref::radix::dwal_engine>;
+using be_db      = TK::database;
+using be_ws      = TK::write_session;
+using be_tx      = TK::transaction;
+using be_rs      = TK::read_session;
+using be_cursor  = TK::cursor;
+// The delta_art backend is a single logical root: writes always target
+// root 0 (latest); reads use root 0 (W∪B merge). The shim's namespace
+// prefix discriminates DBIs inside that one space.
+static constexpr uint32_t be_root_latest = 0;
 
 // ════════════════════════════════════════════════════════════════════
 // Internal types (hidden behind opaque C handles)
@@ -66,6 +93,18 @@ static size_t max_single_value_size(size_t page_size, size_t key_size)
 static constexpr size_t   max_psitri_key_size = 1024;
 static constexpr uint32_t mdbx_data_root_index = 1;
 static constexpr size_t   mdbx_namespace_prefix_size = 1;
+
+// The delta_art hot delta (start_ver) stores each value in ONE word-confined
+// line run: max_alloc_lines (64) * line_bytes (128) = 8192 bytes per leaf,
+// which must also hold the key suffix + a ~13-byte header (vstamp/slen/vlen +
+// the data/type envelope bytes). Values larger than this cannot be stored;
+// the shim rejects them with MDBX_BAD_VALSIZE (native MDBX's oversize error)
+// instead of letting the backend allocator throw an opaque PANIC. NOTE: this
+// caps single-value size well below native MDBX — a real engine limitation of
+// the tiered hot delta, not a mapping defect.
+static constexpr size_t   backend_value_leaf_budget = 64 * 128;  // 8192
+static constexpr size_t   max_backend_value_size =
+   backend_value_leaf_budget - max_psitri_key_size - 16;  // conservative
 static constexpr size_t   max_mdbx_logical_key_size =
    max_psitri_key_size - mdbx_namespace_prefix_size;
 static constexpr uint32_t max_mdbx_namespace_id = 255;
@@ -185,9 +224,13 @@ static std::atomic<uint64_t> g_next_env_session_cache_id{1};
 
 struct MDBX_env
 {
-   // ── PsiTri database ───────────────────────────────────────────
-   std::shared_ptr<psitri::database>              db;
-   std::unique_ptr<psitri::dwal::dwal_database>   dwal_db;
+   // ── delta_art tiered backend ──────────────────────────────────
+   // ONE database, ONE shared write session (delta_art serializes
+   // writers internally on its own writer mutex; the shim's
+   // writer_mutex still enforces MDBX's one-writer-per-env contract
+   // at the boundary so duplicate same-thread writers fail cleanly).
+   std::shared_ptr<be_db>                         db;
+   std::shared_ptr<be_ws>                         ws;
    std::filesystem::path                          path;
    uint64_t session_cache_id =
       g_next_env_session_cache_id.fetch_add(1, std::memory_order_relaxed);
@@ -560,28 +603,51 @@ class returned_slice_arena
    char               empty_ = '\0';
 };
 
-/// Cursor facade for either the direct PsiTri path or the optional DWAL path.
+// The per-write-txn read-own-writes overlay: physical key -> value, with
+// nullopt meaning a same-txn delete (tombstone) that must MASK committed data.
+using write_set_t = std::map<std::string, std::optional<std::string>>;
+
+/// Cursor facade over the delta_art tiered cursor (the single backend).
+/// Keeps the exact public surface the hundreds of call sites depend on
+/// (seek/lower_bound/upper_bound/find/next/prev/key/read_value …) so the
+/// engine-agnostic mapping above it is untouched.
+///
+/// When opened inside a WRITE transaction it is given that txn's write_set
+/// and performs a bidirectional ordered merge (overlay shadows committed on
+/// equal keys; an overlay tombstone hides both) — read-your-own-uncommitted-
+/// writes for cursor iteration, which the delta_art transaction itself cannot
+/// provide. A plain committed-only cursor (RO txns) has no overlay.
 class mdbx_view_cursor
 {
  public:
-   explicit mdbx_view_cursor(psitri::cursor c) : direct_(std::move(c)) {}
-   explicit mdbx_view_cursor(psitri::dwal::owned_merge_cursor c)
-       : dwal_(std::move(c))
+   explicit mdbx_view_cursor(be_cursor c) : cur_(std::move(c)) {}
+   mdbx_view_cursor(be_cursor c, const write_set_t* ws)
+       : cur_(std::move(c)), ws_(ws)
    {
    }
 
    mdbx_view_cursor(mdbx_view_cursor&& other) noexcept
-       : direct_(std::move(other.direct_)),
-         dwal_(std::move(other.dwal_))
+       : cur_(std::move(other.cur_)), ws_(other.ws_), o_it_(other.o_it_),
+         b_more_(other.b_more_), o_valid_(other.o_valid_), on_b_(other.on_b_),
+         on_o_(other.on_o_), rend_(other.rend_)
    {
    }
    mdbx_view_cursor& operator=(mdbx_view_cursor&& other) noexcept
    {
       if (this != &other)
       {
-         clear_borrowed_value();
-         direct_ = std::move(other.direct_);
-         dwal_   = std::move(other.dwal_);
+         // be_cursor is move-constructible but not move-ASSIGNABLE (it holds a
+         // copyable-but-not-assignable warm snapshot handle), so reset+emplace.
+         cur_.reset();
+         if (other.cur_)
+            cur_.emplace(std::move(*other.cur_));
+         ws_      = other.ws_;
+         o_it_    = other.o_it_;
+         b_more_  = other.b_more_;
+         o_valid_ = other.o_valid_;
+         on_b_    = other.on_b_;
+         on_o_    = other.on_o_;
+         rend_    = other.rend_;
       }
       return *this;
    }
@@ -593,106 +659,239 @@ class mdbx_view_cursor
 
    bool seek_begin()
    {
-      clear_borrowed_value();
-      return direct_ ? direct_->seek_begin() : (*dwal_)->seek_begin();
+      if (!has_overlay())
+         return cur_->seek_begin();
+      b_more_  = cur_->seek_begin();
+      o_it_    = ws_->begin();
+      o_valid_ = o_it_ != ws_->end();
+      return settle_fwd_();
    }
    bool seek_last()
    {
-      clear_borrowed_value();
-      return direct_ ? direct_->seek_last() : (*dwal_)->seek_last();
+      if (!has_overlay())
+         return cur_->seek_last();
+      b_more_ = cur_->seek_last();
+      o_it_   = ws_->empty() ? ws_->end() : std::prev(ws_->end());
+      o_valid_ = !ws_->empty();
+      return settle_bwd_();
    }
    bool lower_bound(std::string_view key)
    {
-      clear_borrowed_value();
-      return direct_ ? direct_->lower_bound(key) : (*dwal_)->lower_bound(key);
+      if (!has_overlay())
+         return cur_->lower_bound(key);
+      b_more_  = cur_->lower_bound(key);
+      o_it_    = ws_->lower_bound(std::string(key));
+      o_valid_ = o_it_ != ws_->end();
+      return settle_fwd_();
    }
    bool upper_bound(std::string_view key)
    {
-      clear_borrowed_value();
-      return direct_ ? direct_->upper_bound(key) : (*dwal_)->upper_bound(key);
+      if (!has_overlay())
+         return cur_->upper_bound(key);
+      b_more_  = cur_->upper_bound(key);
+      o_it_    = ws_->upper_bound(std::string(key));
+      o_valid_ = o_it_ != ws_->end();
+      return settle_fwd_();
    }
    bool seek(std::string_view key)
    {
       return find(key);
    }
+   // Exact-match find: the tiered cursor has none; compose it from
+   // lower_bound + an exact key compare (mapping glue). Works with overlay.
    bool find(std::string_view key)
    {
-      clear_borrowed_value();
-      return direct_ ? direct_->find(key) : (*dwal_)->find(key);
+      if (!lower_bound(key))
+         return false;
+      return this->key() == key;
    }
    bool next()
    {
-      clear_borrowed_value();
-      return direct_ ? direct_->next() : (*dwal_)->next();
+      if (!has_overlay())
+         return cur_->next();
+      // advance whichever side(s) we are sitting on, then re-settle
+      if (rend_)
+         return seek_begin();
+      if (on_b_)
+         b_more_ = cur_->next();
+      if (on_o_)
+         advance_overlay_fwd_();
+      return settle_fwd_();
    }
    bool prev()
    {
-      clear_borrowed_value();
-      return direct_ ? direct_->prev() : (*dwal_)->prev();
+      if (!has_overlay())
+         return cur_->prev();
+      if (is_end())
+         return seek_last();
+      if (rend_)
+         return false;
+      if (on_b_)
+         b_more_ = cur_->prev();
+      if (on_o_)
+         retreat_overlay_bwd_();
+      return settle_bwd_();
    }
 
-   bool is_end() const { return direct_ ? direct_->is_end() : (*dwal_)->is_end(); }
-   bool is_rend() const { return direct_ ? direct_->is_rend() : (*dwal_)->is_rend(); }
-   std::string_view key() const { return direct_ ? direct_->key() : (*dwal_)->key(); }
+   bool is_end() const
+   {
+      if (!has_overlay())
+         return cur_->is_end();
+      return !rend_ && !on_b_ && !on_o_;
+   }
+   bool is_rend() const
+   {
+      if (!has_overlay())
+         return cur_->is_rend();
+      return rend_;
+   }
+   std::string_view key() const
+   {
+      if (!has_overlay())
+         return cur_->key();
+      return on_o_ ? std::string_view(o_it_->first) : cur_->key();
+   }
 
-   void clear_borrowed_value() { value_pin_.reset(); }
-   bool has_cursor() const noexcept { return direct_.has_value() || dwal_.has_value(); }
+   void clear_borrowed_value() {}
+   bool has_cursor() const noexcept { return cur_.has_value(); }
    void reset() noexcept
    {
-      clear_borrowed_value();
-      direct_.reset();
-      dwal_.reset();
+      cur_.reset();
+      ws_ = nullptr;
    }
 
+   // Copy the current value into `out` and point `view` at it. RAW bytes
+   // (the tiered cursor's value() unwraps the data/tombstone envelope;
+   // overlay values are already raw). `view` is buffered (valid until the
+   // next cursor op); returns false (never a borrowed/pinned slice).
    bool read_value(std::string& out, std::string_view& view)
    {
-      if (direct_)
+      if (has_overlay() && on_o_)
       {
-         value_pin_.reset();
-         value_pin_.emplace(direct_->pin_values());
-         view = direct_->value(*value_pin_);
-         return true;
-      }
-
-      value_pin_.reset();
-      auto source = (*dwal_)->current_source();
-      if (source == psitri::dwal::merge_cursor::source::tri)
-      {
-         auto* tc = (*dwal_)->tri_cursor();
-         if (!tc)
-         {
-            view = {};
-            return false;
-         }
-         value_pin_.emplace(tc->pin_values());
-         view = tc->value(*value_pin_);
-         return true;
-      }
-
-      if (source == psitri::dwal::merge_cursor::source::rw ||
-          source == psitri::dwal::merge_cursor::source::ro)
-      {
-         auto& bv = (*dwal_)->current_value();
-         if (bv.is_data())
-         {
-            view = bv.data;
-            return true;
-         }
-      }
-
-      if (source != psitri::dwal::merge_cursor::source::none)
-      {
-         auto& bv = (*dwal_)->current_value();
-         out.assign(bv.data.data(), bv.data.size());
+         const auto& v = o_it_->second;  // settle guarantees this is data
+         out.assign(v ? *v : std::string());
          view = out;
+         return false;
       }
-      return false;
+      auto v = cur_->template value<std::string>();
+      if (!v)
+      {
+         view = {};
+         return false;
+      }
+      out = std::move(*v);
+      view = out;
+      return false;  // buffered (not a borrowed/pinned slice)
    }
 
  private:
-   std::optional<psitri::cursor>                   direct_;
-   std::optional<psitri::dwal::owned_merge_cursor> dwal_;
-   std::optional<psitri::value_pin>                value_pin_;
+   bool has_overlay() const noexcept { return ws_ != nullptr; }
+
+   // forward overlay state: o_it_ points at the candidate; o_valid_ tracks
+   // validity for the backward direction (std::map has no rend sentinel).
+   void advance_overlay_fwd_()
+   {
+      if (o_it_ != ws_->end())
+         ++o_it_;
+      o_valid_ = o_it_ != ws_->end();
+   }
+   void retreat_overlay_bwd_()
+   {
+      if (o_it_ == ws_->begin())
+      {
+         o_valid_ = false;
+         o_it_    = ws_->end();
+      }
+      else
+         --o_it_;
+   }
+
+   bool overlay_live_fwd_() const { return o_it_ != ws_->end(); }
+   bool overlay_live_bwd_() const { return o_valid_; }
+
+   // 2-way forward merge; overlay shadows committed; an overlay tombstone
+   // (nullopt value) masks both sides at that key.
+   bool settle_fwd_()
+   {
+      for (;;)
+      {
+         const bool be = !b_more_ || cur_->is_end();
+         const bool oe = !overlay_live_fwd_();
+         if (be && oe)
+         {
+            on_b_ = on_o_ = false;
+            rend_ = false;
+            return false;
+         }
+         int c = 0;  // <0: base smaller, >0: overlay smaller, 0: equal
+         if (be)
+            c = 1;
+         else if (oe)
+            c = -1;
+         else
+            c = cmp_(cur_->key(), o_it_->first);
+         on_b_ = (c <= 0) && !be;
+         on_o_ = (c >= 0) && !oe;
+         rend_ = false;
+         if (on_o_ && !o_it_->second)  // overlay tombstone: skip both
+         {
+            if (on_b_)
+               b_more_ = cur_->next();
+            advance_overlay_fwd_();
+            continue;
+         }
+         return true;
+      }
+   }
+   bool settle_bwd_()
+   {
+      for (;;)
+      {
+         const bool be = !b_more_ || cur_->is_end() || cur_->is_rend();
+         const bool oe = !overlay_live_bwd_();
+         if (be && oe)
+         {
+            on_b_ = on_o_ = false;
+            rend_ = true;
+            return false;
+         }
+         int c = 0;
+         if (be)
+            c = -1;  // overlay wins (it is the only live side)
+         else if (oe)
+            c = 1;
+         else
+            c = cmp_(cur_->key(), o_it_->first);
+         // backward: the LARGER key wins; overlay shadows base on ties.
+         on_b_ = (c >= 0) && !be;
+         on_o_ = (c <= 0) && !oe;
+         rend_ = false;
+         if (on_o_ && !o_it_->second)
+         {
+            if (on_b_)
+               b_more_ = cur_->prev();
+            retreat_overlay_bwd_();
+            continue;
+         }
+         return true;
+      }
+   }
+   static int cmp_(std::string_view a, std::string_view b)
+   {
+      const int c = std::memcmp(a.data(), b.data(), std::min(a.size(), b.size()));
+      if (c)
+         return c < 0 ? -1 : 1;
+      return a.size() < b.size() ? -1 : a.size() > b.size() ? 1 : 0;
+   }
+
+   std::optional<be_cursor>      cur_;
+   const write_set_t*            ws_ = nullptr;     // write-txn overlay (or null)
+   write_set_t::const_iterator   o_it_;             // overlay candidate
+   bool                          b_more_  = false;  // base cursor positioned
+   bool                          o_valid_ = false;  // overlay live (backward dir)
+   bool                          on_b_    = false;  // current key is on base
+   bool                          on_o_    = false;  // current key is on overlay
+   bool                          rend_    = false;  // settled before-first
 };
 
 /// Cursor state for a single DBI.
@@ -1229,16 +1428,19 @@ struct MDBX_txn
    MDBX_txn_flags_t  txn_flags = MDBX_TXN_READWRITE;
    void*             context   = nullptr;
    uint64_t          id        = 0;
-   bool              use_dwal  = false;
 
-   // Default RW path: direct PsiTri COW transaction over all possible MDBX roots.
-   std::shared_ptr<psitri::write_session> direct_session;
-   std::unique_ptr<psitri::transaction>   direct_tx;
-   std::map<uint32_t, psitri::tree_handle> direct_roots;
+   // ── RW path: one delta_art transaction over the single root ────
+   // `direct_tx` is the live write transaction (latest root 0). POINT
+   // reads inside a write txn go through it (read-own-writes: the W tree
+   // get() sees pending upserts/removes).
+   std::optional<be_tx>                   direct_tx;
 
-   // Optional DWAL RW transaction (only when MDBX_TXN_USE_DWAL is set).
-   std::unique_ptr<psitri::dwal::transaction>      write_tx;
-   std::vector<uint32_t>                           write_roots; // roots opened for writing
+   // Cursor read-own-writes overlay: the delta_art transaction has point
+   // get() but no iterating cursor over UNCOMMITTED writes. Cursors opened
+   // inside a write txn therefore merge this in-memory write-set (physical
+   // key -> value, nullopt = tombstone/deleted) over the committed read
+   // cursor. Engine-agnostic mapping glue; small (test txns are tiny).
+   std::map<std::string, std::optional<std::string>> write_set;
 
    struct dbi_registry_change
    {
@@ -1254,12 +1456,25 @@ struct MDBX_txn
    MDBX_cursor*                             free_cursors = nullptr;
    size_t                                   active_cursors = 0;
 
-   // Default RO path: direct PsiTri snapshots captured at txn begin/renew.
-   std::shared_ptr<psitri::read_session> direct_read_session;
-   std::map<uint32_t, psitri::tree>      direct_read_roots;
+   // ── RO path: a delta_art read session + a latest (W∪B) cursor ──
+   // captured at txn begin/renew. A read txn is a stable view; the read
+   // session pins the snapshot, the cursor reads through the merge.
+   std::shared_ptr<be_rs>                 read_session;
+   std::optional<be_cursor>               read_cursor;
+   bool                                   has_read_view = false;
 
-   // Optional DWAL RO transaction state retained for the opt-in DWAL mode.
-   mutable std::unique_ptr<psitri::dwal::dwal_read_session> read_session;
+   // Iteration read session for cursors opened inside a WRITE txn (the
+   // dupsort/cursor-op mapping needs an iterable view). The session must
+   // outlive every cursor it hands out, so it is owned by the txn. Lazily
+   // created on first iterating cursor.
+   std::shared_ptr<be_rs>                 iter_read_session;
+
+   std::shared_ptr<be_rs> ensure_iter_read_session()
+   {
+      if (!iter_read_session)
+         iter_read_session = env->db->start_read_session();
+      return iter_read_session;
+   }
 
    // Per-transaction DBI metadata cache. Named DBI metadata is environment
    // scoped and changes only through DBI open/drop, so hot get/put/del calls
@@ -1430,146 +1645,45 @@ static constexpr unsigned max_named_dbs()
    return max_mdbx_namespace_id - 1;
 }
 
-static psitri::dwal::read_mode read_mode_for_txn(const MDBX_txn* txn)
-{
-   if (!txn || !txn->is_readonly())
-      return psitri::dwal::read_mode::latest;
-
-   static constexpr psitri::dwal::read_mode modes[] = {
-      psitri::dwal::read_mode::buffered,
-      psitri::dwal::read_mode::latest,
-      psitri::dwal::read_mode::trie,
-   };
-   return modes[txn->env->read_mode];
-}
-
-static std::vector<uint32_t> all_mdbx_write_roots(MDBX_env* env)
-{
-   (void)env;
-   return {mdbx_data_root_index};
-}
-
-static bool txn_covers_root(const MDBX_txn* txn, uint32_t root_idx)
-{
-   if (!txn)
-      return false;
-   for (auto ri : txn->write_roots)
-      if (ri == root_idx)
-         return true;
-   return false;
-}
-
-static psitri::tree_handle* direct_root_handle(MDBX_txn* txn,
-                                               uint32_t  root_idx)
-{
-   if (!txn)
-      return nullptr;
-   auto it = txn->direct_roots.find(root_idx);
-   return it == txn->direct_roots.end() ? nullptr : &it->second;
-}
-
-static psitri::tree_handle* ensure_direct_root_handle(MDBX_txn* txn,
-                                                      uint32_t  root_idx)
-{
-   if (auto* root = direct_root_handle(txn, root_idx))
-      return root;
-   if (!txn || !txn->direct_tx)
-      return nullptr;
-   if (!txn->write_roots.empty() && root_idx <= txn->write_roots.back())
-      return nullptr;
-
-   auto [it, inserted] = txn->direct_roots.emplace(
-      root_idx, txn->direct_tx->open_root(root_idx));
-   if (inserted)
-      txn->write_roots.push_back(root_idx);
-   return &it->second;
-}
-
-static const psitri::tree_handle* direct_root_handle(const MDBX_txn* txn,
-                                                     uint32_t        root_idx)
-{
-   if (!txn)
-      return nullptr;
-   auto it = txn->direct_roots.find(root_idx);
-   return it == txn->direct_roots.end() ? nullptr : &it->second;
-}
-
-static const psitri::tree* direct_read_root(const MDBX_txn* txn,
-                                            uint32_t        root_idx)
-{
-   if (!txn)
-      return nullptr;
-   auto it = txn->direct_read_roots.find(root_idx);
-   return it == txn->direct_read_roots.end() ? nullptr : &it->second;
-}
-
+// Capture the RO snapshot for a read transaction: a delta_art read session
+// (pins the version) plus a latest (W∪B) cursor reused for point reads.
 static void capture_direct_read_roots(MDBX_txn* txn)
 {
-   txn->direct_read_roots.clear();
-   txn->direct_read_session = txn->env->db->start_read_session();
-   txn->direct_read_roots.emplace(
-      mdbx_data_root_index,
-      txn->direct_read_session->get_root(mdbx_data_root_index));
-}
-
-static std::unordered_map<uint64_t, std::shared_ptr<psitri::write_session>>&
-thread_write_session_cache()
-{
-   thread_local std::unordered_map<uint64_t,
-                                   std::shared_ptr<psitri::write_session>>
-      sessions;
-   return sessions;
-}
-
-static std::shared_ptr<psitri::write_session>
-cached_thread_write_session(MDBX_env* env)
-{
-   auto& session = thread_write_session_cache()[env->session_cache_id];
-   if (!session)
-      session = env->db->start_write_session();
-   return session;
-}
-
-static void erase_cached_thread_write_session(MDBX_env* env)
-{
-   thread_write_session_cache().erase(env->session_cache_id);
+   txn->read_session = txn->env->db->start_read_session();
+   txn->read_cursor.emplace(txn->read_session->create_cursor(be_root_latest));
+   txn->has_read_view = true;
 }
 
 static void start_direct_write_txn(MDBX_txn* txn)
 {
-   txn->direct_session = cached_thread_write_session(txn->env);
-   txn->write_roots    = {mdbx_data_root_index};
-
-   txn->direct_tx = std::make_unique<psitri::transaction>(
-      txn->direct_session->start_transaction(mdbx_data_root_index,
-                                             psitri::tx_mode::expect_success));
-   txn->direct_roots.emplace(mdbx_data_root_index, txn->direct_tx->primary());
+   // The env owns the single shared write session (delta_art serializes
+   // writers internally on its own mutex; start_transaction blocks until
+   // it owns the writer lock, released at commit/abort).
+   txn->direct_tx.emplace(txn->env->ws->start_transaction(be_root_latest));
 }
 
 static mdbx_view_cursor make_txn_cursor(const MDBX_txn* txn, uint32_t root_idx)
 {
    (void)root_idx;
+   auto* mtxn = const_cast<MDBX_txn*>(txn);
    if (!txn->is_readonly())
    {
-      if (!txn->use_dwal && txn->direct_tx)
-      {
-         auto* root = ensure_direct_root_handle(const_cast<MDBX_txn*>(txn),
-                                                mdbx_data_root_index);
-         if (!root)
-            throw std::out_of_range("MDBX direct transaction root not opened");
-         return mdbx_view_cursor(root->read_cursor());
-      }
-      if (txn->write_tx)
-         return mdbx_view_cursor(
-            txn->write_tx->create_cursor(mdbx_data_root_index));
+      // A cursor inside a write txn iterates the latest committed (W∪B) view
+      // MERGED with this txn's read-own-writes overlay (write_set). The
+      // owning read session lives in the txn (it must outlive the cursor).
+      auto rs = mtxn->ensure_iter_read_session();
+      return mdbx_view_cursor(rs->create_cursor(be_root_latest),
+                              &mtxn->write_set);
    }
 
-   if (const auto* root = direct_read_root(txn, mdbx_data_root_index))
-      return mdbx_view_cursor(root->cursor());
+   if (txn->has_read_view)
+      return mdbx_view_cursor(
+         mtxn->read_session->create_cursor(be_root_latest));
 
-   return mdbx_view_cursor(
-      txn->env->dwal_db->create_cursor(mdbx_data_root_index,
-                                       read_mode_for_txn(txn)));
+   // No captured view (e.g. reset txn): pin one in the txn so it outlives
+   // the cursor, then position from it.
+   auto rs = mtxn->ensure_iter_read_session();
+   return mdbx_view_cursor(rs->create_cursor(be_root_latest));
 }
 
 static bool txn_get_physical_value(const MDBX_txn* txn, std::string_view key,
@@ -1577,47 +1691,30 @@ static bool txn_get_physical_value(const MDBX_txn* txn, std::string_view key,
 {
    if (!txn->is_readonly())
    {
-      if (!txn->use_dwal && txn->direct_tx)
+      if (txn->direct_tx)
       {
-         auto* root = ensure_direct_root_handle(const_cast<MDBX_txn*>(txn),
-                                                mdbx_data_root_index);
-         return root && root->get(key, [&out](psitri::value_view vv) {
+         // Read-own-writes: the transaction's 3-way (hot->warm->base) get
+         // sees this txn's pending upserts/removes plus committed data.
+         return txn->direct_tx->get(key, [&out](std::string_view vv) {
             out.assign(vv.data(), vv.size());
          });
       }
-
-      if (txn->write_tx)
-      {
-         auto result = txn->write_tx->get(mdbx_data_root_index, key);
-         if (!result.found)
-            return false;
-         out.assign(result.value.data.data(), result.value.data.size());
-         return true;
-      }
-
       return false;
    }
 
-   if (const auto* root = direct_read_root(txn, mdbx_data_root_index))
+   if (txn->has_read_view && txn->read_cursor)
    {
-      return root->get(key, [&out](psitri::value_view vv) {
+      auto* mtxn = const_cast<MDBX_txn*>(txn);
+      return mtxn->read_cursor->get(key, [&out](std::string_view vv) {
          out.assign(vv.data(), vv.size());
       });
    }
 
-   auto* mtxn = const_cast<MDBX_txn*>(txn);
-   if (!txn->read_session)
-   {
-      mtxn->read_session = std::make_unique<psitri::dwal::dwal_read_session>(
-         txn->env->dwal_db->start_read_session());
-   }
-
-   auto result = txn->read_session->get(mdbx_data_root_index, key,
-                                        read_mode_for_txn(txn));
-   if (!result.found)
-      return false;
-   out = std::move(result.value);
-   return true;
+   auto rs  = txn->env->db->start_read_session();
+   auto cur = rs->create_cursor(be_root_latest);
+   return cur.get(key, [&out](std::string_view vv) {
+      out.assign(vv.data(), vv.size());
+   });
 }
 
 static bool txn_get_value(const MDBX_txn* txn, uint32_t root_idx,
@@ -1632,18 +1729,12 @@ static void txn_upsert_physical_value(MDBX_txn* txn, std::string_view key,
                                       std::string_view value,
                                       bool sorted_append_hint = false)
 {
-   if (!txn->use_dwal && txn->direct_tx)
-   {
-      auto* root = ensure_direct_root_handle(txn, mdbx_data_root_index);
-      if (!root)
-         throw std::out_of_range("MDBX direct transaction root not opened");
-      if (sorted_append_hint)
-         root->upsert_sorted(key, value);
-      else
-         root->upsert(key, value);
-      return;
-   }
-   txn->write_tx->upsert(mdbx_data_root_index, key, value);
+   (void)sorted_append_hint;  // delta_art has no sorted-append fast path
+   if (!txn->direct_tx)
+      throw std::out_of_range("MDBX direct transaction not started");
+   txn->direct_tx->upsert(key, value);
+   // record in the read-own-writes cursor overlay
+   txn->write_set[std::string(key)] = std::string(value);
 }
 
 static void txn_upsert_value(MDBX_txn* txn, uint32_t root_idx,
@@ -1659,12 +1750,14 @@ static void txn_upsert_value(MDBX_txn* txn, uint32_t root_idx,
 
 static bool txn_remove_physical_key(MDBX_txn* txn, std::string_view key)
 {
-   if (!txn->use_dwal && txn->direct_tx)
-   {
-      auto* root = ensure_direct_root_handle(txn, mdbx_data_root_index);
-      return root && root->remove(key) >= 0;
-   }
-   return static_cast<bool>(txn->write_tx->remove(mdbx_data_root_index, key));
+   if (!txn->direct_tx)
+      return false;
+   // The key is present iff it has a live value now (committed or same-txn).
+   const bool present = txn->direct_tx->get(key, [](std::string_view) {});
+   txn->direct_tx->remove(key);
+   // overlay: a same-txn tombstone that masks committed data
+   txn->write_set[std::string(key)] = std::nullopt;
+   return present;
 }
 
 static bool txn_remove_key(MDBX_txn* txn, uint32_t root_idx,
@@ -1678,15 +1771,27 @@ static bool txn_remove_key(MDBX_txn* txn, uint32_t root_idx,
 static bool txn_remove_physical_range_any(MDBX_txn* txn, std::string_view low,
                                           std::string_view high)
 {
-   if (!txn->use_dwal && txn->direct_tx)
+   // delta_art has no range-remove. Enumerate every live key in [low, high)
+   // through the write-txn cursor (which merges the same-txn overlay, so it
+   // sees uncommitted inserts), collect them, then remove each. Collecting
+   // first avoids invalidating the overlay iterator the cursor rides.
+   std::vector<std::string> keys;
    {
-      auto* root = ensure_direct_root_handle(txn, mdbx_data_root_index);
-      return root && root->remove_range_any(low, high);
+      auto mc = make_txn_cursor(txn, mdbx_data_root_index);
+      if (mc->lower_bound(low))
+      {
+         do
+         {
+            auto k = mc->key();
+            if (!high.empty() && !(k < high))
+               break;
+            keys.emplace_back(k);
+         } while (mc->next());
+      }
    }
-   auto mc = make_txn_cursor(txn, mdbx_data_root_index);
-   bool had_key = mc->lower_bound(low) && (high.empty() || mc->key() < high);
-   txn->write_tx->remove_range(mdbx_data_root_index, low, high);
-   return had_key;
+   for (const auto& k : keys)
+      txn_remove_physical_key(txn, k);
+   return !keys.empty();
 }
 
 static bool txn_remove_range_any(MDBX_txn* txn, uint32_t root_idx,
@@ -2205,20 +2310,21 @@ int mdbx_env_open(MDBX_env* env, const char* pathname,
             env->write_mode = *mode;
       }
 
-      // Determine open mode
-      auto open_mode = psitri::open_mode::create_or_open;
-      if (flags & MDBX_RDONLY)
-         open_mode = psitri::open_mode::open_existing;
+      // Determine open mode. MDBX_RDONLY is advisory: the shim enforces
+      // read-only at the transaction layer (is_readonly()). The start_ver hot
+      // delta has no true read-only open yet, so open create_or_open and rely
+      // on the txn-layer guard — opening an existing DB never creates data.
+      auto open_mode = sal::open_mode::create_or_open;
 
-      psitri::runtime_config runtime_cfg;
+      TK::config cfg;
+      // Optional delta_art knobs from the psitri cache options (best-effort
+      // mapping; cache_size -> arena budget, in MB).
       if (auto it = env->options.find(MDBX_opt_psitri_cache_size_mb);
-          it != env->options.end())
-         runtime_cfg.max_pinned_cache_size_mb = it->second;
-      if (auto it = env->options.find(MDBX_opt_psitri_cache_window_sec);
-          it != env->options.end())
-         runtime_cfg.read_cache_window_sec = std::max<uint64_t>(1, it->second);
+          it != env->options.end() && it->second)
+         cfg.knobs.arena_budget_bytes = it->second << 20;
 
-      env->db = psitri::database::open(env->path, open_mode, runtime_cfg);
+      env->db = be_db::open(env->path, open_mode, cfg);
+      env->ws = env->db->start_write_session();
 
       if (!(flags & MDBX_RDONLY))
       {
@@ -2238,65 +2344,42 @@ int mdbx_env_open(MDBX_env* env, const char* pathname,
             requested_or_default_page_size(env->geo_pagesize));
       }
 
-      // Create WAL directory
-      auto wal_dir = env->path / "wal";
-      std::filesystem::create_directories(wal_dir);
-
-      psitri::dwal::dwal_config cfg;
-      cfg.merge_threads = 2;
-
-      env->dwal_db = std::make_unique<psitri::dwal::dwal_database>(
-         env->db, wal_dir, cfg);
-
       env->init_default_dbi();
 
-      // Under COWART, latest reads are lock-free via cow_coordinator.
-
-      // Restore named DBIs from the MDBX main DB (root 1). Root 0 is scanned
-      // only for older psitrimdbx catalogs written before the main-DB layout.
+      // Restore named DBIs from the catalog (DBI 1 namespace inside the single
+      // delta_art root). Each catalog entry is name -> {flags, root_idx}; the
+      // mapping/encoding is unchanged, only the backend cursor differs.
       try
       {
-         auto rs = env->db->start_read_session();
-         auto restore_catalog = [&](uint32_t root_idx) {
-            auto cur = rs->snapshot_cursor(root_idx);
-            namespaced_key_buffer prefix_buf;
-            auto scan_prefix = root_idx == mdbx_data_root_index
-                                  ? std::optional<std::string_view>(
-                                       namespace_prefix_into(1, prefix_buf))
-                                  : std::nullopt;
-            bool positioned = scan_prefix ? cur.lower_bound(*scan_prefix)
-                                           : cur.seek_begin();
-            if (positioned)
+         auto rs  = env->db->start_read_session();
+         auto cur = rs->create_cursor(be_root_latest);
+         namespaced_key_buffer prefix_buf;
+         auto scan_prefix = namespace_prefix_into(1, prefix_buf);
+         if (cur.lower_bound(scan_prefix))
+         {
+            do
             {
-               do
-               {
-                  auto raw_key = cur.key();
-                  if (scan_prefix)
-                  {
-                     if (!key_has_namespace(raw_key, 1))
-                        break;
-                     raw_key = strip_namespace(raw_key);
-                  }
+               auto raw_key = cur.key();
+               if (!key_has_namespace(raw_key, 1))
+                  break;
+               raw_key = strip_namespace(raw_key);
 
-                  auto name = std::string(raw_key.data(), raw_key.size());
-                  if (env->name_to_dbi.contains(name))
-                     continue;
+               auto name = std::string(raw_key.data(), raw_key.size());
+               if (env->name_to_dbi.contains(name))
+                  continue;
 
-                  auto val = cur.value<std::string>();
-                  unsigned f = 0;
-                  uint32_t r = 0;
-                  if (!val || !decode_catalog_entry(*val, f, r, root_idx == 0))
-                     continue;
+               auto val = cur.value<std::string>();
+               unsigned f = 0;
+               uint32_t r = 0;
+               if (!val || !decode_catalog_entry(*val, f, r, false))
+                  continue;
 
-                  if (r != 0)
-                     env->allocate_dbi_with_root(name, f, r);
-                  else
-                     env->allocate_dbi(name, f);
-               } while (cur.next());
-            }
-         };
-         restore_catalog(1);
-         restore_catalog(0);
+               if (r != 0)
+                  env->allocate_dbi_with_root(name, f, r);
+               else
+                  env->allocate_dbi(name, f);
+            } while (cur.next());
+         }
       }
       catch (...)
       {
@@ -2323,13 +2406,13 @@ int mdbx_env_close_ex(MDBX_env* env, int dont_sync)
    if (!env)
       return MDBX_EINVAL;
 
-   // DWAL owns close-time flushing of its RW/RO layers.  Do not create a latest
-   // cursor here: env close is a teardown path, and a full cursor traversal can
-   // resurrect read sessions while server-side readers are unwinding.
+   // Teardown: drop the shared write session, then the database. delta_art's
+   // database destructor joins the background merger; the hot delta's committed
+   // root is the durable state (no WAL), so recovery on reopen re-flushes
+   // whatever the warm slot still holds.
    (void)dont_sync;
 
-   erase_cached_thread_write_session(env);
-   env->dwal_db.reset();
+   env->ws.reset();
    env->db.reset();
    delete env;
    return MDBX_SUCCESS;
@@ -2372,15 +2455,9 @@ int mdbx_env_sync_ex(MDBX_env* env, int /*force*/, int /*nonblock*/)
 {
    if (!env || !env->opened)
       return MDBX_EINVAL;
-   try
-   {
-      env->dwal_db->flush_wal();
-      return MDBX_SUCCESS;
-   }
-   catch (...)
-   {
-      return MDBX_PANIC;
-   }
+   // delta_art has no WAL: a committed transaction's hot-delta root is already
+   // the durable state. Nothing to flush here.
+   return MDBX_SUCCESS;
 }
 
 int mdbx_env_get_flags(MDBX_env* env, unsigned* flags)
@@ -2477,7 +2554,6 @@ int mdbx_env_copy(MDBX_env* env, const char* dest, unsigned /*flags*/)
 
    try
    {
-      env->dwal_db->flush_wal();
       std::filesystem::copy(
          env->path, dest,
          std::filesystem::copy_options::recursive |
@@ -2528,13 +2604,10 @@ int mdbx_txn_begin_ex(MDBX_env* env, MDBX_txn* parent,
       t->txn_flags = flags;
       t->context   = context;
       t->id        = env->next_txn_id.fetch_add(1);
-      t->use_dwal  = ((flags & MDBX_TXN_USE_DWAL) != 0) ||
-                     env->write_mode == PSITRI_WRITE_MODE_DWAL;
 
       if (flags & MDBX_TXN_RDONLY)
       {
-         if (!t->use_dwal)
-            capture_direct_read_roots(t.get());
+         capture_direct_read_roots(t.get());
       }
       else
       {
@@ -2545,19 +2618,7 @@ int mdbx_txn_begin_ex(MDBX_env* env, MDBX_txn* parent,
 
          try
          {
-            if (t->use_dwal)
-            {
-               // DWAL wants a transaction's root set declared up front. MDBX DBIs
-               // can be touched lazily, so the compatibility layer enlists every
-               // root that could belong to a DBI for this environment.
-               t->write_roots = all_mdbx_write_roots(env);
-               t->write_tx = std::make_unique<psitri::dwal::transaction>(
-                  *env->dwal_db, t->write_roots);
-            }
-            else
-            {
-               start_direct_write_txn(t.get());
-            }
+            start_direct_write_txn(t.get());
          }
          catch (...)
          {
@@ -2591,12 +2652,7 @@ int mdbx_txn_commit_ex(MDBX_txn* txn, MDBX_commit_latency* latency)
       {
          txn->direct_tx->commit();
          txn->direct_tx.reset();
-         release_write_slot(txn);
-      }
-      if (txn->write_tx)
-      {
-         txn->write_tx->commit();
-         txn->write_tx.reset();
+         txn->write_set.clear();
          release_write_slot(txn);
       }
 
@@ -2631,12 +2687,7 @@ int mdbx_txn_abort(MDBX_txn* txn)
       {
          txn->direct_tx->abort();
          txn->direct_tx.reset();
-         release_write_slot(txn);
-      }
-      if (txn->write_tx)
-      {
-         txn->write_tx->abort();
-         txn->write_tx.reset();
+         txn->write_set.clear();
          release_write_slot(txn);
       }
 
@@ -2659,9 +2710,9 @@ int mdbx_txn_reset(MDBX_txn* txn)
 {
    if (!txn || !txn->is_readonly())
       return MDBX_BAD_TXN;
-   txn->direct_read_roots.clear();
-   txn->direct_read_session.reset();
+   txn->read_cursor.reset();
    txn->read_session.reset();
+   txn->has_read_view = false;
    txn->returned_slices.clear();
    return MDBX_SUCCESS;
 }
@@ -2673,11 +2724,10 @@ int mdbx_txn_renew(MDBX_txn* txn)
    try
    {
       txn->returned_slices.clear();
+      txn->read_cursor.reset();
       txn->read_session.reset();
-      txn->direct_read_roots.clear();
-      txn->direct_read_session.reset();
-      if (!txn->use_dwal)
-         capture_direct_read_roots(txn);
+      txn->has_read_view = false;
+      capture_direct_read_roots(txn);
       return MDBX_SUCCESS;
    }
    catch (...)
@@ -3005,7 +3055,9 @@ int mdbx_get_ex(const MDBX_txn* txn, MDBX_dbi dbi,
    return rc;
 }
 
-/// Ensure the write transaction covers the given root.
+/// Ensure the write transaction is live. The shim is single-keyspace: the
+/// dbi number is a key namespace prefix into the one delta_art root, so every
+/// dbi is "covered" once the transaction exists.
 static int ensure_rw_root(MDBX_txn* txn, uint32_t root_idx)
 {
    if (!txn || txn->is_readonly())
@@ -3013,16 +3065,7 @@ static int ensure_rw_root(MDBX_txn* txn, uint32_t root_idx)
    if (namespace_too_large(root_idx))
       return MDBX_BAD_DBI;
 
-   if (!txn->use_dwal)
-      return ensure_direct_root_handle(txn, mdbx_data_root_index)
-                ? MDBX_SUCCESS
-                : MDBX_DBS_FULL;
-
-   if (!txn->write_tx)
-      return MDBX_BAD_TXN;
-
-   return txn_covers_root(txn, mdbx_data_root_index) ? MDBX_SUCCESS
-                                                     : MDBX_DBS_FULL;
+   return txn->direct_tx ? MDBX_SUCCESS : MDBX_BAD_TXN;
 }
 
 static int mdbx_put_impl(MDBX_txn* txn, uint32_t root_idx, bool is_ds,
@@ -3078,6 +3121,13 @@ static int mdbx_put_impl(MDBX_txn* txn, uint32_t root_idx, bool is_ds,
       }
 
       // Non-DUPSORT path
+      // The tiered hot delta stores a value in one word-confined line run; a
+      // value too large to fit a leaf is rejected up front (native MDBX returns
+      // MDBX_BAD_VALSIZE for oversize values) rather than panicking deep in the
+      // backend allocator.
+      if (val_sv.size() > max_backend_value_size)
+         return MDBX_BAD_VALSIZE;
+
       if (flags & MDBX_NOOVERWRITE)
       {
          std::string existing;

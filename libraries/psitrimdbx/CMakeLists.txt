@@ -1,7 +1,7 @@
 # PsiTriMDBX: MDBX-compatible drop-in API. The generic shim (dbi mapping,
 # DUPSORT composite-key encoding, cursor ops, txn lifecycle) is engine-agnostic;
-# the backend is being lifted onto the adb concept so it can ride the new fast
-# model (delta_art tiered / start_ver). Today it builds on the psitri dwal API.
+# the backend now rides the new fast model — the delta_art tiered engine
+# (start_ver hot delta over a sal_art_ref dwal cold base).
 add_library(psitrimdbx
     src/mdbx_impl.cpp
 )
@@ -10,9 +10,12 @@ target_include_directories(psitrimdbx
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
+    PRIVATE
+        # heart_dwal_engine.hpp / radix_engine.hpp (the cold base instantiation)
+        ${CMAKE_SOURCE_DIR}/libraries/sal_art_ref/test
 )
 
-target_link_libraries(psitrimdbx PUBLIC psitri)
+target_link_libraries(psitrimdbx PUBLIC psitri delta_art start_ver sal_art_ref)
 target_compile_features(psitrimdbx PUBLIC cxx_std_20)
 
 option(PSITRIMDBX_BUILD_TESTS "Build the psitrimdbx test suite" ON)

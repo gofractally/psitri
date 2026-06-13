@@ -1144,6 +1144,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      slot = own_suffix_(path_, pdep_, fshared_);
                      cur  = *slot;
                   }  // split re-prefixes this node in place
+                        if constexpr (inline_children_ok)
+                        {
+                           setlist* sp_ = static_cast<setlist*>(deref_(cur));
+                           if (sl_inl_active(sp_)) sl_externalize_all_(sp_);
+                        }
                         *slot = split_setlist_prefix(cur, key, depth, c, std::forward<VF>(v), [&](auto&& x) {
                            return make_value_at(key, depth + c + 1, std::forward<decltype(x)>(x));
                         });
@@ -1167,6 +1172,19 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   const uint8_t byte = uint8_t(key[depth]);
                   if (int i = setlist_index(s, byte); i >= 0)  // existing child -> descend
                   {
+                     if constexpr (inline_children_ok)
+                        if (sl_is_inline(s, i))
+                        {  // the leaf to mutate rides this line — own it, then handle in place
+                           if constexpr (Shared)
+                           {
+                              slot = own_suffix_(path_, pdep_, fshared_);
+                              cur  = *slot;
+                              s    = static_cast<setlist*>(deref_(cur));
+                           }
+                           bool ins = upsert_inline_<Assign>(s, i, key, depth, std::forward<VF>(v));
+                           count_ += ins;
+                           return ins;
+                        }
                      if constexpr (WideStems) pslot = slot;
                      slot           = &s->branch[i];
                      assert(pdep_ < 72);
@@ -1181,6 +1199,10 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      cur  = *slot;
                   }
                   s   = static_cast<setlist*>(deref_(cur));
+                  // a new branch grows the array into the tail — dissolve any inline payloads
+                  // first (re-compacted at the next split); widen below then sees no inline.
+                  if constexpr (inline_children_ok)
+                     if (sl_inl_active(s)) sl_externalize_all_(s);
                   packed_ptr lf = make_value_at(key, depth + 1, std::forward<VF>(v));
                   if (setlist_set(s, byte, lf))  // room: in place (prefix untouched)
                   {
@@ -3953,7 +3975,32 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      goto rm_term;
                   {
                      const uint8_t byte = uint8_t(key[depth]);
-                     packed_ptr*   cs   = router_find_slot(cur, byte);
+                     if constexpr (inline_children_ok)
+                        if (cur.tag() == K::setlist_u8)
+                        {
+                           setlist*  s = static_cast<setlist*>(deref_(cur));
+                           const int i = setlist_index(s, byte);
+                           if (i >= 0 && sl_is_inline(s, i))
+                           {  // target leaf rides this line: drop the branch, no node to free
+                              const char* L = sl_inline_leaf(s, i);
+                              if (std::string_view(reinterpret_cast<const char*>(leaf_suf(L)),
+                                                   leaf_slen(L)) != key.substr(depth + 1))
+                                 return false;  // key not present
+                              own_rm_();  // own the path (incl. this setlist); leaf rides the clone
+                              setlist*  os = static_cast<setlist*>(deref_(*slot));
+                              const int oi = setlist_index(os, byte);
+                              vh_leaf_dies_(sl_inline_leaf(os, oi));
+                              sl_remove_branch_(os, oi);
+                              --count_;
+                              if (rm_shrink_(slot))  // emptied/collapsed: unlink + cascade up
+                              {
+                                 if (n >= 2) rm_unwind_(path, n, n - 2);
+                                 else        root_ = packed_ptr::null();
+                              }
+                              return true;
+                           }
+                        }
+                     packed_ptr* cs = router_find_slot(cur, byte);
                      if (!cs)
                         return false;
                      slot               = cs;
@@ -5756,6 +5803,53 @@ namespace detail  // implementation types & node helpers — not part of the pub
          }
          set_term(rh, std::forward<VF>(val));
          return true;
+      }
+
+      // Upsert into an INLINE child: the leaf rides s's (already-owned) line. `depth` is the
+      // byte index that selected child i, so the leaf's key tail is key.substr(depth+1). Per
+      // Dan's COW insight: the line is already cloned, so a same-size value update overwrites
+      // in place — NO externalize. Externalize only when the leaf no longer fits (raw value
+      // grows/shrinks) or the key diverges (a split needs the slot). Returns true iff a new
+      // key was inserted (an exact-key update returns false).
+      template <bool Assign, class VF>
+      bool upsert_inline_(setlist* s, int i, std::string_view key, size_t depth, VF&& val)
+      {
+         char*            L = sl_inline_leaf(s, i);
+         std::string_view S(reinterpret_cast<const char*>(leaf_suf(L)), leaf_slen(L));
+         std::string_view R = key.substr(depth + 1);
+         if (S == R)  // exact key → value update
+         {
+            if constexpr (Assign)
+            {
+               if constexpr (raw_vals)
+               {
+                  const std::string_view nb = vf_peek_(val);
+                  if (nb.size() == leaf_vlen(L))
+                  {  // same size: overwrite in the owned line — no externalize (Dan)
+                     vh_leaf_dies_(L);
+                     std::memcpy(L + leaf_value_off(), nb.data(), nb.size());
+                  }
+                  else
+                  {  // size changed: no longer fits this slot — externalize, then rebuild
+                     sl_externalize_(s, i);
+                     bool ins;
+                     s->branch[i] =
+                         split_leaf<Assign>(s->branch[i], key, depth + 1, std::forward<VF>(val), ins);
+                  }
+               }
+               else
+               {  // trivially-copyable fixed-size T: overwrite in the owned line
+                  v_destroy(alloc_, leaf_val(L));
+                  vf_construct(std::forward<VF>(val), leaf_val(L));
+               }
+            }
+            return false;  // key existed
+         }
+         // diverging key → externalize the leaf, then split it like a normal terminal
+         sl_externalize_(s, i);
+         bool inserted;
+         s->branch[i] = split_leaf<Assign>(s->branch[i], key, depth + 1, std::forward<VF>(val), inserted);
+         return inserted;
       }
 
       // Split a leaf whose suffix diverges from the key: build a setlist holding the

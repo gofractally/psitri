@@ -4257,6 +4257,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
       // (2 typical leaves no longer fit), making the whole feature dormant.
       static constexpr unsigned SL_VAL_ALIGN =
           raw_vals ? 1u : (alignof(T) < 1 ? 1u : unsigned(alignof(T)));
+      // Inline leaves need no OWN version stamp — the setlist's stamp governs their liveness
+      // (they are never a separate COW unit). For raw_vals strip the leading 4 B vstamp:
+      // store only [slen..suffix] and hand accessors a LOGICAL pointer 4 B before the stored
+      // bytes. The phantom [logical, logical+4) is never read for an inline leaf; externalize's
+      // memcpy(full sz)+pack_ re-materializes a real stamp there. +4 B of region per leaf.
+      static constexpr unsigned SL_VSTAMP = raw_vals ? 4u : 0u;
 
       static bool sl_inl_active(const setlist* s) noexcept { return s->inl & 0x80; }
       static bool sl_is_inline(const setlist* s, int i) noexcept
@@ -4322,11 +4328,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
          for (int i = 0; i < n; ++i)
             if (sl_is_inline(s, i))
             {
-               const char*    lf = sl_inline_leaf(s, i);
-               const unsigned sz = unsigned(leaf_alloc_size(lf));
-               pos = (pos - sz) & ~(SL_VAL_ALIGN - 1);
-               std::memcpy(tmp + pos, lf, sz);
-               newoff[i] = pos;
+               const char*    lf   = sl_inline_leaf(s, i);          // logical (4 B before physical)
+               const unsigned sz   = unsigned(leaf_alloc_size(lf)); // full size (incl vstamp)
+               const unsigned phys = sz - SL_VSTAMP;                // stored bytes
+               pos = (pos - phys) & ~(SL_VAL_ALIGN - 1);            // physical start
+               std::memcpy(tmp + pos, lf + SL_VSTAMP, phys);        // lf+SL_VSTAMP = physical start
+               newoff[i] = pos - SL_VSTAMP;                         // logical offset
             }
          std::memcpy(reinterpret_cast<char*>(s) + pos, tmp + pos, sl_inline_top() - pos);
          for (int i = 0; i < n; ++i)
@@ -4355,13 +4362,14 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   was_ext[i] = true;
                }
                if (!src) continue;
-               const unsigned sz = unsigned(leaf_alloc_size(src));
-               if (sz > pos) return;  // leaf too big for the region — all-or-nothing bail
-               const unsigned np = (pos - sz) & ~(SL_VAL_ALIGN - 1);
+               const unsigned sz   = unsigned(leaf_alloc_size(src));  // full leaf size (incl vstamp)
+               const unsigned phys = sz - SL_VSTAMP;                  // stored bytes (vstamp stripped)
+               if (phys > pos) return;  // too big for the region — all-or-nothing bail
+               const unsigned np = (pos - phys) & ~(SL_VAL_ALIGN - 1);  // physical start
                if (np < sl_used_branch_end(s)) return;  // would overlap the branch array
                pos = np;
-               std::memcpy(tmp + pos, src, sz);
-               newoff[i] = pos;
+               std::memcpy(tmp + np, src + SL_VSTAMP, phys);  // skip the source's vstamp
+               newoff[i] = np - SL_VSTAMP;                    // LOGICAL offset (4 B before physical)
                newinl |= uint8_t(1u << i);
                any = true;
             }

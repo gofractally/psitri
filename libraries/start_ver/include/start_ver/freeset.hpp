@@ -183,11 +183,17 @@ namespace start_ver
 #endif
    }  // namespace detail
 
-   struct seg_freeset
+   // Grain-AGNOSTIC: templated on UNITS-per-segment (bits in l0), never on bytes.
+   // The byte-size-per-unit lives in the arena (config::geometry). The default
+   // instantiation (UnitsPerSegment == lines_per_segment) is byte-identical to
+   // the original layout. A coarser-grain arena instantiates it with fewer units.
+   template <uint32_t UnitsPerSegment = lines_per_segment>
+   struct seg_freeset_t
    {
-      static constexpr uint32_t W0 = lines_per_segment / 64;  // l0 words
-      static constexpr uint32_t PW = W0 / 64;                 // presence words/class
-      static_assert(W0 % 64 == 0, "presence words are exact (segment >= 512 KB)");
+      static constexpr uint32_t W0 = UnitsPerSegment / 64;    // l0 words
+      static constexpr uint32_t PW = (W0 + 63) / 64;          // presence words/class
+      static_assert(W0 % 64 == 0 || W0 < 64,
+                    "presence words are exact (segment >= 512 KB) or one short word");
       static constexpr bool xfit = VPART_FS_XFIT != 0;
 
       std::atomic<uint64_t> l0[W0];       // AUTHORITY: 1 bit per line, 1 = free
@@ -206,7 +212,7 @@ namespace start_ver
          for (auto& c : pres)
             for (auto& w : c)
                w.store(all_free ? ~0ull : 0ull, std::memory_order_relaxed);
-         free8_count.store(all_free ? lines_per_segment / 8 : 0,
+         free8_count.store(all_free ? UnitsPerSegment / 8 : 0,
                            std::memory_order_relaxed);
       }
 
@@ -288,7 +294,7 @@ namespace start_ver
       // (usually zero extra RMWs) — no tier propagation.
       void free_run(uint32_t line, uint32_t n) noexcept
       {
-         assert(line + n <= lines_per_segment && n >= 1 && n <= max_alloc_lines);
+         assert(line + n <= UnitsPerSegment && n >= 1 && n <= max_alloc_lines);
          const uint32_t w    = line / 64;
          const uint64_t mask = detail::mask_n(n) << (line % 64);
          assert((line % 64) + n <= 64 && "allocation never crosses an l0 word");
@@ -451,7 +457,7 @@ namespace start_ver
       {
          const uint32_t n          = 1u << K;
          const uint32_t first_line = ((from + n - 1) >> K) << K;
-         if (first_line >= lines_per_segment)
+         if (first_line >= UnitsPerSegment)
             return UINT32_MAX;
          uint32_t wfrom = first_line / 64;
          while (true)
@@ -475,7 +481,7 @@ namespace start_ver
       uint32_t pair16_(uint32_t from) noexcept
       {
          const uint32_t first_line = ((from + 15) >> 4) << 4;
-         if (first_line >= lines_per_segment)
+         if (first_line >= UnitsPerSegment)
             return UINT32_MAX;
          uint32_t wfrom = first_line / 64;
          while (true)
@@ -678,4 +684,7 @@ namespace start_ver
                           });
       }
    };
+
+   // The default (128 B grain) freeset — byte-identical to the original layout.
+   using seg_freeset = seg_freeset_t<lines_per_segment>;
 }  // namespace start_ver

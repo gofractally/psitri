@@ -533,6 +533,7 @@ namespace start_ver::kv
 
       database*      _db;
       start_ver::session _ses;
+      start_ver::large_session _lses;  // large-arena allocation context (writer)
       vlog_state     _vlog;  // per-transaction clone/create logs (ALL roots)
       engine_t       _t;     // root 0's working tree (the classic hot path)
       std::array<std::optional<engine_t>, kMaxRoots> _aux;  // roots >= 1, lazy
@@ -608,7 +609,18 @@ namespace start_ver::kv
          // The live tree is durable state — nothing to release at teardown.
       }
 
-      start_ver::arena& store() noexcept { return _arena; }
+      start_ver::arena&       store() noexcept { return _arena; }
+      start_ver::large_arena& large_store() noexcept { return _large; }  // debug/tests
+      // Used grains in the large arena (debug/tests: prove value_large fired and
+      // that remove/drain frees the large object). Exact only at quiescence.
+      uint64_t large_used_units_dbg() noexcept
+      {
+         uint64_t freeU = 0;
+         const uint32_t ns = _large.num_segments();
+         for (uint32_t s = 0; s < ns; ++s)
+            freeU += _large.freeset_of(s).free_lines();
+         return uint64_t(ns) * start_ver::large_geometry::units_per_segment - freeU;
+      }
       // debug/tuning: (used_lines, total_lines) across the arena — distinguishes
       // un-reclaimed garbage (used high) from reclaimed-but-not-reused file
       // high-water (free high). Exact only at quiescence.
@@ -705,8 +717,11 @@ namespace start_ver::kv
       friend class transaction;
 
       database(std::filesystem::path dir, runtime_config cfg)
-          : _arena(make_cfg_(std::move(dir), cfg))
+          : _arena(make_cfg_(dir, cfg)), _large(make_large_cfg_(dir, cfg))
       {
+         // The line arena owns a link to the large arena so every part_alloc
+         // copy (writer/view/drain/reaper) resolves and frees value_large leaves.
+         _arena.set_companion(&_large);
          // resume the version counter past every stamp that could be durable,
          // and re-expose every durable root as its live boundary. Version is
          // global (slot kMaxRoots); roots live in slots [0, kMaxRoots).
@@ -971,6 +986,20 @@ namespace start_ver::kv
          c.reuse_threshold = cfg.reuse_threshold;
          return c;
       }
+      // Large arena config: a `large/` subdirectory (the arena hardcodes
+      // data.part / free.part / refs.part / meta.part filenames), so it never
+      // collides with the line arena's files.
+      static start_ver::arena_config make_large_cfg_(std::filesystem::path dir, runtime_config cfg)
+      {
+         start_ver::arena_config c = make_cfg_(std::move(dir), cfg);
+         c.dir /= "large";
+         // The large arena's index is 28-bit GRAINS of 8 KB (vs 128 B lines), so
+         // the same max_segments would address 64x the bytes — far past the band.
+         // Cap segment count to the grain index ceiling (and keep it modest: a
+         // few hundred 8 MB segments is gigabytes of 0.5 MB-max objects).
+         c.max_segments = std::min<uint32_t>(c.max_segments, 512);
+         return c;
+      }
 
       struct reg_entry
       {
@@ -1000,6 +1029,11 @@ namespace start_ver::kv
 
       start_ver::recycle_ring   _recycle;  // drain -> writer exact-size run reuse
       start_ver::arena          _arena;
+      // Large-value second arena (8 KB grain) in a `large/` subdirectory: same
+      // COW/refcount/recovery machinery, max object 0.5 MB. Linked to _arena as
+      // its companion so every part_alloc (writer, view, drain, reaper) reaches
+      // it. value_large leaves live here; value_ptr leaves stay in _arena.
+      start_ver::large_arena    _large;
       std::mutex            _root_mx;             // serializes commit publication
       std::mutex            _root_locks[kMaxRoots];  // per-root writer locks (ordered)
       std::atomic<uint64_t> _live_arr[kMaxRoots];    // (version<<32|root_i) per root
@@ -1061,10 +1095,14 @@ namespace start_ver::kv
 
    // ── bodies ────────────────────────────────────────────────────────────────
    inline write_session::write_session(database* db)
-       : _db(db), _ses(db->_arena.start_session()), _t(part_alloc<bval>(&_ses))
+       : _db(db), _ses(db->_arena.start_session()),
+         _lses(db->_large.start_session()), _t(part_alloc<bval>(&_ses))
    {
       _t.allocator_mut().vlog   = &_vlog;
       _t.allocator_mut().vhooks = &db->_vh;
+      _t.allocator_mut().lses   = &_lses;  // large-value allocations on this writer
+      // (large_base_ was cached by the tree ctor's rebase_: the companion link
+      // is set on _arena before any write_session is created)
       // re-adopt the durable root on reopen (parity plus: part started empty)
       const uint64_t live = db->_live_arr[0].load(std::memory_order_seq_cst);
       if (live != 0)  // raw 0 is a valid root; version 0 = unpublished
@@ -1086,6 +1124,7 @@ namespace start_ver::kv
          _aux[i].emplace(part_alloc<bval>(&_ses));
          _aux[i]->allocator_mut().vlog   = &_vlog;  // shared per-txn chains
          _aux[i]->allocator_mut().vhooks = &_db->_vh;
+         _aux[i]->allocator_mut().lses   = &_lses;  // large-value allocations
          const uint64_t live = _db->_live_arr[i].load(std::memory_order_seq_cst);
          if (live != 0)
          {

@@ -72,16 +72,20 @@ namespace start_ver
       }
    };
 
-   class arena;
+   // Grain-parameterized: line_geometry (128 B) reproduces today's constants
+   // verbatim; large_geometry (8 KB) is the same allocator at a coarser grain.
+   template <class Geo>
+   class arena_t;
 
    // One of <=64 reader slots (a u64 bitmap). pin/unpin bracket a snapshot's
    // lifetime; the pin IS the smart pointer for everything reachable under it.
-   class read_session
+   template <class Geo>
+   class read_session_t
    {
      public:
-      read_session(read_session&& o) noexcept : _a(o._a), _slot(o._slot) { o._a = nullptr; }
-      read_session(const read_session&) = delete;
-      ~read_session();
+      read_session_t(read_session_t&& o) noexcept : _a(o._a), _slot(o._slot) { o._a = nullptr; }
+      read_session_t(const read_session_t&) = delete;
+      ~read_session_t();
 
       void pin(line_idx i);  // +1 in the reserved band; throws ref_overflow at 255
       template <typename Destroy>
@@ -89,25 +93,32 @@ namespace start_ver
       uint32_t slot() const noexcept { return _slot; }
 
      private:
-      friend class arena;
-      read_session(arena* a, uint32_t slot) noexcept : _a(a), _slot(slot) {}
-      arena*   _a;
-      uint32_t _slot;
+      friend class arena_t<Geo>;
+      read_session_t(arena_t<Geo>* a, uint32_t slot) noexcept : _a(a), _slot(slot) {}
+      arena_t<Geo>* _a;
+      uint32_t      _slot;
    };
 
-   class transaction;
+   template <class Geo>
+   class transaction_t;
 
    // One per writer thread. Owns the active segment claim and the txn floor.
-   class session
+   template <class Geo>
+   class session_t
    {
+      static constexpr uint32_t lines_per_segment = Geo::units_per_segment;
+      static constexpr uint32_t lines_per_page    = Geo::units_per_page;
+      static constexpr uint32_t line_bytes        = Geo::grain_bytes;
+      using seg_freeset = seg_freeset_t<Geo::units_per_segment>;
+
      public:
       // Not movable: start_session() returns a prvalue (guaranteed elision) and
       // outstanding transactions hold a session*.
-      session(session&&)      = delete;
-      session(const session&) = delete;
-      ~session();
+      session_t(session_t&&)      = delete;
+      session_t(const session_t&) = delete;
+      ~session_t();
 
-      transaction start_transaction(uint32_t root_slot = 0);
+      transaction_t<Geo> start_transaction(uint32_t root_slot = 0);
 
       // The allocation entry point (1..64 word-confined lines, all refs = 1).
       // Lives on the session (not the transaction) so a long-lived tree can
@@ -134,14 +145,14 @@ namespace start_ver
          release_run(i, n, [](line_idx) {});
       }
 
-      arena& store() noexcept { return *_a; }
+      arena_t<Geo>& store() noexcept { return *_a; }
 
      private:
-      friend class arena;
-      friend class transaction;
-      explicit session(arena* a) noexcept : _a(a) {}
+      friend class arena_t<Geo>;
+      friend class transaction_t<Geo>;
+      explicit session_t(arena_t<Geo>* a) noexcept : _a(a) {}
 
-      arena*                _a;
+      arena_t<Geo>*         _a;
       uint32_t              _segment      = UINT32_MAX;  // current claim
       line_idx              _floor        = 0;           // first-fit scan start (global line)
       line_idx              _cursor       = 0;           // next-scan hint (global line)
@@ -177,34 +188,47 @@ namespace start_ver
    // First-class txn (harness-shaped): alloc_lines + commit/abort. The tree
    // layer composes durable commits as: txn.commit() -> arena.set_root() ->
    // release(old root) — in that order (SPEC §7).
-   class transaction
+   template <class Geo>
+   class transaction_t
    {
      public:
-      transaction(transaction&& o) noexcept : _s(o._s) { o._s = nullptr; }
-      transaction(const transaction&) = delete;
-      ~transaction();
+      transaction_t(transaction_t&& o) noexcept : _s(o._s) { o._s = nullptr; }
+      transaction_t(const transaction_t&) = delete;
+      ~transaction_t();
 
       line_idx alloc_lines(uint32_t n);  // 1..64, word-confined; all n refs = 1
       void     commit();
       void     abort() noexcept {}  // immediate frees make abort free (SPEC §12.1)
 
-      arena& store() noexcept;
+      arena_t<Geo>& store() noexcept;
 
      private:
-      friend class session;
-      explicit transaction(session* s) noexcept : _s(s) {}
-      session* _s;
+      friend class session_t<Geo>;
+      explicit transaction_t(session_t<Geo>* s) noexcept : _s(s) {}
+      session_t<Geo>* _s;
    };
 
-   class arena
+   template <class Geo>
+   class arena_t
    {
+      // Grain geometry — line_geometry (default) reproduces the original
+      // constants verbatim; the names shadow the file-scope globals so the
+      // bodies below are byte-identical to the pre-template arena.
+      static constexpr uint32_t line_bytes        = Geo::grain_bytes;
+      static constexpr uint32_t segment_bytes     = Geo::seg_bytes;
+      static constexpr uint32_t disk_page_bytes   = Geo::page_bytes;
+      static constexpr uint32_t lines_per_segment = Geo::units_per_segment;
+      static constexpr uint32_t pages_per_segment = Geo::pages_per_segment_;
+      static constexpr uint32_t lines_per_page    = Geo::units_per_page;
+      using seg_freeset = seg_freeset_t<Geo::units_per_segment>;
+
      public:
       static constexpr uint64_t meta_magic   = 0x7061727461726e61ull;  // "partarna"
       static constexpr uint32_t meta_version = 1;
       static constexpr uint32_t max_roots    = 16;
       static constexpr uint8_t  SEG_UNOWNED = 0, SEG_OWNED = 1;
 
-      explicit arena(arena_config cfg) : _cfg(std::move(cfg))
+      explicit arena_t(arena_config cfg) : _cfg(std::move(cfg))
       {
          for (auto& r : _reader_root_idx)
             r.store(UINT32_MAX, std::memory_order_relaxed);  // default: gates all roots
@@ -276,7 +300,7 @@ namespace start_ver
             fprintf(stderr, "REFBASE %p DATABASE %p\n", (void*)_ref_base, (void*)_base);
       }
 
-      ~arena()
+      ~arena_t()
       {
          // Clean shutdown: derived state on disk is now trustworthy.
          if (_hdr)
@@ -419,7 +443,7 @@ namespace start_ver
       }
 
       // ── sessions ───────────────────────────────────────────────────────────
-      session start_session() { return session(this); }
+      session_t<Geo> start_session() { return session_t<Geo>(this); }
 
       std::atomic<uint64_t>& reader_slot(uint32_t i) noexcept { return _reader_roots[i]; }
       // Per-pin ROOT INDEX (multi-root per-root floors): set by a cursor before
@@ -435,7 +459,7 @@ namespace start_ver
          return false;
       }
 
-      read_session start_read_session()
+      read_session_t<Geo> start_read_session()
       {
          auto cur = _read_slots.load(std::memory_order_relaxed);
          while (true)
@@ -445,7 +469,7 @@ namespace start_ver
             const uint32_t slot = uint32_t(std::countr_one(cur));
             if (_read_slots.compare_exchange_weak(cur, cur | (1ull << slot),
                                                   std::memory_order_acquire))
-               return read_session(this, slot);
+               return read_session_t<Geo>(this, slot);
          }
       }
 
@@ -524,10 +548,18 @@ namespace start_ver
       }
       const arena_config& config() const noexcept { return _cfg; }
 
+      // Companion link to the large-value arena (the 8 KB-grain second instance).
+      // The line arena holds it so view/drain allocators (which carry only an
+      // arena*) can resolve and free value_large leaves; null when no large
+      // arena is attached. Stored type-erased: arena_t<line_geometry> cannot
+      // name arena_t<large_geometry> without an instantiation cycle.
+      void  set_companion(void* large) noexcept { _companion = large; }
+      void* companion() const noexcept { return _companion; }
+
      private:
-      friend class session;
-      friend class transaction;
-      friend class read_session;
+      friend class session_t<Geo>;
+      friend class transaction_t<Geo>;
+      friend class read_session_t<Geo>;
 
       struct meta_hdr
       {
@@ -728,10 +760,12 @@ namespace start_ver
       std::atomic<uint32_t> _reader_root_idx[max_read_sessions];
       arena_stats                           _stats;
       bool                                  _was_clean = false;
+      void*                                 _companion = nullptr;  // -> large_arena (type-erased)
    };
 
    // ── session / transaction / read_session bodies ──────────────────────────
-   inline session::~session()
+   template <class Geo>
+   inline session_t<Geo>::~session_t()
    {
       if (!_a)
          return;
@@ -742,26 +776,30 @@ namespace start_ver
          _a->release_claim_(_segment);
    }
 
-   inline transaction session::start_transaction(uint32_t)
+   template <class Geo>
+   inline transaction_t<Geo> session_t<Geo>::start_transaction(uint32_t)
    {
       assert(!_txn_open && "one open transaction per session");
       _txn_open = true;
       // floor = the disk page the txn starts writing on (SPEC §7)
       _floor = (_fill_end / lines_per_page) * lines_per_page;
-      return transaction(this);
+      return transaction_t<Geo>(this);
    }
 
-   inline transaction::~transaction()
+   template <class Geo>
+   inline transaction_t<Geo>::~transaction_t()
    {
       if (_s)
          _s->_txn_open = false;
    }
-   inline arena& transaction::store() noexcept
+   template <class Geo>
+   inline arena_t<Geo>& transaction_t<Geo>::store() noexcept
    {
       return *_s->_a;
    }
 
-   inline line_idx transaction::alloc_lines(uint32_t n)
+   template <class Geo>
+   inline line_idx transaction_t<Geo>::alloc_lines(uint32_t n)
    {
       return _s->alloc_lines(n);
    }
@@ -781,7 +819,8 @@ namespace start_ver
       return r;
    }
 
-   inline void session::recycle_drained(line_idx i, uint32_t n) noexcept
+   template <class Geo>
+   inline void session_t<Geo>::recycle_drained(line_idx i, uint32_t n) noexcept
    {
       for (uint32_t k = 0; k < n; ++k)
          _a->_ref_base[i + k].store(0, std::memory_order_release);
@@ -790,12 +829,13 @@ namespace start_ver
       _a->free_lines_now(i, n);
    }
 
-   inline void session::finish_alloc_(line_idx g, uint32_t n) noexcept
+   template <class Geo>
+   inline void session_t<Geo>::finish_alloc_(line_idx g, uint32_t n) noexcept
    {
-      arena& a = *_a;
-      if (arena::trace_line_() >= 0 && uint32_t(arena::trace_line_()) >= g &&
-          uint32_t(arena::trace_line_()) < g + n)
-         fprintf(stderr, "TRACE line %ld alloc (run %u+%u)\n", arena::trace_line_(), g, n);
+      arena_t<Geo>& a = *_a;
+      if (arena_t<Geo>::trace_line_() >= 0 && uint32_t(arena_t<Geo>::trace_line_()) >= g &&
+          uint32_t(arena_t<Geo>::trace_line_()) < g + n)
+         fprintf(stderr, "TRACE line %ld alloc (run %u+%u)\n", arena_t<Geo>::trace_line_(), g, n);
       for (uint32_t k = 0; k < n; ++k)
          a._ref_base[g + k].store(1, std::memory_order_relaxed);
       if (a._cfg.sync_mode != sync_type::none)
@@ -814,14 +854,15 @@ namespace start_ver
       _alloc_bytes += uint64_t(n) * line_bytes;
    }
 
+   template <class Geo>
    template <typename Destroy>
-   inline void session::release_run(line_idx i, uint32_t n, Destroy&& destroy)
+   inline void session_t<Geo>::release_run(line_idx i, uint32_t n, Destroy&& destroy)
    {
       if (n <= fcache_max_size && i >= _floor && _a->all_refs_one_(i, n))
       {
          for (uint32_t k = 0; k < n; ++k)
          {
-            if (long(i + k) == arena::trace_line_())
+            if (long(i + k) == arena_t<Geo>::trace_line_())
                fprintf(stderr, "TRACE line %u ses_release_run(1->0)\n", i + k);
             _a->_ref_base[i + k].store(0, std::memory_order_release);
             destroy(i + k);
@@ -834,7 +875,8 @@ namespace start_ver
       _a->release_run(i, n, static_cast<Destroy&&>(destroy));
    }
 
-   inline bool session::cache_freed_(line_idx i, uint32_t n) noexcept
+   template <class Geo>
+   inline bool session_t<Geo>::cache_freed_(line_idx i, uint32_t n) noexcept
    {
       auto& v = _fcache[n];
       if (v.size() >= 4096)
@@ -843,7 +885,8 @@ namespace start_ver
       return true;
    }
 
-   inline void session::flush_fcache_() noexcept
+   template <class Geo>
+   inline void session_t<Geo>::flush_fcache_() noexcept
    {
       for (uint32_t n = 1; n <= fcache_max_size; ++n)
       {
@@ -853,7 +896,8 @@ namespace start_ver
       }
    }
 
-   inline line_idx session::take_from_window_(uint32_t n) noexcept
+   template <class Geo>
+   inline line_idx session_t<Geo>::take_from_window_(uint32_t n) noexcept
    {
       const uint64_t r = n == 1 ? _wmask : runs_in_word_(_wmask, n);
       if (!r)
@@ -863,7 +907,8 @@ namespace start_ver
       return _wbase + pos;
    }
 
-   inline void session::flush_window_() noexcept
+   template <class Geo>
+   inline void session_t<Geo>::flush_window_() noexcept
    {
       if (!_wmask)
       {
@@ -885,7 +930,8 @@ namespace start_ver
       _wseg  = UINT32_MAX;
    }
 
-   inline line_idx session::alloc_lines(uint32_t n)
+   template <class Geo>
+   inline line_idx session_t<Geo>::alloc_lines(uint32_t n)
    {
       assert(n >= 1 && n <= max_alloc_lines);
       // Hot-hole cache: exact-size recycle of this-txn frees (dirty pages).
@@ -926,8 +972,9 @@ namespace start_ver
       return alloc_slow_(n);
    }
 
+   template <class Geo>
    template <uint32_t N>
-   [[gnu::always_inline]] inline line_idx session::alloc_lines_c()
+   [[gnu::always_inline]] inline line_idx session_t<Geo>::alloc_lines_c()
    {
       static_assert(N >= 1 && N <= max_alloc_lines);
       if (N <= fcache_max_size && !_fcache[N].empty())
@@ -962,10 +1009,11 @@ namespace start_ver
       return alloc_slow_(N);
    }
 
-   inline line_idx session::alloc_slow_(uint32_t n)
+   template <class Geo>
+   inline line_idx session_t<Geo>::alloc_slow_(uint32_t n)
    {
-      session& s = *this;
-      arena&   a = *s._a;
+      session_t<Geo>& s = *this;
+      arena_t<Geo>&   a = *s._a;
       if (s._wmask)
          s.flush_window_();
       for (int attempts = 0;; ++attempts)
@@ -1040,7 +1088,8 @@ namespace start_ver
       }
    }
 
-   inline void session::flush_stats_() noexcept
+   template <class Geo>
+   inline void session_t<Geo>::flush_stats_() noexcept
    {
       if (_alloc_bytes)
       {
@@ -1049,10 +1098,11 @@ namespace start_ver
       }
    }
 
-   inline void transaction::commit()
+   template <class Geo>
+   inline void transaction_t<Geo>::commit()
    {
-      session& s = *_s;
-      arena&   a = *s._a;
+      session_t<Geo>& s = *_s;
+      arena_t<Geo>&   a = *s._a;
       // The window/cache may hold lines behind the post-commit floor; returning
       // them keeps "writes never land behind the floor" exact for the next txn.
       s.flush_fcache_();
@@ -1068,21 +1118,38 @@ namespace start_ver
       }
       // Advance the floor to the page containing the fill position: the next
       // txn re-dirties that mid-commit page and may fill holes from it forward.
-      s._floor = (s._fill_end / lines_per_page) * lines_per_page;
+      s._floor = (s._fill_end / Geo::units_per_page) * Geo::units_per_page;
    }
 
-   inline read_session::~read_session()
+   template <class Geo>
+   inline read_session_t<Geo>::~read_session_t()
    {
       if (_a)
          _a->_read_slots.fetch_and(~(1ull << _slot), std::memory_order_release);
    }
-   inline void read_session::pin(line_idx i)
+   template <class Geo>
+   inline void read_session_t<Geo>::pin(line_idx i)
    {
       _a->add_ref_or_throw(i);
    }
+   template <class Geo>
    template <typename Destroy>
-   inline void read_session::unpin(line_idx i, Destroy&& d)
+   inline void read_session_t<Geo>::unpin(line_idx i, Destroy&& d)
    {
       _a->release(i, static_cast<Destroy&&>(d));
    }
+
+   // ── default (128 B grain) aliases — byte-identical to the pre-template API ──
+   // Every existing user (kv.hpp, tree_alloc.hpp, tests, benches) names these.
+   using arena        = arena_t<line_geometry>;
+   using session      = session_t<line_geometry>;
+   using transaction  = transaction_t<line_geometry>;
+   using read_session = read_session_t<line_geometry>;
+
+   // The large-value second arena (8 KB grain): same allocator, same COW /
+   // refcount / recovery machinery, max object large_max_object_bytes.
+   using large_arena        = arena_t<large_geometry>;
+   using large_session      = session_t<large_geometry>;
+   using large_transaction  = transaction_t<large_geometry>;
+   using large_read_session = read_session_t<large_geometry>;
 }  // namespace start_ver

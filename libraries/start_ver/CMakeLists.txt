@@ -25,6 +25,7 @@ if(START_VER_BUILD_TESTS)
             test/tree_tests.cpp
             test/cow_tests.cpp
             test/kv_tests.cpp
+            test/large_value_tests.cpp
         )
         target_link_libraries(start_ver-tests PRIVATE start_ver Catch2::Catch2WithMain)
         target_compile_options(start_ver-tests PRIVATE -O1 -g -UNDEBUG -Wall -Werror=switch)

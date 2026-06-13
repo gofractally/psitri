@@ -35,6 +35,12 @@ namespace start_ver::hkv::detail
       cx           = 11, // EXPLICIT segmented router (part COW demotion of c2/c4/c8):
                          // CL0 carries per-segment line pointers; segment lines
                          // are individually refcounted and shareable
+      value_large  = 14, // LARGE terminal: a leaf (suffix + value) structurally
+                         // identical to value_ptr, but allocated from the SECOND
+                         // arena at an 8 KB grain (max object 0.5 MB). The only
+                         // difference is which arena the handle's index addresses;
+                         // deref/alloc/free route on the tag, every other path is
+                         // value_ptr's verbatim.
       full_x       = 10, // EXPLICIT full router (part COW demotion of node_full):
                          // CL0 holds per-line pointers to individually-refcounted
                          // direct lines — COW of one branch shares the other lines
@@ -56,9 +62,15 @@ namespace start_ver::hkv::detail
    // dense and rejects corrupt tags), so a kind above K_max would silently miss.
    // NOTE: tag values are free to renumber only until a persisted (WAL/disk) format
    // exists; after that they are frozen.
-   inline constexpr unsigned K_max = unsigned(K::cbucket);
+   inline constexpr unsigned K_max = unsigned(K::value_large);  // 14 (was cbucket=13)
 
-   constexpr bool is_terminal(K k) noexcept { return k == K::value_ptr || k == K::value_inline; }
+   constexpr bool is_terminal(K k) noexcept
+   {
+      return k == K::value_ptr || k == K::value_inline || k == K::value_large;
+   }
+   // A leaf terminal (suffix + value), in either arena — the read/free/iterate
+   // paths treat value_ptr and value_large identically except for the arena.
+   constexpr bool is_leaf(K k) noexcept { return k == K::value_ptr || k == K::value_large; }
    static_assert(uint8_t(K::setlist_u16) == uint8_t(K::c8) + 1,
                  "router tags are contiguous: setlist_u8..setlist_u16 is one range check");
    constexpr bool is_router(K k) noexcept

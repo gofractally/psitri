@@ -50,6 +50,19 @@ namespace start_ver
             std::memcpy(p.b, &raw, 4);
             return p;
          }
+         // LARGE arena: the index counts 8 KB GRAINS, not 128 B lines. The handle
+         // is otherwise identical (28-bit index in the high nibbles, 4-bit tag);
+         // deref multiplies the index by large_grain_bytes instead of line_bytes.
+         static line_ptr from_grain_off(size_t byte_off, start_ver::hkv::detail::K k) noexcept
+         {
+            assert((byte_off % large_grain_bytes) == 0 && "vpart: large objects are grain-aligned");
+            const size_t grain = byte_off / large_grain_bytes;
+            assert(grain >> 28 == 0 && "vpart: large index exceeds the 28-bit field");
+            line_ptr       p;
+            const uint32_t raw = uint32_t(grain << 4) | uint8_t(k);
+            std::memcpy(p.b, &raw, 4);
+            return p;
+         }
          uint64_t raw() const noexcept
          {
             uint32_t v;
@@ -154,6 +167,14 @@ namespace start_ver
       uint32_t      vtxn     = 0;        // current write window id (0 = no window)
       bool          vreclaim = false;    // drain context: free-now instead of log
 
+      // ── large-value second arena (8 KB grain; value_large leaves) ─────────
+      // lses (writer-only) is the allocation context; the deref/free base comes
+      // from a->companion() so EVERY allocator copy — views, drain, reaper —
+      // resolves and frees a large leaf without carrying lses. The same COW /
+      // refcount / recovery machinery the line arena has (large_arena IS the
+      // grain-parameterized arena), with no per-line-arena overhead.
+      large_session* lses = nullptr;
+
       part_alloc() = default;
       explicit part_alloc(session* s) noexcept : a(&s->store()), ses(s) {}
       explicit part_alloc(session& s) noexcept : a(&s.store()), ses(&s) {}
@@ -162,11 +183,52 @@ namespace start_ver
       template <class U>
       part_alloc(const part_alloc<U>& o) noexcept
           : a(o.a), ses(o.ses), vlog(o.vlog), vhooks(o.vhooks), vring(o.vring), vtxn(o.vtxn),
-            vreclaim(o.vreclaim)
+            vreclaim(o.vreclaim), lses(o.lses)
       {
       }
 
       const std::byte* hkv_base() const noexcept { return a ? a->base() : nullptr; }
+
+      // ── large arena addressing/alloc/free (value_large leaves) ────────────
+      // The companion large_arena is held by the LINE arena (set once at db
+      // construction), so any allocator copy reaches it through `a`.
+      large_arena* large_() const noexcept
+      {
+         return a ? static_cast<large_arena*>(a->companion()) : nullptr;
+      }
+      const std::byte* hkv_large_base() const noexcept
+      {
+         large_arena* la = large_();
+         return la ? la->base() : nullptr;
+      }
+      static constexpr bool has_large = true;
+      // Largest value the line arena can hold (64 lines minus leaf/suffix
+      // overhead): the tree decides line-vs-large against this.
+      static constexpr size_t large_threshold_bytes = size_t(max_alloc_lines) * line_bytes;
+      static constexpr size_t large_max_bytes       = large_max_object_bytes;
+
+      // Allocate a large leaf of `bytes`; returns its grain offset (from the
+      // large arena base) — the tree packs it with from_grain_off + value_large.
+      size_t allocate_large(size_t bytes)
+      {
+         large_arena*   la = large_();
+         assert(la && lses && "large-value store has no large arena/session");
+         if (bytes > large_max_bytes)
+            throw std::runtime_error("vpart: value exceeds the large-arena 0.5 MB object cap");
+         const uint32_t units = uint32_t((bytes + large_grain_bytes - 1) / large_grain_bytes);
+         const line_idx g     = lses->alloc_lines(units);
+         return size_t(g) * large_grain_bytes;
+      }
+      void deallocate_large(size_t grain_off, size_t bytes) noexcept
+      {
+         large_arena*   la    = large_();
+         const line_idx g     = line_idx(grain_off / large_grain_bytes);
+         const uint32_t units = uint32_t((bytes + large_grain_bytes - 1) / large_grain_bytes);
+         if (lses)
+            lses->release_run(g, units);
+         else if (la)
+            la->release_run(g, units);
+      }
 
       static constexpr size_t lines_(size_t bytes) noexcept
       {

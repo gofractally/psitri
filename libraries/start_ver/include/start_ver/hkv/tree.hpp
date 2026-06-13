@@ -32,6 +32,7 @@
 #include <utility>
 #include <vector>
 
+#include <start_ver/config.hpp>  // large_grain_bytes / line_bytes / max_alloc_lines
 #include <start_ver/hkv/cnode.hpp>
 #include <start_ver/hkv/key_codec.hpp>
 #include <start_ver/hkv/tagged_ptr.hpp>
@@ -565,6 +566,21 @@ namespace detail  // implementation types & node helpers — not part of the pub
       static constexpr size_t inline_bytes = sizeof(T) <= inline_cap ? sizeof(T) : inline_cap;
 
      private:
+      // value_large gate, defined up front so the leaf helpers below can use it
+      // in member-initializer context (cow_cap_/large_cap_ live later but are
+      // only needed in function bodies). The allocator exposes a second 8 KB-
+      // grain arena via has_large; heap/PMR allocators lack it and large_ok_ is
+      // false, making every leaf value_ptr (the large path is dead code).
+      template <class A, class = void>
+      struct large_cap0_ : std::false_type
+      {
+      };
+      template <class A>
+      struct large_cap0_<A, std::void_t<decltype(A::has_large)>> : std::true_type
+      {
+      };
+      static constexpr bool large_ok_ = large_cap0_<Allocator>::value && Ptr::indexed;
+
       // Per-node allocation. Every node/value blob is a run of 128-byte-aligned blocks taken
       // straight from the tree's Allocator (rebound to a 128-byte unit), so the low 7 bits stay
       // free for the pointer tag and sizes round up to whole blocks. There is no pool: each node
@@ -596,6 +612,62 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
          node_alloc_t na(alloc_);
          node_at::deallocate(na, static_cast<node_block*>(p), nblocks_(n));
+      }
+
+      // ── large-value leaves: a second 8 KB-grain arena (value_large) ────────
+      // A leaf whose byte size exceeds the line arena's single-CAS cap lives in
+      // the allocator's large arena instead. Allocation/free route there; the
+      // leaf bytes and accessors are value_ptr's verbatim, so once a value_large
+      // handle is deref'd, EVERY leaf_*() reads it identically.
+      // Does a leaf of this many bytes need the large arena? (true => value_large)
+      bool leaf_needs_large_(size_t bytes) const noexcept
+      {
+         if constexpr (large_ok_)
+            return bytes > Allocator::large_threshold_bytes;
+         else
+            return false;
+      }
+      // Allocate a leaf of `bytes`; sets out_tag to value_ptr or value_large.
+      char* leaf_alloc_(size_t bytes, K& out_tag)
+      {
+         if constexpr (large_ok_)
+            if (bytes > Allocator::large_threshold_bytes)
+            {
+               out_tag           = K::value_large;
+               const size_t goff = alloc_.allocate_large(bytes);  // throws past 0.5 MB
+               return static_cast<char*>(
+                   deref_large_(uint64_t(goff / start_ver::large_grain_bytes) << 4));
+            }
+         out_tag = K::value_ptr;
+         return static_cast<char*>(node_alloc_(bytes));
+      }
+      // Free a leaf, routing on its tag (large vs line arena). p is the deref'd
+      // leaf base; bytes is its alloc size.
+      void leaf_free_(void* p, size_t bytes, K tag) noexcept
+      {
+         if constexpr (large_ok_)
+            if (tag == K::value_large)
+            {
+               const size_t goff =
+                   size_t(static_cast<const std::byte*>(p) - large_base_);
+               alloc_.deallocate_large(goff, bytes);
+               return;
+            }
+         node_free_(p, bytes);
+      }
+      // Free a node BY HANDLE: routes a value_large leaf to the large arena,
+      // everything else to the line arena. The generic node-death sites (COW
+      // release/drain/abort, free_all_) funnel through this so they never need
+      // to special-case the tag themselves.
+      void node_free_p_(Ptr p, size_t bytes) noexcept
+      {
+         if constexpr (large_ok_)
+            if (p.tag() == K::value_large)
+            {
+               leaf_free_(deref_(p), bytes, K::value_large);
+               return;
+            }
+         node_free_(deref_(p), bytes);
       }
 
       // ── typed-value lifecycle hooks (raw_vals, allocator-carried) ─────────
@@ -630,7 +702,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       void vh_node_dies_(Ptr p) noexcept  // funnel for tag-dispatched frees
       {
          if constexpr (vh_on)
-            if (p.tag() == K::value_ptr)
+            if (is_leaf(p.tag()))  // value_ptr or value_large carry value bytes
                vh_leaf_dies_(static_cast<const char*>(deref_(p)));
       }
 
@@ -642,14 +714,34 @@ namespace detail  // implementation types & node helpers — not part of the pub
       struct no_base_t
       {
       };
+      // value_large grain (8 KB) vs line grain (128 B): the index field is
+      // identical; only the multiplier (and base) differ. (raw & ~0xF) << 3 is
+      // index<<7 (128 B); << 9 is index<<13 (8192 B). One predictable, almost-
+      // always-false tag compare; the small path is byte-identical to before.
+      static_assert(!large_ok_ || start_ver::large_grain_bytes == 8192,
+                    "deref shift assumes an 8 KB large grain");
+      void* deref_large_(uint64_t raw) const noexcept
+      {
+         if constexpr (large_ok_)
+            return const_cast<std::byte*>(large_base_) + ((raw & ~uint64_t(0xF)) << 9);
+         else
+            return nullptr;
+      }
       void* deref_(packed_ptr p) const noexcept
       {
          if constexpr (indexed)
+         {
+            if constexpr (large_ok_)
+               if (p.tag() == K::value_large)
+                  return deref_large_(p.raw());
             return const_cast<std::byte*>(base_) + ((p.raw() & ~uint64_t(0xF)) << 3);
+         }
          else
             return p.ptr();
       }
       // Same resolution for a raw handle value already in a register (the descend hot path).
+      // PURE line-arena resolution — value_large gets its own descend body so the
+      // common router hops never pay a tag compare here.
       const char* deref_raw_(uint64_t raw) const noexcept
       {
          if constexpr (indexed)
@@ -666,7 +758,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
          switch (k)
          {
-            case K::value_ptr:   return 0;                    // leaf prepend
+            case K::value_ptr:
+            case K::value_large: return 0;                    // leaf prepend (same layout)
             case K::prefix_node: return 2 + int(sizeof(Ptr));  // after [plen][next]
             case K::setlist_u8:  return 96;   // header-ward (just past sizeof==94): the clone
                                               // copies only [0,94), never the empty [96,128) tail
@@ -705,6 +798,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
                               static_cast<const void*>(&v), 4);
                }
             }
+            // value_large: the node lives in the large arena — index it off the
+            // large base in 8 KB grains, not the line base in 128 B lines.
+            if constexpr (large_ok_)
+               if (k == K::value_large)
+                  return packed_ptr::from_grain_off(
+                      size_t(static_cast<const std::byte*>(node) - large_base_), k);
             return packed_ptr::from_off(size_t(static_cast<const std::byte*>(node) - base_), k);
          }
          else
@@ -714,6 +813,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       void rebase_() noexcept
       {
          if constexpr (indexed) base_ = alloc_.hkv_base();
+         if constexpr (large_ok_) large_base_ = alloc_.hkv_large_base();
       }
 
      public:
@@ -1051,6 +1151,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             switch (k)
             {
                case K::value_ptr:
+               case K::value_large:  // a leaf in the large arena: same update/split logic
                case K::value_inline:
                {
                   if constexpr (Shared)
@@ -1382,6 +1483,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
 #define HKV_PTR(R)  deref_raw_(R)
 #define HKV_NEXT(ND) { depth = (ND); continue; }
 #define HKV_BODY_VALUE_PTR    return op.leaf(HKV_PTR(raw), kp + depth, klen - depth);
+// value_large: same op.leaf, but the handle indexes the LARGE arena. A separate
+// body keeps deref_raw_ (the router hot path) free of any tag check.
+#define HKV_BODY_VALUE_LARGE  return op.leaf(static_cast<const char*>(deref_large_(raw)), kp + depth, klen - depth);
 #define HKV_BODY_VALUE_INLINE return op.inl(raw, depth == klen);
 #define HKV_BODY_BUCKET       return op.bkt(reinterpret_cast<const bucket*>(HKV_PTR(raw)), kp + depth, klen - depth);
 #define HKV_BODY_PREFIX { \
@@ -1464,6 +1568,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             switch (static_cast<K>(kk))  // exhaustive, no default → -Wswitch guards a new K
             {
                case K::value_ptr:    HKV_BODY_VALUE_PTR
+               case K::value_large:  HKV_BODY_VALUE_LARGE
                case K::value_inline: HKV_BODY_VALUE_INLINE
                case K::prefix_node:  HKV_BODY_PREFIX
                case K::setlist_u8:   HKV_BODY_SETLIST
@@ -1485,6 +1590,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
 #undef HKV_NEXT
 #undef HKV_PTR
 #undef HKV_BODY_VALUE_PTR
+#undef HKV_BODY_VALUE_LARGE
 #undef HKV_BODY_VALUE_INLINE
 #undef HKV_BODY_PREFIX
 #undef HKV_BODY_SETLIST
@@ -1579,7 +1685,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             uint32_t bkt(const bucket*, const char*, size_t) const { return no_stamp; }
             uint32_t term(const router_hdr* rh) const
             {
-               if (!rh->term.is_null() && rh->term.tag() == K::value_ptr)
+               if (!rh->term.is_null() && is_leaf(rh->term.tag()))
                   return self->vstamp_get_(rh->term);
                return no_stamp;
             }
@@ -1651,6 +1757,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             {
                case K::null:         return op.miss();
                case K::value_ptr:
+               case K::value_large:  // a leaf in either arena: deref_ routes by tag
                   return op.leaf(slot, static_cast<char*>(deref_(cur)), key.substr(depth), parent, pbyte, pstem);
                case K::value_inline: return op.inl(slot, depth == key.size(), parent, pbyte, pstem);
                case K::bucket:       return op.bkt(slot, cur, key.substr(depth));
@@ -2059,6 +2166,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                switch (child.tag())
                {
                   case K::value_ptr:
+                  case K::value_large:  // a leaf in either arena: deref_ routes by tag
                      emit_leaf_(static_cast<const char*>(deref_(child)), base);
                      return;
                   case K::value_inline:
@@ -2243,6 +2351,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             switch (child.tag())
             {
                case K::value_ptr:
+               case K::value_large:  // a leaf in either arena: deref_ routes by tag
                   // external leaf; the inline-leaf path emits the same way via descend_kid_
                   emit_leaf_(static_cast<const char*>(deref_(child)), base);
                   return true;
@@ -2454,7 +2563,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          bool descend_lb_(packed_ptr cur, std::string_view key, size_t depth, bool upper)
          {
             const K k = cur.tag();
-            if (k == K::value_ptr)
+            if (is_leaf(k))  // value_ptr or value_large: same suffix-compare positioning
             {
                const char*      L = static_cast<const char*>(deref_(cur));
                std::string_view S(reinterpret_cast<const char*>(leaf_suf(L)), leaf_slen(L));
@@ -3675,8 +3784,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
             return;
          }
          const K k = cur.tag();
-         if (k == K::value_ptr)
-            return;  // post-floor leaf stays
+         if (is_leaf(k))
+            return;  // post-floor leaf stays (line or large arena)
          // >F spine node: own it once per retire txn, then mutate in place
          if constexpr (cow_stamped_)
             if (alloc_.hkv_vtxn() && cow_shared_(cur))
@@ -3697,7 +3806,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          }
          // routers (hdr resolves to its base shape for dispatch; rh is at CL0)
          router_hdr* rh = static_cast<router_hdr*>(deref_(cur));
-         if (!rh->term.is_null() && rh->term.tag() == K::value_ptr &&
+         if (!rh->term.is_null() && is_leaf(rh->term.tag()) &&
              vstamp_get_(rh->term) <= F)
          {
             retire_list_.push_back(rh->term);
@@ -3777,6 +3886,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          switch (cur.tag())
          {
             case K::value_ptr:
+            case K::value_large:  // a leaf in either arena is one key
             case K::value_inline:
                return 1;
             case K::prefix_node:
@@ -3802,11 +3912,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
          size_t           depth = 0;
          path.ensure(n + 1);
          path[n++] = {&root_, 0};
-         auto free_leaf         = [&](char* L) {
+         auto free_leaf         = [&](char* L, K tag = K::value_ptr) {
             if constexpr (!raw_vals)
                v_destroy(alloc_, leaf_val(L));
             vh_leaf_dies_(L);
-            node_free_(L, leaf_alloc_size(L));
+            leaf_free_(L, leaf_alloc_size(L), tag);  // routes value_large to the large arena
          };
          // BOTTOM-UP COW (Dan): descend READ-ONLY; own_rm_ clones the shared
          // suffix of the recorded path only when the key is actually FOUND —
@@ -3843,14 +3953,16 @@ namespace detail  // implementation types & node helpers — not part of the pub
                case K::null:
                   return false;
                case K::value_ptr:
+               case K::value_large:  // a leaf in the large arena: same remove logic
                {
                   char* L = static_cast<char*>(deref_(cur));
                   if (std::string_view(reinterpret_cast<const char*>(leaf_suf(L)), leaf_slen(L)) !=
                       key.substr(depth))
                      return false;
                   own_rm_();  // found: own the whole path, then unlink/shrink
+                  const K lt = (*slot).tag();
                   L = static_cast<char*>(deref_(*slot));
-                  free_leaf(L);
+                  free_leaf(L, lt);
                   --count_;
                   if (n >= 2) rm_unwind_(path, n, n - 2);  // n-2: the leaf's parent
                   else root_ = packed_ptr::null();         // the leaf WAS the root
@@ -4025,8 +4137,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
             router_hdr* rh = static_cast<router_hdr*>(deref_(*slot));
             if (rh->term.is_null())
                return false;
-            if (rh->term.tag() == K::value_ptr)  // leaf("",v); an inline term has nothing to free
-               free_leaf(static_cast<char*>(deref_(rh->term)));
+            if (is_leaf(rh->term.tag()))  // leaf("",v); an inline term has nothing to free
+               free_leaf(static_cast<char*>(deref_(rh->term)), rh->term.tag());
             rh->term         = packed_ptr::null();
             rh->hdr.has_term = 0;
             --count_;
@@ -4090,7 +4202,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
             return 0;
          switch (cur.tag())
          {
-            case K::value_ptr:    ++d.leaf; ++d.terminals; d.sum_depth += depth;
+            case K::value_ptr:
+            case K::value_large:  ++d.leaf; ++d.terminals; d.sum_depth += depth;
                                   d.router_hops += routers_above; return 1;
             case K::value_inline: ++d.inl;  ++d.terminals; d.sum_depth += depth;
                                   d.router_hops += routers_above; return 1;
@@ -4139,10 +4252,16 @@ namespace detail  // implementation types & node helpers — not part of the pub
       // key as a zero-copy string_view (same cacheline as the value). leaf_suf() points at
       // the suffix in both forms, so point lookup is identical.
       static constexpr uint16_t LEAF_FULL = 0x8000;
+      // raw_vals value length is u32 (offset 8): values up to the large arena's
+      // 0.5 MB cap (value_large) need >16 bits; a u16 capped at 65535. The +2 B
+      // over the old u16 layout is uniform for value_ptr and value_large, so the
+      // two are byte-identical (the design's "same leaf layout"). suffix/prefix
+      // lengths stay u16 (keys never exceed 64 KB).
+      static constexpr uint16_t LEAF_VLEN_OFF = 8;
       static constexpr size_t   leaf_value_off() noexcept
       {
          if constexpr (raw_vals)
-            return 4 + 3 * sizeof(uint16_t);  // [vstamp][slen][pfx_field][vlen]
+            return 4 + 2 * sizeof(uint16_t) + sizeof(uint32_t);  // [vstamp][slen][pfx_field][vlen u32]
          else
          {
             constexpr size_t a = alignof(T);
@@ -4156,16 +4275,21 @@ namespace detail  // implementation types & node helpers — not part of the pub
          else
             return leaf_value_off() + sizeof(T) + strlen;
       }
-      static uint16_t leaf_vlen(const char* p) noexcept
+      static uint32_t leaf_vlen(const char* p) noexcept
       {
          if constexpr (raw_vals)
          {
-            uint16_t v;
-            std::memcpy(&v, p + 8, 2);
+            uint32_t v;
+            std::memcpy(&v, p + LEAF_VLEN_OFF, 4);
             return v;
          }
          else
-            return uint16_t(sizeof(T));
+            return uint32_t(sizeof(T));
+      }
+      static void leaf_set_vlen(char* p, uint32_t vlen) noexcept
+         requires raw_vals
+      {
+         std::memcpy(p + LEAF_VLEN_OFF, &vlen, 4);
       }
       static std::string_view leaf_bytes(const char* p) noexcept
          requires raw_vals
@@ -4484,6 +4608,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          switch (k)
          {
             case K::value_ptr:
+            case K::value_large:  // a leaf in either arena: deref_ routes by tag
                f(static_cast<const T&>(*leaf_val(static_cast<char*>(deref_(cur)))));
                return;
             case K::value_inline:
@@ -4556,6 +4681,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          switch (k)
          {
             case K::value_ptr:
+            case K::value_large:  // a leaf in either arena: deref_ routes by tag
             {
                char* L = static_cast<char*>(deref_(cur));
                if (leaf_has_full(L))  // whole key contiguous in the leaf → zero-copy, no append
@@ -4803,22 +4929,23 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
          if constexpr (raw_vals)
          {
-            const std::string_view b = vf_make(std::forward<VF>(val)).v;
-            char* p = static_cast<char*>(node_alloc_(leaf_size(suf.size(), b.size())));
+            const std::string_view b  = vf_make(std::forward<VF>(val)).v;
+            K                      kt = K::value_ptr;  // leaf_alloc_ may pick value_large
+            char* p = leaf_alloc_(leaf_size(suf.size(), b.size()), kt);
             leaf_set_hdr(p, uint16_t(suf.size()), 0);
-            const uint16_t vl = uint16_t(b.size());
-            std::memcpy(p + 8, &vl, 2);
+            leaf_set_vlen(p, uint32_t(b.size()));
             std::memcpy(p + leaf_value_off(), b.data(), b.size());
             std::memcpy(leaf_str(p), suf.data(), suf.size());
-            return pack_(p, K::value_ptr);
+            return pack_(p, kt);
          }
          else
          {
-            char* p = static_cast<char*>(node_alloc_(leaf_size(suf.size())));
+            K     kt = K::value_ptr;
+            char* p  = leaf_alloc_(leaf_size(suf.size()), kt);
             leaf_set_hdr(p, uint16_t(suf.size()), 0);
             std::memcpy(leaf_str(p), suf.data(), suf.size());
             vf_construct(std::forward<VF>(val), leaf_val(p));
-            return pack_(p, K::value_ptr);
+            return pack_(p, kt);
          }
       }
       template <class VF>
@@ -4826,25 +4953,25 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
          if constexpr (raw_vals)
          {
-            const std::string_view b = vf_make(std::forward<VF>(val)).v;
-            char* p = static_cast<char*>(
-                node_alloc_(leaf_size(pfx.size() + suf.size(), b.size())));
+            const std::string_view b  = vf_make(std::forward<VF>(val)).v;
+            K                      kt = K::value_ptr;
+            char* p = leaf_alloc_(leaf_size(pfx.size() + suf.size(), b.size()), kt);
             leaf_set_hdr(p, uint16_t(suf.size()), uint16_t(LEAF_FULL | pfx.size()));
-            const uint16_t vl = uint16_t(b.size());
-            std::memcpy(p + 8, &vl, 2);
+            leaf_set_vlen(p, uint32_t(b.size()));
             std::memcpy(p + leaf_value_off(), b.data(), b.size());
             std::memcpy(leaf_str(p), pfx.data(), pfx.size());
             std::memcpy(leaf_str(p) + pfx.size(), suf.data(), suf.size());
-            return pack_(p, K::value_ptr);
+            return pack_(p, kt);
          }
          else
          {
-            char* p = static_cast<char*>(node_alloc_(leaf_size(pfx.size() + suf.size())));
+            K     kt = K::value_ptr;
+            char* p  = leaf_alloc_(leaf_size(pfx.size() + suf.size()), kt);
             leaf_set_hdr(p, uint16_t(suf.size()), uint16_t(LEAF_FULL | pfx.size()));
             std::memcpy(leaf_str(p), pfx.data(), pfx.size());
             std::memcpy(leaf_str(p) + pfx.size(), suf.data(), suf.size());
             vf_construct(std::forward<VF>(val), leaf_val(p));
-            return pack_(p, K::value_ptr);
+            return pack_(p, kt);
          }
       }
       // A terminal value with key suffix `suf`: inline in the pointer when the suffix
@@ -5038,9 +5165,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
             case K::cx:          return 128;
             case K::cbucket:     return 128;  // CL0 only; pieces are separate
             // exhaustive (no default): a new node kind must declare its size here.
-            case K::value_ptr: case K::value_inline: case K::prefix_node:
-            case K::bucket: case K::hdr: case K::null:
-               assert(false); __builtin_unreachable();
+            case K::value_ptr: case K::value_large: case K::value_inline:
+            case K::prefix_node: case K::bucket: case K::hdr: case K::null:
+               assert(false); __builtin_unreachable();  // leaves size via leaf_alloc_size
          }
       }
       // ── see-header (K::hdr) wide routers: CL0 layout
@@ -5109,8 +5236,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
                }
             }
             // exhaustive (no default): a new K must be decided here — and only here.
-            case K::value_ptr: case K::value_inline: case K::prefix_node:
-            case K::setlist_u16: case K::bucket: case K::cbucket: case K::null:
+            case K::value_ptr: case K::value_large: case K::value_inline:
+            case K::prefix_node: case K::setlist_u16: case K::bucket:
+            case K::cbucket: case K::null:
                assert(false && "byte-routers only"); __builtin_unreachable();
          }
       }
@@ -5830,7 +5958,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             if constexpr (Assign)
             {
                if constexpr (cow_stamped_)  // fused privatize: own the term leaf
-                  if (alloc_.hkv_vtxn() && rh->term.tag() == K::value_ptr &&
+                  if (alloc_.hkv_vtxn() && is_leaf(rh->term.tag()) &&
                       cow_shared_(rh->term))
                      cow_clone_into_(&rh->term, rh->term);
                if (rh->term.tag() == K::value_inline)
@@ -5940,6 +6068,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             setlist_set(r, uint8_t(R[0]), make_value_at(key, depth + 1, std::forward<VF>(val)));  // new continues
             return pack_(r, K::setlist_u8);  // c == 0, no prefix node needed
          }
+         const K          lt = cur.tag();  // value_ptr or value_large — frees route by it
          char*            L = static_cast<char*>(deref_(cur));
          std::string_view S(reinterpret_cast<const char*>(leaf_suf(L)), leaf_slen(L));
          std::string_view R = key.substr(depth);
@@ -5971,7 +6100,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                                                       leaf_slen(L)),
                                                   std::forward<VF>(val));
                      vh_leaf_dies_(L);  // old bytes die with the old leaf
-                     node_free_(L, Lsz);
+                     leaf_free_(L, Lsz, lt);  // routes value_large to the large arena
                      inserted = false;
                      return np;
                   }
@@ -6012,7 +6141,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                setlist_set(r, uint8_t(S[c]), make_value_at(ofv, depth + c + 1, ov));
             else
                setlist_set(r, uint8_t(S[c]), make_value(S.substr(c + 1), ov));
-            node_free_(L, Lsize);
+            leaf_free_(L, Lsize, lt);  // routes value_large to the large arena
          }
          else
          {
@@ -6023,7 +6152,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             else
                setlist_set(r, uint8_t(S[c]), make_value(S.substr(c + 1), std::move(*leaf_val(L))));
             v_destroy(alloc_, leaf_val(L));  // old value moved out → destroy moved-from + free
-            node_free_(L, Lsize);
+            leaf_free_(L, Lsize, lt);  // routes value_large to the large arena
          }
          // establish-once: pull r's small leaf children into its line (alloc-free; a same-scope
          // MOVE, no vh hooks). Done at the split shape only — re-compacting per insert is churn.
@@ -6159,11 +6288,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
          switch (cur.tag())
          {
             case K::value_ptr:
+            case K::value_large:  // a leaf in the large arena: free there
             {
                char* L = static_cast<char*>(deref_(cur));
                if constexpr (!std::is_trivially_destructible_v<T>) v_destroy(alloc_, leaf_val(L));
                vh_leaf_dies_(L);
-               node_free_(L, leaf_alloc_size(L));
+               leaf_free_(L, leaf_alloc_size(L), cur.tag());  // routes value_large to the large arena
                return;
             }
             case K::value_inline:
@@ -6317,6 +6447,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
 
      public:
       static constexpr bool cow_enabled = cow_cap_<Allocator>::value && indexed;
+      // Large-value leaves live in the allocator's second arena (large_ok_,
+      // defined up front so the leaf helpers can use it in member-init context).
+      static constexpr bool large_enabled = large_ok_;
 
      private:
       // vpart L1a: stamp-based liveness is active exactly when the COW
@@ -7379,7 +7512,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             {
                cow_destroy_dead_(p);  // cascade children (window/drain rules inside)
                vh_node_dies_(p);
-               node_free_(deref_(p), cow_node_bytes_(p));
+               node_free_p_(p, cow_node_bytes_(p));  // routes value_large to the large arena
                return;
             }
             alloc_.hkv_vdeep(uint32_t(p.raw()), vstamp_get_(p));
@@ -7421,7 +7554,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                if constexpr (vh_on)
                   if (p.tag() == K::setlist_u8)
                      sl_inline_vh_dies_(static_cast<setlist*>(deref_(p)));
-               node_free_(deref_(p), cow_node_bytes_(p));
+               node_free_p_(p, cow_node_bytes_(p));  // routes value_large to the large arena
             }
          }
       }
@@ -7471,7 +7604,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   break;  // leaves/buckets: no children
             }
             vh_node_dies_(p);
-            node_free_(deref_(p), cow_node_bytes_(p));
+            node_free_p_(p, cow_node_bytes_(p));  // routes value_large to the large arena
          }
       }
 
@@ -8806,6 +8939,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          switch (k)
          {
             case K::value_ptr:
+            case K::value_large:  // a leaf (line or large arena): report its bytes
             {
                const char*    L  = static_cast<const char*>(deref_(cur));
                const uint32_t sz = uint32_t(leaf_alloc_size(const_cast<char*>(L)));
@@ -8949,6 +9083,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          switch (p.tag())
          {
             case K::value_ptr:
+            case K::value_large:  // same leaf layout — leaf_alloc_size is arena-agnostic
                return leaf_alloc_size(n);
             case K::prefix_node:
                return pn_size<Ptr>(pn_plen(n));
@@ -8981,6 +9116,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          switch (k)
          {
             case K::value_ptr:
+            case K::value_large:  // a leaf has no children to cascade
             case K::bucket:  // POD payloads (asserted in cow_insert): no dtors
                break;
             case K::prefix_node:
@@ -9495,11 +9631,27 @@ namespace detail  // implementation types & node helpers — not part of the pub
                return pack_(d2, K::cbucket);
             }
          const size_t bytes = cow_node_bytes_(cur);
+         // value_large: the clone is another large-arena leaf. Allocate there,
+         // memcpy the verbatim leaf, pack with the large (grain) encoding.
+         if constexpr (large_ok_)
+            if (k == K::value_large)
+            {
+               K     kt  = K::value_ptr;
+               char* dst = leaf_alloc_(bytes, kt);
+               assert(kt == K::value_large && "a value_large clone must stay large");
+               std::memcpy(dst, deref_(cur), bytes);
+               const Ptr np = pack_(dst, K::value_large);
+               if constexpr (vh_on)
+                  vh_copy_(leaf_bytes(static_cast<const char*>(dst)));
+               return np;
+            }
          void*        dst   = node_alloc_(bytes);
          std::memcpy(dst, deref_(cur), bytes);
          const Ptr np = pack_(dst, k);
          switch (k)
          {
+            case K::value_large:  // handled above (large-arena clone); never here
+               __builtin_unreachable();
             case K::value_ptr:
                // duplicated value bytes; the shallow husk's drain balances this
                if constexpr (vh_on)
@@ -9630,7 +9782,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       void cow_privatize_term_(router_hdr* rh)
       {
          const Ptr t = rh->term;
-         if (!t.is_null() && t.tag() == K::value_ptr && cow_shared_(t))
+         if (!t.is_null() && is_leaf(t.tag()) && cow_shared_(t))
             cow_clone_into_(&rh->term, t);
       }
 
@@ -9655,6 +9807,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             switch (k)
             {
                case K::value_ptr:
+               case K::value_large:  // a leaf in either arena: terminal reached and private
                case K::bucket:
                   return;  // terminal reached and private
                case K::cbucket:
@@ -9844,6 +9997,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
      private:
       [[no_unique_address]] Allocator alloc_{};  // element (T) allocator; rebound per-node for bytes
       [[no_unique_address]] std::conditional_t<indexed, const std::byte*, no_base_t> base_{};
+      // Large-arena base (value_large deref): cached like base_, only when the
+      // allocator has a second arena. An empty member otherwise — zero cost.
+      [[no_unique_address]] std::conditional_t<large_ok_, const std::byte*, no_base_t> large_base_{};
       packed_ptr                      root_  = packed_ptr::null();
       size_t                          count_ = 0;
    };

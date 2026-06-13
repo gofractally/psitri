@@ -43,6 +43,53 @@ namespace start_ver
    // level-0 freeset (an 8 KB-aligned region) — every alloc/free is one CAS.
    inline constexpr uint32_t max_alloc_lines = 64;
 
+   // ── grain geometry (large-value second arena) ──────────────────────────
+   // The arena/freeset are grain-AGNOSTIC: the freeset allocates runs of UNITS
+   // (bits), <= 64 per u64 word; the byte-size-per-unit lives only here. A
+   // `geometry` instantiation freezes one grain. The DEFAULT (`line_geometry`)
+   // reproduces today's exact constants verbatim — the existing line arena is
+   // byte-identical. A second instance at an 8 KB grain reuses the SAME freeset
+   // and gets 1..64 chunks/word = 0.5 MB max object, with no allocator changes.
+   template <uint32_t GrainBytes,
+             uint32_t SegBytes  = segment_bytes,
+             uint32_t PageBytes = disk_page_bytes>
+   struct geometry
+   {
+      static constexpr uint32_t grain_bytes        = GrainBytes;
+      static constexpr uint32_t seg_bytes          = SegBytes;
+      static constexpr uint32_t page_bytes         = PageBytes;
+      static constexpr uint32_t units_per_segment  = SegBytes / GrainBytes;
+      static constexpr uint32_t units_per_page     = PageBytes / GrainBytes;
+      static constexpr uint32_t pages_per_segment_ = SegBytes / PageBytes;
+
+      static_assert((SegBytes & (SegBytes - 1)) == 0, "segment size is a power of 2");
+      static_assert((PageBytes & (PageBytes - 1)) == 0, "disk page is a power of 2");
+      static_assert(SegBytes % PageBytes == 0 && PageBytes % GrainBytes == 0);
+      static_assert(units_per_segment >= 64 && units_per_segment % 64 == 0);
+   };
+
+   // The default line grain (128 B): every constant matches the globals above.
+   using line_geometry = geometry<line_bytes>;
+   static_assert(line_geometry::grain_bytes == line_bytes);
+   static_assert(line_geometry::units_per_segment == lines_per_segment);
+   static_assert(line_geometry::units_per_page == lines_per_page);
+   static_assert(line_geometry::pages_per_segment_ == pages_per_segment);
+
+   // The large-value grain: 8 KB units. Max object = max_alloc_lines (64) x
+   // 8192 = 524288 B (the single-CAS cap — an allocation stays in one freeset
+   // u64 word). The segment is sized so units_per_segment == lines_per_segment
+   // (the default geometry's): the per-segment metadata (seg_freeset, the 1 B/
+   // unit refcount block) is then BYTE-IDENTICAL in size to the line arena's —
+   // critically, a whole-page multiple, so the contiguous-VA block_allocator's
+   // MAP_FIXED grows succeed on 16 KB-page hosts (a sub-page metadata block size
+   // makes mmap(MAP_FIXED) fail with EINVAL). 8 KB x 65536 = 512 MB segments.
+   inline constexpr uint32_t large_grain_bytes   = 8u * 1024;
+   inline constexpr uint32_t large_segment_bytes = large_grain_bytes * lines_per_segment;
+   using large_geometry = geometry<large_grain_bytes, large_segment_bytes, disk_page_bytes>;
+   inline constexpr uint32_t large_max_object_bytes = max_alloc_lines * large_grain_bytes;
+   static_assert(large_geometry::units_per_segment == lines_per_segment,
+                 "large per-segment metadata matches the line arena's (page-aligned)");
+
    // Refcount bands (SPEC §9): u8 per line; 255 is the overflow THROW sentinel
    // (never a stored count), readers get the top band, writers clone at the rest.
    inline constexpr uint32_t max_read_sessions = 64;  // one u64 slot bitmap

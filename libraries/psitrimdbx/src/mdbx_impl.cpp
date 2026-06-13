@@ -2321,6 +2321,10 @@ int mdbx_env_open(MDBX_env* env, const char* pathname,
       if (auto it = env->options.find(MDBX_opt_psitri_cache_size_mb);
           it != env->options.end() && it->second)
          cfg.knobs.arena_budget_bytes = it->second << 20;
+      // Flush-threshold override (testing/tuning): force hot->cold flushes at a
+      // chosen hot-delta size so large-value flush paths get exercised.
+      if (const char* hw = std::getenv("PSITRI_MDBX_HI_WATER_MB"))
+         cfg.knobs.hi_water_bytes = std::strtoull(hw, nullptr, 10) << 20;
 
       env->db = be_db::open(env->path, open_mode, cfg);
       env->ws = env->db->start_write_session();

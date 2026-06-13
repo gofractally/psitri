@@ -4105,6 +4105,205 @@ namespace detail  // implementation types & node helpers — not part of the pub
          return std::string_view(leaf_str(p), leaf_strlen(p));
       }
 
+      // ── setlist inline children (libart++ `inl` byte, vpart-adapted) ─────────────
+      // A setlist_u8 can host small leaf children INSIDE its own 128 B line instead of
+      // as separate value_ptr terminals. inl bit7 = inline-active, bits0-6 flag branch
+      // 0..6. An inline branch's handle keeps tag K::value_ptr but its address bits hold
+      // a LINE OFFSET (the leaf starts at line_base + (raw>>4)) — NEVER an arena address,
+      // so the audit rule is: an inline branch is resolved ONLY via sl_inline_leaf()
+      // (parent in hand); deref_/vstamp_get_/cow_release/node_free_ must never touch it.
+      //
+      // vpart specifics libart++ lacks: (1) the setlist carries a version stamp at line
+      // offset vstamp_off_(setlist_u8); inline payloads pack DOWN from SL_INLINE_TOP (the
+      // stamp slot), not 128, so they never collide with it. (2) The minimal COW unit IS
+      // the cacheline: updating an inline value clones the line (carrying the bytes) and
+      // overwrites in place — no externalize. Externalize only when a leaf no longer fits
+      // (value grows past the region, or a structural split/widen needs the slot).
+      // (3) Typed-value hooks: a line CLONE duplicates inline bytes -> vh_copy_ each; a
+      // line DEATH drops them -> vh_release_ each; a same-scope MOVE (compact/externalize)
+      // fires neither. Only raw_vals leaves carry hooks; trivially-copyable T is POD.
+      static constexpr bool     inline_children_ok = raw_vals || std::is_trivially_copyable_v<T>;
+      static constexpr unsigned SL_LINE          = cacheline_bytes;  // 128
+      static constexpr int      SL_INLINE_BRANCH = 7;  // inl bits 0..6 cover branches 0..6
+      static constexpr unsigned sl_branch_off =
+          unsigned(sizeof(router_hdr_t<packed_ptr>)) + 1u + setlist::LANES + setlist::PREFIX_CAP;
+      // Inline payloads must stop below the setlist's version-stamp slot (the 4 B line_ptr
+      // COW instantiation stamps at offset 96); a stampless instantiation uses the full tail.
+      // A function (not a data member): cow_stamped_ is declared later in the class, and a
+      // function body is parsed after the class is complete — a class-scope initializer is not.
+      static constexpr unsigned sl_inline_top() noexcept
+      {
+         return cow_stamped_ ? unsigned(vstamp_off_(K::setlist_u8)) : SL_LINE;
+      }
+      // Inline leaf start aligns so leaf_value_off() lands on alignof(T) (raw_vals -> 1).
+      static constexpr unsigned SL_VAL_ALIGN = alignof(T) < 1 ? 1u : unsigned(alignof(T));
+
+      static bool sl_inl_active(const setlist* s) noexcept { return s->inl & 0x80; }
+      static bool sl_is_inline(const setlist* s, int i) noexcept
+      {
+         return (s->inl & 0x80) && i < SL_INLINE_BRANCH && (s->inl & (1u << i));
+      }
+      static packed_ptr sl_inline_handle(unsigned line_off) noexcept
+      {
+         packed_ptr p;
+         std::memset(p.b, 0, sizeof(packed_ptr));
+         const uint64_t raw = (uint64_t(line_off) << 4) | uint8_t(K::value_ptr);
+         std::memcpy(p.b, &raw, sizeof(packed_ptr));
+         return p;
+      }
+      static unsigned sl_inline_off(packed_ptr p) noexcept { return unsigned(p.raw() >> 4); }
+      // Resolve inline branch i's leaf bytes. `s` IS the 128 B line base (deref_ of the
+      // setlist), so the leaf lives at s + line_off. Caller guarantees sl_is_inline(s, i).
+      char* sl_inline_leaf(setlist* s, int i) const noexcept
+      {
+         return reinterpret_cast<char*>(s) + sl_inline_off(s->branch[i]);
+      }
+      const char* sl_inline_leaf(const setlist* s, int i) const noexcept
+      {
+         return reinterpret_cast<const char*>(s) + sl_inline_off(s->branch[i]);
+      }
+      static unsigned sl_used_branch_end(const setlist* s) noexcept
+      {
+         return sl_branch_off + unsigned(s->rh.hdr.nbranch) * unsigned(sizeof(packed_ptr));
+      }
+      // Typed-value hooks for line clone (each inline leaf's bytes are duplicated) and line
+      // death (each dies). No-ops unless vh_on (raw_vals + registered allocator).
+      void sl_inline_vh_copy_(const setlist* s) noexcept
+      {
+         if constexpr (vh_on)
+            if (sl_inl_active(s))
+            {
+               const int n = std::min<int>(s->rh.hdr.nbranch, SL_INLINE_BRANCH);
+               for (int i = 0; i < n; ++i)
+                  if (sl_is_inline(s, i))
+                     vh_copy_(leaf_bytes(sl_inline_leaf(s, i)));
+            }
+      }
+      void sl_inline_vh_dies_(const setlist* s) noexcept
+      {
+         if constexpr (vh_on)
+            if (sl_inl_active(s))
+            {
+               const int n = std::min<int>(s->rh.hdr.nbranch, SL_INLINE_BRANCH);
+               for (int i = 0; i < n; ++i)
+                  if (sl_is_inline(s, i))
+                     vh_release_(leaf_bytes(sl_inline_leaf(s, i)));
+            }
+      }
+      // Re-pack inline payloads contiguously against SL_INLINE_TOP in ascending branch
+      // order (canonical). Allocation-free; trivially-/raw-copyable payloads move by memcpy
+      // and the new positions never overlap the (smaller-or-equal) used branch array.
+      void sl_repack_(setlist* s) const noexcept
+      {
+         if (!sl_inl_active(s)) return;
+         const int n = std::min<int>(s->rh.hdr.nbranch, SL_INLINE_BRANCH);
+         char      tmp[SL_LINE];
+         unsigned  pos = sl_inline_top(), newoff[SL_INLINE_BRANCH];
+         for (int i = 0; i < n; ++i)
+            if (sl_is_inline(s, i))
+            {
+               const char*    lf = sl_inline_leaf(s, i);
+               const unsigned sz = unsigned(leaf_alloc_size(lf));
+               pos = (pos - sz) & ~(SL_VAL_ALIGN - 1);
+               std::memcpy(tmp + pos, lf, sz);
+               newoff[i] = pos;
+            }
+         std::memcpy(reinterpret_cast<char*>(s) + pos, tmp + pos, sl_inline_top() - pos);
+         for (int i = 0; i < n; ++i)
+            if (sl_is_inline(s, i)) s->branch[i] = sl_inline_handle(newoff[i]);
+      }
+      // Pull external leaf children INTO the line, all-or-nothing: allocation-free (frees
+      // the externals — a same-scope MOVE, so no vh hooks), canonical by construction.
+      // The creation workhorse — called once after building/growing a small setlist (split).
+      void sl_inline_compact_(setlist* s) noexcept
+      {
+         if constexpr (!inline_children_ok) { (void)s; return; }
+         else
+         {
+            const int n = std::min<int>(s->rh.hdr.nbranch, SL_INLINE_BRANCH);
+            char      tmp[SL_LINE];
+            unsigned  pos = sl_inline_top(), newoff[SL_INLINE_BRANCH];
+            uint8_t   newinl = 0x80;
+            bool      any = false, was_ext[SL_INLINE_BRANCH] = {};
+            for (int i = 0; i < n; ++i)
+            {
+               const char* src = nullptr;
+               if (sl_is_inline(s, i)) src = sl_inline_leaf(s, i);
+               else if (s->branch[i].tag() == K::value_ptr)
+               {
+                  src        = static_cast<const char*>(deref_(s->branch[i]));
+                  was_ext[i] = true;
+               }
+               if (!src) continue;
+               const unsigned sz = unsigned(leaf_alloc_size(src));
+               if (sz > pos) return;  // leaf too big for the region — all-or-nothing bail
+               const unsigned np = (pos - sz) & ~(SL_VAL_ALIGN - 1);
+               if (np < sl_used_branch_end(s)) return;  // would overlap the branch array
+               pos = np;
+               std::memcpy(tmp + pos, src, sz);
+               newoff[i] = pos;
+               newinl |= uint8_t(1u << i);
+               any = true;
+            }
+            if (!any) return;
+            for (int i = 0; i < n; ++i)
+               if (was_ext[i])  // MOVE: free the external husk (no vh_release_ — same scope)
+                  node_free_(deref_(s->branch[i]), leaf_alloc_size(static_cast<const char*>(deref_(s->branch[i]))));
+            std::memcpy(reinterpret_cast<char*>(s) + pos, tmp + pos, sl_inline_top() - pos);
+            for (int i = 0; i < n; ++i)
+               if (newinl & (1u << i)) s->branch[i] = sl_inline_handle(newoff[i]);
+            s->inl = newinl;
+         }
+      }
+      // Move one inline child OUT to a real value_ptr leaf (throws on alloc). A same-scope
+      // MOVE — no vh hooks. pack_ refreshes the externalized leaf's own version stamp.
+      void sl_externalize_(setlist* s, int i)
+      {
+         char*          lf  = sl_inline_leaf(s, i);
+         const unsigned sz  = unsigned(leaf_alloc_size(lf));
+         char*          ext = static_cast<char*>(node_alloc_(sz));  // throws
+         std::memcpy(ext, lf, sz);
+         s->branch[i] = pack_(ext, K::value_ptr);
+         s->inl &= uint8_t(~(1u << i));
+         if (!(s->inl & 0x7F)) s->inl = 0;
+         else sl_repack_(s);
+      }
+      void sl_externalize_all_(setlist* s)  // basic guarantee: a partial result is valid
+      {
+         if (!sl_inl_active(s)) return;
+         const int n = std::min<int>(s->rh.hdr.nbranch, SL_INLINE_BRANCH);
+         for (int i = 0; i < n; ++i)
+            if (sl_is_inline(s, i))
+            {
+               char*          lf  = sl_inline_leaf(s, i);
+               const unsigned sz  = unsigned(leaf_alloc_size(lf));
+               char*          ext = static_cast<char*>(node_alloc_(sz));  // throws
+               std::memcpy(ext, lf, sz);
+               s->branch[i] = pack_(ext, K::value_ptr);
+               s->inl &= uint8_t(~(1u << i));
+            }
+         s->inl = 0;
+      }
+      // Drop branch i, shifting stems/handles AND the inl bits down; reclaims an inline
+      // payload if branch i had one. Allocation-free — the inline-aware setlist_remove.
+      void sl_remove_branch_(setlist* s, int i) const noexcept
+      {
+         const int n = s->rh.hdr.nbranch;
+         std::memmove(&s->bytes[i], &s->bytes[i + 1], size_t(n - 1 - i));
+         std::memmove(&s->branch[i], &s->branch[i + 1], size_t(n - 1 - i) * sizeof(packed_ptr));
+         s->bytes[n - 1]   = 0xFF;
+         s->rh.hdr.nbranch = uint16_t(n - 1);
+         if (s->inl & 0x80)
+         {
+            const uint8_t flags = uint8_t(s->inl & 0x7F);  // drop active bit before the shift
+            const uint8_t lo    = uint8_t(flags & ((1u << i) - 1));
+            const uint8_t hi    = uint8_t((flags >> 1) & ~((1u << i) - 1) & 0x7F);
+            const uint8_t bits  = uint8_t(lo | hi);
+            s->inl = bits ? uint8_t(0x80 | bits) : 0;
+            sl_repack_(s);
+         }
+      }
+
       // Invoke f(key, value) for a terminal pointer (value_ptr leaf or value_inline).
       template <class F>
       void call_val_(std::string_view key, packed_ptr p, F& f) const

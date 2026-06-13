@@ -29,7 +29,6 @@
 #include <string>
 #include <string_view>
 #include <thread>
-#include <vector>
 
 namespace delta_art
 {
@@ -56,30 +55,26 @@ namespace delta_art
    template <class W, class B>
    class tiered_kv
    {
-      // The double-buffer rotation needs W's freeze/release/pin primitives
-      // (Dan's design: cutoff at flush start — the flusher owns an IMMUTABLE
-      // warm tree, the writer owns a newborn hot tree; nobody shares).
-      // Rotation rides W's refcounted version-root handles: freeze returns a
-      // tree_root; holders (merger, reader warm legs) just copy/drop it and
-      // W's OWN reaper reclaims on the last drop (Dan: GC is vpart's job).
-      using warm_root_t = decltype(std::declval<typename W::write_session&>().freeze_and_reset());
-      static_assert(requires(warm_root_t& h) {
-                       { h.version() } -> std::convertible_to<uint32_t>;
-                       { h.root_raw() } -> std::convertible_to<uint32_t>;
-                       { bool(h) };
+      // The double-buffer rotation rides W's adb multi-root + snapshot
+      // primitives ONLY (concept-only — no contraband shims). Rotation is the
+      // set_root exchange in one multi-root transaction (h1.set_root(h0
+      // .set_root({}))): the writer's hot tree (root 0) becomes the IMMUTABLE
+      // warm tree (root 1), root 0 is a newborn — the flusher and the writer
+      // never share a mutating delta. The warm tree is read through
+      // get_root(1), an owned, FROZEN snapshot (a tree IS a snapshot); copies
+      // of it (merger flush cursor, reader/writer warm legs) keep the version
+      // alive, and W's OWN GC reclaims it when the last handle drops.
+      using warm_tree_t = decltype(std::declval<typename W::write_session&>().get_root(1u));
+      static_assert(requires(typename W::transaction& tx, uint32_t i) {
+                       { tx.primary() };
+                       { tx.open_root(i) };
                     },
-                    "W's freeze_and_reset must return a refcounted tree_root handle");
-      static_assert(requires(typename W::write_session& ws) { ws.clear_warm_slots(); },
-                    "W must expose clear_warm_slots (crash-recovery marker)");
-      static_assert(requires(typename W::database& d, uint32_t v, uint32_t r) {
-                       { d.pin_at(v, r) } -> std::same_as<typename W::cursor>;
-                       { d.pending_warm() } -> std::convertible_to<std::pair<uint32_t, uint32_t>>;
+                    "W must be a multi-root engine (primary()/open_root())");
+      static_assert(requires(warm_tree_t& t) {
+                       { t.snapshot_cursor() } -> std::same_as<typename W::cursor>;
+                       { bool(t) };
                     },
-                    "W must expose pin_at/pending_warm — the warm-leg reader primitives");
-      static_assert(requires(typename W::database& d) {
-                       { d.committed_version() } -> std::convertible_to<uint32_t>;
-                    },
-                    "W must expose committed_version() — the merge floor F");
+                    "W::get_root must return an owned, readable snapshot tree");
 
      public:
       class database;
@@ -375,7 +370,7 @@ namespace delta_art
          }
          std::optional<typename W::cursor> _w;  // hot leg; absent = stable view
          std::optional<typename W::cursor> _m;  // WARM leg (flush in flight)
-         warm_root_t _mh;  // keeps the warm tree alive: the reaper counts handles
+         warm_tree_t _mh;  // keeps the warm snapshot alive: W's GC counts handles
          typename B::cursor                _b;
          bool _on_w = false, _on_m = false, _on_b = false, _rend = false;
       };
@@ -384,16 +379,20 @@ namespace delta_art
       {
         public:
          // root_index 0 = latest (W ∪ B), 1 = stable (B only).
+         // Snapshot order under _rot_m (consistency vs rotation/clear): HOT
+         // first, then WARM, then BASE — a rotation between hot and warm makes
+         // an in-flight key appear in both (dedup), and clear strictly follows
+         // the base commit, so a base cursor taken after warm never misses it.
          cursor create_cursor(uint32_t root_index)
          {
             if (root_index == 1)
                return cursor(_brs->create_cursor(0));
             std::lock_guard rg(_db->_rot_m);  // legs sampled atomically vs rotation
+            auto hot = _wrs->create_cursor(0);
             if (_db->_warm_active)
-               return cursor(_wrs->create_cursor(0),
-                             _db->_w->pin_at(_db->_warm_vf, _db->_warm_root),
+               return cursor(std::move(hot), _db->_warm_handle.snapshot_cursor(),
                              _db->_warm_handle, _brs->create_cursor(0));
-            return cursor(_wrs->create_cursor(0), _brs->create_cursor(0));
+            return cursor(std::move(hot), _brs->create_cursor(0));
          }
 
         private:
@@ -482,7 +481,7 @@ namespace delta_art
          write_session*                     _ws;
          std::unique_lock<std::mutex>       _lk;  // writer serialization (user <-> merger)
          mutable std::optional<typename W::cursor> _warm;  // lazy warm leg (this txn)
-         mutable warm_root_t                        _warm_h;  // keeps it alive
+         mutable warm_tree_t                        _warm_h;  // keeps the snapshot alive
          std::optional<typename W::transaction>    _tx;
          std::string                        _buf;  // envelope scratch (amortized)
          uint64_t                           _bytes = 0;
@@ -543,75 +542,50 @@ namespace delta_art
          // the retire pump at F. Returns keys flushed.
          uint64_t flush_now()
          {
-            // ── Dan's double buffer ─────────────────────────────────────────
-            // CUTOFF: freeze the committed delta as the WARM tree and reset
-            // the writer to a newborn hot tree — the flusher owns an
-            // IMMUTABLE tree, the writer owns a private one; nobody shares a
-            // mutating delta (the in-place retire WAS the write-amp).
-            warm_root_t handle;
-            uint32_t    vf = 0, wroot = 0;
+            // ── Dan's double buffer, in adb vocabulary ──────────────────────
+            // CUTOFF = the set_root exchange: in one multi-root transaction
+            // move the writer's hot tree (root 0) to the WARM slot (root 1)
+            // and leave root 0 a newborn. The flusher then reads root 1 as a
+            // FROZEN snapshot (get_root(1)); the writer mutates the private
+            // newborn root 0 — nobody shares a mutating delta (the in-place
+            // retire WAS the write-amp). No freeze/pin/clear shims.
+            warm_tree_t warm_snap;
             {
                std::scoped_lock lk(_writer_m, _rot_m);
                if (_warm_active)
                   return 0;  // a flush is already in flight
-               if (auto pend = _w->pending_warm(); pend.first)
-                  handle = _w->make_orphan_root(pend.first, pend.second);  // crashed run
-               else
-                  handle = _wws->freeze_and_reset();
-               vf     = handle.version();
-               wroot  = handle.root_raw();
+               // rotate hot -> warm (only when root 0 actually holds data; an
+               // empty rotation just wastes a version)
+               auto tx = _wws->start_transaction(0);
+               auto h0 = tx.primary();
+               auto h1 = tx.open_root(1);
+               h1.set_root(h0.set_root({}));  // THE exchange
+               tx.commit();
+               warm_snap    = _wws->get_root(1);  // owned, frozen warm snapshot
+               _warm_handle = warm_snap;          // reader/writer warm legs copy THIS
                _warm_active = true;
-               _warm_vf     = vf;
-               _warm_root   = wroot;
-               _warm_handle = handle;  // reader warm legs copy THIS
             }
-            // master pin: holds the floor <= vf for every reader warm leg.
-            // optional: it MUST drop before the final writer-lock acquisition
-            // (deadlock cycle otherwise: writer spins on the full supersession
-            // ring inside commit while HOLDING _writer_m; the drain can't eat
-            // the ring while the floor sits at vf; we'd wait on _writer_m).
-            std::optional<typename W::cursor> warm;
-            warm.emplace(_w->pin_at(vf, wroot));
-            if (!_bws)
-               _bws = _b->start_write_session();  // ONCE per flushing thread
-            uint64_t n    = 0;
-            bool     more = warm->seek_begin();
-            while (more)
-            {
-               auto     btx   = _bws->start_transaction(0);
-               uint64_t in_tx = 0;
-               while (!warm->is_end() && in_tx < _k.flush_chunk)
-               {
-                  warm->get_value([&](value_view v) {
-                     if (!v.empty() && v[0] == TAG_DATA)
-                        btx.upsert(warm->key(), value_view(v.data() + 1, v.size() - 1));
-                     else
-                        btx.remove(warm->key());  // tombstone: applied, never stored in B
-                  });
-                  ++in_tx;
-                  warm->next();
-               }
-               btx.commit();
-               _base_epoch.fetch_add(1, std::memory_order_release);
-               n += in_tx;
-               more = !warm->is_end();
-            }
-            warm.reset();  // DROP the floor pin before touching _writer_m
-            // the warm data is durable in B: stop handing out warm legs and
-            // clear the crash slots, then cascade-free the tree INLINE on
-            // this (merger) thread once every warm reader is gone — the
-            // drain thread cannot keep pace with multi-GB tree cascades
-            // (measured: generation backlog to the 32 GB wall at 142M keys).
+            // Stream the frozen warm snapshot into B (independent of _wws now;
+            // the writer keeps mutating root 0 the whole time).
+            const uint64_t n = drain_warm_(warm_snap);
+            // The warm data is durable in B. CLEAR the warm slot (set_root({})
+            // on root 1) — the displaced warm tree ARMS and W's GC reclaims it
+            // when the last snapshot handle (reader warm legs + our copies)
+            // drops. Stop handing out warm legs under _rot_m. Snapshot order
+            // (clear AFTER the base commits) is what lets a reader's base
+            // cursor never miss an in-flight key.
             {
                std::scoped_lock lk(_writer_m, _rot_m);
                _warm_active = false;
-               _warm_handle.reset();  // OUR ref; readers may still hold theirs
-               _wws->clear_warm_slots();
+               _warm_handle = warm_tree_t{};  // OUR shared ref; readers keep theirs
+               auto tx = _wws->start_transaction(1);
+               tx.primary().set_root({});  // empty the warm slot
+               tx.commit();
             }
             _unflushed.store(0, std::memory_order_relaxed);
-            // `handle` (this frame's copy) drops at return: when the LAST
-            // holder (reader warm legs included) lets go, W's reaper frees
-            // the tree — the merger does no garbage collection (Dan).
+            // warm_snap drops at return: when the LAST holder (reader warm
+            // legs included) lets go, W's GC frees the tree — the merger does
+            // no garbage collection (Dan).
             return n;
          }
 
@@ -637,23 +611,78 @@ namespace delta_art
                                                // (user txns and merger retire
                                                // txns serialize on _writer_m;
                                                // sessions are thread-agnostic)
+            recover_();  // a crashed flush may have left warm data in root 1
             if (_k.background)
                _merger = std::thread([this] { merge_loop_(); });
          }
+         // Stream a frozen warm snapshot into B in sorted chunks (the flush
+         // body, shared by flush_now and recovery). Returns keys applied.
+         uint64_t drain_warm_(warm_tree_t& warm_snap)
+         {
+            if (!_bws)
+               _bws = _b->start_write_session();
+            uint64_t n    = 0;
+            auto     warm = warm_snap.snapshot_cursor();
+            bool     more = warm.seek_begin();
+            while (more)
+            {
+               auto     btx   = _bws->start_transaction(0);
+               uint64_t in_tx = 0;
+               while (!warm.is_end() && in_tx < _k.flush_chunk)
+               {
+                  warm.get_value([&](value_view v) {
+                     if (!v.empty() && v[0] == TAG_DATA)
+                        btx.upsert(warm.key(), value_view(v.data() + 1, v.size() - 1));
+                     else
+                        btx.remove(warm.key());  // tombstone: applied, never stored in B
+                  });
+                  ++in_tx;
+                  warm.next();
+               }
+               btx.commit();
+               _base_epoch.fetch_add(1, std::memory_order_release);
+               n += in_tx;
+               more = !warm.is_end();
+            }
+            return n;
+         }
+         // Crash recovery: if root 1 (the warm slot) still holds data from a
+         // run that died mid-flush, re-flush it (idempotent upserts/removes)
+         // and clear the slot. No WAL — re-applying the warm tree is the
+         // recovery. Empty root 1 = clean shutdown, nothing to do.
+         void recover_()
+         {
+            warm_tree_t warm_snap = _wws->get_root(1);
+            auto        probe     = warm_snap.snapshot_cursor();
+            if (!probe.seek_begin())
+               return;  // empty warm slot
+            drain_warm_(warm_snap);
+            auto tx = _wws->start_transaction(1);
+            tx.primary().set_root({});
+            tx.commit();
+         }
+         // Flush trigger: bytes-written backstop, plus (when W exposes it) the
+         // arena footprint at HALF the budget — flush EARLY, memory keeps
+         // growing while the flush runs. footprint_bytes is an OPTIONAL W
+         // sensor (if constexpr): the concept requires only the byte counter.
+         bool over_water_() const
+         {
+            if (_unflushed.load(std::memory_order_relaxed) >= _k.hi_water_bytes)
+               return true;
+            if constexpr (requires(typename W::database& d) { d.footprint_bytes(); })
+               return _w->footprint_bytes() >= _k.arena_budget_bytes / 2;
+            return false;
+         }
          void after_commit_(uint64_t bytes)
          {
-            const uint64_t un = _unflushed.fetch_add(bytes, std::memory_order_relaxed) + bytes;
-            // primary trigger: arena footprint at HALF the budget (flush
-            // EARLY — memory keeps growing while the flush runs). The
-            // footprint read is two loads; cheap enough per commit.
-            if (un >= _k.hi_water_bytes ||
-                _w->footprint_bytes() >= _k.arena_budget_bytes / 2)
+            _unflushed.fetch_add(bytes, std::memory_order_relaxed);
+            if (over_water_())
                _cv.notify_one();
          }
          // warm-leg point get for the writer's 3-way cursor: lazily pin the
          // current warm boundary for THIS transaction; envelope-decoded.
          template <class F>
-         bool warm_get_(std::optional<typename W::cursor>& leg, warm_root_t& legh, key_view k,
+         bool warm_get_(std::optional<typename W::cursor>& leg, warm_tree_t& legh, key_view k,
                         bool& hit, bool& dead, F&& f)
          {
             if (!leg)
@@ -661,8 +690,8 @@ namespace delta_art
                std::lock_guard rg(_rot_m);
                if (!_warm_active)
                   return false;
-               legh = _warm_handle;  // hold the tree (reaper counts handles)
-               leg.emplace(_w->pin_at(_warm_vf, _warm_root));
+               legh = _warm_handle;  // hold the snapshot (W's GC counts handles)
+               leg.emplace(legh.snapshot_cursor());
             }
             leg->get(k, [&](value_view v) {
                if (!v.empty() && v[0] == TAG_DATA)
@@ -697,11 +726,7 @@ namespace delta_art
             for (;;)
             {
                std::unique_lock lk(_m);
-               _cv.wait(lk, [&] {
-                  return _stop ||
-                         _unflushed.load(std::memory_order_relaxed) >= _k.hi_water_bytes ||
-                         _w->footprint_bytes() >= _k.arena_budget_bytes / 2;
-               });
+               _cv.wait(lk, [&] { return _stop || over_water_(); });
                if (_stop)
                   return;
                lk.unlock();
@@ -718,8 +743,7 @@ namespace delta_art
          std::mutex                            _writer_m;  // user txns <-> merger rotation txns
          std::mutex  _rot_m;          // warm-state flips vs reader-leg sampling
          bool        _warm_active = false;
-         uint32_t    _warm_vf = 0, _warm_root = 0;
-         warm_root_t _warm_handle;
+         warm_tree_t _warm_handle;    // the shared frozen warm snapshot (get_root(1))
          std::shared_ptr<typename B::read_session>        _bget_rs;   // writer-thread base reads
          std::optional<typename B::cursor>                _bget_cur;
          std::atomic<uint64_t>                            _base_epoch{0};

@@ -1,0 +1,23 @@
+#include <radix_engine.hpp>
+#include <vpart/kv.hpp>
+#include <cstdio>
+#include <filesystem>
+namespace fs = std::filesystem;
+int main(int argc, char**)
+{
+   auto hd = fs::temp_directory_path() / "rep_heart"; fs::remove_all(hd);
+   auto vd = fs::temp_directory_path() / "rep_vpart"; fs::remove_all(vd);
+   std::shared_ptr<vpart::kv::database> vdb;
+   if (argc > 1)  // mode 2: vpart first
+      vdb = vpart::kv::database::create(vd);
+   auto hdb = sal_art_ref::radix::database::open(hd, sal::open_mode::create_or_open);
+   auto hws = hdb->start_write_session();
+   {
+      auto tx = hws->start_transaction(0);
+      for (int i = 0; i < 1000; ++i)
+         tx.upsert("k" + std::to_string(i), "v");
+      tx.commit();
+   }
+   printf("sal_art_ref write OK (argc=%d)\n", argc);
+   return 0;
+}

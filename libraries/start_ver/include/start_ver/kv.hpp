@@ -713,9 +713,19 @@ namespace start_ver::kv
          _committed = uint32_t(_arena.get_root(kMaxRoots));
          for (uint32_t i = 0; i < kMaxRoots; ++i)
          {
-            const uint32_t r32 = uint32_t(_arena.get_root(i));
+            const uint64_t durable = _arena.get_root(i);
+            const uint32_t r32     = uint32_t(durable);
+            // A durable root slot of 0 means "never published" (zero-init
+            // mmap): publishing always stores either a real non-zero raw or
+            // root_ptr::null()'s all-FF pattern, never bare 0. Re-adopting it
+            // as (committed<<32)|0 would falsely expose line-0 as a live root
+            // (a reader then decodes garbage). Such a slot's live boundary is
+            // empty (0); only actually-published slots get the committed
+            // version. (Caught on reopen: an unwritten aux root read back a
+            // null-tag value as type 0xFFFF.)
+            const bool published = durable != 0;
             _live_arr[i].store(
-                _committed ? (uint64_t(_committed) << 32) | r32 : 0,
+                (_committed && published) ? (uint64_t(_committed) << 32) | r32 : 0,
                 std::memory_order_seq_cst);
          }
          _live.store(_live_arr[0].load(std::memory_order_seq_cst),

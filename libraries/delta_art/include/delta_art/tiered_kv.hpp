@@ -76,6 +76,29 @@ namespace delta_art
                        { bool(t) };
                     },
                     "W::get_root must return an owned, readable snapshot tree");
+      // The warm handle is COPIED to many holders (merger flush cursor +
+      // reader/writer warm legs); a move-only one-ref snapshot can't be shared.
+      static_assert(std::is_copy_constructible_v<warm_tree_t>,
+                    "W::get_root's snapshot must be COPYABLE (warm legs share it)");
+      // Both tiers' cursors drive the bidirectional merge: positioning returns
+      // bool (landed-on-a-key), plus reverse iteration. A void-returning cursor
+      // passes the battery but cannot merge — catch it HERE, not deep in a
+      // template error.
+      static constexpr auto mergeable_ = [](auto* cp) {
+         using C = std::remove_pointer_t<decltype(cp)>;
+         return requires(C c, std::string_view k) {
+            { c.seek_begin() } -> std::convertible_to<bool>;
+            { c.seek_last() } -> std::convertible_to<bool>;
+            { c.next() } -> std::convertible_to<bool>;
+            { c.prev() } -> std::convertible_to<bool>;
+            { c.is_end() } -> std::convertible_to<bool>;
+            { c.is_rend() } -> std::convertible_to<bool>;
+         };
+      };
+      static_assert(mergeable_(static_cast<typename W::cursor*>(nullptr)),
+                    "W::cursor must be a bool-returning bidirectional (mergeable) cursor");
+      static_assert(mergeable_(static_cast<typename B::cursor*>(nullptr)),
+                    "B::cursor must be a bool-returning bidirectional (mergeable) cursor");
 
      public:
       class database;
@@ -546,6 +569,13 @@ namespace delta_art
          {
             if constexpr (requires { _w->occupancy_dbg(); })
                return _w->occupancy_dbg();
+            else
+               return {0, 0};
+         }
+         std::pair<uint64_t, uint64_t> delta_seg_stats_dbg() noexcept
+         {
+            if constexpr (requires { _w->seg_stats_dbg(); })
+               return _w->seg_stats_dbg();
             else
                return {0, 0};
          }

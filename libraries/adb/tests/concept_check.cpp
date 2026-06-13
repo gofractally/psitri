@@ -14,9 +14,31 @@ namespace mock
 {
    struct cursor
    {
-      void seek_begin() {}
-      void lower_bound(std::string_view) {}
-      void next() {}
+      // positioning returns bool (landed-on-a-key) — required by kv_cursor
+      bool seek_begin() { return false; }
+      bool lower_bound(std::string_view) { return false; }
+      bool next() { return false; }
+      // bidirectional surface — required by mergeable_cursor
+      bool seek_last() { return false; }
+      bool upper_bound(std::string_view) { return false; }
+      bool prev() { return false; }
+      bool             is_rend() const { return false; }
+      bool             is_subtree() const { return false; }
+      template <class F>
+      bool get_value(F&&) const
+      {
+         return false;
+      }
+      template <class F>
+      bool get(std::string_view, F&&) const
+      {
+         return false;
+      }
+      template <class S = std::string>
+      std::optional<S> get(std::string_view) const
+      {
+         return std::nullopt;
+      }
       bool             is_end() const { return true; }
       std::string_view key() const { return {}; }
       template <class S>
@@ -104,7 +126,9 @@ namespace mock
 }  // namespace mock
 
 static_assert(adb::kv_cursor<mock::cursor>);
+static_assert(adb::mergeable_cursor<mock::cursor>);   // bidirectional merge surface
 static_assert(adb::kv_tree<mock::tree>);
+static_assert(adb::shared_snapshot<mock::tree>);      // copyable + mergeable cursor
 static_assert(adb::kv_transaction<mock::transaction>);
 static_assert(adb::kv_write_session<mock::write_session>);
 static_assert(adb::kv_database<mock::database>);

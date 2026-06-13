@@ -14,19 +14,49 @@
 
 namespace adb
 {
+   // Base forward cursor. Positioning returns bool (landed-on-a-key) — a void
+   // return passes a naive `c.seek_begin();` check but can't drive a merge
+   // (`bool more = c.seek_begin()`), so it is REQUIRED here: an engine whose
+   // cursor returns void is not composable, and that must be a compile error
+   // at conformance, not a surprise at the first delta_art instantiation.
    template <class C>
    concept kv_cursor = requires(C c, std::string_view k) {
-      c.seek_begin();
-      c.lower_bound(k);
-      c.next();
+      { c.seek_begin() } -> std::convertible_to<bool>;
+      { c.lower_bound(k) } -> std::convertible_to<bool>;
+      { c.next() } -> std::convertible_to<bool>;
       { c.is_end() } -> std::convertible_to<bool>;
       { c.key() } -> std::convertible_to<std::string_view>;
       c.template value<std::string>();  // optional-like result
    };
 
+   // Mergeable cursor: the full bidirectional surface a tiered/merge engine
+   // (delta_art) drives — reverse iteration, point reads, subtree probe. An
+   // engine usable as a delta_art tier MUST satisfy this; the base kv_cursor
+   // alone does not (delta_art static_asserts this on its W and B cursors).
+   template <class C>
+   concept mergeable_cursor = kv_cursor<C> && requires(C c, std::string_view k) {
+      { c.seek_last() } -> std::convertible_to<bool>;
+      { c.upper_bound(k) } -> std::convertible_to<bool>;
+      { c.prev() } -> std::convertible_to<bool>;
+      { c.is_rend() } -> std::convertible_to<bool>;
+      { c.is_subtree() } -> std::convertible_to<bool>;
+      { c.get_value([](std::string_view) {}) } -> std::convertible_to<bool>;
+      { c.get(k, [](std::string_view) {}) } -> std::convertible_to<bool>;
+      { c.template get<std::string>(k) };  // optional-like
+   };
+
    template <class T>
    concept kv_tree = requires(const T t) {
       { t.snapshot_cursor() } -> kv_cursor;
+   };
+
+   // An owned snapshot usable as a shared warm/merge leg: COPYABLE (multiple
+   // holders — merger flush cursor, reader/writer warm legs — each keep it
+   // alive) and readable through a mergeable cursor. delta_art's warm handle
+   // (get_root's return) must satisfy this; a move-only one-ref tree does not.
+   template <class T>
+   concept shared_snapshot = std::copy_constructible<T> && requires(const T t) {
+      { t.snapshot_cursor() } -> mergeable_cursor;
    };
 
    template <class TX>

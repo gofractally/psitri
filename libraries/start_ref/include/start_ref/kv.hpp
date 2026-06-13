@@ -207,13 +207,14 @@ namespace start_ref::kv
             _view.cow_release(r);  // write-side pinned cursor (scan_all path)
       }
 
-      void seek_begin() { _it = _view.begin(); }
-      void lower_bound(key_view k) { _it = _view.lower_bound(k); }
-      void upper_bound(key_view k)
+      bool seek_begin() { _it = _view.begin(); return _it != _view.end(); }
+      bool lower_bound(key_view k) { _it = _view.lower_bound(k); return _it != _view.end(); }
+      bool upper_bound(key_view k)
       {
          _it = _view.lower_bound(k);
          if (_it != _view.end() && (*_it).first == k)
             ++_it;
+         return _it != _view.end();
       }
       void find(key_view k)
       {
@@ -226,7 +227,7 @@ namespace start_ref::kv
          else
             _it = _view.find(k);
       }
-      void next() { ++_it; }
+      bool next() { ++_it; return _it != _view.end(); }
       bool is_end() const { return _it == _view.end(); }
 
       key_view key() const { return (*_it).first; }

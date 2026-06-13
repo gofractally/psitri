@@ -340,6 +340,22 @@ namespace sal_art_ref::kv
       std::shared_ptr<sal_art_ref::radix::write_session> _ws;
    };
 
+   // Reader-thread handle (psitri-shaped): hands out envelope-stripping
+   // snapshot cursors. CREATE ON THE READER THREAD (one SAL session per
+   // thread). Reads run lock-free against the writer (native contract).
+   class read_session
+   {
+     public:
+      explicit read_session(std::shared_ptr<sal_art_ref::radix::read_session> rs)
+          : _rs(std::move(rs))
+      {
+      }
+      cursor create_cursor(uint32_t root_index) { return cursor(_rs->create_cursor(root_index)); }
+
+     private:
+      std::shared_ptr<sal_art_ref::radix::read_session> _rs;
+   };
+
    class database
    {
      public:
@@ -351,6 +367,10 @@ namespace sal_art_ref::kv
       std::shared_ptr<write_session> start_write_session()
       {
          return std::make_shared<write_session>(_db->start_write_session());
+      }
+      std::shared_ptr<read_session> start_read_session()
+      {
+         return std::make_shared<read_session>(_db->start_read_session());
       }
 
       // ── typed-value registry (locked adb API) ───────────────────────────

@@ -668,8 +668,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
          {
             case K::value_ptr:   return 0;                    // leaf prepend
             case K::prefix_node: return 2 + int(sizeof(Ptr));  // after [plen][next]
-            case K::setlist_u8:  return 124;  // LAST 4 B of the line — leaves [94,124) free for
-                                              // inline children (the clone copies the full line)
+            case K::setlist_u8:  return 96;   // header-ward (just past sizeof==94): the clone
+                                              // copies only [0,94), never the empty [96,128) tail
             case K::setlist_u16: return 104;  // tail pad (102 used)
             case K::c2:
             case K::c4:
@@ -1202,9 +1202,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   s   = static_cast<setlist*>(deref_(cur));
                   // a new branch grows the array into the tail — dissolve inline payloads so
                   // setlist_set can write the new slot (re-compacted at the next split).
-                  // NOTE: grow-keeps-inline (re-compact here) raised coverage 19%->47% but is
-                  // unsafe under COW — compact would free a SHARED child and breaks SHALLOW
-                  // supersession (the clone must carry the husk's children). Deferred.
+                  // grow-keeps-inline (re-compact here) is COW-safe (cow_release/skip-shared)
+                  // but the externalize+reinline churn livelocks the arena under load — a
+                  // churn-free in-place repack is the way to raise coverage past split-only.
                   if constexpr (inline_children_ok)
                      if (sl_inl_active(s)) sl_externalize_all_(s);
                   packed_ptr lf = make_value_at(key, depth + 1, std::forward<VF>(v));
@@ -4251,10 +4251,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
       // bound on the COW path; take the min so a payload is never truncated on clone.
       static constexpr unsigned sl_inline_top() noexcept
       {
-         // cow_node_bytes_(setlist_u8) now copies the WHOLE 128 B line, so the only cap is the
-         // version stamp (relocated to the line end, offset 124). Stampless instantiations use
-         // the full line. -> region is [used_branch_end, 124) for the 4 B COW handle (was 94).
-         const unsigned copied = SL_LINE;
+         // The clone copies sizeof(setlist) bytes; inline payloads must fit within that AND
+         // below the version stamp. min handles both (sizeof < stamp on the 4 B COW handle).
+         const unsigned copied = unsigned(sizeof(setlist));
          const unsigned stamp  = cow_stamped_ ? unsigned(vstamp_off_(K::setlist_u8)) : SL_LINE;
          return copied < stamp ? copied : stamp;
       }
@@ -4365,8 +4364,18 @@ namespace detail  // implementation types & node helpers — not part of the pub
                if (sl_is_inline(s, i)) src = sl_inline_leaf(s, i);
                else if (s->branch[i].tag() == K::value_ptr)
                {
-                  src        = static_cast<const char*>(deref_(s->branch[i]));
-                  was_ext[i] = true;
+                  // Only WINDOW-BORN external leaves move inline (a MOVE we own). A SHARED leaf
+                  // (committed, a snapshot/old generation holds it) stays external — it's carried
+                  // by this clone for COW supersession; dropping it has no refcount under stamp
+                  // MVCC and would double-free. (Non-COW: everything is window-born.)
+                  bool window_born = true;
+                  if constexpr (cow_enabled)
+                     window_born = !alloc_.hkv_vtxn() || !cow_shared_(s->branch[i]);
+                  if (window_born)
+                  {
+                     src        = static_cast<const char*>(deref_(s->branch[i]));
+                     was_ext[i] = true;
+                  }
                }
                if (!src) continue;
                const unsigned sz   = unsigned(leaf_alloc_size(src));  // full leaf size (incl vstamp)
@@ -4382,7 +4391,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             }
             if (!any) return;
             for (int i = 0; i < n; ++i)
-               if (was_ext[i])  // MOVE: free the external husk (no vh_release_ — same scope)
+               if (was_ext[i])  // only window-born husks reach here — MOVE: free, no vh hook
                   node_free_(deref_(s->branch[i]), leaf_alloc_size(static_cast<const char*>(deref_(s->branch[i]))));
             std::memcpy(reinterpret_cast<char*>(s) + pos, tmp + pos, sl_inline_top() - pos);
             for (int i = 0; i < n; ++i)
@@ -8928,9 +8937,6 @@ namespace detail  // implementation types & node helpers — not part of the pub
             case K::prefix_node:
                return pn_size<Ptr>(pn_plen(n));
             case K::setlist_u8:
-               // copy/free the WHOLE 128 B line, not just sizeof==94: inline children live in
-               // [94,124) and the version stamp is at [124,128) — both must survive a COW clone.
-               return cacheline_bytes;
             case K::setlist_u16:
             case K::c2:
             case K::c4:

@@ -1049,4 +1049,15 @@ namespace start_ref::kv
       t._root = root_ptr::null();
       return tree(_tx->_ws->_db, old, old_cnt);  // owned tree takes the working's old ref
    }
+
+   // The engine as a kv_engine aggregate (delta_art's W/B type param).
+   struct engine
+   {
+      using database      = start_ref::kv::database;
+      using write_session = start_ref::kv::write_session;
+      using read_session  = start_ref::kv::read_session;
+      using transaction   = start_ref::kv::transaction;
+      using cursor        = start_ref::kv::cursor;
+      using config        = start_ref::kv::runtime_config;
+   };
 }  // namespace start_ref::kv

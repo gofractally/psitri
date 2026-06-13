@@ -15,6 +15,7 @@
 #include <heart_dwal_engine.hpp>  // sal_art_ref::radix::dwal_engine (cold base)
 #include <heart_kv.hpp>           // sal_art_ref::kv (standalone)
 #include <start_ver/kv.hpp>       // start_ver::kv (hot, standalone)
+#include <start_ref/kv.hpp>       // start_ref::kv (hot, standalone)
 
 #include <atomic>
 #include <chrono>
@@ -213,6 +214,11 @@ int main(int argc, char** argv)
       std::filesystem::remove_all(base + "/start_ver");
       auto db = start_ver::kv::database::create(base + "/start_ver");
       rows.push_back(run_bank("start_ver", db, p));
+   }
+   {  // start_ref standalone
+      std::filesystem::remove_all(base + "/start_ref");
+      auto db = start_ref::kv::database::create(base + "/start_ref");
+      rows.push_back(run_bank("start_ref", db, p));
    }
    {  // sal_art_ref standalone
       std::filesystem::remove_all(base + "/sal_art_ref");

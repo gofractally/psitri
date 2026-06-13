@@ -23,3 +23,19 @@ The threshold must let the delta grow past ~46M keys (multi-GB high-water),
 OR compare delta_art@small-mark vs start_ver STANDALONE (unbounded delta) at
 100M+ keys where the standalone delta degrades and delta_art stays flat.
 (see the high-threshold 80M-key run in this dir / the scale bench)
+
+## Finding 3 — the delta footprint is a GC problem, not a threshold problem
+100M scale run @256MB hi_water (delta_art-scale-bench): 0.8 min, ~480ns flat
+insert, 100% hit. Per-tier file: DELTA 10GB, BASE 7.3GB.
+- base = 7.3GB / ~5GB live ~= 1.46x: heart reclaim healthy; the merge already
+  does N sorted COW upserts in ONE txn per chunk (Dan: that's fine).
+- delta = 10GB for a 256MB flush TARGET. Occupancy probe @30M: 5.07GB used /
+  13.52GB total = 37% used, 63% FREE.
+  => reclaim WORKS (63% free) but the file high-water climbs because the
+     writer grabs NEW segments instead of reusing freed ones. reuse_threshold
+     is NOT the lever (0.25 == 0.80, both ~9GB) — the claim_ path isn't reusing
+     freed segments (the O(nseg) claim_ scan poisoning = audit #31 GC rework).
+  => plus a drain backlog: 5GB "used" >> 256MB live window = drain/reaper
+     behind the supersession + reaped-warm-tree volume.
+FIX = the #31 start_ver GC rework (O(1) bucketed claim_ so freed segments are
+reused; faster drain) — "the reclaim GC engine should be more aggressive".

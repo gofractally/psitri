@@ -19,6 +19,7 @@
 
 #include <sal/config.hpp>  // sal::open_mode (the unified open clause)
 
+#include <cstdlib>
 #include <atomic>
 #include <condition_variable>
 #include <cstring>
@@ -540,6 +541,14 @@ namespace delta_art
          // One full flush, synchronously (tests + the no-thread mode): pin a
          // snapshot at floor F, stream it into B in big sorted chunks, then arm
          // the retire pump at F. Returns keys flushed.
+         // debug/tuning: (used_lines, total_lines) of the DELTA (hot) arena.
+         std::pair<uint64_t, uint64_t> delta_occupancy_dbg() noexcept
+         {
+            if constexpr (requires { _w->occupancy_dbg(); })
+               return _w->occupancy_dbg();
+            else
+               return {0, 0};
+         }
          uint64_t flush_now()
          {
             // ── Dan's double buffer, in adb vocabulary ──────────────────────
@@ -604,7 +613,11 @@ namespace delta_art
             // allocation bump-like (long runs, virgin locality). Standalone
             // W keeps its own default (50%).
             if constexpr (requires { wcfg.reuse_threshold; })
+            {
                wcfg.reuse_threshold = 0.80;
+               if (const char* rt = getenv("DELTA_REUSE"))  // experiment knob
+                  wcfg.reuse_threshold = atof(rt);
+            }
             _w   = W::database::open(dir / "delta", mode, wcfg);
             _b   = B::database::open(dir / "base", mode, cfg.bcfg);
             _wws = _w->start_write_session();  // THE single W writer, shared

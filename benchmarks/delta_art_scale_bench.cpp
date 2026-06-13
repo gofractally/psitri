@@ -156,6 +156,14 @@ int main(int argc, char** argv)
       (void)ksum;
    }
    const double total_s = std::chrono::duration<double>(Clock::now() - t_start).count();
+   {  // delta arena occupancy: used vs total lines (128 B each)
+      auto occ   = db->delta_occupancy_dbg();
+      auto used  = occ.first;
+      auto total = occ.second;
+      printf("delta arena: %.2f GB used / %.2f GB total (%.0f%% used)\n",
+             double(used) * 128 / 1e9, double(total) * 128 / 1e9,
+             total ? 100.0 * double(used) / double(total) : 0.0);
+   }
    printf("DONE: %llu keys in %.1f min\n", (unsigned long long)done, total_s / 60.0);
    return 0;
 }

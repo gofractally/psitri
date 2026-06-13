@@ -608,6 +608,18 @@ namespace start_ver::kv
       }
 
       start_ver::arena& store() noexcept { return _arena; }
+      // debug/tuning: (used_lines, total_lines) across the arena — distinguishes
+      // un-reclaimed garbage (used high) from reclaimed-but-not-reused file
+      // high-water (free high). Exact only at quiescence.
+      std::pair<uint64_t, uint64_t> occupancy_dbg() noexcept
+      {
+         uint64_t freeL = 0;
+         const uint32_t ns = _arena.num_segments();
+         for (uint32_t s = 0; s < ns; ++s)
+            freeL += _arena.freeset_of(s).free_lines();
+         const uint64_t total = uint64_t(ns) * start_ver::lines_per_segment;
+         return {total - freeL, total};
+      }
 
       // ── typed-value registry (locked API §9) ────────────────────────────
       // Registered ids dispatch retain/release from the tree's value-

@@ -21,3 +21,14 @@ target_compile_definitions(walart-scale-bench PRIVATE XXH_INLINE_ALL)
 target_compile_options(walart-scale-bench PRIVATE -O3 -DNDEBUG)
 set_target_properties(walart-scale-bench PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# delta_art bank bench: transfer workload + balance conservation over
+# start_ver (hot delta) -> sal_art_ref dwal (cold base).
+add_executable(delta_art-bank-bench delta_art_bank_bench.cpp)
+target_link_libraries(delta_art-bank-bench PRIVATE delta_art start_ver sal_art_ref psitri)
+target_include_directories(delta_art-bank-bench PRIVATE
+    ${CMAKE_SOURCE_DIR}/libraries/sal_art_ref/test)
+target_compile_definitions(delta_art-bank-bench PRIVATE XXH_INLINE_ALL)
+target_compile_options(delta_art-bank-bench PRIVATE -O3 -DNDEBUG)
+set_target_properties(delta_art-bank-bench PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

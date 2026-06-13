@@ -18,7 +18,17 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-option(BUILD_TESTS "Build test suites" ON)
+# When embedded as a subdirectory (e.g. Silkworm's psitrimdbx backend), default
+# the dev-only targets OFF so the consumer gets just the libraries it links.
+# (PROJECT_IS_TOP_LEVEL needs CMake 3.21; compute it portably for 3.20.)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    set(PSITRI_IS_TOP ON)
+else()
+    set(PSITRI_IS_TOP OFF)
+endif()
+
+option(BUILD_TESTS "Build test suites" ${PSITRI_IS_TOP})
+option(BUILD_BENCHMARKS "Build benchmarks" ${PSITRI_IS_TOP})
 if(BUILD_TESTS)
     enable_testing()
 endif()
@@ -62,4 +72,6 @@ if(BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
-add_subdirectory(benchmarks)
+if(BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks)
+endif()

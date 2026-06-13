@@ -54,3 +54,13 @@ target_compile_definitions(delta_art-threshold-sweep PRIVATE XXH_INLINE_ALL)
 target_compile_options(delta_art-threshold-sweep PRIVATE -O3 -DNDEBUG)
 set_target_properties(delta_art-threshold-sweep PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# memory + recovery comparison (ONE engine per process; peak RSS is process-wide)
+add_executable(mem-recovery-bench mem_recovery_bench.cpp)
+target_link_libraries(mem-recovery-bench PRIVATE delta_art start_ver sal_art_ref psitri)
+target_include_directories(mem-recovery-bench PRIVATE
+    ${CMAKE_SOURCE_DIR}/libraries/sal_art_ref/test)
+target_compile_definitions(mem-recovery-bench PRIVATE XXH_INLINE_ALL)
+target_compile_options(mem-recovery-bench PRIVATE -O3 -DNDEBUG)
+set_target_properties(mem-recovery-bench PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

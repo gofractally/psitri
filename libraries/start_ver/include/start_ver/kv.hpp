@@ -222,6 +222,7 @@ namespace start_ver::kv
       {
          database* db;
          uint32_t  vf, raw;
+         uint32_t  idx = UINT32_MAX;  // root index this snapshot is OF (per-root floor)
          uint64_t  count = 0;     // keys in the tree (size() continuity)
          bool      armed = true;  // false until the displacing txn COMMITS
          // snapshot handles: a reader-slot pin holds the drain floor at vf
@@ -598,7 +599,7 @@ namespace start_ver::kv
          _drain_cv.notify_one();
          if (_drain_thread.joinable())
             _drain_thread.join();
-         drain_(committed_());
+         drain_();
          {  // flush ring-parked runs back to the freeset
             uint32_t l, n;
             while (_recycle.pop(l, n))
@@ -619,6 +620,14 @@ namespace start_ver::kv
             freeL += _arena.freeset_of(s).free_lines();
          const uint64_t total = uint64_t(ns) * start_ver::lines_per_segment;
          return {total - freeL, total};
+      }
+      // debug/tuning: (segments_grown, segments_reused) — grow high => claim_
+      // can't find free segments when the writer needs one (reclaim lag or
+      // claim_ logic); reuse high => recycling works.
+      std::pair<uint64_t, uint64_t> seg_stats_dbg() const noexcept
+      {
+         return {_arena.stats().segments_grown.load(std::memory_order_relaxed),
+                 _arena.stats().segments_reused.load(std::memory_order_relaxed)};
       }
 
       // ── typed-value registry (locked API §9) ────────────────────────────
@@ -643,7 +652,8 @@ namespace start_ver::kv
          };
          while (_reg_tail.load(std::memory_order_acquire) !=
                     _reg_head.load(std::memory_order_acquire) ||
-                !spill_empty())
+                _drain_active.load(std::memory_order_acquire) ||  // a pass holds
+                !spill_empty())                                   // gated in-flight
          {
             _drain_cv.notify_one();
             std::this_thread::yield();
@@ -672,10 +682,14 @@ namespace start_ver::kv
       // Pinned cursor for a tree_root snapshot at (version, root). version 0 &&
       // root 0 = the empty/unpublished tree (raw 0 is a valid root at v>0, so
       // the empty test is the pair == {0,0}); its cursor reads as empty.
-      cursor snapshot_cursor_for(uint32_t version, uint32_t root_raw)
+      cursor snapshot_cursor_for(uint32_t version, uint32_t root_raw,
+                                 uint32_t root_index = UINT32_MAX)
       {
          auto  rs   = _arena.start_read_session();
          auto& slot = _arena.reader_slot(rs.slot());
+         // attribute the pin to its root BEFORE publishing the slot (per-root
+         // floor: a warm-root pin must not gate hot-root garbage)
+         _arena.reader_root_idx(rs.slot()).store(root_index, std::memory_order_relaxed);
          slot.store((uint64_t(version) << 32) | root_raw, std::memory_order_seq_cst);
          root_ptr p = root_ptr::null();
          if (!(version == 0 && root_raw == 0))
@@ -780,7 +794,13 @@ namespace start_ver::kv
       // floor = oldest pinned version (committed when nothing is pinned).
       // seq_cst slot publication (reader) vs seq_cst scan (drain) closes the
       // race exactly like part's root_published dance.
-      uint32_t floor_() noexcept
+      // Per-root floor: the oldest version pinned by a reader of THIS root
+      // (plus any "gates-all" pin, UINT32_MAX). A pin on a DIFFERENT specific
+      // root does not gate this root — a warm-root (1) reader cannot see
+      // hot-root (0) garbage, so it must not block its reclamation. Pass
+      // root == UINT32_MAX for the conservative GLOBAL floor (multi-root
+      // chains, shutdown).
+      uint32_t floor_for_(uint32_t root) noexcept
       {
          uint32_t f = _committed;
          for (uint32_t i = 0; i < max_read_sessions; ++i)
@@ -788,16 +808,20 @@ namespace start_ver::kv
             const uint64_t s = _arena.reader_slot(i).load(std::memory_order_seq_cst);
             if (!s)
                continue;
+            const uint32_t pidx = _arena.reader_root_idx(i).load(std::memory_order_relaxed);
+            if (root != UINT32_MAX && pidx != root && pidx != UINT32_MAX)
+               continue;  // pin on a different specific root: doesn't gate `root`
             const uint32_t v = uint32_t(s >> 32);  // pin at V sees state V:
             if (v < f)                             // deaths <= V stay eligible
                f = v;
          }
          return f;
       }
+      uint32_t floor_() noexcept { return floor_for_(UINT32_MAX); }  // global
 
       // SPSC registry: writer pushes (version, chain head) at commit; the
       // drain owner (thread, or the writer inline when no thread) consumes.
-      void reg_push_(uint32_t ver, uint32_t chain_head)
+      void reg_push_(uint32_t ver, uint32_t chain_head, uint32_t root)
       {
          if (chain_head == vlog_state::npos)
             return;
@@ -807,7 +831,7 @@ namespace start_ver::kv
             const uint32_t t = _reg_tail.load(std::memory_order_acquire);
             if (h - t < kRegRing)
             {
-               _reg[h % kRegRing] = {ver, chain_head};
+               _reg[h % kRegRing] = {ver, chain_head, root};
                _reg_head.store(h + 1, std::memory_order_release);
                _drain_cv.notify_one();
                return;
@@ -818,22 +842,33 @@ namespace start_ver::kv
             // merger waits on the writer lock). Spill unbounded instead.
             {
                std::lock_guard g(_reg_spill_mx);
-               _reg_spill.push_back({ver, chain_head});
+               _reg_spill.push_back({ver, chain_head, root});
             }
             _drain_cv.notify_one();
             return;
          }
       }
 
-      // Drain every committed chain with death <= floor. Single consumer.
-      void drain_(uint32_t floor) noexcept
+      // Drain committed chains whose death <= the floor OF THEIR ROOT. Single
+      // consumer. PER-ROOT: a chain tagged root R drains at floor_for_(R), so
+      // a warm-root (1) pin held across a long flush no longer blocks the hot
+      // root's (0) garbage. Because eligibility is no longer a version-ordered
+      // prefix, the ring is consumed IN FULL each pass: eligible chains are
+      // eaten, gated chains move to the (unordered) spill and are retried next
+      // pass — no head-of-line blocking (a blocked root-1 clear chain can't
+      // freeze the root-0 chains behind it).
+      void drain_() noexcept
       {
+         _drain_active.store(true, std::memory_order_release);
+         struct done_guard
+         {
+            std::atomic<bool>& f;
+            ~done_guard() { f.store(false, std::memory_order_release); }
+         } dg{_drain_active};
          engine_t v{part_alloc<bval>(&_arena, /*reclaim=*/true)};
          v.allocator_mut().vring  = &_recycle;  // freed runs go back to the writer
          v.allocator_mut().vhooks = &_vh;       // superseded typed values die HERE
          auto eat_chain = [&](uint32_t head) noexcept {
-            // walk the chain newest-line-first; entries within a chain share
-            // the death version, so order inside is irrelevant
             uint32_t line = head;
             while (line != vlog_state::npos)
             {
@@ -845,36 +880,51 @@ namespace start_ver::kv
                line = prev;
             }
          };
+         // per-root floor cache (computed once per pass); index kMaxRoots = global
+         uint32_t fcache[kMaxRoots + 1];
+         bool     fhave[kMaxRoots + 1] = {};
+         auto     floor_of = [&](uint32_t root) noexcept -> uint32_t {
+            const uint32_t slot = root < kMaxRoots ? root : kMaxRoots;
+            if (!fhave[slot])
+            {
+               fcache[slot] = floor_for_(slot == kMaxRoots ? UINT32_MAX : slot);
+               fhave[slot]  = true;
+            }
+            return fcache[slot];
+         };
+         auto eligible = [&](const reg_entry& e) noexcept {
+            return e.ver <= floor_of(e.root);
+         };
+         // consume the whole ring; eat eligible, spill gated
+         std::vector<reg_entry> gated;
          for (;;)
          {
             const uint32_t t = _reg_tail.load(std::memory_order_relaxed);
             if (t == _reg_head.load(std::memory_order_acquire))
                break;
             const reg_entry e = _reg[t % kRegRing];
-            if (e.ver > floor)
-               break;  // strictly ordered: nothing behind it is eligible either
-            eat_chain(e.head);
             _reg_tail.store(t + 1, std::memory_order_release);
+            if (eligible(e))
+               eat_chain(e.head);
+            else
+               gated.push_back(e);
          }
-         // ring-overflow spill (unordered): eat what the floor allows, keep the rest
+         // retry the spill (ring-overflow + freshly-gated): eat eligible, keep rest
          std::vector<reg_entry> local;
          {
             std::lock_guard g(_reg_spill_mx);
             local.swap(_reg_spill);
          }
-         if (!local.empty())
+         std::vector<reg_entry> keep = std::move(gated);
+         for (const reg_entry& e : local)
+            if (eligible(e))
+               eat_chain(e.head);
+            else
+               keep.push_back(e);
+         if (!keep.empty())
          {
-            std::vector<reg_entry> keep;
-            for (const reg_entry& e : local)
-               if (e.ver <= floor)
-                  eat_chain(e.head);
-               else
-                  keep.push_back(e);
-            if (!keep.empty())
-            {
-               std::lock_guard g(_reg_spill_mx);
-               _reg_spill.insert(_reg_spill.end(), keep.begin(), keep.end());
-            }
+            std::lock_guard g(_reg_spill_mx);
+            _reg_spill.insert(_reg_spill.end(), keep.begin(), keep.end());
          }
       }
       void drain_loop_() noexcept
@@ -890,7 +940,7 @@ namespace start_ver::kv
                _drain_cv.wait_for(lk, std::chrono::milliseconds(2));
                continue;
             }
-            drain_(floor_());
+            drain_();
             if (_drain_stop.load(std::memory_order_acquire) &&
                 _reg_tail.load(std::memory_order_acquire) ==
                     _reg_head.load(std::memory_order_acquire))
@@ -916,6 +966,8 @@ namespace start_ver::kv
       {
          uint32_t ver;
          uint32_t head;
+         uint32_t root;  // root index this chain's garbage belongs to;
+                         // UINT32_MAX = multi-root chain -> global floor
       };
       static constexpr uint32_t kRegRing = 1u << 16;  // 512 KB; covers deep pin backlogs
       reg_entry                 _reg[kRegRing];
@@ -932,6 +984,9 @@ namespace start_ver::kv
       std::condition_variable   _drain_cv;
       std::thread               _drain_thread;
       std::atomic<bool>         _drain_stop{false};
+      std::atomic<bool>         _drain_active{false};  // a drain pass is mid-flight
+                                                       // (gated chains in a local) —
+                                                       // flush_releases must wait
 
       start_ver::recycle_ring   _recycle;  // drain -> writer exact-size run reuse
       start_ver::arena          _arena;
@@ -1056,6 +1111,8 @@ namespace start_ver::kv
    {
       assert(root_index < kMaxRoots);
       auto& slot = _db->_arena.reader_slot(_rs.slot());
+      // attribute the pin to its root (per-root floor) before publishing
+      _db->_arena.reader_root_idx(_rs.slot()).store(root_index, std::memory_order_relaxed);
       for (;;)
       {
          const uint64_t live = _db->_live_arr[root_index].load(std::memory_order_seq_cst);
@@ -1078,7 +1135,7 @@ namespace start_ver::kv
    {
       if (!_c)
          return database::empty_cursor();
-      return _c->db->snapshot_cursor_for(_c->vf, _c->raw);
+      return _c->db->snapshot_cursor_for(_c->vf, _c->raw, _c->idx);
    }
    template <class S>
    inline std::optional<S> tree_root::get(key_view k) const
@@ -1101,6 +1158,8 @@ namespace start_ver::kv
       auto& arena = _db->_arena;
       auto  rs    = arena.start_read_session();
       auto& slot  = arena.reader_slot(rs.slot());
+      // attribute the pin to this root (per-root floor) before publishing
+      arena.reader_root_idx(rs.slot()).store(root_index, std::memory_order_relaxed);
       uint64_t live;
       for (;;)  // publish-validate (the pin_snapshot protocol)
       {
@@ -1113,6 +1172,7 @@ namespace start_ver::kv
       c->db    = _db;
       c->vf    = uint32_t(live >> 32);
       c->raw   = uint32_t(live);
+      c->idx   = root_index;
       c->count = tree_for(root_index).size_hint();
       c->armed = false;  // view of the LIVE lineage: never reaped from here
       c->pin.emplace(std::move(rs));
@@ -1366,7 +1426,12 @@ namespace start_ver::kv
          db->_arena.set_root(kMaxRoots, v);  // the global version slot
          db->_committed = v;
       }
-      db->reg_push_(v, vl.clone_head);  // publish the supersession chain
+      // Tag the chain with its root for per-root reclaim: a single-root txn's
+      // garbage is that root's lineage (the common hot write = root 0, drains
+      // at root-0's floor unblocked by warm-root pins); a multi-root txn (the
+      // rotation/clear) mixes lineages -> global floor (UINT32_MAX).
+      const uint32_t chain_root = _roots.size() == 1 ? _roots[0].index : UINT32_MAX;
+      db->reg_push_(v, vl.clone_head, chain_root);  // publish the supersession chain
       vl.reset();
       _ws->_t.allocator_mut().vtxn = 0;
       for (auto& c : _displaced)
@@ -1376,7 +1441,7 @@ namespace start_ver::kv
          it->lock.unlock();
       _roots.clear();
       if (!db->_drain_thread.joinable())
-         db->drain_(db->floor_());  // no thread: drain inline on the writer
+         db->drain_();  // no thread: drain inline on the writer
    }
    // kv_engine concept surface (psitri::dwal::kv_engine): one aggregate naming
    // the five types + config. tiered_kv<W, Base> and the conformance

@@ -206,6 +206,8 @@ namespace start_ver
 
       explicit arena(arena_config cfg) : _cfg(std::move(cfg))
       {
+         for (auto& r : _reader_root_idx)
+            r.store(UINT32_MAX, std::memory_order_relaxed);  // default: gates all roots
          if (uint64_t(_cfg.max_segments) * lines_per_segment > sentinel_base)
             throw std::runtime_error("part: max_segments crosses the sentinel index band");
          namespace fs = std::filesystem;
@@ -420,6 +422,11 @@ namespace start_ver
       session start_session() { return session(this); }
 
       std::atomic<uint64_t>& reader_slot(uint32_t i) noexcept { return _reader_roots[i]; }
+      // Per-pin ROOT INDEX (multi-root per-root floors): set by a cursor before
+      // it publishes its slot; floor computation attributes the pin's version
+      // to this root so a warm-root (1) pin can't gate hot-root (0) garbage.
+      // UINT32_MAX = "gates all roots" (an un-attributed pin, conservative).
+      std::atomic<uint32_t>& reader_root_idx(uint32_t i) noexcept { return _reader_root_idx[i]; }
       bool root_published(uint64_t raw) const noexcept
       {
          for (uint32_t i = 0; i < max_read_sessions; ++i)
@@ -717,6 +724,8 @@ namespace start_ver
       // locks, and the WRITER defers retired-root release until no slot shows
       // it. Transient: rebuilt empty every open.
       std::atomic<uint64_t> _reader_roots[max_read_sessions] = {};
+      // Per-pin root index (parallel to _reader_roots); default "gates all".
+      std::atomic<uint32_t> _reader_root_idx[max_read_sessions];
       arena_stats                           _stats;
       bool                                  _was_clean = false;
    };

@@ -1200,14 +1200,14 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      cur  = *slot;
                   }
                   s   = static_cast<setlist*>(deref_(cur));
-                  // split-only inline: dissolve inline payloads so setlist_set can write the new
-                  // slot (re-inlined at the next split). grow-keeps-inline (sl_try_inline_add_)
-                  // is implemented but DEFERRED — it still double-frees under the heavy COW
-                  // workload (in-place inline mutation vs supersession/repack); needs focused
-                  // debugging before enabling.
+                  packed_ptr lf = make_value_at(key, depth + 1, std::forward<VF>(v));
+                  // New child. setlist_set shifts branch[] (and would desync the inl bits),
+                  // so flatten any inline children first. Per libart++: do NOT re-compact on
+                  // growth — inline is established once at split creation; a setlist that
+                  // outgrows its split shape goes external and stays there (re-compacting per
+                  // insert is O(n) alloc/free churn that wrecked clustered builds).
                   if constexpr (inline_children_ok)
                      if (sl_inl_active(s)) sl_externalize_all_(s);
-                  packed_ptr lf = make_value_at(key, depth + 1, std::forward<VF>(v));
                   if (setlist_set(s, byte, lf))  // room: in place (prefix untouched)
                   {
                      ++count_;
@@ -4234,7 +4234,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       // interaction that inline creation sets up; repro: removing "str/31510" drops
       // "str/31514"). Default OFF so the suite stays green; flip to true to develop the
       // feature / reproduce the bug. Type gate unchanged (raw_vals || trivially-copyable T).
-      static constexpr bool     kInlineChildren    = false;
+      static constexpr bool     kInlineChildren    = true;
       static constexpr bool     inline_children_ok =
           kInlineChildren && (raw_vals || std::is_trivially_copyable_v<T>);
       static constexpr unsigned SL_LINE          = cacheline_bytes;  // 128
@@ -4275,6 +4275,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
          return (s->inl & 0x80) && i < SL_INLINE_BRANCH && (s->inl & (1u << i));
       }
+      // Inline handle: tag stays value_ptr (libart++ convention); the address bits
+      // hold a LINE-relative offset, not a pool/line index. It is resolved ONLY via
+      // sl_inline_leaf (s + offset) under an sl_is_inline gate, and NEVER deref_'d
+      // or handed to the COW machinery — the setlist line and its inline leaves are
+      // ONE COW unit (clone copies the whole line; release frees the whole line).
       static packed_ptr sl_inline_handle(unsigned line_off) noexcept
       {
          packed_ptr p;
@@ -4397,61 +4402,6 @@ namespace detail  // implementation types & node helpers — not part of the pub
             for (int i = 0; i < n; ++i)
                if (newinl & (1u << i)) s->branch[i] = sl_inline_handle(newoff[i]);
             s->inl = newinl;
-         }
-      }
-      // CHURN-FREE grow: add a new child (byte -> the window-born external leaf `lf`) to the
-      // OWNED setlist `s`, keeping it inline, with NO externalize and NO O(n) re-alloc. The
-      // existing inline payloads DON'T move — only the branch/byte/inl arrays shift and the new
-      // leaf drops into the gap (the unused branch-pointer slots between used_branch_end and the
-      // lowest existing payload). Returns true and frees lf if it fit inline; false otherwise
-      // (caller falls back to externalize + external setlist_set / widen). raw_vals only (the
-      // stripped-vstamp logical-pointer scheme); typed-T routes through compact instead.
-      [[maybe_unused]] bool sl_try_inline_add_(setlist* s, uint8_t byte, packed_ptr lf)
-      {
-         if constexpr (!inline_children_ok) { (void)s; (void)byte; (void)lf; return false; }
-         else
-         {
-            const int K = s->rh.hdr.nbranch;
-            if (K >= setlist::CAP) return false;  // branch array full → caller widens
-            const unsigned new_used = sl_branch_off + unsigned(K + 1) * unsigned(sizeof(packed_ptr));
-            unsigned       lowest   = sl_inline_top();  // lowest existing inline payload (physical)
-            for (int i = 0; i < K; ++i)
-               if (sl_is_inline(s, i))
-               {
-                  const unsigned off = sl_inline_off(s->branch[i]) + SL_VSTAMP;  // physical start
-                  if (off < lowest) lowest = off;
-               }
-            // The new branch slot consumes the BOTTOM 4 B of the gap [used,lowest); if the inline
-            // payloads have grown down to block even that, bail (caller externalizes + widens —
-            // happens at most once per setlist, near full, so no oscillating churn).
-            if (lowest < new_used) return false;
-            // Commit IN PLACE: insert byte at its sorted slot; existing payloads never move.
-            const int idx = setlist_lb(s, byte);
-            std::memmove(&s->bytes[idx + 1], &s->bytes[idx], size_t(K - idx));
-            std::memmove(&s->branch[idx + 1], &s->branch[idx], size_t(K - idx) * sizeof(packed_ptr));
-            const uint8_t flags = uint8_t(s->inl & 0x7F);  // shift inl bits up across the insert
-            const uint8_t lo    = uint8_t(flags & ((1u << idx) - 1));
-            const uint8_t hi    = uint8_t((flags << 1) & ~((1u << (idx + 1)) - 1) & 0x7F);
-            const char*    lsrc = static_cast<const char*>(deref_(lf));
-            const unsigned phys = unsigned(leaf_alloc_size(lsrc)) - SL_VSTAMP;
-            const unsigned np   = (phys <= lowest) ? ((lowest - phys) & ~(SL_VAL_ALIGN - 1)) : 0;
-            s->bytes[idx] = byte;
-            if (idx < SL_INLINE_BRANCH && phys <= lowest && np >= new_used)
-            {  // the new leaf fits the gap (above the new slot) — inline it, free the external husk
-               std::memcpy(reinterpret_cast<char*>(s) + np, lsrc + SL_VSTAMP, phys);
-               s->branch[idx] = sl_inline_handle(np - SL_VSTAMP);
-               s->inl         = uint8_t(0x80 | lo | hi | (1u << idx));
-               node_free_(const_cast<char*>(lsrc), leaf_alloc_size(lsrc));
-            }
-            else
-            {  // payload won't fit (or idx>=7): keep it EXTERNAL in place — do NOT dissolve the
-               // other inline children (that's what oscillated into an alloc livelock).
-               s->branch[idx]      = lf;
-               const uint8_t bits  = uint8_t(lo | hi);
-               s->inl              = bits ? uint8_t(0x80 | bits) : 0;
-            }
-            s->rh.hdr.nbranch = uint16_t(K + 1);
-            return true;
          }
       }
       // Move one inline child OUT to a real value_ptr leaf (throws on alloc). A same-scope
@@ -5612,7 +5562,18 @@ namespace detail  // implementation types & node helpers — not part of the pub
 
       // Remove byte's branch (keeps each tier's invariants: setlist gap, cnode rank/present,
       // full direct slot + nset).
-      static void router_remove(setlist* s, uint8_t byte) noexcept { setlist_remove(s, byte); }
+      void router_remove(setlist* s, uint8_t byte) const noexcept
+      {
+         if constexpr (inline_children_ok)
+         {  // a setlist may host inline siblings: remove by INDEX so sl_remove_branch_
+            // shifts the inl bits (and repacks) in lockstep with the branch/byte arrays.
+            // Plain setlist_remove(byte) shifts only branch/byte → a surviving inline
+            // sibling's bit would point at the wrong slot (point-lookup then misses it).
+            const int i = setlist_index(s, byte);
+            if (i >= 0) { sl_remove_branch_(s, i); return; }
+         }
+         setlist_remove(s, byte);
+      }
       template <int N>
       static void router_remove(cnode<N>* c, uint8_t byte) noexcept { cnode_remove(c, byte); }
       static void router_remove(node_full* f, uint8_t byte) noexcept { full_set(f, byte, packed_ptr::null()); }

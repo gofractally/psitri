@@ -611,11 +611,19 @@ TEST_CASE("tree_root: refcounted version roots — held trees live, last drop re
       }
       tx.commit();
    }
-   start_ver::kv::tree_root h1 = ses->freeze_and_reset();
+   // ── rotate hot -> warm in adb vocabulary: h1.set_root(h0.set_root({})) ──
+   {
+      auto tx = ses->start_transaction(0);
+      auto h0 = tx.primary();
+      auto h1 = tx.open_root(1);
+      h1.set_root(h0.set_root(start_ver::kv::tree_root{}));  // hot -> warm, root 0 newborn
+      tx.commit();
+   }
+   start_ver::kv::tree_root h1 = ses->get_root(1);  // owned, FROZEN warm snapshot
    REQUIRE(bool(h1));
    REQUIRE(h1.version() > 0);
 
-   // hot tree is NEWBORN: independent of the frozen one
+   // hot tree (root 0) is NEWBORN: independent of the frozen warm tree
    {
       auto tx = ses->start_transaction(0);
       tx.upsert("hot/alpha", "a");
@@ -628,9 +636,9 @@ TEST_CASE("tree_root: refcounted version roots — held trees live, last drop re
       REQUIRE_FALSE(hot.get<std::string>(frozen.begin()->first).has_value());
    }
 
-   // ── the frozen tree reads correctly through ANY holder, cross-thread ──
+   // ── the frozen warm tree reads correctly through ANY holder, cross-thread ──
    auto check_frozen = [&](const start_ver::kv::tree_root& h) {
-      auto cur = db->pin_at(h.version(), h.root_raw());
+      auto cur = h.snapshot_cursor();  // a tree IS a snapshot
       int  n   = 0;
       for (auto& [k, v] : frozen)
       {
@@ -640,16 +648,16 @@ TEST_CASE("tree_root: refcounted version roots — held trees live, last drop re
       }
    };
    check_frozen(h1);
-   start_ver::kv::tree_root h2 = h1;  // second holder
-   h1.reset();                    // first drop: tree must SURVIVE (h2 lives)
+   start_ver::kv::tree_root h2 = h1;  // second holder (snapshots copy/share)
+   h1.reset();                        // first drop: tree must SURVIVE (h2 lives)
    check_frozen(h2);
    {
       std::thread t([&] { check_frozen(h2); });  // handles cross threads
       t.join();
    }
 
-   // ── handles are VIEWS now: the tree is owned by ROOT 1 (the rotation
-   // shim) — dropping every handle reaps NOTHING; the data stays readable ──
+   // get_root(1) snapshots are VIEWS of the live lineage (root 1 owns the
+   // tree) — dropping every handle reaps NOTHING; the data stays readable ──
    h2.reset();
    db->flush_reaper();
    {
@@ -657,8 +665,12 @@ TEST_CASE("tree_root: refcounted version roots — held trees live, last drop re
       auto c1  = rs2->create_cursor(1);
       REQUIRE(c1.get<std::string>(frozen.begin()->first).has_value());
    }
-   // reclamation = emptying root 1 (displaced tree arms at commit -> reaper)
-   ses->clear_warm_slots();
+   // reclamation = emptying root 1 (set_root({}); displaced tree arms -> reaper)
+   {
+      auto tx = ses->start_transaction(1);
+      tx.primary().set_root(start_ver::kv::tree_root{});
+      tx.commit();
+   }
    db->flush_reaper();
    db->flush_releases();
    // everything the frozen tree held is back: only the 1-key hot tree (and

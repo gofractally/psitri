@@ -501,17 +501,6 @@ namespace start_ver::kv
    {
      public:
       transaction start_transaction(uint32_t root_index);
-      // Rotation (Dan's double buffer): freeze the last committed delta as
-      // the WARM tree and continue on a NEWBORN EMPTY hot tree. Publishes the
-      // reset as a new version; the warm (version, root) persists in root
-      // slots 2/3 until clear_warm_slots() so a crash re-flushes it. Caller
-      // holds the writer serialization. Returns the refcounted HANDLE — the
-      // tree lives while any handle exists; the last drop wakes the reaper.
-      tree_root freeze_and_reset();
-      // After the warm tree is durably flushed to the base: clear the
-      // crash-recovery slots (the tree itself is reclaimed by the REAPER when
-      // the last tree_root handle drops — GC lives in vpart, not callers).
-      void clear_warm_slots();
       // get_root(i) IS the snapshot primitive (a tree is a snapshot): an
       // owned, FROZEN tree_root of root i's committed state — a reader-slot
       // pin holds the drain floor at its version (the nodes stay readable)
@@ -668,53 +657,6 @@ namespace start_ver::kv
          return p;
       }
 
-      // Merger-side warm-tree reclamation: WAIT until no reader pins a
-      // version <= vf (the warm boundary), then cascade-free the detached
-      // root INLINE on the calling thread with a reclaim-mode engine. The
-      // single drain thread cannot keep pace cascading multi-GB warm trees
-      // (measured: generations queued behind one deep entry until the 32 GB
-      // wall at 142M keys); the merger is idle between flushes — it frees
-      // what it flushed. Caller must NOT hold the writer lock while waiting.
-      // Crash recovery: wrap an orphaned frozen root (slots 2/3 from a dead
-      // run) in a handle so the normal flush+drop+reap lifecycle applies.
-      tree_root make_orphan_root(uint32_t vf, uint32_t raw)
-      {
-         auto c = std::make_shared<tree_root::ctrl>();
-         c->db  = this;
-         c->vf  = vf;
-         c->raw = raw;
-         return tree_root(std::move(c));
-      }
-
-      // A crashed rotation leaves the frozen warm tree in root slots 2/3 —
-      // recovery re-flushes it (idempotent) and releases. {0,0} = none.
-      // TRANSITIONAL shim (#32): warm = root 1; pending = root 1 non-empty.
-      std::pair<uint32_t, uint32_t> pending_warm() const
-      {
-         const uint64_t live = _live_arr[1].load(std::memory_order_seq_cst);
-         if (live == 0)
-            return {0, 0};
-         root_ptr p = root_ptr::null();
-         const uint32_t r32 = uint32_t(live);
-         std::memcpy(p.b, &r32, 4);
-         if (p.is_null())
-            return {0, 0};
-         return {uint32_t(live >> 32), r32};
-      }
-
-      // Pin a cursor at a SPECIFIC (version, root) boundary — the WARM leg of
-      // tiered readers. Publish-validate against the floor: valid only while
-      // a master pin (the compactor's) holds floor <= version, which the
-      // rotation protocol guarantees for the whole flush window.
-      cursor pin_at(uint32_t version, uint32_t root_raw)
-      {
-         auto  rs   = _arena.start_read_session();
-         auto& slot = _arena.reader_slot(rs.slot());
-         slot.store((uint64_t(version) << 32) | root_raw, std::memory_order_seq_cst);
-         root_ptr p = root_ptr::null();
-         std::memcpy(p.b, &root_raw, 4);
-         return cursor(&_arena, p, &slot, std::move(rs));
-      }
       // Pinned cursor for a tree_root snapshot at (version, root). version 0 &&
       // root 0 = the empty/unpublished tree (raw 0 is a valid root at v>0, so
       // the empty test is the pair == {0,0}); its cursor reads as empty.
@@ -730,29 +672,6 @@ namespace start_ver::kv
       }
       // An owned cursor over the empty tree (default tree_root has no db).
       static cursor empty_cursor() { return cursor(nullptr, root_ptr::null(), nullptr); }
-
-      // Writer-side snapshot: claims a read-session slot and pins the latest
-      // committed boundary exactly like a reader.
-      cursor pin_snapshot()
-      {
-         auto rs = _arena.start_read_session();
-         auto& slot = _arena.reader_slot(rs.slot());
-         for (;;)
-         {
-            const uint64_t live = _live_arr[0].load(std::memory_order_seq_cst);
-            slot.store(live, std::memory_order_seq_cst);
-            if (_live_arr[0].load(std::memory_order_seq_cst) == live)
-            {
-               root_ptr p = root_ptr::null();
-               if (live != 0)  // raw 0 is a valid root; version 0 = unpublished
-               {
-                  const uint32_t r32 = uint32_t(live);
-                  std::memcpy(p.b, &r32, 4);
-               }
-               return cursor(&_arena, p, &slot, std::move(rs));
-            }
-         }
-      }
 
      private:
       friend class write_session;
@@ -783,9 +702,6 @@ namespace start_ver::kv
       uint32_t committed_() const noexcept { return _committed; }
 
      public:
-      // Last published version — the merge floor F a flusher captures BEFORE
-      // pinning its snapshot (F <= pin version: conservative-safe for retire).
-      uint32_t committed_version() const noexcept { return _committed; }
       // Arena footprint (segments held x segment bytes): the observer signal
       // (Dan: the compactor watches FREE SPACE and flushes early — bytes
       // written is the wrong sensor; a big arena also poisons claim_ scans).
@@ -1160,28 +1076,6 @@ namespace start_ver::kv
       return snapshot_cursor().template get<S>(k);
    }
 
-   // TRANSITIONAL shim for tiered (#32 deletes it): the rotation in concept
-   // vocabulary — one multi-root txn, h1.set_root(h0.set_root({})). The warm
-   // tree lives in ROOT 1 (durable there: crash recovery = root 1 non-empty).
-   // Returns a DISARMED view handle (the tree is owned by root 1, not by the
-   // handle); emptying root 1 later is what releases it.
-   inline tree_root write_session::freeze_and_reset()
-   {
-      auto tx = start_transaction(0);
-      auto h0 = tx.primary();
-      auto h1 = tx.open_root(1);
-      assert(h1.key_count() == 0 && "rotation requires an empty warm slot");
-      tree_root displaced = h0.set_root(tree_root{});
-      h1.set_root(std::move(displaced));
-      tx.commit();
-      auto c   = std::make_shared<tree_root::ctrl>();
-      c->db    = _db;
-      c->vf    = _db->_committed;
-      c->raw   = uint32_t(uint32_t(_db->_live_arr[1].load(std::memory_order_seq_cst)));
-      c->count = 0;
-      c->armed = false;  // VIEW: root 1 owns the tree
-      return tree_root(std::move(c));
-   }
    inline tree_root::ctrl::~ctrl()
    {
       if (armed)
@@ -1212,16 +1106,6 @@ namespace start_ver::kv
       c->pin.emplace(std::move(rs));
       c->pin_slot = &slot;
       return tree_root(std::move(c));
-   }
-
-   // TRANSITIONAL shim (#32 deletes): empty root 1 — the displaced tree ARMS
-   // at commit and vpart's GC reaps it (the model: GC is vpart's, period).
-   inline void write_session::clear_warm_slots()
-   {
-      auto tx = start_transaction(1);
-      auto h1 = tx.primary();
-      (void)h1.set_root(tree_root{});  // displaced arms at commit -> reaper
-      tx.commit();
    }
 
 

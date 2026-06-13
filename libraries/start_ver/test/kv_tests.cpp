@@ -814,3 +814,5 @@ TEST_CASE("multi-root: set_root exchange — the rotation, abort-safe, leak-exac
       REQUIRE(cap - free_total < 2000);  // 8k-key tree fully reclaimed
    }
 }
+
+

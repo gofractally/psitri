@@ -3506,6 +3506,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
                if (k == K::setlist_u8)
                {
                   setlist* s = static_cast<setlist*>(deref_(nd));
+                  if constexpr (inline_children_ok)
+                     if (sl_is_inline(s, 0))
+                        return false;  // lone inline survivor: folding needs an alloc (noexcept) — leave it
                   pl         = s->rh.hdr.prefix_len;
                   std::memcpy(pfx, s->prefix, pl);
                   pfx[pl++] = s->bytes[0];
@@ -4219,7 +4222,17 @@ namespace detail  // implementation types & node helpers — not part of the pub
       // (3) Typed-value hooks: a line CLONE duplicates inline bytes -> vh_copy_ each; a
       // line DEATH drops them -> vh_release_ each; a same-scope MOVE (compact/externalize)
       // fires neither. Only raw_vals leaves carry hooks; trivially-copyable T is POD.
-      static constexpr bool     inline_children_ok = raw_vals || std::is_trivially_copyable_v<T>;
+      // Master switch for the inline-children feature. WIP: with it ON the read/creation/
+      // write paths are correct AND ~20-40% faster (start_ver-tests fully green, kv-compat
+      // fastest in every phase), but there is ONE open bug — under kv-compat's heavy
+      // update-all-then-remove-half battery, removing an externalized key can drop its
+      // externalized sibling, exposed only by flush_releases() (a stamp/drain supersession
+      // interaction that inline creation sets up; repro: removing "str/31510" drops
+      // "str/31514"). Default OFF so the suite stays green; flip to true to develop the
+      // feature / reproduce the bug. Type gate unchanged (raw_vals || trivially-copyable T).
+      static constexpr bool     kInlineChildren    = false;
+      static constexpr bool     inline_children_ok =
+          kInlineChildren && (raw_vals || std::is_trivially_copyable_v<T>);
       static constexpr unsigned SL_LINE          = cacheline_bytes;  // 128
       static constexpr int      SL_INLINE_BRANCH = 7;  // inl bits 0..6 cover branches 0..6
       static constexpr unsigned sl_branch_off =
@@ -4228,9 +4241,15 @@ namespace detail  // implementation types & node helpers — not part of the pub
       // COW instantiation stamps at offset 96); a stampless instantiation uses the full tail.
       // A function (not a data member): cow_stamped_ is declared later in the class, and a
       // function body is parsed after the class is complete — a class-scope initializer is not.
+      // Inline payloads must stay within (a) the bytes cow_clone_node_ memcpys, which is
+      // node_size(setlist_u8) == sizeof(setlist) (the 4 B line_ptr struct is only 94 B though
+      // it lives in a 128 B block), and (b) below the version-stamp slot. sizeof is the tighter
+      // bound on the COW path; take the min so a payload is never truncated on clone.
       static constexpr unsigned sl_inline_top() noexcept
       {
-         return cow_stamped_ ? unsigned(vstamp_off_(K::setlist_u8)) : SL_LINE;
+         const unsigned copied = unsigned(sizeof(setlist));
+         const unsigned stamp  = cow_stamped_ ? unsigned(vstamp_off_(K::setlist_u8)) : SL_LINE;
+         return copied < stamp ? copied : stamp;
       }
       // Inline leaf start aligns so leaf_value_off() lands on alignof(T) (raw_vals -> 1).
       static constexpr unsigned SL_VAL_ALIGN = alignof(T) < 1 ? 1u : unsigned(alignof(T));
@@ -4368,6 +4387,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       void sl_externalize_all_(setlist* s)  // basic guarantee: a partial result is valid
       {
          if (!sl_inl_active(s)) return;
+
          const int n = std::min<int>(s->rh.hdr.nbranch, SL_INLINE_BRANCH);
          for (int i = 0; i < n; ++i)
             if (sl_is_inline(s, i))
@@ -5961,6 +5981,10 @@ namespace detail  // implementation types & node helpers — not part of the pub
             v_destroy(alloc_, leaf_val(L));  // old value moved out → destroy moved-from + free
             node_free_(L, Lsize);
          }
+         // establish-once: pull r's small leaf children into its line (alloc-free; a same-scope
+         // MOVE, no vh hooks). Done at the split shape only — re-compacting per insert is churn.
+         if constexpr (inline_children_ok)
+            sl_inline_compact_(r);
          g.release();  // committed: the caller adopts `partial`
          inserted = true;
          return partial;
@@ -7348,6 +7372,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
             else  // SHALLOW: children carried by the successor — free p only
             {
                vh_node_dies_(p);  // a superseded leaf's bytes die with the husk
+               // inline children are NOT carried (the clone has its own vh_copy_'d copies):
+               // their bytes die with this husk line, so balance the clone's copy hook here.
+               if constexpr (vh_on)
+                  if (p.tag() == K::setlist_u8)
+                     sl_inline_vh_dies_(static_cast<setlist*>(deref_(p)));
                node_free_(deref_(p), cow_node_bytes_(p));
             }
          }

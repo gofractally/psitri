@@ -1,0 +1,1187 @@
+#pragma once
+#include <cstring>
+#include <psitri/count_keys.hpp>
+#include <psitri/node/inner.hpp>
+#include <psitri/node/leaf.hpp>
+#include <psitri/node/node.hpp>
+#include <psitri/node/value_node.hpp>
+#include <psitri/value_pin.hpp>
+#include <psitri/value_type.hpp>
+#include <sal/mapped_memory/session_op_stats.hpp>
+#include <sal/smart_ptr.hpp>
+#include <stdexcept>
+#include <utility>
+
+namespace psitri
+{
+
+   // clang-format off
+   /**
+    * Concept for buffer types that can be used with iterator value functions.
+    * Requires the type to be resizable and provide contiguous memory access.
+    */
+   template <typename T>
+   concept Buffer = requires(T b) {
+      { b.resize(std::size_t{}) } -> std::same_as<void>;
+      { b.data() } -> std::convertible_to<void*>;
+   };
+
+   /**
+    * Extended Buffer concept that also requires default constructibility.
+    * Used for value() function that constructs a new buffer.
+    */
+   template <typename T>
+   concept ConstructibleBuffer = Buffer<T> && requires { T(); };
+
+
+   /**
+    * Concept for types that can be implicitly converted to a std::string_view
+    */
+   template <typename T>
+   concept ImplicitValueViewConvertible = requires(const T& t) {
+      { std::string_view{t} } -> std::same_as<std::string_view>;
+   };
+
+   /**
+    * Concept for types that provide data() and size() methods compatible with std::string_view construction
+    */
+   template <typename T>
+   concept DataSizeValueViewConvertible = requires(const T& t) {
+      { t.data() } -> std::convertible_to<const char*>;
+      { t.size() } -> std::convertible_to<std::size_t>;
+   };
+
+   /**
+    * Concept for types that can be converted to a std::string_view through either method
+    */
+   template <typename T>
+   concept ValueViewConvertible = ImplicitValueViewConvertible<T> || DataSizeValueViewConvertible<T>;
+
+   /**
+    * Concept for types that can be used as values in the trie (either convertible to value_view or a smart_ptr<>)
+    */
+   template <typename T>
+   concept ValueViewConvertibleOrNode = ValueViewConvertible<T> || std::same_as<T, sal::smart_ptr<sal::alloc_header>>;
+   // clang-format on
+
+   /// Information about a key's current state in the tree.
+   /// Used by OCC transactions for per-key read-set validation.
+   struct key_info
+   {
+      sal::ptr_address leaf_addr = sal::null_ptr_address;  ///< leaf containing the key
+      uint64_t         version   = UINT64_MAX;  ///< 0=inline, VN latest, UINT64_MAX=missing
+   };
+
+   // A value_view kept safe to read by a value_pin (read_lock) bundled into the return — the pin
+   // holds the page resident for as long as this object lives. Return-by-value bundles the pin with
+   // the view (vector<bool>::reference-style proxy): the caller extends the safe-read window simply
+   // by holding it, with no separate pin to manage (safer than value(read_lock&)). Converts to
+   // value_view for transient use. Symmetric with heart::radix::value_ref.
+   //
+   // WARNING: the held read_lock BLOCKS the compactor from reclaiming/evicting memory. Hold a
+   // value_ref only for a SHORT, LOCAL scope. Keeping it alive across long spans — especially under
+   // heavy concurrent writes — stalls compaction and causes temporary memory bloat (freed/garbage
+   // memory can't be reclaimed while any read_lock is open). For longer-lived needs, copy the bytes
+   // out (value<T>()) and let the lock drop.
+   class value_ref
+   {
+      value_pin  _pin;  // residency pin (move-only)
+      value_view _v;
+
+     public:
+      value_ref(value_pin pin, value_view v) noexcept : _pin(std::move(pin)), _v(v) {}
+      operator value_view() const noexcept { return _v; }
+      value_view  view() const noexcept { return _v; }
+      const char* data() const noexcept { return _v.data(); }
+      size_t      size() const noexcept { return _v.size(); }
+      bool        empty() const noexcept { return _v.empty(); }
+      std::string str() const { return std::string(_v); }
+   };
+
+   class cursor
+   {
+     public:
+      cursor(sal::smart_ptr<sal::alloc_header> n);
+      cursor(sal::smart_ptr<sal::alloc_header> n, uint64_t version);
+
+      cursor(const cursor& other) noexcept
+          : _node(other._node),
+            _key_len(other._key_len),
+            _root_end_branch(other._root_end_branch),
+            _version(other._version)
+      {
+         auto d = other._path_back - other._path.data();
+         std::memcpy(_key_buf.data(), other._key_buf.data(), _key_len);
+         std::memcpy(_path.data(), other._path.data(), (d + 1) * sizeof(path_entry));
+         _path_back = _path.data() + d;
+      }
+
+      cursor& operator=(const cursor& other) noexcept
+      {
+         if (this != &other)
+         {
+            _node            = other._node;
+            _key_len         = other._key_len;
+            _root_end_branch = other._root_end_branch;
+            _version         = other._version;
+            auto d           = other._path_back - other._path.data();
+            std::memcpy(_key_buf.data(), other._key_buf.data(), _key_len);
+            std::memcpy(_path.data(), other._path.data(), (d + 1) * sizeof(path_entry));
+            _path_back = _path.data() + d;
+         }
+         return *this;
+      }
+
+      cursor(cursor&& other) noexcept
+          : _node(std::move(other._node)),
+            _key_len(other._key_len),
+            _root_end_branch(other._root_end_branch),
+            _version(other._version)
+      {
+         auto d = other._path_back - other._path.data();
+         std::memcpy(_key_buf.data(), other._key_buf.data(), _key_len);
+         std::memcpy(_path.data(), other._path.data(), (d + 1) * sizeof(path_entry));
+         _path_back       = _path.data() + d;
+         other._path_back = other._path.data();
+      }
+
+      cursor& operator=(cursor&& other) noexcept
+      {
+         if (this != &other)
+         {
+            _node            = std::move(other._node);
+            _key_len         = other._key_len;
+            _root_end_branch = other._root_end_branch;
+            _version         = other._version;
+            auto d           = other._path_back - other._path.data();
+            std::memcpy(_key_buf.data(), other._key_buf.data(), _key_len);
+            std::memcpy(_path.data(), other._path.data(), (d + 1) * sizeof(path_entry));
+            _path_back       = _path.data() + d;
+            other._path_back = other._path.data();
+         }
+         return *this;
+      }
+
+      static constexpr int32_t value_not_found = -1;
+      static constexpr int32_t value_subtree   = -2;
+
+      bool seek_rend() noexcept;   /// position before first key
+      bool seek_begin() noexcept;  /// position at first key
+      bool seek_last() noexcept;   /// position at last key
+      bool seek_end() noexcept;    /// position after last key
+
+      /// checks if the position is before first key
+      bool is_rend() const noexcept { return _path[0].branch == branch_number(-1); }
+      /// checks if the position is after last key
+      bool is_end() const noexcept { return depth() == 0 and _path[0].branch == _root_end_branch; }
+
+      /// seek to the first key that is greater than or equal to the given key
+      /// @return true if positioned on a key, false if it ran off the end
+      bool lower_bound(key_view key) noexcept;
+      /// seek to the first key strictly greater than the given key
+      /// @return true if positioned on a key, false if it ran off the end
+      bool upper_bound(key_view key) noexcept;
+
+      /// Deprecated exact-positioning alias. Use find() for exact lookup
+      /// and lower_bound() for ordered seek/range positioning.
+      /// @return true iff the exact key is present (cursor is left at lower_bound either way)
+      bool seek(key_view key) noexcept;
+      /// Finds exactly the given key using the point-lookup path.
+      /// On miss, positions the cursor at end.
+      /// @return true if found, false on miss
+      bool find(key_view key) noexcept;
+
+      /// position at the first key (optionally the first key >= prefix)
+      /// @return true if positioned on a key, false if empty
+      bool first(key_view prefix = {}) noexcept;
+      /// position at the last key (prefix bound not yet supported)
+      /// @return true if positioned on a key, false if empty
+      bool last(key_view prefix = {}) noexcept;
+
+      /// advance to the next key in order
+      /// @return true if it landed on a key, false if it ran off the end
+      bool next() noexcept;
+
+      /// retreat to the previous key in order
+      /// @return true if it landed on a key, false if it ran off the front (rend)
+      bool prev() noexcept;
+
+      key_view key() const noexcept { return key_view(_key_buf.data(), _key_len); }
+
+      /// @return the value associated with the current key as a view that is valid for the
+      /// the lifetime of the read_lock passed in.
+      value_view value(sal::read_lock& rl) const noexcept;
+      value_view value(value_pin& pin) const noexcept { return value(pin.lock()); }
+      value_pin  pin_values() const { return value_pin(_node.session()); }
+      // Borrowed value view bundled with the pin that keeps it valid (the safe replacement for
+      // value(read_lock&) / value(value_pin&) — the caller can't forget the lock). Symmetric with
+      // heart::radix::cursor::pinned_value(); empty if not positioned or the value is a subtree.
+      // WARNING: hold the returned value_ref only briefly — its read_lock stalls the compactor;
+      // holding it during heavy writes causes temporary memory bloat. Copy via value<T>() if you
+      // need the bytes longer.
+      value_ref pinned_value() const
+      {
+         value_pin  p = pin_values();
+         value_view v = value(p);
+         return value_ref{std::move(p), v};
+      }
+
+      /// calls lambda with a view of the value for the current key, view is only valid for the lifetime of the lambda
+      void get_value(std::invocable<value_view> auto&& lambda) const noexcept;
+
+      /// constructs a new buffer of type ConstructibleBufferType and fills it with the value of the
+      /// current key, returns nullopt if not a valid key or the value is a subtree
+      template <ConstructibleBuffer ConstructibleBufferType>
+      std::optional<ConstructibleBufferType> value() const noexcept;
+
+      /// @return the number of bytes in the value of the current key,
+      /// or cursor::value_not_found if not a valid key, or cursor::value_subtree if subtree
+      int32_t value_size() const noexcept;
+
+      template <ConstructibleBuffer ConstructibleBufferType>
+      std::optional<ConstructibleBufferType> get(key_view key) const;
+
+      bool get(key_view key, std::invocable<value_view> auto&& lambda) const
+      {
+         auto op_scope = record_operation(sal::mapped_memory::session_operation::cursor_get);
+         cursor c(_node, _version);
+         if (!c.find(key) || c.is_subtree())
+            return false;
+         c.get_value(std::forward<decltype(lambda)>(lambda));
+         return true;
+      }
+
+      /**
+       * Get the value at the specified key into a buffer
+       * @tparam Buffer Type that supports resize() and data() for contiguous memory access
+       * @param key The key to get the value for
+       * @param buffer Pointer to the buffer to read the value into
+       * @return
+       *   >= 0: Number of bytes read into buffer on success
+       *   iterator::value_nothing: Value not found
+       *   iterator::value_subtree: Found subtree value (use subtree() or subtree_cursor() instead)
+       */
+      int32_t get(key_view key, Buffer auto* buffer);
+
+      /// Count keys in range [lower, upper). Empty bounds mean unbounded.
+      uint64_t count_keys(key_view lower = {}, key_view upper = {}) const noexcept;
+
+      /// Get the leaf address and version for a key without copying the value.
+      /// Used by OCC transactions for per-key read-set validation.
+      key_info get_key_info(key_view key) const noexcept;
+
+      bool is_subtree() const noexcept;
+
+      /// if the current value is a subtree, return it as a smart pointer
+      /// @return a null smart_ptr if the current value is not a subtree
+      sal::smart_ptr<sal::alloc_header> subtree() const noexcept;
+
+      /// if the current value is a subtree, return it as a cursor
+      /// @return a null cursor if the current value is not a subtree
+      cursor subtree_cursor() const noexcept;
+
+      /// get the root of the tree
+      const sal::smart_ptr<sal::alloc_header>& get_root() const noexcept { return _node; }
+      void                                     set_root(sal::smart_ptr<> r) noexcept
+      {
+         _node = std::move(r);
+         seek_rend();
+         _path_back->adr = _node.address();
+      }
+
+      /// Re-fetch the root from the allocator session and reset cursor state.
+      /// Picks up any new COW root committed since this cursor was created.
+      void refresh(uint32_t root_index = 0) noexcept
+      {
+         set_root(_node.session()->get_root(sal::root_object_number(root_index)));
+      }
+
+     private:
+      int32_t  get_impl(key_view key, Buffer auto* buffer) noexcept;
+      key_info get_key_info_impl(key_view key) noexcept;
+      bool     next_impl() noexcept;
+      bool     prev_impl() noexcept;
+      bool     lower_bound_impl(key_view key) noexcept;
+      bool     find_impl(key_view key) noexcept;
+      [[nodiscard]] sal::allocator_session::operation_scope
+      record_operation(sal::mapped_memory::session_operation op,
+                       uint64_t count = 1) const noexcept
+      {
+         return _node.session()->record_operation(op, count);
+      }
+
+      auto visit(ptr_address adr, auto&& lambda);
+
+      struct path_entry
+      {
+         ptr_address   adr;
+         branch_number branch;  // 0 to num_branches
+         uint16_t      prefix_len;
+      };
+      int depth() const noexcept { return _path_back - _path.data(); }
+      static_assert(sizeof(path_entry) == 8, "path_entry must be 8 bytes");
+
+      sal::smart_ptr<sal::alloc_header> _node;
+      std::array<char, 1024>            _key_buf;
+      // Sized for the key contract: a <=1024-byte key over 1-byte-per-level
+      // inner nodes legitimately needs ~1024 frames; 128 let deep-nested key
+      // sets walk _path_back past the array (the find_impl SEGV — garbage
+      // frames, sign-extended deref). +2 = root + leaf slack.
+      std::array<path_entry, 1026>      _path;
+      path_entry*                       _path_back;
+      uint32_t                          _key_len;
+      branch_number                     _root_end_branch;
+      uint64_t                          _version = UINT64_MAX;
+
+      /// Check if the current leaf entry is hidden at the cursor's version.
+      /// Delegates to the shared visibility predicate so count_keys and the
+      /// cursor agree about which entries a snapshot can see.
+      bool is_leaf_entry_hidden(const leaf_node* l, branch_number bn) const noexcept
+      {
+         return !leaf_entry_visible_at(*_node.session(), *l, bn, _version);
+      }
+
+      void append_key(key_view key) noexcept;
+      bool pop() noexcept;
+      bool reverse_pop() noexcept;
+      void push(ptr_address adr) noexcept;
+      void push_end(ptr_address adr) noexcept;
+      void next_branch(key_view key) noexcept;
+   };
+   inline bool is_cursor_root_type(sal::header_type type) noexcept
+   {
+      switch (node_type(type))
+      {
+         case node_type::leaf:
+         case node_type::inner:
+         case node_type::inner_prefix:
+         case node_type::value:
+            return true;
+         default:
+            return false;
+      }
+   }
+
+   inline auto cursor::visit(ptr_address adr, auto&& lambda)
+   {
+      auto ref = _node.session()->get_ref(adr);
+      switch (node_type(ref->type()))
+      {
+         case node_type::leaf:
+            return lambda(*ref.as<leaf_node>());
+         case node_type::inner:
+            return lambda(*ref.as<inner_node>());
+         case node_type::inner_prefix:
+            return lambda(*ref.as<inner_prefix_node>());
+         case node_type::value:
+            return lambda(*ref.as<value_node>());
+         default:
+            throw std::runtime_error("psitri cursor root is not a tree node");
+      }
+   }
+   inline cursor::cursor(sal::smart_ptr<sal::alloc_header> n, uint64_t version)
+       : _node(std::move(n)), _version(version)
+   {
+      _path_back         = _path.data();
+      _path_back->branch = branch_number(-1);
+      _key_len           = 0;
+      _path_back->adr    = _node.address();
+      if (_node.address() == sal::null_ptr_address)
+      {
+         _path_back->prefix_len = 0;
+         _root_end_branch       = branch_number(-1);
+         return;
+      }
+      auto read_lock = _node.session()->lock();
+      if (!is_cursor_root_type(_node.session()->get_ref(_node.address())->type()))
+         throw std::runtime_error("psitri cursor root is not a tree node");
+      _root_end_branch =
+          visit(_node.address(), [](auto&& node) { return branch_number(node.num_branches()); });
+   }
+   inline cursor::cursor(sal::smart_ptr<sal::alloc_header> n) : _node(std::move(n))
+   {
+      // MVCC removed: a single version (0) everywhere. _version keeps its default
+      // ("see the latest entry"); all version-0 entries are visible at any read version.
+      _path_back         = _path.data();
+      _path_back->branch = branch_number(-1);
+      _key_len           = 0;
+      _path_back->adr    = _node.address();
+      if (_node.address() == sal::null_ptr_address)
+      {
+         _path_back->prefix_len = 0;
+         _root_end_branch       = branch_number(-1);
+         return;
+      }
+      auto read_lock = _node.session()->lock();
+      if (!is_cursor_root_type(_node.session()->get_ref(_node.address())->type()))
+         throw std::runtime_error("psitri cursor root is not a tree node");
+      _root_end_branch =
+          visit(_node.address(), [](auto&& node) { return branch_number(node.num_branches()); });
+   }
+
+   inline bool cursor::lower_bound(key_view key) noexcept
+   {
+      auto op_scope = record_operation(sal::mapped_memory::session_operation::cursor_lower_bound);
+      auto read_lock = _node.session()->lock();
+      return lower_bound_impl(key);
+   }
+   inline bool cursor::upper_bound(key_view key) noexcept
+   {
+      auto op_scope = record_operation(sal::mapped_memory::session_operation::cursor_upper_bound);
+      auto read_lock = _node.session()->lock();
+      if (!lower_bound_impl(key))
+         return false;  // at end — nothing >= key
+      if (this->key() == key)
+         return next_impl();  // skip exact match; true=found next, false=at end
+      return true;       // already positioned past key
+   }
+   inline bool cursor::lower_bound_impl(key_view key) noexcept
+   {
+      if (sal::null_ptr_address == _node.address()) [[unlikely]]
+         return false;
+      seek_rend();
+      while (true)
+      {
+         const node* n = _node.session()->get_ref<node>(_path_back->adr).obj();
+         switch (n->type())
+         {
+            [[unlikely]] case node_type::leaf:
+            {
+               auto*         l      = static_cast<const leaf_node*>(n);
+               branch_number branch = l->lower_bound(key);
+               if (branch == l->num_branches())
+               {
+                  return pop() and next_impl();
+               }
+               _path_back->branch = branch;
+               if (is_leaf_entry_hidden(l, branch))
+               {
+                  append_key(l->get_key(branch));
+                  return next_impl();
+               }
+               append_key(l->get_key(branch));
+               return true;
+            }
+            [[likely]] case node_type::inner:
+            {
+               auto*         i      = static_cast<const inner_node*>(n);
+               branch_number branch = i->lower_bound(key);
+               //SAL_INFO("{} inner branch: {} divs: {}", _path_back->adr, branch, i->divs());
+               _path_back->branch = branch;
+               push(i->get_branch(branch));
+               continue;
+            }
+            [[likely]] case node_type::inner_prefix:
+            {
+               auto* ip   = static_cast<const inner_prefix_node*>(n);
+               auto  cpre = ucc::common_prefix(key, ip->prefix());
+               //     SAL_INFO("{} cpre: '{}' curkey: '{}' argkey: '{}' divs: {}", _path_back->adr, cpre,
+               //            this->key(), key, ip->divs());
+               if (cpre.size() == ip->prefix().size())
+               {
+                  append_key(ip->prefix());
+                  _path_back->branch = ip->lower_bound(key = key.substr(cpre.size()));
+                  //     SAL_INFO("{} ip->lower_bound({}): {}", _path_back->adr, key, _path_back->branch);
+                  push(ip->get_branch(_path_back->branch));
+                  continue;
+               }
+               if (ip->prefix() > key)
+               {
+                  //    SAL_INFO("{} prefix {} > key {}", _path_back->adr, ip->prefix(), key);
+                  _path_back->branch = branch_number(0);
+                  append_key(ip->prefix());
+                  push(ip->get_branch(_path_back->branch));
+                  return next_impl();
+               }
+               // SAL_INFO("{} prefix{} < key{}", _path_back->adr, ip->prefix(), key);
+               return pop() and next_impl();
+            }
+            [[unlikely]] case node_type::value:
+               [[fallthrough]];
+            default:
+               std::unreachable();
+         }
+      }
+   }
+   int32_t cursor::get(key_view key, Buffer auto* buffer)
+   {
+      auto op_scope = record_operation(sal::mapped_memory::session_operation::cursor_get);
+      if (sal::null_ptr_address == _node.address()) [[unlikely]]
+         return cursor::value_not_found;
+      auto read_lock = _node.session()->lock();
+      return get_impl(key, buffer);
+   }
+   template <ConstructibleBuffer ConstructibleBufferType>
+   std::optional<ConstructibleBufferType> cursor::get(key_view key) const
+   {
+      cursor                  tmp(*this);
+      ConstructibleBufferType buf;
+      if (tmp.get(key, &buf) >= 0)
+         return buf;
+      return std::nullopt;
+   }
+
+	   int32_t cursor::get_impl(key_view key, Buffer auto* buffer) noexcept
+	   {
+	      seek_rend();
+	      while (true)
+      {
+         const node* n = _node.session()->get_ref<node>(_path_back->adr).obj();
+         switch (n->type())
+         {
+            [[likely]] case node_type::inner:
+            {
+               const auto*   i      = static_cast<const inner_node*>(n);
+               branch_number branch = i->lower_bound(key);
+               _path_back->branch   = branch;
+               push(i->get_branch(branch));
+               continue;
+            }
+            [[likely]] case node_type::inner_prefix:
+            {
+               const auto* ip   = static_cast<const inner_prefix_node*>(n);
+               auto        cpre = ucc::common_prefix(key, ip->prefix());
+               if (cpre.size() != ip->prefix().size())
+                  return seek_end(), cursor::value_not_found;
+
+               append_key(ip->prefix());
+               _path_back->branch = ip->lower_bound(key = key.substr(cpre.size()));
+               push(ip->get_branch(_path_back->branch));
+               continue;
+            }
+            [[unlikely]] case node_type::leaf:
+            {
+               const auto* l      = static_cast<const leaf_node*>(n);
+               _path_back->branch = l->get(key);
+               if (_path_back->branch == l->num_branches())
+                  return seek_end(), cursor::value_not_found;
+               if (is_leaf_entry_hidden(l, _path_back->branch))
+                  return seek_end(), cursor::value_not_found;
+               append_key(key);
+               switch (l->get_value_type(_path_back->branch))
+               {
+                  case leaf_node::value_type_flag::null:
+                     buffer->resize(0);
+                     return 0;
+                  case leaf_node::value_type_flag::inline_data:
+                  {
+                     value_view vv = l->get_value_view(_path_back->branch);
+                     buffer->resize(vv.size());
+                     std::memcpy(buffer->data(), vv.data(), buffer->size());
+                     return buffer->size();
+                  }
+                  case leaf_node::value_type_flag::value_node:
+                  {
+                     auto ref = _node.session()->get_ref<value_node>(
+                         l->get_value_address(_path_back->branch));
+                     if (ref->is_subtree_container())
+                        return value_subtree;
+                     auto [offset, idx] = ref->find_version(_version);
+                     if (offset == value_node::offset_tombstone ||
+                         offset == value_node::offset_null)
+                        return seek_end(), cursor::value_not_found;
+                     auto vv = ref->get_value_at_version(_version);
+                     buffer->resize(vv.size());
+                     std::memcpy(buffer->data(), vv.data(), vv.size());
+                     return buffer->size();
+                  }
+                  case leaf_node::value_type_flag::subtree:
+                     return value_subtree;
+                  default:
+                     std::unreachable();
+               }
+            }
+            [[unlikely]] case node_type::value:
+               [[fallthrough]];
+            default:
+               std::unreachable();
+	         }
+	      }
+	   }
+
+	   inline bool cursor::find(key_view key) noexcept
+	   {
+		      auto op_scope = record_operation(sal::mapped_memory::session_operation::cursor_find);
+	      if (sal::null_ptr_address == _node.address()) [[unlikely]]
+	         return seek_end();
+	      auto read_lock = _node.session()->lock();
+	      return find_impl(key);
+	   }
+
+	   inline bool cursor::find_impl(key_view key) noexcept
+	   {
+	      seek_rend();
+	      while (true)
+	      {
+	         const node* n = _node.session()->get_ref<node>(_path_back->adr).obj();
+	         switch (n->type())
+	         {
+	            [[likely]] case node_type::inner:
+	            {
+	               const auto*   i      = static_cast<const inner_node*>(n);
+	               branch_number branch = i->lower_bound(key);
+	               _path_back->branch   = branch;
+	               push(i->get_branch(branch));
+	               continue;
+	            }
+	            [[likely]] case node_type::inner_prefix:
+	            {
+	               const auto* ip   = static_cast<const inner_prefix_node*>(n);
+	               auto        cpre = ucc::common_prefix(key, ip->prefix());
+	               if (cpre.size() != ip->prefix().size())
+	                  return seek_end();
+
+	               append_key(ip->prefix());
+	               _path_back->branch = ip->lower_bound(key = key.substr(cpre.size()));
+	               push(ip->get_branch(_path_back->branch));
+	               continue;
+	            }
+	            [[unlikely]] case node_type::leaf:
+	            {
+	               const auto* l      = static_cast<const leaf_node*>(n);
+	               _path_back->branch = l->get(key);
+	               if (_path_back->branch == l->num_branches())
+	                  return seek_end();
+	               if (is_leaf_entry_hidden(l, _path_back->branch))
+	                  return seek_end();
+
+	               append_key(key);
+	               if (l->get_value_type(_path_back->branch) ==
+	                   leaf_node::value_type_flag::value_node)
+	               {
+	                  auto ref = _node.session()->get_ref<value_node>(
+	                      l->get_value_address(_path_back->branch));
+	                  if (ref->is_subtree_container())
+	                     return true;
+	                  auto [offset, idx] = ref->find_version(_version);
+	                  if (offset == value_node::offset_tombstone ||
+	                      offset == value_node::offset_null)
+	                     return seek_end();
+	               }
+	               return true;
+	            }
+	            [[unlikely]] case node_type::value:
+	               [[fallthrough]];
+	            default:
+	               std::unreachable();
+	         }
+	      }
+	   }
+
+	   inline void cursor::append_key(key_view key) noexcept
+	   {
+      // TODO: it is always possible to read 7 bytes past the end of the key stored in nodes; therefore,
+      // this copy could be done 8 bytes at a time instead of 1 byte at a time, so long as we ensure that
+      // it is safe to write 7 bytes past the end of _key_buf
+      std::copy(key.begin(), key.end(), _key_buf.begin() + _key_len);
+      _key_len += key.size();
+      _path_back->prefix_len = key.size();
+      assert(_key_len <= 1024);
+   }
+   inline bool cursor::pop() noexcept
+   {
+      _key_len -= _path_back->prefix_len;
+      bool not_end = _path_back > _path.data();
+      _path_back -= not_end;
+      _path_back->branch = not_end ? _path_back->branch : _root_end_branch;
+      return not_end;
+   }
+   inline bool cursor::reverse_pop() noexcept
+   {
+      _key_len -= _path_back->prefix_len;
+      bool not_end = _path_back > _path.data();
+      _path_back -= not_end;
+      _path_back->branch |= branch_number(-!not_end);
+      return not_end;
+   }
+   inline bool cursor::seek_end() noexcept
+   {
+      _path_back             = _path.data();
+      _path_back->branch     = _root_end_branch;
+      _key_len               = 0;
+      _path_back->prefix_len = 0;
+      return false;
+   }
+   inline bool cursor::seek_rend() noexcept
+   {
+      _path_back             = _path.data();
+      _path_back->branch     = branch_number(-1);
+      _key_len               = 0;
+      _path_back->prefix_len = 0;
+      return true;
+   }
+   inline bool cursor::seek_begin() noexcept
+   {
+      if (_node.address() == sal::null_ptr_address) [[unlikely]]
+         return seek_end();
+      seek_rend();
+      return next();
+   }
+   inline bool cursor::seek_last() noexcept
+   {
+      if (_node.address() == sal::null_ptr_address) [[unlikely]]
+         return seek_end();
+      seek_end();
+      return prev();
+   }
+   inline bool cursor::first(key_view prefix) noexcept
+   {
+      return prefix.empty() ? seek_begin() : lower_bound(prefix);
+   }
+   inline bool cursor::last(key_view prefix) noexcept
+   {
+      (void)prefix;  // prefix-bounded last not yet supported (parity with heart)
+      return seek_last();
+   }
+   inline bool cursor::seek(key_view key) noexcept
+   {
+      auto op_scope = record_operation(sal::mapped_memory::session_operation::cursor_seek);
+      auto read_lock = _node.session()->lock();
+      if (lower_bound_impl(key))
+         return this->key() == key;
+      return false;
+   }
+   inline uint64_t cursor::count_keys(key_view lower, key_view upper) const noexcept
+   {
+      auto op_scope = record_operation(sal::mapped_memory::session_operation::cursor_count_keys);
+      if (_node.address() == sal::null_ptr_address)
+         return 0;
+      auto read_lock = _node.session()->lock();
+      return psitri::count_keys(*_node.session(), _node.address(), {lower, upper}, _version);
+   }
+   inline key_info cursor::get_key_info(key_view key) const noexcept
+   {
+      auto op_scope = record_operation(sal::mapped_memory::session_operation::cursor_key_info);
+      if (sal::null_ptr_address == _node.address())
+         return {};
+      cursor tmp(*this);
+      return tmp.get_key_info_impl(key);
+   }
+
+   inline key_info cursor::get_key_info_impl(key_view key) noexcept
+   {
+      auto read_lock = _node.session()->lock();
+      seek_rend();
+      while (true)
+      {
+         const node* n = _node.session()->get_ref<node>(_path_back->adr).obj();
+         switch (n->type())
+         {
+            [[likely]] case node_type::inner:
+            {
+               const auto*   i      = static_cast<const inner_node*>(n);
+               branch_number branch = i->lower_bound(key);
+               _path_back->branch   = branch;
+               push(i->get_branch(branch));
+               continue;
+            }
+            [[likely]] case node_type::inner_prefix:
+            {
+               const auto* ip   = static_cast<const inner_prefix_node*>(n);
+               auto        cpre = ucc::common_prefix(key, ip->prefix());
+               if (cpre.size() != ip->prefix().size())
+                  return {};  // key cannot exist — prefix mismatch
+               append_key(ip->prefix());
+               _path_back->branch = ip->lower_bound(key = key.substr(cpre.size()));
+               push(ip->get_branch(_path_back->branch));
+               continue;
+            }
+            [[unlikely]] case node_type::leaf:
+            {
+               const auto* l      = static_cast<const leaf_node*>(n);
+               ptr_address la     = _path_back->adr;
+               _path_back->branch = l->get(key);
+               if (_path_back->branch == l->num_branches())
+                  return {la, UINT64_MAX};  // key not found; return leaf addr
+               if (is_leaf_entry_hidden(l, _path_back->branch))
+                  return {la, UINT64_MAX};
+               switch (l->get_value_type(_path_back->branch))
+               {
+                  case leaf_node::value_type_flag::null:
+                  case leaf_node::value_type_flag::inline_data:
+                  case leaf_node::value_type_flag::subtree:
+                     return {la, 0};
+                  case leaf_node::value_type_flag::value_node:
+                  {
+                     auto ref = _node.session()->get_ref<value_node>(
+                         l->get_value_address(_path_back->branch));
+                     return {la, ref->latest_version()};
+                  }
+                  default:
+                     std::unreachable();
+               }
+            }
+            default:
+               std::unreachable();
+         }
+      }
+   }
+
+   inline void cursor::push(ptr_address adr) noexcept
+   {
+      assert(size_t(_path_back - _path.data()) + 1 < _path.size() &&
+             "cursor path overflow: deeper than the key contract allows");
+      _path_back++;
+      _path_back->adr        = adr;
+      _path_back->branch     = branch_number(-1);
+      _path_back->prefix_len = 0;
+   }
+   inline void cursor::push_end(ptr_address adr) noexcept
+   {
+      _path_back++;
+      _path_back->adr        = adr;
+      _path_back->branch     = branch_number(-2);
+      _path_back->prefix_len = 0;
+   }
+   inline void cursor::next_branch(key_view key) noexcept
+   {
+      _key_len -= _path_back->prefix_len;
+      std::copy(key.begin(), key.end(), _key_buf.begin() + _key_len);
+      _key_len += (_path_back->prefix_len = key.size());
+      assert(_key_len <= 1024);
+   }
+   inline bool cursor::next() noexcept
+   {
+      auto op_scope = record_operation(sal::mapped_memory::session_operation::cursor_next);
+      assert(not is_end());
+      auto read_lock = _node.session()->lock();
+      return next_impl();
+   }
+   inline bool cursor::next_impl() noexcept
+   {
+      while (true)
+      {
+         const node* n = _node.session()->get_ref<node>(_path_back->adr).obj();
+         switch (n->type())
+         {
+            [[likely]] case node_type::leaf:
+            {
+               auto* l = static_cast<const leaf_node*>(n);
+               if (++_path_back->branch == l->num_branches()) [[unlikely]]
+                  break;
+               if (is_leaf_entry_hidden(l, _path_back->branch))
+                  continue;
+               return next_branch(l->get_key(_path_back->branch)), true;
+            }
+            [[unlikely]] case node_type::inner:
+            {
+               auto* i = static_cast<const inner_node*>(n);
+               if (++_path_back->branch == i->num_branches()) [[unlikely]]
+                  break;
+               push(i->get_branch(_path_back->branch));
+               continue;
+            }
+            [[unlikely]] case node_type::inner_prefix:
+            {
+               auto* ip = static_cast<const inner_prefix_node*>(n);
+               if (_path_back->branch == branch_number(-1)) [[unlikely]]
+                  append_key(ip->prefix());
+               if (++_path_back->branch == ip->num_branches()) [[unlikely]]
+                  break;
+               push(ip->get_branch(_path_back->branch));
+               continue;
+            }
+            [[unlikely]] case node_type::value:
+               [[fallthrough]];
+            default:
+               std::unreachable();
+         }
+         if (not pop()) [[unlikely]]
+            return false;
+      }  // while true
+      std::unreachable();
+   }
+   inline bool cursor::prev() noexcept
+   {
+      auto op_scope = record_operation(sal::mapped_memory::session_operation::cursor_prev);
+      assert(not is_rend());
+      auto read_lock = _node.session()->lock();
+      return prev_impl();
+   }
+   inline bool cursor::prev_impl() noexcept
+   {
+      while (true)
+      {
+         const node* n = _node.session()->get_ref<node>(_path_back->adr).obj();
+         switch (n->type())
+         {
+            [[likely]] case node_type::leaf:
+            {
+               auto* l = static_cast<const leaf_node*>(n);
+               if (branch_number(-2) == _path_back->branch) [[unlikely]]
+                  _path_back->branch = branch_number(l->num_branches());
+               if (--_path_back->branch == branch_number(-1)) [[unlikely]]
+                  break;
+               if (is_leaf_entry_hidden(l, _path_back->branch))
+                  continue;
+               return next_branch(l->get_key(_path_back->branch)), true;
+            }
+            [[unlikely]] case node_type::inner:
+            {
+               auto* i = static_cast<const inner_node*>(n);
+               if (branch_number(-2) == _path_back->branch) [[unlikely]]
+                  _path_back->branch = branch_number(i->num_branches());
+               if (--_path_back->branch == branch_number(-1)) [[unlikely]]
+                  break;
+               push_end(i->get_branch(_path_back->branch));
+               continue;
+            }
+            [[unlikely]] case node_type::inner_prefix:
+            {
+               auto* ip = static_cast<const inner_prefix_node*>(n);
+               // branch==-2: arrived via push_end (non-root first visit)
+               // branch==num_branches(): arrived via seek_end (root-level first visit)
+               if (_path_back->branch == branch_number(-2) ||
+                   _path_back->branch == branch_number(ip->num_branches())) [[unlikely]]
+               {
+                  _path_back->branch = branch_number(ip->num_branches());
+                  append_key(ip->prefix());
+               }
+               if (--_path_back->branch == branch_number(-1)) [[unlikely]]
+                  break;
+               push_end(ip->get_branch(_path_back->branch));
+               continue;
+            }
+            [[unlikely]] case node_type::value:
+               [[fallthrough]];
+            default:
+               std::unreachable();
+         }
+         if (not reverse_pop()) [[unlikely]]
+            return false;
+      }  // while true
+      std::unreachable();
+   }
+
+   inline int32_t cursor::value_size() const noexcept
+   {
+      if (is_end() || is_rend())
+         return value_not_found;
+      auto        read_lock = _node.session()->lock();
+      const node* n         = _node.session()->get_ref<node>(_path_back->adr).obj();
+      if (n->type() != node_type::leaf)
+         return value_not_found;
+      auto* l = static_cast<const leaf_node*>(n);
+      if (_path_back->branch >= l->num_branches())
+         return value_not_found;
+      if (is_leaf_entry_hidden(l, _path_back->branch))
+         return value_not_found;
+      switch (l->get_value_type(_path_back->branch))
+      {
+         case leaf_node::value_type_flag::null:
+            return 0;
+         case leaf_node::value_type_flag::inline_data:
+            return l->get_value_view(_path_back->branch).size();
+         case leaf_node::value_type_flag::value_node:
+         {
+            auto ref =
+                _node.session()->get_ref<value_node>(l->get_value_address(_path_back->branch));
+            if (ref->is_subtree_container())
+               return value_subtree;
+            auto [offset, idx] = ref->find_version(_version);
+            if (offset == value_node::offset_tombstone || offset == value_node::offset_null)
+               return value_not_found;
+            auto vv = ref->get_value_at_version(_version);
+            return vv.size();
+         }
+         case leaf_node::value_type_flag::subtree:
+            return value_subtree;
+         default:
+            std::unreachable();
+      }
+   }
+
+   inline value_view cursor::value(sal::read_lock& rl) const noexcept
+   {
+      if (is_end() || is_rend())
+         return value_view();
+      const node* n = _node.session()->get_ref<node>(_path_back->adr).obj();
+      if (n->type() != node_type::leaf)
+         return value_view();
+      auto* l = static_cast<const leaf_node*>(n);
+      if (_path_back->branch >= l->num_branches())
+         return value_view();
+      if (is_leaf_entry_hidden(l, _path_back->branch))
+         return value_view();
+      switch (l->get_value_type(_path_back->branch))
+      {
+         case leaf_node::value_type_flag::null:
+            return value_view();
+         case leaf_node::value_type_flag::inline_data:
+            return l->get_value_view(_path_back->branch);
+         case leaf_node::value_type_flag::value_node:
+         {
+            auto ref =
+                _node.session()->get_ref<value_node>(l->get_value_address(_path_back->branch));
+            if (ref->is_subtree_container())
+               return value_view();
+            return ref->get_value_at_version(_version);
+         }
+         case leaf_node::value_type_flag::subtree:
+            return value_view();
+         default:
+            std::unreachable();
+      }
+   }
+
+   inline void cursor::get_value(std::invocable<value_view> auto&& lambda) const noexcept
+   {
+      if (is_end() || is_rend())
+      {
+         lambda(value_view());
+         return;
+      }
+      auto        read_lock = _node.session()->lock();
+      const node* n         = _node.session()->get_ref<node>(_path_back->adr).obj();
+      if (n->type() != node_type::leaf)
+      {
+         lambda(value_view());
+         return;
+      }
+      auto* l = static_cast<const leaf_node*>(n);
+      if (_path_back->branch >= l->num_branches())
+      {
+         lambda(value_view());
+         return;
+      }
+      if (is_leaf_entry_hidden(l, _path_back->branch))
+      {
+         lambda(value_view());
+         return;
+      }
+      switch (l->get_value_type(_path_back->branch))
+      {
+         case leaf_node::value_type_flag::null:
+            lambda(value_view());
+            return;
+         case leaf_node::value_type_flag::inline_data:
+            lambda(l->get_value_view(_path_back->branch));
+            return;
+         case leaf_node::value_type_flag::value_node:
+         {
+            auto ref =
+                _node.session()->get_ref<value_node>(l->get_value_address(_path_back->branch));
+            if (ref->is_subtree_container())
+            {
+               lambda(value_view());
+               return;
+            }
+            lambda(ref->get_value_at_version(_version));
+            return;
+         }
+         case leaf_node::value_type_flag::subtree:
+            lambda(value_view());
+            return;
+         default:
+            std::unreachable();
+      }
+   }
+
+   template <ConstructibleBuffer ConstructibleBufferType>
+   std::optional<ConstructibleBufferType> cursor::value() const noexcept
+   {
+      if (is_end() || is_rend())
+         return std::nullopt;
+      auto        read_lock = _node.session()->lock();
+      const node* n         = _node.session()->get_ref<node>(_path_back->adr).obj();
+      if (n->type() != node_type::leaf)
+         return std::nullopt;
+      auto* l = static_cast<const leaf_node*>(n);
+      if (_path_back->branch >= l->num_branches())
+         return std::nullopt;
+      if (is_leaf_entry_hidden(l, _path_back->branch))
+         return std::nullopt;
+      switch (l->get_value_type(_path_back->branch))
+      {
+         case leaf_node::value_type_flag::null:
+         {
+            ConstructibleBufferType buf;
+            buf.resize(0);
+            return buf;
+         }
+         case leaf_node::value_type_flag::inline_data:
+         {
+            auto                    vv = l->get_value_view(_path_back->branch);
+            ConstructibleBufferType buf;
+            buf.resize(vv.size());
+            std::memcpy(buf.data(), vv.data(), vv.size());
+            return buf;
+         }
+         case leaf_node::value_type_flag::value_node:
+         {
+            auto ref =
+                _node.session()->get_ref<value_node>(l->get_value_address(_path_back->branch));
+            if (ref->is_subtree_container())
+               return std::nullopt;
+            auto [offset, idx] = ref->find_version(_version);
+            if (offset == value_node::offset_tombstone || offset == value_node::offset_null)
+               return std::nullopt;
+            auto                    vv = ref->get_value_at_version(_version);
+            ConstructibleBufferType buf;
+            buf.resize(vv.size());
+            std::memcpy(buf.data(), vv.data(), vv.size());
+            return buf;
+         }
+         case leaf_node::value_type_flag::subtree:
+            return std::nullopt;
+         default:
+            std::unreachable();
+      }
+   }
+
+   inline bool cursor::is_subtree() const noexcept
+   {
+      if (is_end() || is_rend())
+         return false;
+      auto        read_lock = _node.session()->lock();
+      const node* n         = _node.session()->get_ref<node>(_path_back->adr).obj();
+      if (n->type() != node_type::leaf)
+         return false;
+      auto* l = static_cast<const leaf_node*>(n);
+      if (_path_back->branch >= l->num_branches())
+         return false;
+      if (is_leaf_entry_hidden(l, _path_back->branch))
+         return false;
+      auto vt = l->get_value_type(_path_back->branch);
+      if (vt == leaf_node::value_type_flag::subtree)
+         return true;
+      if (vt != leaf_node::value_type_flag::value_node)
+         return false;
+      auto ref = _node.session()->get_ref<value_node>(l->get_value_address(_path_back->branch));
+      return ref->is_subtree_container();
+   }
+
+   inline sal::smart_ptr<sal::alloc_header> cursor::subtree() const noexcept
+   {
+      if (is_end() || is_rend())
+         return sal::smart_ptr<sal::alloc_header>(_node.session(), sal::null_ptr_address);
+      auto        read_lock = _node.session()->lock();
+      const node* n         = _node.session()->get_ref<node>(_path_back->adr).obj();
+      if (n->type() != node_type::leaf)
+         return sal::smart_ptr<sal::alloc_header>(_node.session(), sal::null_ptr_address);
+      auto* l = static_cast<const leaf_node*>(n);
+      if (_path_back->branch >= l->num_branches() || is_leaf_entry_hidden(l, _path_back->branch))
+         return sal::smart_ptr<sal::alloc_header>(_node.session(), sal::null_ptr_address);
+      auto vt = l->get_value_type(_path_back->branch);
+      if (vt == leaf_node::value_type_flag::subtree)
+      {
+         auto val = l->get_value(_path_back->branch);
+         // Construct smart_ptr with inc_ref=true — the leaf owns one ref, caller gets another.
+         // MVCC removed: a subtree reference is just its root (ver dropped).
+         return sal::smart_ptr<sal::alloc_header>(_node.session(), val.subtree_id().root, true);
+      }
+      if (vt == leaf_node::value_type_flag::value_node)
+      {
+         auto ref = _node.session()->get_ref<value_node>(l->get_value_address(_path_back->branch));
+         if (ref->is_subtree_container())
+            return sal::smart_ptr<sal::alloc_header>(_node.session(), ref->get_tree_id().root, true);
+      }
+      return sal::smart_ptr<sal::alloc_header>(_node.session(), sal::null_ptr_address);
+   }
+
+   inline cursor cursor::subtree_cursor() const noexcept
+   {
+      return cursor(subtree());
+   }
+
+}  // namespace psitri

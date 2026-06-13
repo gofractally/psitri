@@ -149,9 +149,18 @@ details go in a nested `detail{}` namespace (e.g. `vhkv::` →
       vs batch-1000 production. GATE: 150M no-flush writer isolation
       (today degrades 164ns → 5.3µs by ~46M)
 
-**libraries/start_ref, sal_art_ref, psitri — green-ups, in order**
-- [ ] each: typed values (envelope+hooks per its liveness model), multi-root
-      + set_root, snapshot; battery flips phase-by-phase, no adapter layers
+**libraries/start_ref, sal_art_ref, psitri — typed values + multi-root + snapshot**
+- [x] start_ref typed values: refcount-liveness hooks; typed-values phase GREEN
+- [x] sal_art_ref typed values: sal-type-ops leaf_page lifecycle + engine-side
+      global registry (no sal change); typed-values phase GREEN
+- [ ] psitri typed values: SAME envelope+registry pattern, but added directly
+      to psitri's native transaction/cursor (no kv adapter) and fired through
+      the tree_ops/tree_context COW (leaf destroy = release; the inline-value
+      on_copy site inside the leaf-clone path; in-place overwrite/remove =
+      release). Largest of the three — legacy COW + the open shared_smart_ptr
+      SIGSEGV (docs/BUGS.md). Its own focused pass.
+- [ ] each: multi-root + set_root, snapshot (the remaining 2 battery phases;
+      these are what start_ref/sal_art_ref still fail — typed values is done)
 - [ ] psitri additionally: wrong-pod read must be invalid_type, never
       not-found (it has open_root/primary already; missing set_root)
 

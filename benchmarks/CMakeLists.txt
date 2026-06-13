@@ -64,3 +64,9 @@ target_compile_definitions(mem-recovery-bench PRIVATE XXH_INLINE_ALL)
 target_compile_options(mem-recovery-bench PRIVATE -O3 -DNDEBUG)
 set_target_properties(mem-recovery-bench PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# delta_art reopen-race repro (TSan): reopen a populated tiered DB + write.
+add_executable(delta_art-reopen-repro delta_art_reopen_repro.cpp)
+target_link_libraries(delta_art-reopen-repro PRIVATE delta_art start_ver sal_art_ref psitri)
+target_include_directories(delta_art-reopen-repro PRIVATE ${CMAKE_SOURCE_DIR}/libraries/sal_art_ref/test)
+target_compile_definitions(delta_art-reopen-repro PRIVATE XXH_INLINE_ALL)

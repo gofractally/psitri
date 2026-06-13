@@ -1512,13 +1512,18 @@ namespace sal
          return false;
       }
 
-      for (auto seg : _mapped_state->_segment_provider.mlock_segments)
       {
-         const auto vage = _mapped_state->_segment_data.get_vage(segment_number(seg));
-         if (vage == 0)
-            continue;
-         oldest_hot_vage = std::min(oldest_hot_vage, vage);
-         newest_hot_vage = std::max(newest_hot_vage, vage);
+         // Guarded snapshot-read: the provider thread mutates mlock_segments concurrently
+         // (update_segment_pinned_state); iterating it unlocked torn the bitmap.
+         std::lock_guard<std::mutex> g(_mlock_segments_mx);
+         for (auto seg : _mapped_state->_segment_provider.mlock_segments)
+         {
+            const auto vage = _mapped_state->_segment_data.get_vage(segment_number(seg));
+            if (vage == 0)
+               continue;
+            oldest_hot_vage = std::min(oldest_hot_vage, vage);
+            newest_hot_vage = std::max(newest_hot_vage, vage);
+         }
       }
 
       auto demote_pressure_ppm = [&](segment_number seg) -> uint32_t {
@@ -2463,11 +2468,15 @@ namespace sal
    {
       auto& provider_state = _mapped_state->_segment_provider;
 
-      // Update the bitmap
-      if (is_pinned)
-         provider_state.mlock_segments.set(*seg_num);
-      else
-         provider_state.mlock_segments.reset(*seg_num);
+      // Update the bitmap (guarded: the compactor iterates mlock_segments concurrently;
+      // hierarchical_bitmap::set/reset is a non-atomic RMW + level cascade).
+      {
+         std::lock_guard<std::mutex> g(_mlock_segments_mx);
+         if (is_pinned)
+            provider_state.mlock_segments.set(*seg_num);
+         else
+            provider_state.mlock_segments.reset(*seg_num);
+      }
 
       // Update the segment metadata
       _mapped_state->_segment_data.set_pinned(seg_num, is_pinned);

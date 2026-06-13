@@ -725,7 +725,7 @@ namespace start_ver::kv
          // resume the version counter past every stamp that could be durable,
          // and re-expose every durable root as its live boundary. Version is
          // global (slot kMaxRoots); roots live in slots [0, kMaxRoots).
-         _committed = uint32_t(_arena.get_root(kMaxRoots));
+         _committed.store(uint32_t(_arena.get_root(kMaxRoots)), std::memory_order_relaxed);
          for (uint32_t i = 0; i < kMaxRoots; ++i)
          {
             const uint64_t durable = _arena.get_root(i);
@@ -738,10 +738,10 @@ namespace start_ver::kv
             // empty (0); only actually-published slots get the committed
             // version. (Caught on reopen: an unwritten aux root read back a
             // null-tag value as type 0xFFFF.)
-            const bool published = durable != 0;
-            _live_arr[i].store(
-                (_committed && published) ? (uint64_t(_committed) << 32) | r32 : 0,
-                std::memory_order_seq_cst);
+            const bool     published = durable != 0;
+            const uint32_t c         = _committed.load(std::memory_order_relaxed);
+            _live_arr[i].store((c && published) ? (uint64_t(c) << 32) | r32 : 0,
+                               std::memory_order_seq_cst);
          }
          _live.store(_live_arr[0].load(std::memory_order_seq_cst),
                      std::memory_order_seq_cst);
@@ -750,7 +750,7 @@ namespace start_ver::kv
          _reaper = std::thread([this] { reaper_loop_(); });
       }
 
-      uint32_t committed_() const noexcept { return _committed; }
+      uint32_t committed_() const noexcept { return _committed.load(std::memory_order_acquire); }
 
      public:
       // Arena footprint (segments held x segment bytes): the observer signal
@@ -827,7 +827,7 @@ namespace start_ver::kv
       // chains, shutdown).
       uint32_t floor_for_(uint32_t root) noexcept
       {
-         uint32_t f = _committed;
+         uint32_t f = _committed.load(std::memory_order_acquire);
          for (uint32_t i = 0; i < max_read_sessions; ++i)
          {
             const uint64_t s = _arena.reader_slot(i).load(std::memory_order_seq_cst);
@@ -1038,7 +1038,9 @@ namespace start_ver::kv
       std::mutex            _root_locks[kMaxRoots];  // per-root writer locks (ordered)
       std::atomic<uint64_t> _live_arr[kMaxRoots];    // (version<<32|root_i) per root
       std::atomic<uint64_t> _live{0};             // (version << 32) | root raw
-      uint32_t              _committed = 0;  // last published version (writer-owned)
+      // last published version. Writer-owned, but the drain thread reads it
+      // (floor_for_) to gate reclaim — atomic with release(commit)/acquire(read).
+      std::atomic<uint32_t> _committed{0};
 
       // ── typed-value dispatch (slot envelope -> registered hooks) ────────
       struct type_entry
@@ -1146,7 +1148,7 @@ namespace start_ver::kv
          while (k++ < 512 && _db->_recycle.pop(l, n))
             _ses.recycle_drained(l, n);
       }
-      const uint32_t v = _db->_committed + 1;  // the version IS the txn
+      const uint32_t v = _db->_committed.load(std::memory_order_relaxed) + 1;  // the version IS the txn
       _t.allocator_mut().vtxn = v;             // shared allocator state: all roots
       return transaction(this, root_index, _ses.start_transaction(0));
    }
@@ -1473,7 +1475,7 @@ namespace start_ver::kv
                                            std::memory_order_seq_cst);
          }
          db->_arena.set_root(kMaxRoots, v);  // the global version slot
-         db->_committed = v;
+         db->_committed.store(v, std::memory_order_release);
       }
       // Tag the chain with its root for per-root reclaim: a single-root txn's
       // garbage is that root's lineage (the common hot write = root 0, drains

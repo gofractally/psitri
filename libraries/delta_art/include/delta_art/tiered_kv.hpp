@@ -454,12 +454,17 @@ namespace delta_art
             _tx->commit();
             _db->after_commit_(_bytes);
             _bytes = 0;
+            // Destroy the inner W transaction BEFORE releasing _writer_m: its
+            // ~transaction() touches the shared write session, and the merge
+            // thread's flush_now borrows that same session under _writer_m.
+            // Unlocking first let the inner dtor race flush_now (TSan-confirmed).
+            _tx.reset();
             _lk.unlock();
          }
          void abort() noexcept
          {
-            _tx->abort();
             _bytes = 0;
+            _tx.reset();  // inner ~transaction() rolls back — under _writer_m (see commit)
             if (_lk.owns_lock())
                _lk.unlock();
          }

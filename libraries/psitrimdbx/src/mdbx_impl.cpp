@@ -1534,20 +1534,22 @@ static MDBX_val hold_txn_slice(const MDBX_txn* txn, std::string_view bytes)
    return const_cast<MDBX_txn*>(txn)->returned_slices.hold(bytes);
 }
 
-static MDBX_val borrow_cursor_slice(std::string_view bytes)
-{
-   static char empty = '\0';
-   return {const_cast<char*>(bytes.empty() ? &empty : bytes.data()), bytes.size()};
-}
-
 static void assign_cursor_result(MDBX_cursor* cursor, MDBX_val* key,
                                  MDBX_val* data)
 {
+   // MDBX contract: key/value slices returned by a cursor op stay valid until
+   // the txn ends (real MDBX hands back mmap-stable pointers; the old shim used
+   // value_pin). The cursor's own key_buf/val_buf are REUSED on the next op, so
+   // borrowing them directly dangles for any LAZY reader that dereferences after
+   // advancing — e.g. Silkworm's range pipeline (... | take_while | caching),
+   // which caches a non-owning ByteView and reads it after the cursor moves,
+   // yielding an empty/garbage range. Copy into the txn-lifetime arena (same as
+   // mdbx_get) so the slices survive cursor movement for the whole txn.
    auto& st = *cursor->state;
    if (key)
-      *key = borrow_cursor_slice(st.key_buf);
+      *key = hold_txn_slice(cursor->txn, st.key_buf);
    if (data)
-      *data = borrow_cursor_slice(st.exposed_value());
+      *data = hold_txn_slice(cursor->txn, st.exposed_value());
 }
 
 static dbi_meta dbi_metadata(MDBX_env* env, MDBX_dbi dbi)

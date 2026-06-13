@@ -56,3 +56,7 @@ add_subdirectory(libraries/sal_art_ref)
 add_subdirectory(libraries/psitri)
 add_subdirectory(libraries/delta_art)
 add_subdirectory(libraries/walart)
+
+if(BUILD_TESTS)
+    add_subdirectory(tests)
+endif()

@@ -1366,7 +1366,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
    const setlist* s = reinterpret_cast<const setlist*>(HKV_PTR(raw)); const unsigned pl = s->rh.hdr.prefix_len; \
    if (pl) { if (klen - depth < pl || std::memcmp(s->prefix, kp + depth, pl) != 0) return op.miss(); depth += pl; } \
    if (depth == klen) return op.term(&s->rh); \
-   raw = setlist_find(s, uint8_t(kp[depth])).raw(); HKV_NEXT(depth + 1); }
+   const int sli_ = setlist_index(s, uint8_t(kp[depth])); \
+   if (sli_ < 0) return op.miss(); \
+   if constexpr (inline_children_ok) if (sl_is_inline(s, sli_)) /* leaf rides this line: resolve here */ \
+      return op.leaf(sl_inline_leaf(s, sli_), kp + depth + 1, klen - depth - 1); \
+   raw = s->branch[sli_].raw(); HKV_NEXT(depth + 1); }
 #define HKV_BODY_SETLIST16 { \
    const setlist16* s = reinterpret_cast<const setlist16*>(HKV_PTR(raw)); \
    if (klen - depth < 2) return depth == klen ? op.term(&s->rh) : op.miss(); \
@@ -1950,6 +1954,54 @@ namespace detail  // implementation types & node helpers — not part of the pub
             else
                set_ptr_(leaf_val(static_cast<const char*>(deref_(p))));
          }
+         // Position the cursor on a resolved leaf pointer L (suffix view + value into the
+         // local buffer / proxy). Shared by descend_/descend_max_ (external leaf via deref_)
+         // and the inline paths (leaf rides the parent setlist's line). base = key length at
+         // the leaf's start.
+         void emit_leaf_(const char* L, size_t base)
+         {
+            sfx_    = leaf_suf(L);
+            sfxlen_ = leaf_slen(L);
+            if (leaf_has_full(L)) { full_str_ = leaf_str(L); full_len_ = leaf_strlen(L); }
+            else                    full_str_ = nullptr;
+            if constexpr (kv_tree::raw_vals)
+            {
+               *reinterpret_cast<T*>(cvalbuf_) = T{leaf_bytes(L)};
+               val_local_ = true;
+            }
+            else
+               set_ptr_(leaf_val(L));
+            if (maintain_) { key_.len = base; if (!full_str_) key_.append(sfx_, sfxlen_); }
+         }
+         // True iff `child` of setlist parent `parent` (reached via `byte`) is an INLINE leaf;
+         // when so, *L is set to the in-line leaf pointer (resolved against the parent line).
+         bool kid_inline_(packed_ptr parent, uint8_t byte, const char** L) const noexcept
+         {
+            if constexpr (inline_children_ok)
+               if (parent.tag() == K::setlist_u8)
+               {
+                  const setlist* s = static_cast<const setlist*>(t_->deref_(parent));
+                  const int      i = setlist_index(s, byte);
+                  if (i >= 0 && kv_tree::sl_is_inline(s, i)) { *L = t_->sl_inline_leaf(s, i); return true; }
+               }
+            (void)parent; (void)byte; (void)L;
+            return false;
+         }
+         // Forward: position at `child` of `parent` (reached via `byte`). Inline leaf -> emit
+         // here (true); otherwise delegate to descend_.
+         bool descend_kid_(packed_ptr parent, uint8_t byte, packed_ptr child, size_t base)
+         {
+            const char* L;
+            if (kid_inline_(parent, byte, &L)) { emit_leaf_(L, base); return true; }
+            return descend_(child, base);
+         }
+         // Backward mirror: descend to the rightmost terminal of `child`, or emit its inline leaf.
+         void descend_kid_max_(packed_ptr parent, uint8_t byte, packed_ptr child, size_t base)
+         {
+            const char* L;
+            if (kid_inline_(parent, byte, &L)) { emit_leaf_(L, base); return; }
+            descend_max_(child, base);
+         }
          // Byte-routers only — u16 (2-byte) and non-routers must be handled by the caller
          // BEFORE this (with_router asserts on them; a silent default here is exactly what
          // once hid the lower_bound/u16 miss).
@@ -1981,22 +2033,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                switch (child.tag())
                {
                   case K::value_ptr:
-                  {
-                     const char* L = static_cast<const char*>(deref_(child));
-                     sfx_          = leaf_suf(L);
-                     sfxlen_       = leaf_slen(L);
-                     if (leaf_has_full(L)) { full_str_ = leaf_str(L); full_len_ = leaf_strlen(L); }
-                     else                    full_str_ = nullptr;
-                     if constexpr (kv_tree::raw_vals)
-                     {
-                        *reinterpret_cast<T*>(cvalbuf_) = T{leaf_bytes(L)};
-                        val_local_ = true;
-                     }
-                     else
-                        set_ptr_(leaf_val(L));
-                     if (maintain_) { key_.len = base; if (!full_str_) key_.append(sfx_, sfxlen_); }
+                     emit_leaf_(static_cast<const char*>(deref_(child)), base);
                      return;
-                  }
                   case K::value_inline:
                      sfx_ = nullptr; sfxlen_ = 0; full_str_ = nullptr;
                      val_local_ = false;
@@ -2073,8 +2111,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
                      {
                         stk_.push_back(Frame{child, int(bb) + 1, uint32_t(base), cb});
                         if (maintain_) key_.push(bb);
+                        const size_t nbase = maintain_ ? size_t(key_.len) : size_t(cb) + 1;
+                        const char*  IL;
+                        if (kid_inline_(child, bb, &IL)) { emit_leaf_(IL, nbase); return; }
                         child = nc;
-                        base  = maintain_ ? size_t(key_.len) : size_t(cb) + 1;
+                        base  = nbase;
                         continue;
                      }
                      stk_.push_back(Frame{child, 0, uint32_t(base), cb});  // childless: term only
@@ -2150,7 +2191,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   {
                      f.cur = int(bb) + 1;
                      if (maintain_) { key_.len = f.cbase; key_.push(bb); }
-                     descend_max_(child, maintain_ ? size_t(key_.len) : 0);
+                     descend_kid_max_(f.node, bb, child, maintain_ ? size_t(key_.len) : 0);
                      return;
                   }
                   if (!rh->term.is_null())  // the term precedes the first child
@@ -2176,24 +2217,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
             switch (child.tag())
             {
                case K::value_ptr:
-               {
-                  const char* L = static_cast<const char*>(deref_(child));
-                  sfx_          = leaf_suf(L);
-                  sfxlen_       = leaf_slen(L);
-                  if (leaf_has_full(L)) { full_str_ = leaf_str(L); full_len_ = leaf_strlen(L); }
-                  else                    full_str_ = nullptr;
-                  if constexpr (kv_tree::raw_vals)
-                  {
-                     *reinterpret_cast<T*>(cvalbuf_) = T{leaf_bytes(L)};
-                     val_local_ = true;
-                  }
-                  else
-                     set_ptr_(leaf_val(L));
-                  // maintain the path in key_ for the NEXT non-full terminal; skip the suffix
-                  // append here when this leaf is full (key() will return its zero-copy view).
-                  if (maintain_) { key_.len = base; if (!full_str_) key_.append(sfx_, sfxlen_); }
+                  // external leaf; the inline-leaf path emits the same way via descend_kid_
+                  emit_leaf_(static_cast<const char*>(deref_(child)), base);
                   return true;
-               }
                case K::value_inline:
                   sfx_       = nullptr;
                   sfxlen_    = 0;
@@ -2388,7 +2414,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                {
                   f.cur = bb + 1;
                   if (maintain_) { key_.len = f.cbase; key_.push(bb); }
-                  if (descend_(child, key_.len)) return;
+                  if (descend_kid_(f.node, bb, child, key_.len)) return;
                }
                else { if (maintain_) key_.len = f.plen; stk_.pop_back(); }
             }
@@ -2556,6 +2582,15 @@ namespace detail  // implementation types & node helpers — not part of the pub
             const packed_ptr child = router_child_(cur, byte);
             if (!child.is_null())  // exact child → follow the key deeper
             {
+               const char* IL;
+               if (kid_inline_(cur, byte, &IL))
+               {  // inline leaf: lower-bound compare in place (mirror of the value_ptr case)
+                  stk_.push_back(Frame{cur, byte + 1, 0, 0});
+                  std::string_view S(reinterpret_cast<const char*>(leaf_suf(IL)), leaf_slen(IL));
+                  const int        cmp = S.compare(key.substr(depth + 1));
+                  if (upper ? cmp > 0 : cmp >= 0) { emit_leaf_(IL, 0); return true; }
+                  return false;
+               }
                stk_.push_back(Frame{cur, byte + 1, 0, 0});
                return descend_lb_(child, key, depth + 1, upper);
             }
@@ -3640,7 +3675,22 @@ namespace detail  // implementation types & node helpers — not part of the pub
             rh->term         = packed_ptr::null();
             rh->hdr.has_term = 0;
          }
-         if (k == K::setlist_u16)
+         if (k == K::setlist_u8)
+         {  // inline children carry no separate stamp — they ride the line and age with it;
+            // skip them (never recurse/deref). sl_remove_branch_ keeps the inl bits in sync.
+            setlist* s = static_cast<setlist*>(deref_(cur));
+            for (int i = 0; i < s->rh.hdr.nbranch;)
+            {
+               if constexpr (inline_children_ok)
+                  if (sl_is_inline(s, i)) { ++i; continue; }
+               retire_spine_(&s->branch[i], F);
+               if (s->branch[i].is_null())
+                  sl_remove_branch_(s, i);  // shifts down; re-check this index
+               else
+                  ++i;
+            }
+         }
+         else if (k == K::setlist_u16)
          {
             setlist16* sw = static_cast<setlist16*>(deref_(cur));
             uint16_t   dead[setlist16::CAP];
@@ -4361,7 +4411,18 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   {
                      const setlist* s = static_cast<const setlist*>(deref_(cur));
                      const int      n = s->rh.hdr.nbranch;
-                     for (int i = 0; i < n; ++i) walk_v_(s->branch[i], f);
+                     for (int i = 0; i < n; ++i)
+                     {
+                        if constexpr (inline_children_ok)
+                           if (sl_is_inline(s, i))  // leaf rides the line
+                           {
+                              const char* L = sl_inline_leaf(s, i);
+                              if constexpr (raw_vals) { T tmp{leaf_bytes(L)}; f(static_cast<const T&>(tmp)); }
+                              else                      f(static_cast<const T&>(*leaf_val(L)));
+                              continue;
+                           }
+                        walk_v_(s->branch[i], f);
+                     }
                      break;
                   }
                   case K::c2: cnode_for_each(static_cast<const cnode<2>*>(deref_(cur)), recurse); break;
@@ -4457,7 +4518,27 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   {
                      const setlist* s = static_cast<const setlist*>(deref_(cur));
                      const int      n = s->rh.hdr.nbranch;
-                     for (int i = 0; i < n; ++i) recurse(s->bytes[i], s->branch[i]);  // bytes[] sorted
+                     for (int i = 0; i < n; ++i)  // bytes[] sorted
+                     {
+                        if constexpr (inline_children_ok)
+                           if (sl_is_inline(s, i))  // leaf rides the line: emit key+byte+suffix here
+                           {
+                              const char* L = sl_inline_leaf(s, i);
+                              key.push(s->bytes[i]);
+                              if (leaf_has_full(L))
+                                 f(leaf_fullview(L), static_cast<const T&>(*leaf_val(L)));
+                              else
+                              {
+                                 const size_t b2 = key.len;
+                                 key.append(leaf_suf(L), leaf_slen(L));
+                                 f(key.view(), static_cast<const T&>(*leaf_val(L)));
+                                 key.len = b2;
+                              }
+                              key.len = cb;
+                              continue;
+                           }
+                        recurse(s->bytes[i], s->branch[i]);
+                     }
                      break;
                   }
                   case K::c2: cnode_for_each(static_cast<const cnode<2>*>(deref_(cur)), recurse); break;
@@ -4712,6 +4793,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          setlist* s = ::new (node_alloc_c_<sizeof(setlist)>()) setlist;
          s->rh.hdr  = node_hdr{0, 0, 0};
          s->rh.term = packed_ptr::null();
+         s->inl     = 0;  // no inline children (the aggregate has no ctor — must zero explicitly)
          std::memset(s->bytes, 0xFF, sizeof(s->bytes));  // pad unused lanes with max for sorted SIMD lower_bound
          return s;
       }
@@ -5932,6 +6014,19 @@ namespace detail  // implementation types & node helpers — not part of the pub
                return;
             }
             case K::setlist_u8:
+            {  // inline children ride this line — release their bytes, never deref/free them
+               setlist*  s  = static_cast<setlist*>(deref_(cur));
+               free_all_(s->rh.term);
+               const int nb = s->rh.hdr.nbranch;
+               for (int i = 0; i < nb; ++i)
+               {
+                  if constexpr (inline_children_ok)
+                     if (sl_is_inline(s, i)) { vh_leaf_dies_(sl_inline_leaf(s, i)); continue; }
+                  free_all_(s->branch[i]);
+               }
+               node_free_(s, node_size(K::setlist_u8));
+               return;
+            }
             case K::setlist_u16:
             case K::c2:
             case K::c4:
@@ -7181,6 +7276,18 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   vabort_release(pn_next<Ptr>(static_cast<char*>(deref_(p))));
                   break;
                case K::setlist_u8:
+               {  // inline children ride this line: release their bytes, never recurse/free them
+                  setlist*  s  = static_cast<setlist*>(deref_(p));
+                  vabort_release(s->rh.term);
+                  const int nb = s->rh.hdr.nbranch;
+                  for (int i = 0; i < nb; ++i)
+                  {
+                     if constexpr (inline_children_ok)
+                        if (sl_is_inline(s, i)) { vh_leaf_dies_(sl_inline_leaf(s, i)); continue; }
+                     vabort_release(s->branch[i]);
+                  }
+                  break;
+               }
                case K::setlist_u16:
                case K::c2:
                case K::c4:
@@ -8416,6 +8523,18 @@ namespace detail  // implementation types & node helpers — not part of the pub
                refwalk_(pn_next<Ptr>(static_cast<char*>(deref_(cur))), exp);
                return;
             case K::setlist_u8:
+            {  // inline children occupy NO separate line — they ride this one (already counted)
+               const setlist* s = static_cast<const setlist*>(deref_(cur));
+               refwalk_(s->rh.term, exp);
+               const int nb = s->rh.hdr.nbranch;
+               for (int i = 0; i < nb; ++i)
+               {
+                  if constexpr (inline_children_ok)
+                     if (sl_is_inline(s, i)) continue;
+                  refwalk_(s->branch[i], exp);
+               }
+               return;
+            }
             case K::setlist_u16:
             case K::c2:
             case K::c4:
@@ -8537,6 +8656,20 @@ namespace detail  // implementation types & node helpers — not part of the pub
                return;
             }
             case K::setlist_u8:
+            {  // inline children ride this line — skip (counted in this node's lines)
+               const setlist* s  = static_cast<const setlist*>(deref_(cur));
+               const uint8_t  la = uint8_t(node_size(K::setlist_u8) / 128);
+               f(census_row{k, uint32_t(node_size(K::setlist_u8)), s->rh.hdr.nbranch, la, la});
+               census_(s->rh.term, f);
+               const int nb = s->rh.hdr.nbranch;
+               for (int i = 0; i < nb; ++i)
+               {
+                  if constexpr (inline_children_ok)
+                     if (sl_is_inline(s, i)) continue;
+                  census_(s->branch[i], f);
+               }
+               return;
+            }
             case K::setlist_u16:
             case K::c2:
             case K::c4:
@@ -8687,6 +8820,18 @@ namespace detail  // implementation types & node helpers — not part of the pub
                cow_release(pn_next<Ptr>(static_cast<char*>(deref_(p))));
                break;
             case K::setlist_u8:
+            {  // inline children ride this line: release their bytes, never cow_release them
+               setlist*  s  = static_cast<setlist*>(deref_(p));
+               cow_release(s->rh.term);
+               const int nb = s->rh.hdr.nbranch;
+               for (int i = 0; i < nb; ++i)
+               {
+                  if constexpr (inline_children_ok)
+                     if (sl_is_inline(s, i)) { vh_leaf_dies_(sl_inline_leaf(s, i)); continue; }
+                  cow_release(s->branch[i]);
+               }
+               break;
+            }
             case K::setlist_u16:
             case K::c2:
             case K::c4:
@@ -9204,6 +9349,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
                cow_fix_child_(&s->rh.term);
                for (int i = 0; i < s->rh.hdr.nbranch; ++i)
                   cow_fix_child_(&s->branch[i]);
+               // inline children rode the memcpy (offsets are line-relative, no re-point);
+               // their bytes are now duplicated — fire the balanced copy hook.
+               sl_inline_vh_copy_(s);
                break;
             }
             case K::setlist_u16:

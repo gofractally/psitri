@@ -159,10 +159,25 @@ details go in a nested `detail{}` namespace (e.g. `vhkv::` →
       on_copy site inside the leaf-clone path; in-place overwrite/remove =
       release). Largest of the three — legacy COW + the open shared_smart_ptr
       SIGSEGV (docs/BUGS.md). Its own focused pass.
-- [ ] each: multi-root + set_root, snapshot (the remaining 2 battery phases;
-      these are what start_ref/sal_art_ref still fail — typed values is done)
-- [ ] psitri additionally: wrong-pod read must be invalid_type, never
-      not-found (it has open_root/primary already; missing set_root)
+- [x] sal_art_ref multi-root + snapshot: native tree_handle::set_root +
+      heart_kv primary/open_root/set_root; get_root IS the frozen snapshot
+      (Dan's 'a tree is a snapshot' — dropped the redundant snapshot()/
+      owned_tree). sal_art_ref now PASSES the FULL battery.
+- [x] adb cleanup: tree IS a snapshot — one owned-tree type per engine;
+      get_root the snapshot primitive; tree_snapshots requires get_root.
+      start_ver get_root now returns the frozen tree_root (was a live handle).
+- [ ] start_ref multi-root + set_root + frozen get_root (typed values done;
+      still 2 battery failures)
+- [ ] psitri multi-root + set_root + typed values + invalid-type-on-wrong-pod
+      (2 battery failures)
+
+**benchmarks/ (start_ver + sal_art_ref composition)**
+- [x] delta_art-scale-bench: delta_art<start_ver hot, sal_art_ref dwal cold>
+      benching (~270ns ins / ~128ns rd, rotation drain active)
+- [x] walart-scale-bench: walart (sal_art_ref base + start_ref delta) benching
+      (~360ns ins / ~205ns rd)
+- [ ] remaining bench migration: bank (multi-engine), dict, pipeline, TATP +
+      comparator test-shims
 
 **libraries/delta_art (tiered) — #32 rewrite**
 - [ ] concept-only: templated on two adb engines; THREE instantiations under

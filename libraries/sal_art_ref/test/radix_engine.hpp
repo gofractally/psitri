@@ -1265,6 +1265,9 @@ namespace sal_art_ref::radix
       }
       static const inline_value* inline_of(const sal::alloc_header* node, smart_address sa)
       {
+         // A tail offset must point INSIDE the node's tail region (offset <= size); a larger offset
+         // would mean `sa` is a misclassified/corrupt branch and this computes a wild pointer.
+         assert(sa.tail_offset() <= node->size() && "inline tail offset exceeds node size");
          return reinterpret_cast<const inline_value*>(reinterpret_cast<const char*>(node) +
                                                       node->size() - sa.tail_offset());
       }
@@ -2247,12 +2250,28 @@ namespace sal_art_ref::radix
       // keysets — need several), the deepest holds the page as its term. Returns the
       // branch target for byte D[depth]. Built bottom-up so every link is set on a node
       // this op just created.
+      // The largest prefix a divider setlist_u8 may carry. A setlist_u8 holds up to
+      // setlist_u8::prefix_capacity (97), but when it fills and grow_and_set upgrades it to a wider
+      // tier, try_upgrade copies the prefix into that tier — whose prefix_capacity is SMALLER
+      // (bitset_r2/r4 and full are all 65; c1 only takes empty-prefix nodes, see try_upgrade_c1).
+      // A 66..97-byte prefix overflows the wider node's CL0 into its branch storage → corruption →
+      // SIGBUS. INVARIANT: never create a divider node whose prefix exceeds divider_prefix_cap, so
+      // it is always upgradeable. (This subsumes the old room_for_one cap — 65 < 92 < 97.)
+      static constexpr int divider_prefix_cap = bitset_r2_node::prefix_capacity;
+      static_assert(bitset_r4_node::prefix_capacity >= divider_prefix_cap &&
+                        full_radix_node::prefix_capacity >= divider_prefix_cap,
+                    "divider_prefix_cap must be the SMALLEST upgrade-tier prefix_capacity");
+
       smart_address make_divider_tail(bytes D, uint32_t depth, ptr_address page,
                                       sal::alloc_hint hint)
       {
          if (depth + 1 == D.size())
             return smart_address::from_pointer(page);
-         constexpr int cap = setlist_u8::prefix_capacity;
+         // Every node here (term-only deepest AND branch-carrying up-links) must stay upgradeable,
+         // so chunk the divider tail at divider_prefix_cap. The deepest node may later acquire a
+         // branch when a sibling divider is inserted under it, so it is bound by the same cap.
+         constexpr int cap        = divider_prefix_cap;
+         constexpr int branch_cap = divider_prefix_cap;
          const int     lo  = int(depth) + 1;
          int           end = int(D.size());
          int           start = end - cap > lo ? end - cap : lo;
@@ -2262,7 +2281,7 @@ namespace sal_art_ref::radix
          while (start > lo)
          {
             const int   bpos = start - 1;  // this link's branch byte
-            const int   s2   = bpos - cap > lo ? bpos - cap : lo;
+            const int   s2   = bpos - branch_cap > lo ? bpos - branch_cap : lo;
             ptr_address up = make_node<setlist_u8>(D.subspan(size_t(s2), size_t(bpos - s2)), hint);
             [[maybe_unused]] bool okb =
                 mut<setlist_u8>(up)->set_branch(D[size_t(bpos)], smart_address::from_pointer(node));
@@ -2271,6 +2290,29 @@ namespace sal_art_ref::radix
             start = s2;
          }
          return smart_address::from_pointer(node);
+      }
+
+      // Build a path-compression chain that consumes `seg` and ends by branching into `tail`
+      // (seg.back() is the branch byte into tail). Each link is a fresh single-branch setlist_u8
+      // whose prefix is capped at divider_prefix_cap so it always has room for its branch AND stays
+      // upgradeable — the invariant make_divider_tail / divider_prefix_split rely on for long keys.
+      ptr_address make_prefix_chain(bytes seg, ptr_address tail, sal::alloc_hint hint)
+      {
+         constexpr int branch_cap = divider_prefix_cap;
+         ptr_address   node = tail;
+         int           hi   = int(seg.size());
+         while (hi > 0)
+         {
+            const int   bpos = hi - 1;  // branch byte into `node`
+            const int   s    = bpos - branch_cap > 0 ? bpos - branch_cap : 0;
+            ptr_address up = make_node<setlist_u8>(seg.subspan(size_t(s), size_t(bpos - s)), hint);
+            [[maybe_unused]] bool ok =
+                mut<setlist_u8>(up)->set_branch(seg[size_t(bpos)], smart_address::from_pointer(node));
+            assert(ok && "prefix-chain node (prefix<=branch_cap) always fits one branch");
+            node = up;
+            hi   = s;
+         }
+         return node;
       }
       template <upsert_mode mode, class N>
       ptr_address divider_insert_in(ptr_address addr, bytes D, uint32_t depth, ptr_address page)
@@ -2390,7 +2432,15 @@ namespace sal_art_ref::radix
          std::memcpy(pbuf, d->prefix().data() + p + 1, size_t(newpl));
          reprefix<N>(dnode, bytes{pbuf, size_t(newpl)});
 
-         ptr_address np = make_node<setlist_u8>(D.subspan(depth, size_t(p)));
+         // np is the divergence node: it carries ob->dnode PLUS the divider's continuation (a 2nd
+         // branch, or a term). That is up to TWO (stem,branch) pairs. divider_prefix_cap (65) leaves
+         // ample room for both ((65 + 2*(stem_width+4)) = 75 <= 97) AND keeps np upgradeable. A
+         // longer common prefix `p` cannot live in np (it would overflow a wider tier on upgrade ->
+         // SIGBUS); represent its leading bytes as a single-branch chain above np instead.
+         constexpr int     npcap       = divider_prefix_cap;
+         const int         np_pfx_len  = p <= npcap ? p : npcap;
+         const uint32_t    np_pfx_from = depth + uint32_t(p) - uint32_t(np_pfx_len);
+         ptr_address       np = make_node<setlist_u8>(D.subspan(np_pfx_from, size_t(np_pfx_len)));
          mut<setlist_u8>(np)->set_branch(ob, smart_address::from_pointer(dnode));
          if (dnode == addr)
             _ses->retain(dnode);  // in-place demote: np is a 2nd parent; caller releases addr
@@ -2402,9 +2452,14 @@ namespace sal_art_ref::radix
          {
             smart_address         sab = make_divider_tail(D, d2, page, sal::alloc_hint{});
             [[maybe_unused]] bool ok  = mut<setlist_u8>(np)->set_branch(D[d2], sab);
-            assert(ok && "fresh two-entry setlist always fits");
+            assert(ok && "np prefix capped at npcap → two-entry setlist always fits");
          }
-         return np;
+         if (p <= npcap)
+            return np;
+         // Leading chain for the common prefix bytes that did not fit in np: D[depth .. np_pfx_from)
+         // (its last byte is the branch into np).
+         return make_prefix_chain(D.subspan(depth, size_t(np_pfx_from - depth)), np,
+                                  sal::alloc_hint{});
       }
 
       // Remove divider D from the radix. `out_page` receives the page the slot held; when
@@ -3137,6 +3192,7 @@ namespace sal_art_ref::radix
             if (!_valid)
                return (_end < 0) ? seek_begin() : false;  // from rend → first key; from end → stay
             auto lk = rlock();
+            if (_stack_deferred) materialize_stack_();  // [lazy] build the divider path now
             return advance_steps();
          }
          bool prev()  // retreat to the previous key in order; true if it landed on one
@@ -3144,6 +3200,7 @@ namespace sal_art_ref::radix
             if (!_valid)
                return (_end >= 0) ? seek_last() : false;  // from end → last key; from rend → stay
             auto lk = rlock();
+            if (_stack_deferred) materialize_stack_();  // [lazy] build the divider path now
             return retreat_steps();
          }
          bool seek_last()  // position at the last (largest) key; true if there is one
@@ -3286,11 +3343,12 @@ namespace sal_art_ref::radix
 
          void reset() noexcept
          {
-            _depth      = 0;
-            _klen       = 0;
-            _valid      = false;
-            _end        = 0;
-            _is_subtree = false;
+            _depth          = 0;
+            _klen           = 0;
+            _valid          = false;
+            _end            = 0;
+            _is_subtree     = false;
+            _stack_deferred = false;
          }
          void append(const uint8_t* p, size_t n) noexcept
          {
@@ -3715,12 +3773,27 @@ namespace sal_art_ref::radix
                }
                else
                {
-                  // lower-bound route to the owning page, then exact-build the divider path so
-                  // next()/prev() walk neighboring pages from these frames.
-                  uint8_t  db[1056];  // divider <= max key + 1
-                  uint32_t dl = 0;
-                  route_to_page(ses(), root, q, db, &dl);
-                  build_to_page(bytes{db, dl}, q);
+                  // [lazy] Route to the owning page and position WITHIN it. Page entries are
+                  // self-contained (key = page cpfx+suffix, value in-page), so a seek+read needs
+                  // neither the divider-path frame stack nor a re-descent — take_page_entry sets
+                  // key+value directly. Build the full stack lazily only when next()/prev() must
+                  // cross a page boundary (materialize_stack_). A q PAST the page end must spill,
+                  // and strict (upper_bound) may step past an exact match — both need the stack,
+                  // so they fall back to the eager build_to_page.
+                  uint8_t          db[1056];  // divider <= max key + 1
+                  uint32_t         dl = 0;
+                  const leaf_page* owner = route_to_page(ses(), root, q, db, &dl);
+                  const int        lb = owner->lower_bound(q.data(), uint32_t(q.size()), kvres(ses()));
+                  if (!strict && lb < int(owner->num_keys()))
+                  {
+                     take_page_entry(owner, lb);  // self-contained: sets _kbuf (key) + _val (value)
+                     _valid          = true;
+                     _stack_deferred = true;
+                  }
+                  else
+                  {
+                     build_to_page(bytes{db, dl}, q);  // spill / strict: build the full stack
+                  }
                }
                if (_valid && strict &&
                    key() == key_view(reinterpret_cast<const char*>(q.data()), q.size()))
@@ -3805,6 +3878,23 @@ namespace sal_art_ref::radix
             }
          }
 
+         // [lazy] A deferred seek positioned the cursor inside its owning page WITHOUT building
+         // the divider-path frame stack (key+value are page-self-contained). Build it now —
+         // re-route from the current key and exact-build the path — so advance/retreat_steps can
+         // cross page boundaries. Only the FIRST next()/prev() after a seek pays this; a pure
+         // seek+read never does. Caller already holds the read lock.
+         void materialize_stack_()
+         {
+            uint8_t        q[1024];
+            const uint32_t ql = _klen;          // current key (set by the deferred take_page_entry)
+            std::memcpy(q, _kbuf, ql);
+            uint8_t  db[1056];
+            uint32_t dl = 0;
+            route_to_page(ses(), _root.address(), bytes{q, ql}, db, &dl);
+            build_to_page(bytes{db, dl}, bytes{q, ql});  // rebuilds frames + repositions same entry
+            _stack_deferred = false;
+         }
+
          // Position at an EXACT existing key, building the descent path along the way.
          void build_to(bytes key)
          {
@@ -3878,6 +3968,9 @@ namespace sal_art_ref::radix
          ptr_address _subtree{};           // that subtree's root (valid when _is_subtree)
          ptr_address _nextaddr{};
          uint32_t    _nextdepth = 0;
+         // [lazy] a seek positioned inside the owning page but did NOT build the divider-path
+         // frame stack (key+value are page-self-contained). next()/prev() build it on demand.
+         bool        _stack_deferred = false;
       };
 
      public:
@@ -5317,6 +5410,11 @@ namespace sal_art_ref::radix
                               bytes val, sal::alloc_hint hint, bool& ok)
       {
          const From* cn = _ses->get_ref<From>(from).obj();
+         // INVARIANT: the source node's prefix must fit the wider tier, or alloc<To>(prefix) below
+         // overflows To's CL0 into its branch storage → corruption → SIGBUS. Divider nodes are
+         // capped at divider_prefix_cap precisely to guarantee this (see make_divider_tail).
+         assert(cn->prefix().size() <= To::prefix_capacity &&
+                "source prefix exceeds upgrade tier capacity — divider_prefix_cap violated");
          uint32_t    need =
              ucc::round_up_multiple<sal::cacheline_size>(To::head_bytes() + cn->tail_used() +
                                                          tail_reserve + 64 + To::headroom);

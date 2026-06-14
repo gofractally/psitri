@@ -7132,8 +7132,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
       }
 
       // debug: assert a page's storage is totally ordered (stem, then suffix)
-      void pg_validate_(Ptr pg, const char* tag) const
+      void pg_validate_([[maybe_unused]] Ptr pg, [[maybe_unused]] const char* tag) const
       {
+         // [debug] page-order assertion — compile-gated (define HKV_PG_VALIDATE). Called pre-op/
+         // post-insert on every upsert; a per-call getenv("PG_VAL") was ~5% on the write path.
+#ifdef HKV_PG_VALIDATE
          if (!getenv("PG_VAL"))
             return;
          const auto* h = static_cast<const cb_hdr*>(deref_(pg));
@@ -7163,6 +7166,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             prev  = std::string(s2);
             first = false;
          });
+#endif
       }
 
       // ── page-mode entry points ──────────────────────────────────────────────

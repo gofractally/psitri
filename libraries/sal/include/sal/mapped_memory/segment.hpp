@@ -267,7 +267,20 @@ namespace sal
        */
       struct segment
       {
-         uint32_t get_alloc_pos() const { return _alloc_pos_LOCKED; }
+         // Hot path (owner thread): relaxed == plain ldr on a lock-free u32.
+         uint32_t get_alloc_pos() const
+         {
+            return _alloc_pos_LOCKED.load(std::memory_order_relaxed);
+         }
+         // Cross-thread reader (compactor) MUST use this: it acquire-loads the
+         // value published by the writer's set_alloc_pos (release), establishing
+         // happens-before so the read is neither torn nor stale. The design
+         // invariant "check _first_writable_page before using _alloc_pos" is the
+         // intent; this pairs the exact accesses the verifier flagged.
+         uint32_t get_alloc_pos_acquire() const
+         {
+            return _alloc_pos_LOCKED.load(std::memory_order_acquire);
+         }
 
          /// @brief  the amount of space available for allocation
          uint32_t free_space() const { return end() - alloc_ptr(); }
@@ -290,7 +303,9 @@ namespace sal
          void set_alloc_pos(uint32_t pos)
          {
             assert(pos <= end_pos());
-            _alloc_pos_LOCKED = pos;
+            // Release: publishes this (final/sync) alloc_pos plus every prior
+            // owner-thread write to a compactor that get_alloc_pos_acquire()s it.
+            _alloc_pos_LOCKED.store(pos, std::memory_order_release);
          }
 
          /// @brief  helper to convert ptr to pos
@@ -318,24 +333,28 @@ namespace sal
          T* alloc(uint32_t size, auto&&... args)
          {
             assert(can_alloc(size));
-            auto result = new (data + _alloc_pos_LOCKED) T(size, std::forward<decltype(args)>(args)...);
+            // Owner-thread bump: relaxed load + relaxed store (no RMW) == plain
+            // ldr/add/str. The release that publishes this to the compactor is
+            // the eventual set_alloc_pos at sync/finalize.
+            uint32_t pos = _alloc_pos_LOCKED.load(std::memory_order_relaxed);
+            auto result  = new (data + pos) T(size, std::forward<decltype(args)>(args)...);
             // Lock the tracker around {alloc_pos bump + mark_alloc} so a
             // concurrent verifier observation cannot land between them.
             SAL_TRACK_LOCK();
-            _alloc_pos_LOCKED += size;
+            _alloc_pos_LOCKED.store(pos + size, std::memory_order_relaxed);
             SAL_TRACK_ALLOC(result, size, "segment_alloc");
             return result;
          }
          void unalloc(uint32_t size)
          {
             assert(size == ucc::round_up_multiple<cacheline_size>(size));
-            assert(size <= get_alloc_pos());
-
-            assert(_alloc_pos_LOCKED >= size);
-            // Same atomicity requirement as alloc<T>.
+            uint32_t pos = _alloc_pos_LOCKED.load(std::memory_order_relaxed);
+            assert(size <= pos);
+            // Same atomicity requirement as alloc<T> (owner-thread relaxed bump).
             SAL_TRACK_LOCK();
-            _alloc_pos_LOCKED -= size;
-            SAL_TRACK_FREE(data + _alloc_pos_LOCKED, size, "segment_unalloc");
+            pos -= size;
+            _alloc_pos_LOCKED.store(pos, std::memory_order_relaxed);
+            SAL_TRACK_FREE(data + pos, size, "segment_unalloc");
          }
 
          /**
@@ -386,7 +405,15 @@ namespace sal
          // outside segment::alloc<T> / unalloc / set_alloc_pos — the only
          // paths that pair the bump with SAL_TRACK_ALLOC/FREE under
          // SAL_TRACK_LOCK.
-         uint32_t _alloc_pos_LOCKED = 0;  /// number of bytes allocated from data
+         // Atomic so the background compactor can read it (acquire) without a
+         // data race against the owner thread's writes (release on the final
+         // set_alloc_pos; relaxed on the owner-only bump in alloc/unalloc, which
+         // is identical codegen to a plain += on a lock-free u32).
+         std::atomic<uint32_t> _alloc_pos_LOCKED{0};  /// number of bytes allocated from data
+         static_assert(std::atomic<uint32_t>::is_always_lock_free,
+                       "std::atomic<uint32_t> must be lock free");
+         static_assert(sizeof(std::atomic<uint32_t>) == sizeof(uint32_t),
+                       "std::atomic<uint32_t> must not add overhead");
         public:
          /// The os_page number of the first page that can be written to
          /// advanced by the sync() thread... sync thread waits until all

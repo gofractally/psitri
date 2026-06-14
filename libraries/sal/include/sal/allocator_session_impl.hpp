@@ -8,6 +8,7 @@
 namespace sal
 {
 
+
    [[nodiscard]] inline read_lock allocator_session::lock() noexcept
    {
       return read_lock(*this);

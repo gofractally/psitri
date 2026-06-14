@@ -563,6 +563,11 @@ namespace sal
       uint32_t                        _allocator_index;
       std::mutex               _post_release_mx;  // sessionless ASYNC release queue
       std::vector<ptr_address> _post_release_q;
+      // Guards _segment_provider.mlock_segments (a non-atomic hierarchical_bitmap):
+      // the provider thread mutates it (update_segment_pinned_state / reset) while the
+      // compactor thread iterates it (compactor_promote_rcache_data) — an unsynchronized
+      // RMW vs read torn the bitmap, corrupting the segment set (TSan-confirmed race).
+      mutable std::mutex       _mlock_segments_mx;
       std::mutex               _utility_mx;   // sessionless SYNC release (serialized session)
       allocator_session_ptr    _utility_ses{nullptr};
       bool                     _utility_init = false;

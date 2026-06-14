@@ -247,6 +247,17 @@ namespace sal
       template <typename T = alloc_header>
       [[nodiscard]] smart_ref<T> get_ref(ptr_address adr) noexcept;
 
+      // Non-faulting validity check: true iff `adr` indexes a live, allocated control
+      // block (in-bounds zone + not free + not a tombstone). Lets callers verify a
+      // child pointer BEFORE get_ref() would index out of bounds and SIGBUS. Cheap
+      // (one bound compare + one load); intended for debug/diagnostic guards.
+      bool is_resolvable(ptr_address adr) noexcept
+      {
+         if (adr == null_ptr_address || is_reserved_ptr_address(adr))
+            return false;
+         return _ptr_alloc.try_get(adr) != nullptr;
+      }
+
       inline void prefetch(ptr_address adr) const noexcept;
       inline bool is_read_only(ptr_address adr) const noexcept;
 

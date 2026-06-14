@@ -1512,13 +1512,18 @@ namespace sal
          return false;
       }
 
-      for (auto seg : _mapped_state->_segment_provider.mlock_segments)
       {
-         const auto vage = _mapped_state->_segment_data.get_vage(segment_number(seg));
-         if (vage == 0)
-            continue;
-         oldest_hot_vage = std::min(oldest_hot_vage, vage);
-         newest_hot_vage = std::max(newest_hot_vage, vage);
+         // Guarded snapshot-read: the provider thread mutates mlock_segments concurrently
+         // (update_segment_pinned_state); iterating it unlocked torn the bitmap.
+         std::lock_guard<std::mutex> g(_mlock_segments_mx);
+         for (auto seg : _mapped_state->_segment_provider.mlock_segments)
+         {
+            const auto vage = _mapped_state->_segment_data.get_vage(segment_number(seg));
+            if (vage == 0)
+               continue;
+            oldest_hot_vage = std::min(oldest_hot_vage, vage);
+            newest_hot_vage = std::max(newest_hot_vage, vage);
+         }
       }
 
       auto demote_pressure_ppm = [&](segment_number seg) -> uint32_t {
@@ -1776,15 +1781,17 @@ namespace sal
       //      SAL_ERROR("compact_segment: {:L}", seg_num);
       auto        state = ses.lock();
       const auto* s     = get_segment(seg_num);
+      const auto* shead = (const mapped_memory::segment*)s;
 
       // if it is read only, then we don't have to worry about locking!
-      assert(s->is_read_only() && "segment must be read only before compacting");
+      assert(shead->is_read_only() && "segment must be read only before compacting");
 
-      // collect the range we will be iterating over
-      const auto* shead = (const mapped_memory::segment*)s;
-      const auto* send  = reinterpret_cast<const alloc_header*>(
+      // collect the range we will be iterating over. get_alloc_pos_acquire()
+      // pairs with set_alloc_pos's release store: it observes the writer's final,
+      // complete alloc_pos (establishing happens-before — no torn/stale read).
+      const auto* send = reinterpret_cast<const alloc_header*>(
           shead->data +
-          std::min<uint32_t>(shead->end_pos(), shead->get_alloc_pos()));
+          std::min<uint32_t>(shead->end_pos(), shead->get_alloc_pos_acquire()));
 
       // cast the start to first object_header
       const alloc_header* foo = (const alloc_header*)(shead);
@@ -2463,11 +2470,15 @@ namespace sal
    {
       auto& provider_state = _mapped_state->_segment_provider;
 
-      // Update the bitmap
-      if (is_pinned)
-         provider_state.mlock_segments.set(*seg_num);
-      else
-         provider_state.mlock_segments.reset(*seg_num);
+      // Update the bitmap (guarded: the compactor iterates mlock_segments concurrently;
+      // hierarchical_bitmap::set/reset is a non-atomic RMW + level cascade).
+      {
+         std::lock_guard<std::mutex> g(_mlock_segments_mx);
+         if (is_pinned)
+            provider_state.mlock_segments.set(*seg_num);
+         else
+            provider_state.mlock_segments.reset(*seg_num);
+      }
 
       // Update the segment metadata
       _mapped_state->_segment_data.set_pinned(seg_num, is_pinned);

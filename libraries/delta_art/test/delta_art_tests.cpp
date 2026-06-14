@@ -243,3 +243,214 @@ TEST_CASE("delta_art: read-your-writes inside an open transaction")
    REQUIRE_FALSE(tx.get<std::string>("base-key").has_value());  // tombstone masks
    tx.abort();
 }
+
+// Regression (Dan): the tiered merge cursor must handle DIRECTION CHANGES across the
+// W (hot) and B (cold) tiers. Interleave keys so the two legs straddle every probe;
+// after a forward op (lower_bound/upper_bound) the non-current leg sits PAST the probe,
+// and prev() must move it back — else settle_bwd_ re-selects the stranded leg on the
+// wrong side. This is exactly the Silkworm crash: seek_last-of-namespace
+// (lower_bound(successor)+prev) returned a NEXT-namespace key -> MDBX_NOTFOUND.
+TEST_CASE("delta_art: bidirectional merge cursor handles direction changes across tiers")
+{
+   auto db = fresh("dirchange");
+   auto ws = db->start_write_session();
+   std::map<std::string, std::string> oracle;
+   auto                               put = [&](const std::string& k, const std::string& v)
+   {
+      auto tx = ws->start_transaction(0);
+      tx.upsert(k, v);
+      tx.commit();
+      oracle[k] = v;
+   };
+   auto kn = [](int i)
+   {
+      char b[8];
+      std::snprintf(b, sizeof b, "k%04d", i);
+      return std::string(b);
+   };
+
+   // Evens -> cold base (flushed); odds -> hot delta (kept). Merged = 0..199 sorted,
+   // every adjacent pair lives on a different tier (maximally straddled).
+   for (int i = 0; i < 200; i += 2)
+      put(kn(i), "b" + std::to_string(i));
+   REQUIRE(db->flush_now() == 100);  // evens retired into the base
+   for (int i = 1; i < 200; i += 2)
+      put(kn(i), "w" + std::to_string(i));  // odds remain in the delta
+
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);  // latest = W u B merge
+
+   SECTION("forward scan == sorted oracle")
+   {
+      auto it = oracle.begin();
+      for (bool ok = cur.seek_begin(); ok; ok = cur.next(), ++it)
+      {
+         REQUIRE(it != oracle.end());
+         REQUIRE(std::string(cur.key()) == it->first);
+      }
+      REQUIRE(it == oracle.end());
+   }
+   SECTION("backward scan == reverse sorted oracle")
+   {
+      auto it = oracle.rbegin();
+      for (bool ok = cur.seek_last(); ok; ok = cur.prev(), ++it)
+      {
+         REQUIRE(it != oracle.rend());
+         REQUIRE(std::string(cur.key()) == it->first);
+      }
+      REQUIRE(it == oracle.rend());
+   }
+   SECTION("lower_bound(K) then prev() == predecessor at every boundary (the bug)")
+   {
+      for (int i = 0; i <= 200; ++i)
+      {
+         auto probe = kn(i);
+         bool ok    = cur.lower_bound(probe);
+         auto lb    = oracle.lower_bound(probe);
+         if (lb == oracle.end())
+            REQUIRE_FALSE(ok);
+         else
+         {
+            REQUIRE(ok);
+            REQUIRE(std::string(cur.key()) == lb->first);
+         }
+         bool pok = cur.prev();
+         if (lb == oracle.begin())
+            REQUIRE_FALSE(pok);  // no predecessor
+         else if (lb == oracle.end())
+         {
+            REQUIRE(pok);  // prev from end == last
+            REQUIRE(std::string(cur.key()) == oracle.rbegin()->first);
+         }
+         else
+         {
+            REQUIRE(pok);
+            REQUIRE(std::string(cur.key()) == std::prev(lb)->first);
+         }
+      }
+   }
+   SECTION("seek-last-of-range shape: lower_bound(successor)+prev stays in range")
+   {
+      // The exact Silkworm failure: the last key < k0100 is k0099 (a HOT-delta key),
+      // never the >= boundary key k0100 (a cold-base key).
+      REQUIRE(cur.lower_bound("k0100"));
+      REQUIRE(std::string(cur.key()) == "k0100");
+      REQUIRE(cur.prev());
+      REQUIRE(std::string(cur.key()) == "k0099");
+   }
+   SECTION("upper_bound(K) then prev() round-trips (forward->backward)")
+   {
+      REQUIRE(cur.upper_bound("k0099"));  // first > k0099 == k0100
+      REQUIRE(std::string(cur.key()) == "k0100");
+      REQUIRE(cur.prev());
+      REQUIRE(std::string(cur.key()) == "k0099");
+   }
+}
+
+#include <atomic>
+#include <thread>
+
+// Hypothesis #1b (Dan): in the TIERED engine, a reader's root-0 (latest = W u B merge)
+// snapshot must never read a freed value across the ROTATION/DRAIN of the hot delta into
+// the cold base. When hi_water trips, the hot buffer rotates to "warm" and the merge
+// thread drains it; root-0 readers see HOT u WARM u COLD. If the warm snapshot (or a
+// value in it) is reclaimed while a reader/merge still references it, the reader reads
+// freed memory (the Silkworm "value is type N, read as type 0" / EXC_BAD_ACCESS, which
+// only reproduced in the tiered config, not pure start_ver). Robust assertion: each key
+// always carries the SAME content V_k, so any committed version a snapshot lands on must
+// read exactly V_k; any other bytes / throw / fault = a freed value was read => bug.
+TEST_CASE("delta_art: concurrent root-0 snapshot never reads a freed value across rotation")
+{
+   auto dir = fs::temp_directory_path() / "tiered_rotrace";
+   fs::remove_all(dir);
+   TK::config cfg;                         // background ON: rotation + merge + drain + compaction
+   cfg.knobs.hi_water_bytes = 1u << 20;    // small => frequent rotation/drain (warm churn)
+   auto db = TK::database::open(dir, sal::open_mode::create_or_open, cfg);
+
+   constexpr int    NK  = 3000;
+   constexpr size_t LEN = 9000;            // large (value_large in the cold base)
+   auto vof = [&](int k) {
+      std::string v(LEN, 0);
+      for (size_t j = 0; j < LEN; ++j)
+         v[j] = char(uint8_t(uint64_t(k) * 131u + j * 7u + (j >> 8)));
+      return v;
+   };
+   auto kof = [&](int k) {
+      char b[16];
+      std::snprintf(b, sizeof b, "k%08d", k);
+      return std::string(b);
+   };
+
+   {
+      auto ws = db->start_write_session();
+      for (int base = 0; base < NK; base += 200)
+      {
+         auto tx = ws->start_transaction(0);
+         for (int k = base; k < base + 200 && k < NK; ++k)
+            tx.upsert(kof(k), vof(k));
+         tx.commit();
+      }
+   }
+
+   std::atomic<bool>     stop{false}, bad{false};
+   std::atomic<uint64_t> reads{0}, writes{0};
+
+   std::thread writer([&] {
+      std::mt19937_64 rng(7);
+      auto            ws = db->start_write_session();
+      while (!stop.load(std::memory_order_relaxed))
+      {
+         auto tx = ws->start_transaction(0);
+         for (int i = 0; i < 64; ++i)
+         {
+            int k = int(rng() % NK);
+            tx.upsert(kof(k), vof(k));  // same content -> readers always expect V_k
+         }
+         tx.commit();
+         writes.fetch_add(64, std::memory_order_relaxed);
+      }
+   });
+
+   auto reader = [&] {
+      std::mt19937_64 rng(1234 + reads.load());
+      while (!stop.load(std::memory_order_relaxed))
+      {
+         auto rs  = db->start_read_session();
+         auto cur = rs->create_cursor(0);  // latest = W u B merge
+         for (int i = 0; i < 256; ++i)
+         {
+            int k = int(rng() % NK);
+            try
+            {
+               auto v = cur.get<std::string>(kof(k));
+               if (!v || *v != vof(k))
+               {
+                  bad.store(true);
+                  stop.store(true);
+                  return;
+               }
+            }
+            catch (...)
+            {
+               bad.store(true);
+               stop.store(true);
+               return;
+            }
+            reads.fetch_add(1, std::memory_order_relaxed);
+         }
+      }
+   };
+   std::vector<std::thread> rs;
+   for (int i = 0; i < 4; ++i)
+      rs.emplace_back(reader);
+
+   while (!bad.load() && writes.load() < 2'000'000)
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+   stop.store(true);
+   writer.join();
+   for (auto& t : rs)
+      t.join();
+
+   INFO("reads=" << reads.load() << " writes=" << writes.load());
+   REQUIRE_FALSE(bad.load());
+}

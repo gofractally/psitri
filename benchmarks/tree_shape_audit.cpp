@@ -166,6 +166,8 @@ int main(int argc, char** argv)
    uint64_t pfxw_hist[5]    = {0};  // index by _pfxw (1,2,4)
    uint64_t cpfx_len_sum    = 0;    // Σ leaf_page::_cpfx_len → avg factored common prefix
    uint64_t cpfx_hist[8]    = {0};  // cpfx length buckets: 0,1,2,3,4-7,8-15,16-31,32+
+   uint64_t ncb_sum         = 0;    // Σ leaf_page::num_cbases() → avg cbases used (extern slots)
+   uint64_t pages_zero_ncb  = 0;    // pages with NO externs (cbases[16] = 64B dead weight)
    uint64_t                  sl1_term = 0, sl1_inlineval = 0, sl1_childptr = 0;  // single-branch breakdown
    uint64_t                  total_nodes = 0, total_bytes = 0, terminals = 0;
    std::unordered_set<uint64_t> seen;
@@ -243,6 +245,8 @@ int main(int argc, char** argv)
          {
             const auto* p = ses->get_ref<sal_art_ref::leaf_page>(a).obj();
             total_page_keys += p->num_keys();
+            ncb_sum += p->num_cbases();
+            if (p->num_cbases() == 0) ++pages_zero_ncb;
             if (p->prefix_width() < 5) pfxw_hist[p->prefix_width()]++;
             {
                const uint32_t cl = uint32_t(p->common_prefix().size());
@@ -374,6 +378,11 @@ int main(int argc, char** argv)
       printf("  PAGE resolution width (_pfxw): 1B=%llu  2B=%llu  4B=%llu pages\n",
              (unsigned long long)pfxw_hist[1], (unsigned long long)pfxw_hist[2],
              (unsigned long long)pfxw_hist[4]);
+      printf("  CBASES: avg %.2f used/page; %llu of %llu pages have ZERO externs "
+             "(cbases[16]=64B dead → ~%.1f GB reclaimable if variable)\n",
+             npages ? double(ncb_sum) / double(npages) : 0.0,
+             (unsigned long long)pages_zero_ncb, (unsigned long long)npages,
+             gb(double(pages_zero_ncb) * 64.0));
       printf("  CPFX (factored common prefix) avg %.1f B/page; buckets 0:%llu 1:%llu 2:%llu 3:%llu "
              "4-7:%llu 8-15:%llu 16-31:%llu 32+:%llu\n",
              npages ? double(cpfx_len_sum) / double(npages) : 0.0,

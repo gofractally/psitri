@@ -110,14 +110,9 @@ namespace sal_art_ref
       // reach it). Set ONCE at creation (split right-half = the split divider; left-half / leftmost
       // = inherited / empty), copied verbatim by every rebuild, never touched by in-place ops.
       // Lets a page attach DIRECTLY under a branch byte (no single-child setlist): route_to_page
-      // re-screens key[depth..] against _div[depth..] on arrival. Stored INLINE in the header (this
-      // CL0 is already resident from the h->type() check, so the discriminator read is FREE — the
-      // whole point of collapsing the setlist hop); only a rare long divider (> div_inl_cap) spills
-      // to the tail heap. _div_pos is the spill pointer, unused when inline.
-      static constexpr int div_inl_cap = 24;  // dividers <= this live in CL0 (the common case)
+      // re-screens key[depth..] against _div[depth..] on arrival. Mirrors _cpfx_len/_cpfx_pos.
       uint16_t         _div_len;    // page divider (lower-bound separator) length
-      uint8_t          _div_inl[div_inl_cap];  // inline divider bytes when _div_len <= div_inl_cap
-      tail_ptr<>       _div_pos;    // SPILL: divider bytes in tail heap when _div_len > div_inl_cap
+      tail_ptr<>       _div_pos;    // divider bytes in the tail heap (0 = none / leftmost)
       sal::ptr_address _cbases[max_cbases];
       // CACHELINE INDEX (the wtree lesson): the FIRST stem of every (stride-th) prefix-column
       // cacheline, sampled HERE in the header — resident from reading the fields above, so the
@@ -226,10 +221,9 @@ namespace sal_art_ref
       {
          // compaction never changes cpfx (prepend == 0): fragments copy verbatim, already
          // maximal — no resolver needed (SAL's passive compactor has no session).
-         uint8_t dbuf[1056];
          static_cast<leaf_page*>(dst)->init_from(this, 0, _nkeys, _cpfx_len, nullptr, 0, nullptr,
                                                  nullptr, /*drop=*/-1, /*max_w=*/_pfxw,
-                                                 kv_resolver{}, divider(dbuf));
+                                                 kv_resolver{}, {div_data(), _div_len});
       }
       void copy_to(sal::alloc_header* dst) const noexcept { blit_head_tail(dst, head_size()); }
 
@@ -293,23 +287,20 @@ namespace sal_art_ref
          // factoring only ever LOOSENS here: cpfx may shrink to admit a diverging key
          const uint16_t ncp = uint16_t(
              shared_prefix(op.ins.key.data(), op.ins.key.size(), s->cpfx_data(), s->_cpfx_len));
-         uint8_t dbuf[1056];
          init_from(s, 0, s->_nkeys, ncp, nullptr, 0, &op.ins, nullptr, -1, 4,
-                   op.ins.res, s->divider(dbuf));  // divider unchanged by insert
+                   op.ins.res, {s->div_data(), s->_div_len});  // divider unchanged by insert
       }
       leaf_page(uint32_t asize, sal::ptr_address_seq seq, const clone_update_op& op) noexcept
       {
          this->init_page(asize, type_id, seq);
-         uint8_t dbuf[1056];
          init_from(op.src, 0, op.src->_nkeys, op.src->_cpfx_len, nullptr, 0, nullptr, &op.upd,
-                   -1, 4, op.res, op.src->divider(dbuf));  // divider unchanged
+                   -1, 4, op.res, {op.src->div_data(), op.src->_div_len});  // divider unchanged
       }
       leaf_page(uint32_t asize, sal::ptr_address_seq seq, const clone_remove_op& op) noexcept
       {
          this->init_page(asize, type_id, seq);
-         uint8_t dbuf[1056];
          init_from(op.src, 0, op.src->_nkeys, op.src->_cpfx_len, nullptr, 0, nullptr, nullptr,
-                   int(op.index), 4, op.res, op.src->divider(dbuf));  // divider unchanged
+                   int(op.index), 4, op.res, {op.src->div_data(), op.src->_div_len});  // unchanged
       }
       leaf_page(uint32_t asize, sal::ptr_address_seq seq, const split_op& op) noexcept
       {
@@ -334,54 +325,7 @@ namespace sal_art_ref
       {
          return {cpfx_data(), _cpfx_len};
       }
-      // The divider is stored EXT-ONLY: only the bytes BEYOND the cpfx (cpfx is a prefix of the
-      // divider and is already stored once in _cpfx — never duplicate it). full divider =
-      // cpfx[0..min(_div_len,_cpfx_len)] ++ ext. ext is tiny (the distinguishing bytes), so it
-      // lives inline in CL0 — the part route reads on every hop is in the first 128 B, for free.
-      uint32_t ext_len() const noexcept { return _div_len > _cpfx_len ? _div_len - _cpfx_len : 0; }
-      std::span<const uint8_t> div_ext() const noexcept
-      {
-         const uint32_t el = ext_len();
-         return {el <= uint32_t(div_inl_cap) ? _div_inl : div_data(), el};
-      }
-      // Materialize the full divider (cpfx-prefix ++ ext) into buf — cold paths only (split /
-      // clone-inherit / divergence). buf must hold >= _div_len bytes.
-      std::span<const uint8_t> divider(uint8_t* buf) const noexcept
-      {
-         const uint32_t cm = _div_len < _cpfx_len ? _div_len : _cpfx_len;
-         std::memcpy(buf, cpfx_data(), cm);
-         const uint32_t el = ext_len();
-         if (el)
-         {
-            const std::span<const uint8_t> e = div_ext();
-            std::memcpy(buf + cm, e.data(), el);
-         }
-         return {buf, _div_len};
-      }
-      // HOT read path: compare key[depth..] against divider[depth..] (the lower-bound test).
-      // <0 => key < divider (belongs before this page); >=0 => this page owns it. Sources divider
-      // bytes from ext (inline, CL0) and only touches cpfx (tail) when depth < cpfx_len (rare).
-      int div_cmp(const uint8_t* k, uint32_t klen, uint32_t depth) const noexcept
-      {
-         const uint32_t dl = _div_len;
-         if (depth >= dl)
-            return 0;  // path already consumed the whole divider → key >= divider
-         const uint32_t                 cl  = _cpfx_len;
-         const uint8_t*                 cp  = nullptr;  // lazy: cpfx tail read only if depth < cl
-         const std::span<const uint8_t> ext = div_ext();
-         for (uint32_t i = depth; i < dl; ++i)
-         {
-            uint8_t dvb;
-            if (i < cl) { if (!cp) cp = cpfx_data(); dvb = cp[i]; }
-            else        dvb = ext[i - cl];
-            if (i - depth >= (klen > depth ? klen - depth : 0u))
-               return -1;  // key exhausts inside the divider → key < divider
-            const uint8_t kb = k[i];
-            if (kb != dvb)
-               return kb < dvb ? -1 : 1;
-         }
-         return 0;  // key matched the full divider prefix → key >= divider
-      }
+      std::span<const uint8_t> divider() const noexcept { return {div_data(), _div_len}; }
       std::span<const uint8_t> suffix(uint32_t i) const noexcept { return record(i)->suffix(); }
       uint8_t                  value_type(uint32_t i) const noexcept
       {
@@ -734,8 +678,7 @@ namespace sal_art_ref
             return false;
          if (head_size() + tail_used() > size())
             return false;
-         // cpfx is always tail; the divider EXT (beyond cpfx) is tail ONLY when it spilled
-         uint32_t live = _cpfx_len + (ext_len() > div_inl_cap ? ext_len() : 0u);
+         uint32_t live = _cpfx_len + _div_len;  // both are live tail content
          uint8_t  kbuf[1056];  // full key <= 1024 (+slack)
          uint8_t  pbuf[1056];
          uint32_t plen     = 0;
@@ -1236,18 +1179,13 @@ namespace sal_art_ref
             }
             _cpfx_pos = tail_pos();
          }
-         // the page divider, stored EXT-ONLY: cpfx is a prefix of the divider and already lives in
-         // _cpfx, so keep only the bytes BEYOND the new cpfx (ncp). full divider = cpfx ++ ext. ext
-         // is tiny → inline in CL0 (read free on every route); a rare long ext spills to the tail.
-         _div_len             = uint16_t(div.size());
-         const uint32_t el    = uint32_t(div.size()) > ncp ? uint32_t(div.size()) - ncp : 0u;
-         const uint8_t* esrc  = div.data() + ncp;  // ext = div[ncp..] (== divider beyond cpfx)
-         if (el && el <= uint32_t(div_inl_cap))
-            std::memcpy(_div_inl, esrc, el);
-         else if (el)
+         // the page divider: copied verbatim (inherit) or set (split right-half). Like cpfx, it is
+         // live tail content; allocate it here so the blit/compact used-tail region carries it.
+         _div_len = uint16_t(div.size());
+         if (!div.empty())
          {
-            uint8_t* dd = reinterpret_cast<uint8_t*>(alloc_tail(uint16_t(el)));
-            std::memcpy(dd, esrc, el);
+            uint8_t* dd = reinterpret_cast<uint8_t*>(alloc_tail(uint16_t(div.size())));
+            std::memcpy(dd, div.data(), div.size());
             _div_pos = tail_pos();
          }
          const int prepend = int(src->_cpfx_len) - int(ncp);  // >0: suffixes re-expand
@@ -1366,5 +1304,5 @@ namespace sal_art_ref
       }
    } __attribute__((packed));
 
-   static_assert(sizeof(leaf_page) == 190, "paged(22) + fields(40, incl _div_inl[24]) + cbases(64) + clidx(64)");
+   static_assert(sizeof(leaf_page) == 166, "paged(22) + fields(16) + cbases(64) + clidx(64)");
 }  // namespace sal_art_ref

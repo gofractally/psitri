@@ -13,8 +13,10 @@
 #include <heart_kv.hpp>
 #include <start_ver/kv.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <thread>
@@ -30,6 +32,18 @@ static uint64_t splitmix64(uint64_t x)
    return x ^ (x >> 31);
 }
 static std::string k8(uint64_t v) { return std::string(reinterpret_cast<const char*>(&v), 8); }
+// vsz-byte value derived from a seed (>128 bytes forces a key_val_node external)
+static size_t      g_vsz = 8;
+static std::string vbig(uint64_t seed)
+{
+   std::string s(g_vsz, '\0');
+   for (size_t j = 0; j < g_vsz; j += 8)
+   {
+      uint64_t w = splitmix64(seed + j);
+      std::memcpy(&s[j], &w, std::min(size_t(8), g_vsz - j));
+   }
+   return s;
+}
 static double      dir_gb(const fs::path& p)
 {
    uint64_t        b = 0;
@@ -46,6 +60,7 @@ int main(int argc, char** argv)
    const uint64_t    N      = argc > 2 ? strtoull(argv[2], nullptr, 10) : 1'000'000ull;
    const uint32_t    rounds = argc > 3 ? uint32_t(strtoul(argv[3], nullptr, 10)) : 40;
    const std::string dir    = (argc > 4 ? std::string(argv[4]) : "/tmp/churn") + "/" + eng;
+   g_vsz                    = argc > 5 ? size_t(strtoul(argv[5], nullptr, 10)) : 8;
 
    fs::remove_all(dir);
    fs::create_directories(dir);
@@ -68,7 +83,7 @@ int main(int argc, char** argv)
       {
          auto tx = ws->start_transaction(0);
          for (uint64_t e = std::min(N, i + 1000); i < e; ++i)
-            tx.upsert(k8(splitmix64(i)), k8(i));
+            tx.upsert(k8(splitmix64(i)), vbig(i));
          tx.commit();
       }
       db->flush_now();
@@ -80,7 +95,7 @@ int main(int argc, char** argv)
          {
             auto tx = ws->start_transaction(0);
             for (uint64_t e = std::min(N, i + 1000); i < e; ++i)
-               tx.upsert(k8(splitmix64(i)), k8(i ^ (uint64_t(r) << 40)));
+               tx.upsert(k8(splitmix64(i)), vbig(i ^ (uint64_t(r) << 40)));
             tx.commit();
          }
          db->flush_now();
@@ -105,7 +120,7 @@ int main(int argc, char** argv)
       {
          auto tx = ws->start_transaction(0);
          for (uint64_t e = std::min(N, i + 1000); i < e; ++i)
-            tx.upsert(k8(splitmix64(i)), k8(i));
+            tx.upsert(k8(splitmix64(i)), vbig(i));
          tx.commit();
       }
       report("insert", 0);
@@ -115,7 +130,7 @@ int main(int argc, char** argv)
          {
             auto tx = ws->start_transaction(0);
             for (uint64_t e = std::min(N, i + 1000); i < e; ++i)
-               tx.upsert(k8(splitmix64(i)), k8(i ^ (uint64_t(r) << 40)));
+               tx.upsert(k8(splitmix64(i)), vbig(i ^ (uint64_t(r) << 40)));
             tx.commit();
          }
          std::this_thread::sleep_for(std::chrono::milliseconds(300));  // let compactor free

@@ -2050,14 +2050,10 @@ namespace sal_art_ref::radix
                // hop already appended this page's branch byte; _div beyond it is page-internal, so
                // NOTHING is appended to div here). A root/leftmost page (no fallback) catches every
                // key below it — return it rather than failing the fallback.
-               const leaf_page* pg    = reinterpret_cast<const leaf_page*>(h);
-               bytes            dv    = pg->divider();
-               bytes            dtail = dv.size() > depth ? dv.subspan(depth) : bytes{};
-               bytes            rem   = kb.subspan(depth < kb.size() ? depth : kb.size());
-               const size_t     m     = dtail.size() < rem.size() ? dtail.size() : rem.size();
-               int              c     = m ? std::memcmp(rem.data(), dtail.data(), m) : 0;
-               if (c == 0 && rem.size() < dtail.size())
-                  c = -1;  // key exhausts inside the page divider → below this page
+               const leaf_page* pg = reinterpret_cast<const leaf_page*>(h);
+               // div_cmp sources the divider ext from CL0 (free) and only touches the tail cpfx
+               // when depth < cpfx_len (rare): the divider check is in the first 128 B on the hot path.
+               const int c = pg->div_cmp(kb.data(), uint32_t(kb.size()), depth);
                if (c < 0 && have_fb)
                   return take_fallback();
                return pg;  // c >= 0 (this page owns kb), or no fallback (root/leftmost catch-all)
@@ -2641,7 +2637,8 @@ namespace sal_art_ref::radix
             // lesser divider) and the existing page hangs under its own tail byte. ntail is then
             // empty → cpl 0 → handled below. A true duplicate (D == P._div exactly) is caught by the
             // cpl!=ptail.size() assert in the d2==D.size() branch.
-            bytes      pdv   = page_at(*_ses, child)->divider();
+            uint8_t    pdbuf[1056];
+            bytes      pdv   = page_at(*_ses, child)->divider(pdbuf);  // materialize P's full divider
             bytes      ptail = pdv.size() > depth + 1 ? pdv.subspan(depth + 1) : bytes{};
             bytes      ntail = D.subspan(depth + 1);
             const int  mcl   = int(std::min(ptail.size(), ntail.size()));
@@ -2906,8 +2903,9 @@ namespace sal_art_ref::radix
          // The page divider rides on each half: L keeps pg's own divider (its radix slot is
          // unchanged); R's divider IS the split divider (sp.divider()), the same key inserted into
          // the radix below. This populates leaf_page::_div for the canonical-collapse read path.
+         uint8_t          ldbuf[1056];  // materialize pg's full divider for L (cold split path)
          ptr_address      L  = _ses->alloc<leaf_page>(
-             sal::alloc_hint{}, leaf_page::split_op{pg, 0, sp.index, kvres(*_ses), pg->divider()});
+             sal::alloc_hint{}, leaf_page::split_op{pg, 0, sp.index, kvres(*_ses), pg->divider(ldbuf)});
          _ses->get_ref<leaf_page>(L).obj()->for_each_child([&](ptr_address c) { _ses->retain(c); });
          ptr_address R = _ses->alloc<leaf_page>(
              sal::alloc_hint{},

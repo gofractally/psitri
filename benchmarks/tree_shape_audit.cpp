@@ -150,10 +150,22 @@ int main(int argc, char** argv)
    };
    Stat                      per_type[256];
    uint64_t                  total_compact = 0, total_payload = 0, total_compacted = 0;
+   uint64_t                  total_page_keys = 0;  // Σ leaf_page::num_keys() → avg keys/page
+   const uint64_t page_sample = std::getenv("AUDIT_PAGE_SAMPLE")
+                                    ? strtoull(std::getenv("AUDIT_PAGE_SAMPLE"), nullptr, 10) : 0;
+   bool                      stop_walk = false;
    uint64_t                  kv_key_bytes = 0, kv_value_bytes = 0;  // key_val key vs value split
    uint64_t                  size_hist[40] = {0};   // log2 buckets
    uint64_t                  depth_hist[64] = {0};  // terminal (leaf-of-DAG) depth
    uint64_t                  sl_fanout[8] = {0};    // setlist_u8 branch count: 1,2-4,5-8,9-16,17-32,33-64,65-128,129+
+   // in-page suffix divergence: shared-prefix length between ADJACENT sorted suffixes.
+   // cpl==0 → the two keys differ on the FIRST suffix byte (resolve in 1 byte); cpl>=1 → they
+   // share byte(s), needing 2+ to resolve. + the page's chosen resolution column width (_pfxw).
+   uint64_t adj_cpl_hist[8] = {0};
+   uint64_t adj_pairs       = 0;
+   uint64_t pfxw_hist[5]    = {0};  // index by _pfxw (1,2,4)
+   uint64_t cpfx_len_sum    = 0;    // Σ leaf_page::_cpfx_len → avg factored common prefix
+   uint64_t cpfx_hist[8]    = {0};  // cpfx length buckets: 0,1,2,3,4-7,8-15,16-31,32+
    uint64_t                  sl1_term = 0, sl1_inlineval = 0, sl1_childptr = 0;  // single-branch breakdown
    uint64_t                  total_nodes = 0, total_bytes = 0, terminals = 0;
    std::unordered_set<uint64_t> seen;
@@ -230,11 +242,30 @@ int main(int argc, char** argv)
          else if (ty == uint8_t(sal_art_ref::leaf_page::type_id))
          {
             const auto* p = ses->get_ref<sal_art_ref::leaf_page>(a).obj();
+            total_page_keys += p->num_keys();
+            if (p->prefix_width() < 5) pfxw_hist[p->prefix_width()]++;
+            {
+               const uint32_t cl = uint32_t(p->common_prefix().size());
+               cpfx_len_sum += cl;
+               const int cb = cl == 0 ? 0 : cl <= 3 ? cl : cl < 8 ? 4 : cl < 16 ? 5 : cl < 32 ? 6 : 7;
+               cpfx_hist[cb]++;
+            }
+            const uint8_t* prev = nullptr; uint32_t prevlen = 0;
             for (uint32_t i = 0; i < p->num_keys(); ++i)
             {
                const auto* iv = p->record(i);
                payload += uint64_t(iv->suffix_len) + iv->value_len;
+               if (prev)  // shared-prefix length with the previous (sorted) suffix
+               {
+                  uint32_t c = 0, m = std::min(prevlen, uint32_t(iv->suffix_len));
+                  while (c < m && prev[c] == iv->data[c]) ++c;
+                  adj_cpl_hist[c < 7 ? c : 7]++;
+                  ++adj_pairs;
+               }
+               prev = iv->data; prevlen = iv->suffix_len;
             }
+            if (page_sample && per_type[ty].count + 1 >= page_sample)
+               stop_walk = true;  // enough pages sampled for a representative keys/page
          }
          if (rti::kind_of(hdr->type()) == rti::radix_kind::setlist_u8)
          {
@@ -278,7 +309,11 @@ int main(int argc, char** argv)
             ++terminals;
             depth_hist[depth < 63 ? depth : 63]++;
          }
+         if (stop_walk)
+            break;
       }
+      if (stop_walk)
+         break;
    }
 
    // ---- results ----
@@ -315,6 +350,51 @@ int main(int argc, char** argv)
          row(type_name(uint8_t(t)), per_type[t]);
    Stat tot{total_nodes, total_bytes, total_compact, total_payload, total_compacted};
    row("TOTAL", tot);
+
+   {
+      const uint64_t npages = per_type[uint8_t(sal_art_ref::leaf_page::type_id)].count;
+      const uint64_t kvn    = per_type[uint8_t(sal_art_ref::key_val_node::type_id)].count;
+      printf("\n  KEYS/PAGE: %llu keys across %llu leaf_pages = %.1f keys/page (%s)\n",
+             (unsigned long long)total_page_keys, (unsigned long long)npages,
+             npages ? double(total_page_keys) / double(npages) : 0.0,
+             stop_walk ? "SAMPLED" : "full");
+      printf("  KEY_VAL externals: %llu nodes (avg key %.0fB, val %.0fB) — vs %llu in-page page-keys\n",
+             (unsigned long long)kvn,
+             kvn ? double(kv_key_bytes) / double(kvn) : 0.0,
+             kvn ? double(kv_value_bytes) / double(kvn) : 0.0,
+             (unsigned long long)total_page_keys);
+      // in-page suffix divergence: adjacent sorted suffixes' shared-prefix length
+      printf("  SUFFIX DIVERGENCE (adjacent in-page keys, %llu pairs):\n", (unsigned long long)adj_pairs);
+      const char* lbl[8] = {"differ @byte1 (0 shared)", "@byte2 (1 shared)", "@byte3 (2)",
+                            "@byte4 (3)", "@byte5 (4)", "@byte6 (5)", "@byte7 (6)", ">=byte8 (7+)"};
+      for (int c = 0; c < 8; ++c)
+         if (adj_cpl_hist[c])
+            printf("    %-26s %10llu  %5.1f%%\n", lbl[c], (unsigned long long)adj_cpl_hist[c],
+                   adj_pairs ? 100.0 * double(adj_cpl_hist[c]) / double(adj_pairs) : 0.0);
+      printf("  PAGE resolution width (_pfxw): 1B=%llu  2B=%llu  4B=%llu pages\n",
+             (unsigned long long)pfxw_hist[1], (unsigned long long)pfxw_hist[2],
+             (unsigned long long)pfxw_hist[4]);
+      printf("  CPFX (factored common prefix) avg %.1f B/page; buckets 0:%llu 1:%llu 2:%llu 3:%llu "
+             "4-7:%llu 8-15:%llu 16-31:%llu 32+:%llu\n",
+             npages ? double(cpfx_len_sum) / double(npages) : 0.0,
+             (unsigned long long)cpfx_hist[0], (unsigned long long)cpfx_hist[1],
+             (unsigned long long)cpfx_hist[2], (unsigned long long)cpfx_hist[3],
+             (unsigned long long)cpfx_hist[4], (unsigned long long)cpfx_hist[5],
+             (unsigned long long)cpfx_hist[6], (unsigned long long)cpfx_hist[7]);
+      {
+         double avg_sfx_cpl = 0;
+         for (int c = 0; c < 8; ++c) avg_sfx_cpl += double(c) * double(adj_cpl_hist[c]);
+         avg_sfx_cpl = adj_pairs ? avg_sfx_cpl / double(adj_pairs) : 0.0;
+         printf("  => adjacent FULL keys share ~%.1f B (cpfx %.1f + suffix-overlap >=%.1f); "
+                "cpfx captures %.0f%% of the shared run\n",
+                (npages ? double(cpfx_len_sum) / double(npages) : 0.0) + avg_sfx_cpl,
+                npages ? double(cpfx_len_sum) / double(npages) : 0.0, avg_sfx_cpl,
+                ((npages ? double(cpfx_len_sum) / double(npages) : 0.0) + avg_sfx_cpl) > 0
+                    ? 100.0 * (npages ? double(cpfx_len_sum) / double(npages) : 0.0) /
+                          ((npages ? double(cpfx_len_sum) / double(npages) : 0.0) + avg_sfx_cpl)
+                    : 0.0);
+      }
+   }
 
    const uint64_t total_ovhd  = total_bytes - total_payload;
    const uint64_t total_slack = total_bytes - total_compact;

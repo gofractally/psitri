@@ -1,7 +1,6 @@
 /** @file mdbx_impl.cpp
  *  @brief PsiTri-backed MDBX C and C++ API implementation.
  */
-#define PSITRIMDBX_BACKEND_START_VER 1    // [sal-isolation] non-SAL backend — hang at LogIndex too?
 // #define SAL_STALL_DEBUG 1              // [stall-debug] OFF for clean baseline (per-op fflush confound)
 #include <mdbx.h>
 #include <mdbx.h++>
@@ -40,8 +39,13 @@
 #if !defined(PSITRIMDBX_BACKEND_SAL_ART_REF)
 #define PSITRIMDBX_BACKEND_SAL_ART_REF 0
 #endif
+//   PSITRIMDBX_BACKEND_START_REF     — start_ref DIRECT (part-family ART, refcount liveness, in-RAM)
+#if !defined(PSITRIMDBX_BACKEND_START_REF)
+#define PSITRIMDBX_BACKEND_START_REF 0
+#endif
 #if !PSITRIMDBX_BACKEND_TIERED_PSITRI && !PSITRIMDBX_BACKEND_PSITRI && \
-    !PSITRIMDBX_BACKEND_START_VER && !PSITRIMDBX_BACKEND_SAL_ART_REF
+    !PSITRIMDBX_BACKEND_START_VER && !PSITRIMDBX_BACKEND_SAL_ART_REF && \
+    !PSITRIMDBX_BACKEND_START_REF
 #define PSITRIMDBX_BACKEND_DELTA_ART 1
 #else
 #define PSITRIMDBX_BACKEND_DELTA_ART 0
@@ -52,6 +56,9 @@
 
 #include <sal/config.hpp>    // sal::open_mode
 #include <start_ver/kv.hpp>  // start_ver::kv::engine (hot delta / standalone store)
+#if PSITRIMDBX_BACKEND_START_REF
+#include <start_ref/kv.hpp>  // start_ref::kv::engine (part-family ART, refcount liveness)
+#endif
 #if PSITRIMDBX_USES_TIERED
 #include <delta_art/tiered_kv.hpp>
 #endif
@@ -139,6 +146,8 @@ using TK         = delta_art::tiered_kv<start_ver::kv::engine,
 using TK         = psitri::dwal::psitri_engine<>;  // legacy psitri DIRECT (old algo)
 #elif PSITRIMDBX_BACKEND_START_VER
 using TK         = start_ver::kv::engine;  // start_ver alone — no cold base / drain
+#elif PSITRIMDBX_BACKEND_START_REF
+using TK         = start_ref::kv::engine;  // start_ref alone — part-family ART, refcount liveness
 #elif PSITRIMDBX_BACKEND_SAL_ART_REF
 using TK         = sal_art_ref::radix::dwal_engine;  // sal_art_ref DIRECT — no tiering / no merger
 #else
@@ -2553,6 +2562,9 @@ int mdbx_env_open(MDBX_env* env, const char* pathname,
 #if PSITRIMDBX_BACKEND_START_VER
       // start_ver standalone: no tiered knobs (no hot/cold flush threshold).
       env->db = be_db::open(env->path, open_mode);
+#elif PSITRIMDBX_BACKEND_START_REF
+      // start_ref standalone: part-family ART, refcount liveness; same open shape as start_ver.
+      env->db = be_db::open(env->path, open_mode);
 #elif PSITRIMDBX_BACKEND_PSITRI
       // legacy psitri direct: config is sal::runtime_config (no tiered knobs).
       psitri::runtime_config cfg;
@@ -3954,11 +3966,14 @@ int mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
 {
    // [PSITRI_NF_LOG] capture the incoming key (lookup key for SET-family ops) and the op,
    // then log on a NOTFOUND result. The last entry before a fatal MDBX_NOTFOUND is the culprit.
+   // [perf] cache the env check ONCE — mdbx_cursor_get is the read-heavy hot path; a per-call
+   // std::getenv("PSITRI_NF_LOG") locks+scans environ (~5% __findenv_locked in Silkworm sync).
+   static const bool nf_log = std::getenv("PSITRI_NF_LOG") != nullptr;
    std::string in_key;
-   if (std::getenv("PSITRI_NF_LOG") && key && key->iov_base)
+   if (nf_log && key && key->iov_base)
       in_key.assign(static_cast<const char*>(key->iov_base), key->iov_len);
    int rc = mdbx_cursor_get_impl(cursor, key, data, op);
-   if (rc == MDBX_NOTFOUND && std::getenv("PSITRI_NF_LOG"))
+   if (rc == MDBX_NOTFOUND && nf_log)
    {
       char where[32];
       std::snprintf(where, sizeof where, "cursor_get op=%d", int(op));

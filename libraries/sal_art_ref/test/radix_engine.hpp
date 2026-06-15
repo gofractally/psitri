@@ -985,6 +985,23 @@ namespace sal_art_ref::radix
          }
       }
 
+      // [sync] PSITRI_SYNC env → SAL commit sync level (default none, the bench setting). Cached once
+      // (NOT per-commit getenv). none | async(msync_async) | msync(msync_sync) | fsync | full.
+      static sal::sync_type radix_sync_mode() noexcept
+      {
+         static const sal::sync_type s = [] {
+            const char* e = std::getenv("PSITRI_SYNC");
+            if (!e) return sal::sync_type::none;
+            const std::string_view v{e};
+            if (v == "async" || v == "msync_async") return sal::sync_type::msync_async;
+            if (v == "msync" || v == "msync_sync") return sal::sync_type::msync_sync;
+            if (v == "fsync") return sal::sync_type::fsync;
+            if (v == "full") return sal::sync_type::full;
+            return sal::sync_type::none;
+         }();
+         return s;
+      }
+
       static std::unique_ptr<sal::allocator> make_alloc(const std::filesystem::path& dir,
                                                         bool wipe      = true,
                                                         bool read_only = false)
@@ -996,7 +1013,7 @@ namespace sal_art_ref::radix
          }
          sal::runtime_config cfg;
          cfg.read_only               = read_only;
-         cfg.sync_mode               = sal::sync_type::none;
+         cfg.sync_mode               = radix_sync_mode();  // [sync] PSITRI_SYNC env (default none)
          cfg.write_protect_on_commit = false;
          cfg.enable_read_cache       = false;
          // Sessions allocate into PINNED (mlock'd) segments by default and pinned
@@ -1766,6 +1783,14 @@ namespace sal_art_ref::radix
          dispatch(ses, a, [&](auto ad) { empty = !ad.valid(ad.first()) && ad.term().is_null(); });
          return empty;
       }
+      // [debug] SIGBUS-hunt diagnostics (dump-if-bad + subtree validation). Compile-time
+      // gated: define RADIX_DEBUG to enable. Production builds expand these to nothing, so
+      // there is ZERO branch/call overhead in the hot routing path (route_to_page/max_page).
+#ifdef RADIX_DEBUG
+#  define RADIX_DUMP_IF_BAD(...) radix_dump_if_bad(__VA_ARGS__)
+#else
+#  define RADIX_DUMP_IF_BAD(...) ((void)0)
+#endif
       static bool radix_validate_on()
       {
          static const bool on = std::getenv("RADIX_VALIDATE") != nullptr;
@@ -1817,17 +1842,22 @@ namespace sal_art_ref::radix
             }
          });
       }
-      void validate_root(ptr_address root, const char* where)
+      void validate_root([[maybe_unused]] ptr_address root, [[maybe_unused]] const char* where)
       {
+#ifdef RADIX_DEBUG
          if (radix_validate_on())
             validate_subtree(*_ses, root, 0, where);
+#endif
       }
 
       static void radix_dump_if_bad(const char* where, sal::allocator_session& ses,
                                     ptr_address parent, const sal::alloc_header* h, int info,
                                     ptr_address child)
       {
-         if (!std::getenv("RADIX_DUMP"))
+         // [perf] cache the env check ONCE — this is called on every route_to_page/max_page
+         // (hot path); a per-call std::getenv locks+scans environ (~20% in Silkworm sync).
+         static const bool dump_on = std::getenv("RADIX_DUMP") != nullptr;
+         if (!dump_on)
             return;
          const uint32_t child_raw = uint32_t(*child);
          const bool     is_null   = (child == sal::null_ptr_address);
@@ -1912,7 +1942,7 @@ namespace sal_art_ref::radix
                   next = ad.term().as_pointer();
                }
             });
-            radix_dump_if_bad("max_page", ses, addr, h, chosen_c, next);
+            RADIX_DUMP_IF_BAD("max_page", ses, addr, h, chosen_c, next);
             addr = next;
          }
       }
@@ -2055,7 +2085,7 @@ namespace sal_art_ref::radix
             // 1 (page), 4 (max_page(next)). Actions 2 (fallback) and 3 (max_page(addr))
             // do NOT use `next` (it stays default-0, a valid-but-unrelated address).
             if (action == 0 || action == 1 || action == 4)
-               radix_dump_if_bad("route_to_page", ses, addr, h, action, next);
+               RADIX_DUMP_IF_BAD("route_to_page", ses, addr, h, action, next);
             switch (action)
             {
                case 0:
@@ -2092,7 +2122,7 @@ namespace sal_art_ref::radix
                   if (fpage)
                      return reinterpret_cast<const leaf_page*>(
                          ses.get_ref<sal::alloc_header>(fnext).obj());
-                  radix_dump_if_bad("route_fallback", ses, fb_node,
+                  RADIX_DUMP_IF_BAD("route_fallback", ses, fb_node,
                                     ses.get_ref<sal::alloc_header>(fb_node).obj(), fb_li, fnext);
                   return max_page(ses, fnext, div, dlen);
                }
@@ -3382,6 +3412,7 @@ namespace sal_art_ref::radix
             if (!_valid)
                return (_end < 0) ? seek_begin() : false;  // from rend → first key; from end → stay
             auto lk = rlock();
+            if (_stack_deferred) materialize_stack_();  // [lazy] build the divider path now
             return advance_steps();
          }
          bool prev()  // retreat to the previous key in order; true if it landed on one
@@ -3389,6 +3420,7 @@ namespace sal_art_ref::radix
             if (!_valid)
                return (_end >= 0) ? seek_last() : false;  // from end → last key; from rend → stay
             auto lk = rlock();
+            if (_stack_deferred) materialize_stack_();  // [lazy] build the divider path now
             return retreat_steps();
          }
          bool seek_last()  // position at the last (largest) key; true if there is one
@@ -3531,11 +3563,12 @@ namespace sal_art_ref::radix
 
          void reset() noexcept
          {
-            _depth      = 0;
-            _klen       = 0;
-            _valid      = false;
-            _end        = 0;
-            _is_subtree = false;
+            _depth          = 0;
+            _klen           = 0;
+            _valid          = false;
+            _end            = 0;
+            _is_subtree     = false;
+            _stack_deferred = false;
          }
          void append(const uint8_t* p, size_t n) noexcept
          {
@@ -3960,12 +3993,27 @@ namespace sal_art_ref::radix
                }
                else
                {
-                  // lower-bound route to the owning page, then exact-build the divider path so
-                  // next()/prev() walk neighboring pages from these frames.
-                  uint8_t  db[1056];  // divider <= max key + 1
-                  uint32_t dl = 0;
-                  route_to_page(ses(), root, q, db, &dl);
-                  build_to_page(bytes{db, dl}, q);
+                  // [lazy] Route to the owning page and position WITHIN it. Page entries are
+                  // self-contained (key = page cpfx+suffix, value in-page), so a seek+read needs
+                  // neither the divider-path frame stack nor a re-descent — take_page_entry sets
+                  // key+value directly. Build the full stack lazily only when next()/prev() must
+                  // cross a page boundary (materialize_stack_). A q PAST the page end must spill,
+                  // and strict (upper_bound) may step past an exact match — both need the stack,
+                  // so they fall back to the eager build_to_page.
+                  uint8_t          db[1056];  // divider <= max key + 1
+                  uint32_t         dl = 0;
+                  const leaf_page* owner = route_to_page(ses(), root, q, db, &dl);
+                  const int        lb = owner->lower_bound(q.data(), uint32_t(q.size()), kvres(ses()));
+                  if (!strict && lb < int(owner->num_keys()))
+                  {
+                     take_page_entry(owner, lb);  // self-contained: sets _kbuf (key) + _val (value)
+                     _valid          = true;
+                     _stack_deferred = true;
+                  }
+                  else
+                  {
+                     build_to_page(bytes{db, dl}, q);  // spill / strict: build the full stack
+                  }
                }
                if (_valid && strict &&
                    key() == key_view(reinterpret_cast<const char*>(q.data()), q.size()))
@@ -4050,6 +4098,23 @@ namespace sal_art_ref::radix
             }
          }
 
+         // [lazy] A deferred seek positioned the cursor inside its owning page WITHOUT building
+         // the divider-path frame stack (key+value are page-self-contained). Build it now —
+         // re-route from the current key and exact-build the path — so advance/retreat_steps can
+         // cross page boundaries. Only the FIRST next()/prev() after a seek pays this; a pure
+         // seek+read never does. Caller already holds the read lock.
+         void materialize_stack_()
+         {
+            uint8_t        q[1024];
+            const uint32_t ql = _klen;          // current key (set by the deferred take_page_entry)
+            std::memcpy(q, _kbuf, ql);
+            uint8_t  db[1056];
+            uint32_t dl = 0;
+            route_to_page(ses(), _root.address(), bytes{q, ql}, db, &dl);
+            build_to_page(bytes{db, dl}, bytes{q, ql});  // rebuilds frames + repositions same entry
+            _stack_deferred = false;
+         }
+
          // Position at an EXACT existing key, building the descent path along the way.
          void build_to(bytes key)
          {
@@ -4123,6 +4188,9 @@ namespace sal_art_ref::radix
          ptr_address _subtree{};           // that subtree's root (valid when _is_subtree)
          ptr_address _nextaddr{};
          uint32_t    _nextdepth = 0;
+         // [lazy] a seek positioned inside the owning page but did NOT build the divider-path
+         // frame stack (key+value are page-self-contained). next()/prev() build it on demand.
+         bool        _stack_deferred = false;
       };
 
      public:
@@ -4401,7 +4469,7 @@ namespace sal_art_ref::radix
          void publish(uint32_t idx, root_ptr w)
          {
             auto old = _t->_ses->set_root<sal::alloc_header>(sal::root_object_number(idx),
-                                                             std::move(w), sal::sync_type::none);
+                                                             std::move(w), radix_sync_mode());
          }
 
         public:

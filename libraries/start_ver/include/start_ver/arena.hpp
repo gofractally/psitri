@@ -611,9 +611,16 @@ namespace start_ver
       // run (tie: nearest forward of `cur`), else grow. Returns segment index.
       // `cur` (the segment that just failed to satisfy) is excluded — claiming
       // it again would loop when it qualifies by count but lacks the needed run.
-      uint32_t claim_(uint32_t cur)
+      uint32_t claim_(uint32_t cur, bool force_grow = false)
       {
          std::lock_guard g(_claim_mutex);
+         // Escalation path: the caller has cycled reuse candidates that have free
+         // space but no run long enough for its request. A FRESH segment is 100%
+         // free, so it always satisfies any run up to lines_per_segment. Go
+         // straight to grow (which throws the honest "arena is full" only at the
+         // real cap) instead of handing back another unsatisfiable fragment.
+         if (force_grow)
+            return grow_locked_();
          const uint32_t  nseg = num_segments();
          if (cur != UINT32_MAX && cur + 1 < nseg && qualifies_(cur + 1, thr8_()))
          {
@@ -1077,14 +1084,38 @@ namespace start_ver
             return g;
          }
          // This segment can't satisfy n ahead of the floor: switch (SPEC §8).
-         const uint32_t prev = s._segment;
+         // Reuse is preferred, but a fragmented arena can keep handing back
+         // segments that have free space yet no n-contiguous run. After a few
+         // distinct reuse candidates fail, escalate to a FRESH segment (which
+         // always has an n-contiguous run for n <= lines_per_segment) rather than
+         // cycle to the livelock. Small allocs succeed on the first claim and
+         // never escalate, so this does NOT reintroduce eager file growth.
+         const uint32_t prev       = s._segment;
+         const bool     force_grow = attempts >= 8;
          a.release_claim_(prev);
-         s._segment = a.claim_(prev);
+         s._segment = a.claim_(prev, force_grow);
          s._floor   = line_idx(s._segment) * lines_per_segment;
          s._cursor  = s._floor;
          a._stats.range_switches.fetch_add(1, std::memory_order_relaxed);
          if (attempts > 1024)
+         {
+            // Diagnostic: is this the 32GB capacity wall, or fragmentation at low
+            // occupancy? Report segments used vs cap and total free space.
+            const uint32_t nseg = a.num_segments();
+            uint64_t       free8 = 0;
+            for (uint32_t si = 0; si < nseg; ++si)
+               free8 += a.freeset_(si).free_groups8();
+            const double used_gb = double(nseg) * lines_per_segment * 128.0 / (1u << 30);
+            const double cap_gb  = double(a._cfg.max_segments) * lines_per_segment * 128.0 / (1u << 30);
+            const double free_gb = double(free8) * 8.0 * 128.0 / (1u << 30);
+            std::fprintf(stderr,
+                         "part livelock: need_n=%u lines; segments=%u/%u (%.2f GB of %.2f GB cap); "
+                         "total_free=%.3f GB (%llu 8-groups)\n",
+                         n, nseg, a._cfg.max_segments, used_gb, cap_gb, free_gb,
+                         (unsigned long long)free8);
+            std::fflush(stderr);
             throw std::runtime_error("part: allocation livelock");
+         }
       }
    }
 

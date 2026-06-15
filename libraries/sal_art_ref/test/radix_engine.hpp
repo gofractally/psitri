@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <execinfo.h>  // [RADIX_DUMP] backtrace() — caller chain at the bad-child abort
 #include <stdexcept>  // std::runtime_error (ordered cursor hitting a bucket — see dispatch())
 #include <cstdint>
 #include <cstring>
@@ -177,6 +178,11 @@ namespace sal_art_ref::radix
          // reopened database the compactor would MOVE live heart nodes using the default
          // alloc_header ops (wrong visit/checksum/move semantics) — silent corruption.
          _alloc->start_background_threads();
+         // [BISECT] RADIX_NO_COMPACT=1 stops the compactor (keeps the release thread, so
+         // get_new_segment doesn't stall). If the cold-base SIGBUS vanishes, the race is the
+         // compactor relocating live tree nodes that route_to_page reads via a RAW pointer.
+         if (std::getenv("RADIX_NO_COMPACT"))
+            _alloc->stop_compactor_thread();
       }
 
       // Radix + bucket hybrid: leaf -> bucket-of-leaves -> radix with bucket/leaf branches.
@@ -304,6 +310,7 @@ namespace sal_art_ref::radix
          }
          else
             root = std::move(old);  // unchanged / mutated in place — put it back
+         validate_root(root.address(), "mutate_root");  // [RADIX_VALIDATE] post-op, non-intrusive
       }
 
       // The 1024-byte key contract is load-bearing: route/divider/rebuild buffers throughout
@@ -983,6 +990,23 @@ namespace sal_art_ref::radix
             case radix_kind::bitset1:  // not produced
                break;
          }
+      }
+
+      // [sync] PSITRI_SYNC env → SAL commit sync level (default none, the bench setting). Cached once
+      // (NOT per-commit getenv). none | async(msync_async) | msync(msync_sync) | fsync | full.
+      static sal::sync_type radix_sync_mode() noexcept
+      {
+         static const sal::sync_type s = [] {
+            const char* e = std::getenv("PSITRI_SYNC");
+            if (!e) return sal::sync_type::none;
+            const std::string_view v{e};
+            if (v == "async" || v == "msync_async") return sal::sync_type::msync_async;
+            if (v == "msync" || v == "msync_sync") return sal::sync_type::msync_sync;
+            if (v == "fsync") return sal::sync_type::fsync;
+            if (v == "full") return sal::sync_type::full;
+            return sal::sync_type::none;
+         }();
+         return s;
       }
 
       static std::unique_ptr<sal::allocator> make_alloc(const std::filesystem::path& dir,
@@ -1750,6 +1774,152 @@ namespace sal_art_ref::radix
          *dlen += uint32_t(n);
       }
 
+      // [RADIX_DUMP probe] A child ptr_address that does NOT resolve to a live control block
+      // (out of the allocated zone range, or freed) can only be garbage bytes (divider/stem
+      // data) misread as a pointer — i.e. the node's branch indexing/count is wrong. Dump the
+      // offending PARENT node + abort, so we see the exact type/layout BEFORE the get_ref BUS.
+      // Deterministic bug, so the probe does not perturb it away. Enable with RADIX_DUMP=1.
+      // [RADIX_VALIDATE] A page-model ROUTER with no branches AND no term is structurally
+      // dead — route_to_page/max_page follow its null term into a SIGBUS. Such a node must
+      // never stay linked: the remove path flags it (_emptied) so the parent drops + frees
+      // it. Detect one that slipped through (refcount>0, still linked).
+      static bool is_empty_router(sal::allocator_session& ses, ptr_address a)
+      {
+         if (a == sal::null_ptr_address || is_page(ses, a))
+            return false;
+         bool empty = false;
+         dispatch(ses, a, [&](auto ad) { empty = !ad.valid(ad.first()) && ad.term().is_null(); });
+         return empty;
+      }
+      // [debug] SIGBUS-hunt diagnostics (dump-if-bad + subtree validation). Compile-time
+      // gated: define RADIX_DEBUG to enable. Production builds expand these to nothing, so
+      // there is ZERO branch/call overhead in the hot routing path (route_to_page/max_page).
+#ifdef RADIX_DEBUG
+#  define RADIX_DUMP_IF_BAD(...) radix_dump_if_bad(__VA_ARGS__)
+#else
+#  define RADIX_DUMP_IF_BAD(...) ((void)0)
+#endif
+      static bool radix_validate_on()
+      {
+         static const bool on = std::getenv("RADIX_VALIDATE") != nullptr;
+         return on;
+      }
+      // [RADIX_VALIDATE] POST-OP, NON-INTRUSIVE: walk the whole (just-committed) page-model
+      // subtree; abort at the first structurally-dead router (no branch AND no term) still
+      // linked. Runs only after mutate_root finishes the descent (session quiescent), so it
+      // never perturbs the COW state machine the way a mid-descent probe would.
+      static void validate_subtree(sal::allocator_session& ses, ptr_address addr, int depth,
+                                   const char* where)
+      {
+         if (addr == sal::null_ptr_address || is_page(ses, addr))
+            return;
+#ifdef SAL_STALL_DEBUG
+         // [stall-debug] The radix is shallow; depth > 64 means a CYCLE (this DFS would otherwise
+         // infinite-recurse → stack overflow). Catch it HERE, right after the mutate_root that
+         // created it (run with RADIX_VALIDATE=1), so the abort pins the offending mutation.
+         if (depth > 64)
+         {
+            std::fprintf(stderr,
+                         "\n=== RADIX_VALIDATE_CYCLE (%s) === addr=%u depth=%d — a node branch "
+                         "points back to an ancestor (cycle created by the last mutation) ===\n",
+                         where, uint32_t(*addr), depth);
+            std::fflush(stderr);
+            std::abort();
+         }
+#endif
+         dispatch(ses, addr, [&](auto ad) {
+            const bool has_branch = ad.valid(ad.first());
+            const bool has_term   = !ad.term().is_null();
+            if (!has_branch && !has_term)
+            {
+               const sal::alloc_header* h = ad.node();
+               std::fprintf(stderr,
+                            "\n=== RADIX_EMPTY_ROUTER (%s) === addr=%u type=%u size=%u "
+                            "prefix_len=%zu depth=%d ===\n",
+                            where, uint32_t(*addr), unsigned(h->type()), h->size(),
+                            ad.prefix().size(), depth);
+               std::abort();
+            }
+            if (has_term && ad.term().is_pointer())
+               validate_subtree(ses, ad.term().as_pointer(), depth + 1, where);
+            for (int c = ad.first(); ad.valid(c); c = ad.next(c))
+            {
+               smart_address b = ad.branch(c);
+               if (b.is_pointer())
+                  validate_subtree(ses, b.as_pointer(), depth + 1, where);
+            }
+         });
+      }
+      void validate_root([[maybe_unused]] ptr_address root, [[maybe_unused]] const char* where)
+      {
+#ifdef RADIX_DEBUG
+         if (radix_validate_on())
+            validate_subtree(*_ses, root, 0, where);
+#endif
+      }
+
+      static void radix_dump_if_bad(const char* where, sal::allocator_session& ses,
+                                    ptr_address parent, const sal::alloc_header* h, int info,
+                                    ptr_address child)
+      {
+         // [perf] cache the env check ONCE — this is called on every route_to_page/max_page
+         // (hot path); a per-call std::getenv locks+scans environ (~20% in Silkworm sync).
+         static const bool dump_on = std::getenv("RADIX_DUMP") != nullptr;
+         if (!dump_on)
+            return;
+         const uint32_t child_raw = uint32_t(*child);
+         const bool     is_null   = (child == sal::null_ptr_address);
+         // EVERY call site here is about to FOLLOW `child` (descend / max_page / page).
+         // A live, resolvable pointer is fine; a NULL or an unresolvable address is the
+         // bug — following it into get_ref() is the SIGBUS we are chasing. (null was
+         // previously waved through as "a separate concern" — at a follow-site it is THE
+         // concern: max_page(null)->get_ref(null) faults at ~0xbffffffff8.)
+         if (!is_null && ses.is_resolvable(child))
+            return;
+         // Discriminators for the root cause:
+         //  - refcount of the bad parent: 0 ⇒ FREED-but-still-referenced (COW lifecycle bug,
+         //    slot may be reused); ≥1 ⇒ a LIVE but structurally-empty node (write-path bug).
+         //  - byte stability across two reads: changes ⇒ a TORN read (a concurrent writer is
+         //    mutating this node in place right now).
+         int      rc = -1;
+         uint64_t snap_a[4] = {0}, snap_b[4] = {0};
+         {
+            auto sr = ses.template get_ref<sal::alloc_header>(parent);
+            rc      = int(sr.ref());
+            std::memcpy(snap_a, sr.obj(), sizeof(snap_a));
+         }
+         {
+            auto sr2 = ses.template get_ref<sal::alloc_header>(parent);
+            std::memcpy(snap_b, sr2.obj(), sizeof(snap_b));
+         }
+         const bool torn = std::memcmp(snap_a, snap_b, sizeof(snap_a)) != 0;
+         std::fprintf(stderr,
+                      "\n=== RADIX_BADCHILD (%s) === parent=%u node_type=%u size=%u | "
+                      "info=%d child_raw=0x%08x is_null=%d | refcount=%d torn_read=%d\n",
+                      where, uint32_t(*parent), unsigned(h->type()), h->size(), info, child_raw,
+                      int(is_null), rc, int(torn));
+         const uint8_t* p = reinterpret_cast<const uint8_t*>(h);
+         uint32_t       n = h->size();
+         if (n > 512)
+            n = 512;
+         for (uint32_t i = 0; i < n; i += 16)
+         {
+            std::fprintf(stderr, " %4u:", i);
+            for (uint32_t j = 0; j < 16 && i + j < n; ++j)
+               std::fprintf(stderr, " %02x", p[i + j]);
+            std::fprintf(stderr, "\n");
+         }
+         std::fflush(stderr);
+         {  // caller chain → which path held the stale raw pointer (drain-upsert vs reader-cursor)
+            void*     bt[32];
+            const int n = ::backtrace(bt, 32);
+            std::fprintf(stderr, "--- backtrace (%d frames) ---\n", n);
+            ::backtrace_symbols_fd(bt, n, fileno(stderr));
+            std::fflush(stderr);
+         }
+         std::abort();
+      }
+
       // The rightmost page under `addr` (the page of the subtree's MAX divider). Appends the
       // divider bytes it walks when `div` is non-null. ONE get_ref per hop.
       static const leaf_page* max_page(sal::allocator_session& ses, ptr_address addr, uint8_t* div,
@@ -1761,10 +1931,12 @@ namespace sal_art_ref::radix
             if (h->type() == leaf_page::type_id)
                return reinterpret_cast<const leaf_page*>(h);
             ptr_address next{};
+            int         chosen_c = -1;
             dispatch_hdr(h, [&](auto ad) {
                bytes pfx = ad.prefix();
                div_append(div, dlen, pfx.data(), pfx.size());
                const int c = ad.last();
+               chosen_c    = c;
                if (c >= 0)
                {
                   uint8_t   sb[4];
@@ -1778,6 +1950,7 @@ namespace sal_art_ref::radix
                   next = ad.term().as_pointer();
                }
             });
+            RADIX_DUMP_IF_BAD("max_page", ses, addr, h, chosen_c, next);
             addr = next;
          }
       }
@@ -1827,8 +2000,48 @@ namespace sal_art_ref::radix
                    ses.get_ref<sal::alloc_header>(fnext).obj());
             return max_page(ses, fnext, div, dlen);
          };
+#ifdef SAL_STALL_DEBUG
+         // [stall-debug] route_to_page must terminate at a leaf_page in O(key length) hops. The
+         // radix is shallow, so > 8192 hops without reaching a page means the tree has a CYCLE
+         // (some node's branch points back to an ancestor) — the live-Silkworm "stall" is the
+         // writer's upsert spinning here forever. Dump the repeating node chain and abort.
+         uint32_t    _hops = 0;
+         ptr_address _trail[64];
+#endif
          for (;;)
          {
+#ifdef SAL_STALL_DEBUG
+            _trail[_hops & 63] = addr;
+            ++_hops;
+            // Report each NEW high-water route depth: a healthy radix is shallow (tens of hops);
+            // a climbing high-water = the tree is degenerating into a deep chain (the ns=8 slowdown).
+            {
+               static uint32_t _max_hops = 0;
+               if (_hops > _max_hops + 25)
+               {
+                  _max_hops = _hops;
+                  std::fprintf(stderr,
+                               "[deep-route] NEW-MAX hops=%u key_depth=%u ns=%u klen=%zu\n", _hops,
+                               depth, kb.empty() ? 999u : unsigned(uint8_t(kb[0])), kb.size());
+                  std::fflush(stderr);
+               }
+            }
+            if (_hops > 200000)  // far beyond any real depth → a genuine CYCLE; dump + abort
+            {
+               std::fprintf(stderr,
+                            "\n=== RADIX_ROUTE_CYCLE === depth=%u hops=%u — last 64 hop nodes:\n",
+                            depth, _hops);
+               for (uint32_t t = 0; t < 64; ++t)
+               {
+                  ptr_address              a  = _trail[(_hops + t) & 63];
+                  const sal::alloc_header* hh = ses.get_ref<sal::alloc_header>(a).obj();
+                  std::fprintf(stderr, " [%2u] addr=%u type=%u size=%u\n", t, uint32_t(*a),
+                               unsigned(hh->type()), hh->size());
+               }
+               std::fflush(stderr);
+               std::abort();
+            }
+#endif
             const sal::alloc_header* h = ses.get_ref<sal::alloc_header>(addr).obj();
             if (h->type() == leaf_page::type_id)
             {
@@ -1921,6 +2134,11 @@ namespace sal_art_ref::radix
                }
                action = 2;
             });
+            // probe the child we are about to FOLLOW via `next`: action 0 (descend),
+            // 1 (page), 4 (max_page(next)). Actions 2 (fallback) and 3 (max_page(addr))
+            // do NOT use `next` (it stays default-0, a valid-but-unrelated address).
+            if (action == 0 || action == 1 || action == 4)
+               RADIX_DUMP_IF_BAD("route_to_page", ses, addr, h, action, next);
             switch (action)
             {
                case 0:
@@ -2310,6 +2528,9 @@ namespace sal_art_ref::radix
 #ifdef HEART_NO_COLLAPSE  // A/B knob: build the OLD single-child setlist chain (default = collapse)
          if (depth + 1 == D.size())
             return smart_address::from_pointer(page);
+         // Every node here (term-only deepest AND branch-carrying up-links) must stay upgradeable,
+         // so chunk the divider tail at divider_prefix_cap. The deepest node may later acquire a
+         // branch when a sibling divider is inserted under it, so it is bound by the same cap.
          constexpr int cap        = divider_prefix_cap;
          constexpr int branch_cap = divider_prefix_cap;
          const int     lo  = int(depth) + 1;
@@ -2415,7 +2636,11 @@ namespace sal_art_ref::radix
             // own. Reading P._div (the true separator, NOT cpfx) keeps P's discriminator exact.
             // Mirrors divider_prefix_split: np capped at divider_prefix_cap (upgrade-safe), a longer
             // shared prefix spills to a leading single-branch make_prefix_chain.
-            assert(depth + 1 < D.size() && "duplicate divider");
+            // depth+1 == D.size() is legitimate: the new divider ends AT the branch byte while an
+            // existing page sits there with a LONGER divider — the new page becomes np's term (the
+            // lesser divider) and the existing page hangs under its own tail byte. ntail is then
+            // empty → cpl 0 → handled below. A true duplicate (D == P._div exactly) is caught by the
+            // cpl!=ptail.size() assert in the d2==D.size() branch.
             bytes      pdv   = page_at(*_ses, child)->divider();
             bytes      ptail = pdv.size() > depth + 1 ? pdv.subspan(depth + 1) : bytes{};
             bytes      ntail = D.subspan(depth + 1);
@@ -4150,6 +4375,14 @@ namespace sal_art_ref::radix
             cursor c(_t, _root);
             return c.template get<T>(k);
          }
+         // Callback form (kv_engine concept): invoke f(value_view) iff present; true if found.
+         template <class F>
+         bool get(key_view k, F&& f) const
+         {
+            if (_root == sal::null_ptr_address) return false;
+            cursor c(_t, _root);
+            return c.get(k, std::forward<F>(f));
+         }
       };
       // psitri-compatible OWNING tree handle: what get_root/get_subtree/get_tree return and what
       // upsert_subtree accepts. Owns a ref on its root (RAII smart_ptr); copyable (retains) like
@@ -4329,6 +4562,8 @@ namespace sal_art_ref::radix
          read_handle get_subtree(key_view k) const { return handle().get_subtree(k); }
          template <class T = std::string>
          std::optional<T> get(key_view k) const { return handle().template get<T>(k); }
+         template <class F>
+         bool get(key_view k, F&& f) const { return handle().get(k, std::forward<F>(f)); }
       };
 
       // An atomic transaction over one or more roots. Owns a primary tree_handle (the root at
@@ -4370,9 +4605,44 @@ namespace sal_art_ref::radix
          transaction& operator=(const transaction&)     = delete;
          ~transaction() { if (_open) abort(); }
 
+         // [RADIX_OPLOG — TEMPORARY DIAGNOSTIC] Replayable op-log: capture every upsert/remove/
+         // commit at the transaction boundary so a Silkworm-free standalone tool can replay the
+         // exact sequence into a fresh sal_art_ref DB and reproduce the crash deterministically.
+         // Unbuffered so the crashing (uncommitted) batch survives std::abort(). Set RADIX_OPLOG=path.
+         static std::FILE* oplog()
+         {
+            static std::FILE* f = [] {
+               const char* p = std::getenv("RADIX_OPLOG");
+               std::FILE*  h = p ? std::fopen(p, "wb") : nullptr;
+               if (h)
+                  std::setvbuf(h, nullptr, _IONBF, 0);  // unbuffered: survive abort()
+               return h;
+            }();
+            return f;
+         }
+         static void oplog_kv(char op, key_view k, value_view v)
+         {
+            std::FILE* f = oplog();
+            if (!f)
+               return;
+            uint32_t kl = uint32_t(k.size()), vl = uint32_t(v.size());
+            std::fputc(op, f);
+            std::fwrite(&kl, 4, 1, f); std::fwrite(k.data(), 1, kl, f);
+            std::fwrite(&vl, 4, 1, f); std::fwrite(v.data(), 1, vl, f);
+         }
+         static void oplog_k(char op, key_view k)
+         {
+            std::FILE* f = oplog();
+            if (!f)
+               return;
+            uint32_t kl = uint32_t(k.size());
+            std::fputc(op, f);
+            std::fwrite(&kl, 4, 1, f); std::fwrite(k.data(), 1, kl, f);
+         }
+
          // ── primary-root mutations / reads (forward to the primary handle) ──
-         void upsert(key_view k, value_view v) { _primary.upsert(k, v); }
-         int  remove(key_view k) { return _primary.remove(k); }
+         void upsert(key_view k, value_view v) { oplog_kv('U', k, v); _primary.upsert(k, v); }
+         int  remove(key_view k) { oplog_k('R', k); return _primary.remove(k); }
          uint64_t remove_range_counted(key_view lower, key_view upper)
          {
             return _primary.remove_range_counted(lower, upper);
@@ -4390,6 +4660,8 @@ namespace sal_art_ref::radix
          }
          template <class T = std::string>
          std::optional<T> get(key_view k) { return _primary.template get<T>(k); }
+         template <class F>
+         bool get(key_view k, F&& f) const { return _primary.get(k, std::forward<F>(f)); }
 
          // ── additional roots (multi-root transaction) ──
          tree_handle& open_root(uint32_t idx)
@@ -4406,6 +4678,7 @@ namespace sal_art_ref::radix
          void commit()
          {
             if (!_open) return;
+            if (std::FILE* f = oplog()) std::fputc('C', f);  // [RADIX_OPLOG] commit marker
             publish(_primary_idx, _primary.flush());      // flush bottom-up + publish primary
             for (auto& [i, h] : _extra) publish(i, h->flush());
             _extra.clear();

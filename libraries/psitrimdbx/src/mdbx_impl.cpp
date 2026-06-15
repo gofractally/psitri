@@ -1,6 +1,7 @@
 /** @file mdbx_impl.cpp
  *  @brief PsiTri-backed MDBX C and C++ API implementation.
  */
+// #define SAL_STALL_DEBUG 1              // [stall-debug] OFF for clean baseline (per-op fflush confound)
 #include <mdbx.h>
 #include <mdbx.h++>
 
@@ -15,14 +16,63 @@
 // bidirectional, mergeable cursors — exactly what this single-keyspace
 // shim needs. The legacy psitri direct/dwal backend has been dropped.
 // ════════════════════════════════════════════════════════════════════
-#ifndef PSITRIMDBX_BACKEND_DELTA_ART
-#define PSITRIMDBX_BACKEND_DELTA_ART 1
+// Backend selection (pick one; default = delta_art tiered):
+//   PSITRIMDBX_BACKEND_DELTA_ART     — start_ver hot delta over sal_art_ref dwal cold base (new fast model)
+//   PSITRIMDBX_BACKEND_START_VER     — start_ver ALONE (no cold base / drain) — isolation/standalone
+//   PSITRIMDBX_BACKEND_PSITRI        — legacy psitri DIRECT (b+tree on SAL, old algo) via the
+//                                      psitri::dwal::psitri_engine adb adapter — a known-good baseline.
+//   PSITRIMDBX_BACKEND_TIERED_PSITRI — start_ver hot delta over a legacy-psitri cold base
+//                                      (tiered, no 32GB cap, sidesteps the sal_art_ref cold base).
+#if !defined(PSITRIMDBX_BACKEND_TIERED_PSITRI)
+#define PSITRIMDBX_BACKEND_TIERED_PSITRI 0
 #endif
+#if !defined(PSITRIMDBX_BACKEND_PSITRI)
+#define PSITRIMDBX_BACKEND_PSITRI 0
+#endif
+#if !defined(PSITRIMDBX_BACKEND_START_VER)
+#define PSITRIMDBX_BACKEND_START_VER 0
+#endif
+//   PSITRIMDBX_BACKEND_SAL_ART_REF  — sal_art_ref DIRECT (no tiering, no merger): the cold-base
+//                                     engine as the WHOLE DB, written by the user thread. Isolates
+//                                     whether the cold-base SIGBUS is the engine itself vs the
+//                                     tiered drain/merger interaction.
+#if !defined(PSITRIMDBX_BACKEND_SAL_ART_REF)
+#define PSITRIMDBX_BACKEND_SAL_ART_REF 0
+#endif
+//   PSITRIMDBX_BACKEND_START_REF     — start_ref DIRECT (part-family ART, refcount liveness, in-RAM)
+#if !defined(PSITRIMDBX_BACKEND_START_REF)
+#define PSITRIMDBX_BACKEND_START_REF 0
+#endif
+#if !PSITRIMDBX_BACKEND_TIERED_PSITRI && !PSITRIMDBX_BACKEND_PSITRI && \
+    !PSITRIMDBX_BACKEND_START_VER && !PSITRIMDBX_BACKEND_SAL_ART_REF && \
+    !PSITRIMDBX_BACKEND_START_REF
+#define PSITRIMDBX_BACKEND_DELTA_ART 1
+#else
+#define PSITRIMDBX_BACKEND_DELTA_ART 0
+#endif
+// derived: which engine families the chosen backend needs to pull in
+#define PSITRIMDBX_USES_TIERED (PSITRIMDBX_BACKEND_DELTA_ART || PSITRIMDBX_BACKEND_TIERED_PSITRI)
+#define PSITRIMDBX_USES_PSITRI (PSITRIMDBX_BACKEND_PSITRI || PSITRIMDBX_BACKEND_TIERED_PSITRI)
 
+#include <sal/config.hpp>    // sal::open_mode
+#include <start_ver/kv.hpp>  // start_ver::kv::engine (hot delta / standalone store)
+#if PSITRIMDBX_BACKEND_START_REF
+#include <start_ref/kv.hpp>  // start_ref::kv::engine (part-family ART, refcount liveness)
+#endif
+#if PSITRIMDBX_USES_TIERED
 #include <delta_art/tiered_kv.hpp>
-#include <heart_dwal_engine.hpp>  // sal_art_ref::radix::dwal_engine (cold base)
-#include <sal/config.hpp>         // sal::open_mode
-#include <start_ver/kv.hpp>       // start_ver::kv::engine (hot delta)
+#endif
+#if PSITRIMDBX_BACKEND_DELTA_ART || PSITRIMDBX_BACKEND_SAL_ART_REF
+#include <heart_dwal_engine.hpp>  // sal_art_ref::radix::dwal_engine (cold base / direct)
+#endif
+#if PSITRIMDBX_USES_PSITRI
+#include <psitri/database_impl.hpp>     // basic_database<LockPolicy> full def
+#include <psitri/dwal/kv_engine.hpp>    // psitri::dwal::psitri_engine (legacy direct / cold base)
+#include <psitri/read_session_impl.hpp>
+#include <psitri/transaction.hpp>
+#include <psitri/write_cursor.hpp>
+#include <psitri/write_session_impl.hpp>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -47,14 +97,63 @@
 
 #include <unistd.h>
 
+#ifdef SAL_STALL_DEBUG
+// [qlog] forward decl — definition (with the write-txn filter) is below, after MDBX_txn is complete.
+struct MDBX_txn;
+static void qlog(const MDBX_txn* txn, char op, int subop, uint32_t dbi, const void* ki, size_t kil,
+                 int rc, const void* ko, size_t kol, const void* vo, size_t vol);
+#endif
+
+// [RADIX_CRASHTRACE — TEMPORARY DIAGNOSTIC] symbolized SIGBUS/SIGSEGV backtrace (the cold-base
+// Bug B memmove-from-garbage; lldb batch won't expand the stack). Arm with RADIX_CRASHTRACE=1.
+#include <csignal>
+#include <execinfo.h>
+namespace
+{
+   void psitri_crash_handler(int sig)
+   {
+      const char* m = "\n=== PSITRI CRASHTRACE (signal) ===\n";
+      (void)::write(2, m, std::strlen(m));
+      void*     bt[64];
+      const int n = ::backtrace(bt, 64);
+      ::backtrace_symbols_fd(bt, n, 2);
+      ::signal(sig, SIG_DFL);
+      ::raise(sig);
+   }
+   struct psitri_crash_installer
+   {
+      psitri_crash_installer()
+      {
+         if (std::getenv("RADIX_CRASHTRACE"))
+         {
+            ::signal(SIGBUS, psitri_crash_handler);
+            ::signal(SIGSEGV, psitri_crash_handler);
+         }
+      }
+   } g_psitri_crash_installer;
+}  // namespace
+
 // ── delta_art tiered backend aliases ─────────────────────────────────
 // W = start_ver hot delta, B = sal_art_ref dwal cold base. The composed
 // engine is one kv_engine: a single ordered KV space (root 0 = latest,
 // W∪B merge) with bidirectional cursors. The shim funnels everything
 // through this one physical space; the MDBX dbi number is encoded as a
 // one-byte key namespace prefix (mapping logic, unchanged).
+#if PSITRIMDBX_BACKEND_TIERED_PSITRI
+using TK         = delta_art::tiered_kv<start_ver::kv::engine,
+                                        psitri::dwal::psitri_engine<>>;  // start_ver hot -> psitri cold
+#elif PSITRIMDBX_BACKEND_PSITRI
+using TK         = psitri::dwal::psitri_engine<>;  // legacy psitri DIRECT (old algo)
+#elif PSITRIMDBX_BACKEND_START_VER
+using TK         = start_ver::kv::engine;  // start_ver alone — no cold base / drain
+#elif PSITRIMDBX_BACKEND_START_REF
+using TK         = start_ref::kv::engine;  // start_ref alone — part-family ART, refcount liveness
+#elif PSITRIMDBX_BACKEND_SAL_ART_REF
+using TK         = sal_art_ref::radix::dwal_engine;  // sal_art_ref DIRECT — no tiering / no merger
+#else
 using TK         = delta_art::tiered_kv<start_ver::kv::engine,
                                         sal_art_ref::radix::dwal_engine>;
+#endif
 using be_db      = TK::database;
 using be_ws      = TK::write_session;
 using be_tx      = TK::transaction;
@@ -1550,6 +1649,10 @@ static void assign_cursor_result(MDBX_cursor* cursor, MDBX_val* key,
       *key = hold_txn_slice(cursor->txn, st.key_buf);
    if (data)
       *data = hold_txn_slice(cursor->txn, st.exposed_value());
+#ifdef SAL_STALL_DEBUG
+   qlog(cursor->txn, 'Q', 0, 0, nullptr, 0, 0, key ? key->iov_base : nullptr,
+        key ? key->iov_len : 0, data ? data->iov_base : nullptr, data ? data->iov_len : 0);
+#endif
 }
 
 static dbi_meta dbi_metadata(MDBX_env* env, MDBX_dbi dbi)
@@ -1655,12 +1758,22 @@ static void capture_direct_read_roots(MDBX_txn* txn)
    txn->has_read_view = true;
 }
 
+#ifdef SAL_STALL_DEBUG
+static void stall_hb(const char* phase, std::string_view key);  // [stall-debug] defined below
+#endif
+
 static void start_direct_write_txn(MDBX_txn* txn)
 {
    // The env owns the single shared write session (delta_art serializes
    // writers internally on its own mutex; start_transaction blocks until
    // it owns the writer lock, released at commit/abort).
+#ifdef SAL_STALL_DEBUG
+   stall_hb("TXbegin0", {});  // about to acquire writer lock + start txn (blocks here if slot held)
+#endif
    txn->direct_tx.emplace(txn->env->ws->start_transaction(be_root_latest));
+#ifdef SAL_STALL_DEBUG
+   stall_hb("TXbegin1", {});  // writer lock acquired, txn started
+#endif
 }
 
 static mdbx_view_cursor make_txn_cursor(const MDBX_txn* txn, uint32_t root_idx)
@@ -1696,9 +1809,18 @@ static bool txn_get_physical_value(const MDBX_txn* txn, std::string_view key,
       {
          // Read-own-writes: the transaction's 3-way (hot->warm->base) get
          // sees this txn's pending upserts/removes plus committed data.
-         return txn->direct_tx->get(key, [&out](std::string_view vv) {
+#ifdef SAL_STALL_DEBUG
+         stall_hb("G-enter", key);
+#endif
+         bool r = txn->direct_tx->get(key, [&out](std::string_view vv) {
             out.assign(vv.data(), vv.size());
          });
+#ifdef SAL_STALL_DEBUG
+         stall_hb("G-exit", key);
+         qlog(txn, 'G', 0, 0, key.data(), key.size(), r ? 1 : 0, nullptr, 0,
+              r ? out.data() : nullptr, r ? out.size() : 0);
+#endif
+         return r;
       }
       return false;
    }
@@ -1726,6 +1848,108 @@ static bool txn_get_value(const MDBX_txn* txn, uint32_t root_idx,
    return physical && txn_get_physical_value(txn, *physical, out);
 }
 
+// [oplog] Backend-agnostic capture of the engine-facing op stream (env MDBX_OPLOG=path).
+// Records U(key,val)/R(key)/C exactly as the shim drives TK::transaction — independent of which
+// backend TK is compiled in — so a log captured on a KNOWN-WORKING engine (e.g. start_ver) can be
+// replayed standalone (no Silkworm) into ANY engine to reproduce/diff its behavior deterministically.
+// Keys here are the physical (namespaced) keys the engine receives, matching /tmp/sar_replay's format.
+static void oplog_record(char op, std::string_view key, std::string_view val)
+{
+   static std::mutex mtx;
+   static std::FILE* f    = nullptr;
+   static bool       init = false;
+   std::lock_guard<std::mutex> lk(mtx);
+   if (!init)
+   {
+      init = true;
+      if (const char* p = std::getenv("MDBX_OPLOG"))
+      {
+         f = std::fopen(p, "wb");
+         if (f)
+            std::setvbuf(f, nullptr, _IOFBF, 1 << 20);  // 1 MB buffer; flushed on every commit
+      }
+   }
+   if (!f)
+      return;
+   std::fputc(op, f);
+   if (op == 'C')
+   {
+      std::fflush(f);  // commit boundary: durably capture the batch so a hang keeps the tail
+      return;
+   }
+   uint32_t kl = uint32_t(key.size());
+   std::fwrite(&kl, 4, 1, f);
+   if (kl)
+      std::fwrite(key.data(), 1, kl, f);
+   if (op == 'U')
+   {
+      uint32_t vl = uint32_t(val.size());
+      std::fwrite(&vl, 4, 1, f);
+      if (vl)
+         std::fwrite(val.data(), 1, vl, f);
+   }
+}
+
+#ifdef SAL_STALL_DEBUG
+// [stall-debug] Overwrites /tmp/sal_hb.txt with the current engine-call phase on every entry/exit,
+// flushed. At a hang, `cat /tmp/sal_hb.txt` shows the LAST phase: a "*-enter" with no matching
+// "*-exit" ⇒ the writer is hung INSIDE that engine call (engine bug); an "*-exit" ⇒ it returned and
+// the hang is BETWEEN calls (Silkworm/coroutine side). seq pinpoints the op; ns/klen identify it.
+static std::atomic<uint64_t> g_hb_seq{0};
+static void stall_hb(const char* phase, std::string_view key)
+{
+   static std::FILE* hb = std::fopen("/tmp/sal_hb.txt", "w");
+   if (!hb)
+      return;
+   std::fseek(hb, 0, SEEK_SET);
+   std::fprintf(hb, "seq=%llu phase=%-8s klen=%zu ns=%u v+w_done                 \n",
+                static_cast<unsigned long long>(g_hb_seq.load()), phase, key.size(),
+                key.empty() ? 999u : unsigned(static_cast<uint8_t>(key[0])));
+   std::fflush(hb);
+}
+
+// [qlog] Differential query/response log (env MDBX_QLOG=path). Records EVERY engine op handed to
+// Silkworm — writes (U/R/C) AND reads (G point-get, Q cursor) WITH their responses — as compact
+// diffable text. Captured at the public boundary, BACKEND-AGNOSTIC, so the SAME workload run on the
+// working backend (psitri) and the hanging one (sal_art_ref) produces two logs whose FIRST DIFF is
+// the exact op where the backends hand Silkworm different data. Filtered to the WRITE transaction
+// (txn->direct_tx) = the single execution/staged-sync thread → deterministic order → clean diff.
+// Values/keys are FNV-1a hashed + length, so a divergent response shows as a changed hash/len.
+static uint64_t q_fnv(const void* p, size_t n)
+{
+   const auto* d = static_cast<const unsigned char*>(p);
+   uint64_t    h = 1469598103934665603ull;
+   for (size_t i = 0; i < n; ++i) { h ^= d[i]; h *= 1099511628211ull; }
+   return h;
+}
+static void qlog(const MDBX_txn* txn, char op, int subop, uint32_t dbi, const void* ki, size_t kil,
+                 int rc, const void* ko, size_t kol, const void* vo, size_t vol)
+{
+   if (!txn || !txn->direct_tx)  // only the execution write-txn stream (deterministic, single-thread)
+      return;
+   static std::mutex  mx;
+   static std::FILE*  f    = nullptr;
+   static bool        init = false;
+   std::lock_guard<std::mutex> g(mx);
+   if (!init)
+   {
+      init = true;
+      if (const char* p = std::getenv("MDBX_QLOG"))
+      {
+         f = std::fopen(p, "w");
+         if (f)
+            std::setvbuf(f, nullptr, _IOFBF, 1 << 20);
+      }
+   }
+   if (!f)
+      return;
+   std::fprintf(f, "%c%d d%u ki%016llx/%zu rc%d ko%016llx/%zu v%016llx/%zu\n", op, subop, dbi,
+                static_cast<unsigned long long>(q_fnv(ki, kil)), kil, rc,
+                static_cast<unsigned long long>(q_fnv(ko, kol)), kol,
+                static_cast<unsigned long long>(q_fnv(vo, vol)), vol);
+}
+#endif
+
 static void txn_upsert_physical_value(MDBX_txn* txn, std::string_view key,
                                       std::string_view value,
                                       bool sorted_append_hint = false)
@@ -1733,7 +1957,16 @@ static void txn_upsert_physical_value(MDBX_txn* txn, std::string_view key,
    (void)sorted_append_hint;  // delta_art has no sorted-append fast path
    if (!txn->direct_tx)
       throw std::out_of_range("MDBX direct transaction not started");
+   oplog_record('U', key, value);
+#ifdef SAL_STALL_DEBUG
+   g_hb_seq.fetch_add(1, std::memory_order_relaxed);
+   stall_hb("U-enter", key);
+#endif
    txn->direct_tx->upsert(key, value);
+#ifdef SAL_STALL_DEBUG
+   stall_hb("U-exit", key);
+   qlog(txn, 'U', 0, 0, key.data(), key.size(), 0, nullptr, 0, value.data(), value.size());
+#endif
    // record in the read-own-writes cursor overlay
    txn->write_set[std::string(key)] = std::string(value);
 }
@@ -1755,7 +1988,16 @@ static bool txn_remove_physical_key(MDBX_txn* txn, std::string_view key)
       return false;
    // The key is present iff it has a live value now (committed or same-txn).
    const bool present = txn->direct_tx->get(key, [](std::string_view) {});
+   oplog_record('R', key, {});
+#ifdef SAL_STALL_DEBUG
+   g_hb_seq.fetch_add(1, std::memory_order_relaxed);
+   stall_hb("R-enter", key);
+#endif
    txn->direct_tx->remove(key);
+#ifdef SAL_STALL_DEBUG
+   stall_hb("R-exit", key);
+   qlog(txn, 'R', 0, 0, key.data(), key.size(), present ? 1 : 0, nullptr, 0, nullptr, 0);
+#endif
    // overlay: a same-txn tombstone that masks committed data
    txn->write_set[std::string(key)] = std::nullopt;
    return present;
@@ -2332,6 +2574,28 @@ int mdbx_env_open(MDBX_env* env, const char* pathname,
       // on the txn-layer guard — opening an existing DB never creates data.
       auto open_mode = sal::open_mode::create_or_open;
 
+#if PSITRIMDBX_BACKEND_START_VER
+      // start_ver standalone: no tiered knobs (no hot/cold flush threshold).
+      env->db = be_db::open(env->path, open_mode);
+#elif PSITRIMDBX_BACKEND_START_REF
+      // start_ref standalone: part-family ART, refcount liveness; same open shape as start_ver.
+      env->db = be_db::open(env->path, open_mode);
+#elif PSITRIMDBX_BACKEND_PSITRI
+      // legacy psitri direct: config is sal::runtime_config (no tiered knobs).
+      psitri::runtime_config cfg;
+      env->db = be_db::open(env->path, open_mode, cfg);
+#elif PSITRIMDBX_BACKEND_SAL_ART_REF
+      // sal_art_ref DIRECT: config is sal::runtime_config (no tiered knobs, no merger).
+      sal::runtime_config cfg;
+      // [stall-bisect] read-cache knobs to isolate the compactor/pinned-cache stall.
+      //   PSITRI_NO_READ_CACHE=1     → disable the read cache entirely (no pinned-segment churn)
+      //   PSITRI_CACHE_MB=<n>        → cap the pinned cache at n MB (multiple of 32)
+      if (std::getenv("PSITRI_NO_READ_CACHE"))
+         cfg.enable_read_cache = false;
+      if (const char* mb = std::getenv("PSITRI_CACHE_MB"))
+         cfg.max_pinned_cache_size_mb = std::strtoull(mb, nullptr, 10);
+      env->db = be_db::open(env->path, open_mode, cfg);
+#else
       TK::config cfg;
       // Durability: derive the adb commit-sync from the MDBX env flags (the commit config),
       // fanned out to both tiers at open. PSITRI_SYNC overrides for A/B benchmarking.
@@ -2356,6 +2620,7 @@ int mdbx_env_open(MDBX_env* env, const char* pathname,
          cfg.knobs.hi_water_bytes = std::strtoull(hw, nullptr, 10) << 20;
 
       env->db = be_db::open(env->path, open_mode, cfg);
+#endif
       env->ws = env->db->start_write_session();
 
       if (!(flags & MDBX_RDONLY))
@@ -2682,10 +2947,24 @@ int mdbx_txn_commit_ex(MDBX_txn* txn, MDBX_commit_latency* latency)
    {
       if (txn->direct_tx)
       {
+         oplog_record('C', {}, {});
+#ifdef SAL_STALL_DEBUG
+         stall_hb("C-enter", {});
+#endif
          txn->direct_tx->commit();
+#ifdef SAL_STALL_DEBUG
+         stall_hb("C-exit", {});
+         qlog(txn, 'C', 0, 0, nullptr, 0, 0, nullptr, 0, nullptr, 0);
+#endif
          txn->direct_tx.reset();
+#ifdef SAL_STALL_DEBUG
+         stall_hb("C-reset", {});
+#endif
          txn->write_set.clear();
          release_write_slot(txn);
+#ifdef SAL_STALL_DEBUG
+         stall_hb("C-done", {});  // shim commit fully returned; any further hang is Silkworm-side
+#endif
       }
 
       txn->dbi_changes.clear();
@@ -3025,6 +3304,53 @@ int mdbx_dbi_flags_ex(const MDBX_txn* txn, MDBX_dbi dbi,
 
 // ── Key-value operations ─────────────────────────────────────────
 
+// [PSITRI_NF_LOG] Debug: keep ONLY the last NOTFOUND read (near-zero cost — no per-call I/O,
+// since Silkworm legitimately probes-via-cursor millions of times) and dump it at process exit.
+// The fatal MDBX_NOTFOUND is the very last read before exit, so the last-recorded entry is it.
+static const bool      g_nf_on = std::getenv("PSITRI_NF_LOG") != nullptr;
+static char            g_lnf_key[80];
+static char            g_lnf_where[40];
+static std::atomic<uint32_t> g_lnf_klen{0}, g_lnf_dbi{0}, g_lnf_root{0};
+static std::atomic<uint64_t> g_lnf_count{0};
+static std::atomic<bool>     g_lnf_registered{false};
+
+static void dbg_nf_dump_atexit()
+{
+   const char* path = std::getenv("PSITRI_NF_LOG");
+   if (!path)
+      return;
+   FILE* f = std::fopen(path, "w");
+   if (!f)
+      return;
+   uint32_t kl = g_lnf_klen.load();
+   if (kl > sizeof g_lnf_key)
+      kl = sizeof g_lnf_key;
+   std::fprintf(f, "LAST_NF where=%s dbi=%u root=%u klen=%u total=%llu key=", g_lnf_where,
+                g_lnf_dbi.load(), g_lnf_root.load(), kl,
+                static_cast<unsigned long long>(g_lnf_count.load()));
+   for (uint32_t i = 0; i < kl; ++i)
+      std::fprintf(f, "%02x", static_cast<unsigned char>(g_lnf_key[i]));
+   std::fprintf(f, "\n");
+   std::fclose(f);
+}
+
+static inline void dbg_log_notfound(MDBX_dbi dbi, uint32_t root_idx, std::string_view key,
+                                    const char* where)
+{
+   if (!g_nf_on)
+      return;
+   bool exp = false;
+   if (g_lnf_registered.compare_exchange_strong(exp, true))
+      std::atexit(dbg_nf_dump_atexit);
+   uint32_t kl = key.size() < sizeof g_lnf_key ? uint32_t(key.size()) : uint32_t(sizeof g_lnf_key);
+   std::memcpy(g_lnf_key, key.data(), kl);
+   std::snprintf(g_lnf_where, sizeof g_lnf_where, "%s", where);
+   g_lnf_klen.store(kl);
+   g_lnf_dbi.store(unsigned(dbi));
+   g_lnf_root.store(root_idx);
+   g_lnf_count.fetch_add(1, std::memory_order_relaxed);
+}
+
 int mdbx_get(const MDBX_txn* txn, MDBX_dbi dbi,
              const MDBX_val* key, MDBX_val* data)
 {
@@ -3050,7 +3376,10 @@ int mdbx_get(const MDBX_txn* txn, MDBX_dbi dbi,
       {
          cursor_state st(make_txn_cursor(txn, root_idx), root_idx, true, rev_ds);
          if (!st.seek_outer_first_dup(key_sv))
+         {
+            dbg_log_notfound(dbi, root_idx, key_sv, "get_ds");
             return MDBX_NOTFOUND;
+         }
 
          *data = hold_txn_slice(mtxn, st.val_buf);
          return MDBX_SUCCESS;
@@ -3059,7 +3388,10 @@ int mdbx_get(const MDBX_txn* txn, MDBX_dbi dbi,
       // Non-DUPSORT path
       std::string value;
       if (!txn_get_value(txn, root_idx, key_sv, value))
+      {
+         dbg_log_notfound(dbi, root_idx, key_sv, "get_plain");
          return MDBX_NOTFOUND;
+      }
       *data = hold_txn_slice(mtxn, value);
       return MDBX_SUCCESS;
    }
@@ -3175,8 +3507,17 @@ static int mdbx_put_impl(MDBX_txn* txn, uint32_t root_idx, bool is_ds,
       mark_txn_cursors_stale_after_write(txn, root_idx);
       return MDBX_SUCCESS;
    }
+   catch (const std::exception& e)
+   {
+      std::fprintf(stderr, "MDBX_PANIC put_impl: keylen=%zu vallen=%zu what=%s\n",
+                   key->iov_len, data->iov_len, e.what());
+      std::fflush(stderr);
+      return MDBX_PANIC;
+   }
    catch (...)
    {
+      std::fprintf(stderr, "MDBX_PANIC put_impl: non-std exception\n");
+      std::fflush(stderr);
       return MDBX_PANIC;
    }
 }
@@ -3358,8 +3699,8 @@ void mdbx_cursor_close(MDBX_cursor* cursor)
    release_cursor(cursor);
 }
 
-int mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
-                    MDBX_val* data, MDBX_cursor_op op)
+static int mdbx_cursor_get_impl(MDBX_cursor* cursor, MDBX_val* key,
+                                MDBX_val* data, MDBX_cursor_op op)
 {
    if (!cursor || !cursor->state)
       return MDBX_EINVAL;
@@ -3645,6 +3986,28 @@ int mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
    {
       return MDBX_PANIC;
    }
+}
+
+int mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
+                    MDBX_val* data, MDBX_cursor_op op)
+{
+   // [PSITRI_NF_LOG] capture the incoming key (lookup key for SET-family ops) and the op,
+   // then log on a NOTFOUND result. The last entry before a fatal MDBX_NOTFOUND is the culprit.
+   // [perf] cache the env check ONCE — mdbx_cursor_get is the read-heavy hot path; a per-call
+   // std::getenv("PSITRI_NF_LOG") locks+scans environ (~5% __findenv_locked in Silkworm sync).
+   static const bool nf_log = std::getenv("PSITRI_NF_LOG") != nullptr;
+   std::string in_key;
+   if (nf_log && key && key->iov_base)
+      in_key.assign(static_cast<const char*>(key->iov_base), key->iov_len);
+   int rc = mdbx_cursor_get_impl(cursor, key, data, op);
+   if (rc == MDBX_NOTFOUND && nf_log)
+   {
+      char where[32];
+      std::snprintf(where, sizeof where, "cursor_get op=%d", int(op));
+      const uint32_t root = (cursor && cursor->state) ? cursor->root_idx : 0u;
+      dbg_log_notfound(cursor ? cursor->dbi : MDBX_dbi(0), root, in_key, where);
+   }
+   return rc;
 }
 
 int mdbx_cursor_put(MDBX_cursor* cursor, const MDBX_val* key,

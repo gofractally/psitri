@@ -15,7 +15,7 @@ target_include_directories(psitrimdbx
         ${CMAKE_SOURCE_DIR}/libraries/sal_art_ref/test
 )
 
-target_link_libraries(psitrimdbx PUBLIC psitri delta_art start_ver sal_art_ref)
+target_link_libraries(psitrimdbx PUBLIC psitri delta_art start_ver start_ref sal_art_ref)
 target_compile_features(psitrimdbx PUBLIC cxx_std_20)
 
 option(PSITRIMDBX_BUILD_TESTS "Build the psitrimdbx test suite" ON)

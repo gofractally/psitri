@@ -306,3 +306,147 @@ TEST_CASE("kv large values: mixed-size fuzz vs oracle", "[large_value]")
    ses.reset();
    require_drained(*db);
 }
+
+
+#include <atomic>
+#include <thread>
+
+// Hypothesis #1 (Dan): a LARGE (value_large) value that is overwritten must not be
+// reclaimed while a concurrent reader's snapshot still sees it. Reader snapshots are
+// version-pinned; the old value's death (at the overwrite's version) must be gated by
+// the reader floor. If the large-value death bypasses the floor, a reader dereferences
+// freed+reused memory — the Silkworm "value is type N, read as type 0" / EXC_BAD_ACCESS.
+//
+// Robust-under-concurrency assertion: each key always carries the SAME content V_k, so
+// whichever committed version a reader's snapshot lands on, get(k) MUST equal V_k. Any
+// other bytes (or an invalid_type throw / fault) = a freed value was read => bug.
+TEST_CASE("kv large values: concurrent snapshot never reads a freed value", "[large_value][mt]")
+{
+   auto dir = fs::temp_directory_path() / "sv_largeval_mt";
+   fs::remove_all(dir);
+   start_ver::kv::runtime_config cfg;  // background_release ON (drain thread runs)
+   auto db = start_ver::kv::database::open(dir, cfg);
+
+   constexpr int NK  = 3000;
+   constexpr size_t LEN = 9000;  // forces value_large (> ~8 KB line-arena leaf cap)
+   auto vof = [&](int k) { return mkval(LEN, uint64_t(k)); };
+
+   // pre-fill: every key k carries the fixed large value V_k
+   {
+      auto ws = db->start_write_session();
+      for (int base = 0; base < NK; base += 200)
+      {
+         auto tx = ws->start_transaction(0);
+         for (int k = base; k < base + 200 && k < NK; ++k)
+            tx.upsert(key(k), vof(k));
+         tx.commit();
+      }
+   }
+
+   std::atomic<bool>     stop{false};
+   std::atomic<bool>     bad{false};
+   std::atomic<uint64_t> reads{0}, writes{0};
+
+   // writer: redundantly rewrite random keys with the SAME content -> churns the COW
+   // path + frees/reallocates the large values, without changing what a reader expects.
+   std::thread writer([&] {
+      std::mt19937_64 rng(7);
+      auto            ws = db->start_write_session();
+      while (!stop.load(std::memory_order_relaxed))
+      {
+         auto tx = ws->start_transaction(0);
+         for (int i = 0; i < 64; ++i)
+         {
+            int k = int(rng() % NK);
+            tx.upsert(key(k), vof(k));
+         }
+         tx.commit();
+         writes.fetch_add(64, std::memory_order_relaxed);
+      }
+   });
+
+   // readers: snapshot, read random keys, every value MUST be exactly V_k
+   auto reader = [&] {
+      std::mt19937_64 rng(1234 + reads.load());
+      while (!stop.load(std::memory_order_relaxed))
+      {
+         auto rs  = db->start_read_session();
+         auto cur = rs->create_cursor(0);
+         for (int i = 0; i < 256; ++i)
+         {
+            int k = int(rng() % NK);
+            try
+            {
+               auto v = cur.get<std::string>(key(k));
+               if (!v || *v != vof(k))
+               {
+                  bad.store(true, std::memory_order_relaxed);
+                  stop.store(true, std::memory_order_relaxed);
+                  return;
+               }
+            }
+            catch (...)
+            {  // invalid_type etc. = a freed value was dereferenced
+               bad.store(true, std::memory_order_relaxed);
+               stop.store(true, std::memory_order_relaxed);
+               return;
+            }
+            reads.fetch_add(1, std::memory_order_relaxed);
+         }
+      }
+   };
+   std::vector<std::thread> rthreads;
+   for (int i = 0; i < 4; ++i)
+      rthreads.emplace_back(reader);
+
+   // run until enough churn has happened (the bench crashed by ~few hundred K writes)
+   while (!bad.load(std::memory_order_relaxed) && writes.load() < 2'000'000)
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+   stop.store(true);
+   writer.join();
+   for (auto& t : rthreads)
+      t.join();
+
+   INFO("reads=" << reads.load() << " writes=" << writes.load());
+   REQUIRE_FALSE(bad.load());
+}
+
+// Regression: flush_releases() must NOT spin when there is no background drain
+// thread (background_release=false) — it has to drain INLINE — and must not block on
+// reader-pinned (gated) chains. Previously this hung forever. Also a clean single-
+// threaded check of hypothesis #1: a snapshot pinned at v1 must keep reading V0 across
+// overwrite+drain of that key's large value (the floor must gate the old value's death).
+TEST_CASE("kv: flush_releases drains inline (no spin) + pinned snapshot keeps its value",
+          "[large_value]")
+{
+   auto dir = fs::temp_directory_path() / "sv_flush_inline";
+   fs::remove_all(dir);
+   start_ver::kv::runtime_config cfg;
+   cfg.background_release = false;  // no drain thread => flush_releases must drain inline
+   auto db = start_ver::kv::database::open(dir, cfg);
+
+   const std::string K   = key(42);
+   const size_t      LEN = 100000;  // value_large
+   const std::string V0  = mkval(LEN, 0);
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert(K, V0);
+      tx.commit();
+   }
+   auto rs   = db->start_read_session();
+   auto snap = rs->create_cursor(0);  // pin v1
+   REQUIRE(snap.get<std::string>(K) == V0);
+
+   auto ws = db->start_write_session();
+   for (int i = 1; i <= 50; ++i)
+   {
+      auto tx = ws->start_transaction(0);
+      tx.upsert(K, mkval(LEN, uint64_t(i)));
+      tx.commit();
+      db->flush_releases();  // MUST return (previously spun forever)
+      auto got = snap.get<std::string>(K);
+      REQUIRE(got.has_value());
+      REQUIRE(*got == V0);  // floor must keep V0 alive while pinned
+   }
+}

@@ -108,6 +108,11 @@ namespace delta_art
       class cursor;
       struct config
       {
+         // adb-level commit durability — fanned out to BOTH tiers (hot W + cold B) at open.
+         // Default fsync matches MDBX's MDBX_SYNC_DURABLE: a real commit boundary every batch,
+         // which writes the seal record so segments compact/recycle (no seal => unbounded growth).
+         // The shim derives this from the MDBX env durability flags.
+         sal::sync_type     commit_sync = sal::sync_type::fsync;
          typename W::config wcfg{};
          typename B::config bcfg{};
          delta_art::knobs      knobs{};
@@ -124,6 +129,7 @@ namespace delta_art
          {
             if (!_w)
                return _b.seek_begin();
+            _dir_fwd_ = true;
             _w->seek_begin();
             if (_m)
                _m->seek_begin();
@@ -134,6 +140,7 @@ namespace delta_art
          {
             if (!_w)
                return _b.seek_last();
+            _dir_fwd_ = false;
             _w->seek_last();
             if (_m)
                _m->seek_last();
@@ -144,6 +151,7 @@ namespace delta_art
          {
             if (!_w)
                return _b.lower_bound(k);
+            _dir_fwd_ = true;
             _w->lower_bound(k);
             if (_m)
                _m->lower_bound(k);
@@ -154,6 +162,7 @@ namespace delta_art
          {
             if (!_w)
                return _b.upper_bound(k);
+            _dir_fwd_ = true;
             _w->upper_bound(k);
             if (_m)
                _m->upper_bound(k);
@@ -166,6 +175,19 @@ namespace delta_art
                return _b.next();
             if (_rend)  // psitri convention: next from rend = first
                return seek_begin();
+            if (!_dir_fwd_)
+            {  // direction change (backward -> forward): non-current legs sit at keys < current;
+               // move each to the smallest key > current before merging.
+               if (is_end())
+                  return false;
+               std::string cur(key());
+               reseek_fwd_(*_w, cur);
+               if (_m)
+                  reseek_fwd_(*_m, cur);
+               reseek_fwd_(_b, cur);
+               _dir_fwd_ = true;
+               return settle_fwd_();
+            }
             if (_on_w)
                _w->next();
             if (_on_m)
@@ -182,6 +204,17 @@ namespace delta_art
                return seek_last();
             if (_rend)
                return false;
+            if (_dir_fwd_)
+            {  // direction change (forward -> backward): non-current legs sit at keys > current;
+               // move each to the largest key < current before merging.
+               std::string cur(key());
+               reseek_bwd_(*_w, cur);
+               if (_m)
+                  reseek_bwd_(*_m, cur);
+               reseek_bwd_(_b, cur);
+               _dir_fwd_ = false;
+               return settle_bwd_();
+            }
             if (_on_w)
                _w->prev();
             if (_on_m)
@@ -392,11 +425,31 @@ namespace delta_art
                return c;
             return a.size() < b.size() ? -1 : a.size() > b.size() ? 1 : 0;
          }
+         // Reposition a leg on a DIRECTION CHANGE. After a forward op (lower_bound/upper_bound/
+         // next/seek_begin) every non-current leg sits at a key > current; after a backward op,
+         // at a key < current. On the first opposite step those "stranded" legs must be moved to
+         // the correct side of `cur`, or settle_*() re-selects one of them on the wrong side
+         // (the seek_last-of-namespace bug: lower_bound(successor)+prev returned a next-namespace
+         // key). fwd: smallest key > cur; bwd: largest key < cur.
+         template <class C>
+         static void reseek_fwd_(C& c, key_view cur)
+         {
+            c.upper_bound(cur);
+         }
+         template <class C>
+         static void reseek_bwd_(C& c, key_view cur)
+         {
+            if (c.lower_bound(cur))
+               c.prev();
+            else
+               c.seek_last();
+         }
          std::optional<typename W::cursor> _w;  // hot leg; absent = stable view
          std::optional<typename W::cursor> _m;  // WARM leg (flush in flight)
          warm_tree_t _mh;  // keeps the warm snapshot alive: W's GC counts handles
          typename B::cursor                _b;
          bool _on_w = false, _on_m = false, _on_b = false, _rend = false;
+         bool _dir_fwd_ = true;  // last positioning direction (for direction-change reseek)
       };
 
       class read_session
@@ -643,6 +696,12 @@ namespace delta_art
             std::filesystem::create_directories(dir / "delta");
             std::filesystem::create_directories(dir / "base");
             auto wcfg = cfg.wcfg;
+            // adb-level commit durability fans out to BOTH tiers — the commit boundary that
+            // seals segments for compaction/recycling (no seal => the base grows by the full
+            // COW-garbage rate). Hot W commits sync per cfg; cold B's publish now honors it too.
+            wcfg.sync_mode = cfg.commit_sync;
+            auto bcfg      = cfg.bcfg;
+            bcfg.sync_mode = cfg.commit_sync;
             // Delta role (Dan): flush+retire drains segments nearly clean, so
             // only near-empty segments are worth reusing — 80% bar keeps
             // allocation bump-like (long runs, virgin locality). Standalone
@@ -654,7 +713,7 @@ namespace delta_art
                   wcfg.reuse_threshold = atof(rt);
             }
             _w   = W::database::open(dir / "delta", mode, wcfg);
-            _b   = B::database::open(dir / "base", mode, cfg.bcfg);
+            _b   = B::database::open(dir / "base", mode, bcfg);
             _wws = _w->start_write_session();  // THE single W writer, shared
                                                // (user txns and merger retire
                                                // txns serialize on _writer_m;

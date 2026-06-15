@@ -142,8 +142,11 @@ namespace sal_art_ref::radix
       class subtree;
       explicit radix_tree(const std::filesystem::path& dir,
                           bool                         wipe      = true,
-                          bool                         read_only = false)
-          : _alloc(make_alloc(dir, wipe, read_only)), _ses(_alloc->create_session())
+                          bool                         read_only = false,
+                          sal::sync_type               sync      = sal::sync_type::none)
+          : _alloc(make_alloc(dir, wipe, read_only, sync)),
+            _ses(_alloc->create_session()),
+            _sync(sync)
       {
          _alloc->register_type_ops<leaf_node>();
          _alloc->register_type_ops<setlist_u8>();
@@ -794,6 +797,10 @@ namespace sal_art_ref::radix
       };
       const cow_counters&        counters() const { return _cc; }
       sal::allocator_session_ptr session() const { return _ses; }
+      // Commit durability for this tree, set at open from the adb commit config and used by
+      // every publish()/set_root — without a real sync the commit record isn't written, so
+      // segments never seal and the file grows by the full COW-garbage rate.
+      sal::sync_type sync_mode() const noexcept { return _sync; }
       ptr_address                root_addr() const { return _root.address(); }
 
       struct tier_counts
@@ -980,7 +987,8 @@ namespace sal_art_ref::radix
 
       static std::unique_ptr<sal::allocator> make_alloc(const std::filesystem::path& dir,
                                                         bool wipe      = true,
-                                                        bool read_only = false)
+                                                        bool read_only = false,
+                                                        sal::sync_type sync = sal::sync_type::none)
       {
          if (wipe)
          {
@@ -989,7 +997,7 @@ namespace sal_art_ref::radix
          }
          sal::runtime_config cfg;
          cfg.read_only               = read_only;
-         cfg.sync_mode               = sal::sync_type::none;
+         cfg.sync_mode               = sync;  // commit durability: derived from the adb commit config
          cfg.write_protect_on_commit = false;
          cfg.enable_read_cache       = false;
          // Sessions allocate into PINNED (mlock'd) segments by default and pinned
@@ -1791,11 +1799,56 @@ namespace sal_art_ref::radix
          int         fb_li   = -1;  // the lower-bound cursor at that node (resolve lazily)
          uint32_t    fb_dlen = 0;
          bool        have_fb = false;
+         // Resolve the lazy lower-bound fallback (the deepest exact-path node holding a divider <
+         // kb): the lesser sibling at fb_li, or that node's term. Shared by a router miss (key
+         // diverges below a node prefix) AND a page miss (key < a directly-attached page's divider).
+         auto take_fallback = [&]() -> const leaf_page* {
+            assert(have_fb && "no fallback: the radix root must hold the \"\" divider");
+            (void)have_fb;
+            if (dlen)
+               *dlen = fb_dlen;
+            ptr_address fnext{};
+            bool        fpage = false;
+            dispatch(ses, fb_node, [&](auto ad) {
+               const int less = ad.prev(fb_li);  // resolved ONCE, only on fallback
+               if (less < 0)
+               {
+                  fnext = ad.term().as_pointer();
+                  fpage = true;
+                  return;
+               }
+               uint8_t   sb[4];
+               const int nb = stem_bytes(ad.cell(less), ad.stem_width(), ad.cw(), sb);
+               div_append(div, dlen, sb, size_t(nb));
+               fnext = ad.branch(less).as_pointer();
+            });
+            if (fpage)
+               return reinterpret_cast<const leaf_page*>(
+                   ses.get_ref<sal::alloc_header>(fnext).obj());
+            return max_page(ses, fnext, div, dlen);
+         };
          for (;;)
          {
             const sal::alloc_header* h = ses.get_ref<sal::alloc_header>(addr).obj();
             if (h->type() == leaf_page::type_id)
-               return reinterpret_cast<const leaf_page*>(h);
+            {
+               // Canonical collapse: a page attaches directly under a branch byte and carries its
+               // own divider (_div). Discriminate the lower bound against _div[depth..] (the parent
+               // hop already appended this page's branch byte; _div beyond it is page-internal, so
+               // NOTHING is appended to div here). A root/leftmost page (no fallback) catches every
+               // key below it — return it rather than failing the fallback.
+               const leaf_page* pg    = reinterpret_cast<const leaf_page*>(h);
+               bytes            dv    = pg->divider();
+               bytes            dtail = dv.size() > depth ? dv.subspan(depth) : bytes{};
+               bytes            rem   = kb.subspan(depth < kb.size() ? depth : kb.size());
+               const size_t     m     = dtail.size() < rem.size() ? dtail.size() : rem.size();
+               int              c     = m ? std::memcmp(rem.data(), dtail.data(), m) : 0;
+               if (c == 0 && rem.size() < dtail.size())
+                  c = -1;  // key exhausts inside the page divider → below this page
+               if (c < 0 && have_fb)
+                  return take_fallback();
+               return pg;  // c >= 0 (this page owns kb), or no fallback (root/leftmost catch-all)
+            }
             ptr_address next{};
             int action = 0;  // 0 descend, 1 done(next=page), 2 fallback, 3 max(addr), 4 max(next)
             dispatch_hdr(h, [&](auto ad) {
@@ -1881,31 +1934,7 @@ namespace sal_art_ref::radix
                case 4:
                   return max_page(ses, next, div, dlen);
                case 2:
-               {
-                  assert(have_fb && "no fallback: the radix root must hold the \"\" divider");
-                  (void)have_fb;
-                  if (dlen)
-                     *dlen = fb_dlen;
-                  ptr_address fnext{};
-                  bool        fpage = false;
-                  dispatch(ses, fb_node, [&](auto ad) {
-                     const int less = ad.prev(fb_li);  // resolved ONCE, only on fallback
-                     if (less < 0)
-                     {
-                        fnext = ad.term().as_pointer();
-                        fpage = true;
-                        return;
-                     }
-                     uint8_t   sb[4];
-                     const int nb = stem_bytes(ad.cell(less), ad.stem_width(), ad.cw(), sb);
-                     div_append(div, dlen, sb, size_t(nb));
-                     fnext = ad.branch(less).as_pointer();
-                  });
-                  if (fpage)
-                     return reinterpret_cast<const leaf_page*>(
-                         ses.get_ref<sal::alloc_header>(fnext).obj());
-                  return max_page(ses, fnext, div, dlen);
-               }
+                  return take_fallback();
             }
          }
       }
@@ -1921,7 +1950,7 @@ namespace sal_art_ref::radix
             if (int(i) == skip)
                continue;
             const inline_value* iv = pg->record(i);
-            if (iv->value_type == inline_value::vt_extern)
+            if (inline_value::external_value(iv->value_type))
                _ses->retain(pg->external_addr(i));
             else if (iv->is_subtree() && iv->subtree_root() != sal::null_ptr_address)
                _ses->retain(iv->subtree_root());
@@ -1980,19 +2009,32 @@ namespace sal_art_ref::radix
          // key bytes. (Fresh classification: any item whose suffix+payload exceeds the
          // 128-byte in-page cap moves whole into its own key_val_node.)
          const bool old_ext =
-             idx >= 0 && pg->record(uint32_t(idx))->value_type == inline_value::vt_extern;
+             idx >= 0 && inline_value::external_value(pg->record(uint32_t(idx))->value_type);
          if (old_ext || int(slen + pay0) > leaf_page::max_inline_entry)
          {
-            // the key_val_node stores the FULL key + value (+ the REAL value type)
-            ins.ext   = _ses->alloc<key_val_node>(sal::alloc_hint{}, kb, val, _ins_value_type);
-            ins.vtype = inline_value::vt_extern;
+            if (slen <= leaf_page::max_suffix_len)
+            {
+               // VALUE-ONLY external (psitri's value_node model): the full post-cpfx suffix
+               // stays in the page record; only the VALUE moves out — a key_val_node with an
+               // EMPTY key (value at data+0). No key duplication; exact-match stays in-page.
+               ins.ext   = _ses->alloc<key_val_node>(sal::alloc_hint{}, bytes{}, val,
+                                                      _ins_value_type);
+               ins.vtype = inline_value::vt_extern_val;
+            }
+            else
+            {
+               // Rare long-suffix (> 255 B post-cpfx, can't fit the u8 in-page suffix): keep the
+               // legacy FULL key + value in the external node, page holds only a fragment.
+               ins.ext   = _ses->alloc<key_val_node>(sal::alloc_hint{}, kb, val, _ins_value_type);
+               ins.vtype = inline_value::vt_extern;
+            }
             ins.value = {};
          }
          if (idx >= 0)  // UPDATE — capture the displaced record's identity first
          {
             const inline_value* old       = pg->record(uint32_t(idx));
             ptr_address         old_child = sal::null_ptr_address;
-            if (old->value_type == inline_value::vt_extern)
+            if (inline_value::external_value(old->value_type))
             {
                old_child = pg->external_addr(uint32_t(idx));
                _old_value_size =
@@ -2091,7 +2133,7 @@ namespace sal_art_ref::radix
          const bool          shared    = parent_shared || ref.ref() > 1;
          const inline_value* old       = pg->record(uint32_t(idx));
          ptr_address         old_child = sal::null_ptr_address;
-         if (old->value_type == inline_value::vt_extern)
+         if (inline_value::external_value(old->value_type))
             old_child = pg->external_addr(uint32_t(idx));
          else if (old->is_subtree())
             old_child = old->subtree_root();
@@ -2265,11 +2307,9 @@ namespace sal_art_ref::radix
       smart_address make_divider_tail(bytes D, uint32_t depth, ptr_address page,
                                       sal::alloc_hint hint)
       {
+#ifdef HEART_NO_COLLAPSE  // A/B knob: build the OLD single-child setlist chain (default = collapse)
          if (depth + 1 == D.size())
             return smart_address::from_pointer(page);
-         // Every node here (term-only deepest AND branch-carrying up-links) must stay upgradeable,
-         // so chunk the divider tail at divider_prefix_cap. The deepest node may later acquire a
-         // branch when a sibling divider is inserted under it, so it is bound by the same cap.
          constexpr int cap        = divider_prefix_cap;
          constexpr int branch_cap = divider_prefix_cap;
          const int     lo  = int(depth) + 1;
@@ -2290,6 +2330,12 @@ namespace sal_art_ref::radix
             start = s2;
          }
          return smart_address::from_pointer(node);
+#else
+         (void)D;
+         (void)depth;
+         (void)hint;
+         return smart_address::from_pointer(page);
+#endif
       }
 
       // Build a path-compression chain that consumes `seg` and ends by branching into `tail`
@@ -2361,14 +2407,52 @@ namespace sal_art_ref::radix
          ptr_address child = sa.as_pointer();
          if (is_page(*_ses, child))
          {
-            // an existing divider ends exactly at b (its slot IS this page) and D extends it:
-            // demote the page to the TERM of a fresh empty-prefix router, insert D's tail there.
+            // The slot at b is a directly-attached page P (canonical collapse: P carries its own
+            // divider in leaf_page::_div, no single-child setlist). D is the new page's divider; it
+            // shares [path][b] with P and diverges in the tail → build np, the divergence router:
+            // the SHARED continuation common(P._div, D) is np's prefix, with P under its divergence
+            // byte (or np's term if P's divider ends at the shared prefix) AND D's page under its
+            // own. Reading P._div (the true separator, NOT cpfx) keeps P's discriminator exact.
+            // Mirrors divider_prefix_split: np capped at divider_prefix_cap (upgrade-safe), a longer
+            // shared prefix spills to a leading single-branch make_prefix_chain.
             assert(depth + 1 < D.size() && "duplicate divider");
-            _ses->retain(child);  // the mid router's term takes its own ref on the page
-            ptr_address mid = make_node<setlist_u8>(bytes{}, chint);
-            mut<setlist_u8>(mid)->set_term_value(smart_address::from_pointer(child));
-            ptr_address nmid = divider_insert_in<upsert_mode{}, setlist_u8>(mid, D, depth + 1, page);
-            smart_address     msa = smart_address::from_pointer(nmid);
+            bytes      pdv   = page_at(*_ses, child)->divider();
+            bytes      ptail = pdv.size() > depth + 1 ? pdv.subspan(depth + 1) : bytes{};
+            bytes      ntail = D.subspan(depth + 1);
+            const int  mcl   = int(std::min(ptail.size(), ntail.size()));
+            const int  cpl =
+                common_prefix_len(ptail.subspan(0, size_t(mcl)), ntail.subspan(0, size_t(mcl)));
+            constexpr int  npcap      = divider_prefix_cap;
+            const int      np_pfx_len = cpl <= npcap ? cpl : npcap;
+            const uint32_t np_from    = depth + 1 + uint32_t(cpl) - uint32_t(np_pfx_len);
+            ptr_address    np = make_node<setlist_u8>(D.subspan(np_from, size_t(np_pfx_len)), chint);
+            _ses->retain(child);  // np takes np's ref on the page (balances the old slot release)
+            if (cpl == int(ptail.size()))  // P's divider ends at the shared prefix → P is np's term
+               mut<setlist_u8>(np)->set_term_value(smart_address::from_pointer(child));
+            else
+            {
+               [[maybe_unused]] bool okp = mut<setlist_u8>(np)->set_branch(
+                   ptail[size_t(cpl)], smart_address::from_pointer(child));
+               assert(okp && "fresh setlist always fits the first branch");
+            }
+            const uint32_t d2 = depth + 1 + uint32_t(cpl);
+            if (d2 == D.size())  // the new divider ends at the shared prefix → its page is np's term
+            {
+               assert(cpl != int(ptail.size()) && "duplicate divider");
+               mut<setlist_u8>(np)->set_term_value(smart_address::from_pointer(page));
+            }
+            else
+            {
+               smart_address         sab = make_divider_tail(D, d2, page, chint);
+               [[maybe_unused]] bool ok  = mut<setlist_u8>(np)->set_branch(D[size_t(d2)], sab);
+               assert(ok && "np (<=2 entries, capped prefix) always fits the second branch");
+            }
+            ptr_address nmid =
+                cpl <= npcap
+                    ? np
+                    : make_prefix_chain(D.subspan(depth + 1, size_t(np_from - (depth + 1))), np,
+                                        chint);
+            smart_address msa = smart_address::from_pointer(nmid);
             const ptr_address pre = addr;
             N*                n   = cow<mode, N>(ref, addr);
             rr_diverge<N>(n, range_of(b));
@@ -2594,11 +2678,15 @@ namespace sal_art_ref::radix
                                      " key(s) (size " + std::to_string(pg->size()) + ")");
          }
          const auto       sp = pg->get_split_pos(kvres(*_ses));
-         ptr_address      L  = _ses->alloc<leaf_page>(sal::alloc_hint{},
-                                                      leaf_page::split_op{pg, 0, sp.index, kvres(*_ses)});
+         // The page divider rides on each half: L keeps pg's own divider (its radix slot is
+         // unchanged); R's divider IS the split divider (sp.divider()), the same key inserted into
+         // the radix below. This populates leaf_page::_div for the canonical-collapse read path.
+         ptr_address      L  = _ses->alloc<leaf_page>(
+             sal::alloc_hint{}, leaf_page::split_op{pg, 0, sp.index, kvres(*_ses), pg->divider()});
          _ses->get_ref<leaf_page>(L).obj()->for_each_child([&](ptr_address c) { _ses->retain(c); });
          ptr_address R = _ses->alloc<leaf_page>(
-             sal::alloc_hint{}, leaf_page::split_op{pg, sp.index, uint16_t(pg->num_keys()), kvres(*_ses)});
+             sal::alloc_hint{},
+             leaf_page::split_op{pg, sp.index, uint16_t(pg->num_keys()), kvres(*_ses), sp.divider()});
          _ses->get_ref<leaf_page>(R).obj()->for_each_child([&](ptr_address c) { _ses->retain(c); });
          ++_cc.page_splits;
          if (cur == P)  // the root IS the page → grow a radix above it
@@ -2775,7 +2863,7 @@ namespace sal_art_ref::radix
          if (idx < 0)
             return false;
          const inline_value* iv = pg->record(uint32_t(idx));
-         if (iv->value_type == inline_value::vt_extern)
+         if (inline_value::external_value(iv->value_type))
          {
             const key_val_node* kn =
                 ses.get_ref<key_val_node>(pg->external_addr(uint32_t(idx))).obj();
@@ -2806,7 +2894,7 @@ namespace sal_art_ref::radix
             value_view          v;
             if (iv->value_type == inline_value::vt_extern)
             {
-               // the key_val_node holds the FULL key and the real value
+               // FULL-key external (fragment in-page): key AND value from the external node
                const key_val_node* kn =
                    _ses->get_ref<key_val_node>(pg->external_addr(i)).obj();
                kb2.truncate(0);
@@ -2816,11 +2904,19 @@ namespace sal_art_ref::radix
             }
             else
             {
+               // key: cpfx + in-page suffix (inline AND vt_extern_val carry the full suffix)
                kb2.truncate(uint32_t(cp.size()));
                auto sfx = pg->suffix(i);
                kb2.append(sfx.data(), sfx.size());
-               v = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len),
-                              iv->value_len);
+               if (iv->value_type == inline_value::vt_extern_val)  // value-only external
+               {
+                  bytes vb =
+                      _ses->get_ref<key_val_node>(pg->external_addr(i)).obj()->value_bytes();
+                  v = value_view(reinterpret_cast<const char*>(vb.data()), vb.size());
+               }
+               else
+                  v = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len),
+                                 iv->value_len);
             }
             cb(key_view(reinterpret_cast<const char*>(kb2.buf), kb2.len), v);
          }
@@ -3034,8 +3130,16 @@ namespace sal_art_ref::radix
                auto sfx = pg->suffix(uint32_t(lb));
                out_key.assign(reinterpret_cast<const char*>(cp.data()), cp.size());
                out_key.append(reinterpret_cast<const char*>(sfx.data()), sfx.size());
-               out_val = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len),
-                                    iv->value_len);
+               if (iv->value_type == inline_value::vt_extern_val)  // value-only external
+               {
+                  bytes vb = _ses->get_ref<key_val_node>(pg->external_addr(uint32_t(lb)))
+                                 .obj()
+                                 ->value_bytes();
+                  out_val = value_view(reinterpret_cast<const char*>(vb.data()), vb.size());
+               }
+               else
+                  out_val = value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len),
+                                       iv->value_len);
                return true;
             }
             // Spill: the answer is the NEXT page's first entry — the cursor frame walk finds it.
@@ -3407,7 +3511,25 @@ namespace sal_art_ref::radix
             append(cp.data(), cp.size());
             auto sfx = pg->suffix(uint32_t(i));
             append(sfx.data(), sfx.size());
-            if (iv->is_subtree())
+            if (iv->value_type == inline_value::vt_extern_val)
+            {
+               // value-only external: key is in-page (cpfx+suffix), value/subtree in the node
+               const key_val_node* kn =
+                   ses().get_ref<key_val_node>(pg->external_addr(uint32_t(i))).obj();
+               if (kn->is_subtree())
+               {
+                  _is_subtree = true;
+                  _subtree    = kn->subtree_root();
+                  _val        = {};
+               }
+               else
+               {
+                  _is_subtree = false;
+                  auto v      = kn->value_bytes();
+                  _val        = value_view(reinterpret_cast<const char*>(v.data()), v.size());
+               }
+            }
+            else if (iv->is_subtree())
             {
                _is_subtree = true;
                _subtree    = iv->subtree_root();
@@ -4239,7 +4361,7 @@ namespace sal_art_ref::radix
          void publish(uint32_t idx, root_ptr w)
          {
             auto old = _t->_ses->set_root<sal::alloc_header>(sal::root_object_number(idx),
-                                                             std::move(w), sal::sync_type::none);
+                                                             std::move(w), _t->sync_mode());
          }
 
         public:
@@ -6190,6 +6312,7 @@ namespace sal_art_ref::radix
 
       std::unique_ptr<sal::allocator> _alloc;
       sal::allocator_session_ptr      _ses;
+      sal::sync_type                  _sync = sal::sync_type::none;  // commit durability (adb config)
       // The DIRECT-API working root — an OWNING smart_ptr (psitri tree_context's discipline);
       // empty = the valid empty tree. The database layer never reads it (SAL roots only).
       sal::smart_ptr<sal::alloc_header> _root;
@@ -6370,8 +6493,9 @@ namespace sal_art_ref::radix
      public:
       explicit database(const std::filesystem::path& dir,
                         bool                         wipe      = true,
-                        bool                         read_only = false)
-          : _engine(dir, wipe, read_only)
+                        bool                         read_only = false,
+                        sal::sync_type               sync      = sal::sync_type::none)
+          : _engine(dir, wipe, read_only, sync)
       {
       }
       // Unified open semantics (the kv_engine concept's construction clause —
@@ -6381,7 +6505,7 @@ namespace sal_art_ref::radix
       // remove_all() themselves (they all already did).
       static std::shared_ptr<database> open(const std::filesystem::path& dir,
                                             sal::open_mode mode = sal::open_mode::create_or_open,
-                                            const sal::runtime_config& = {})
+                                            const sal::runtime_config& cfg = {})
       {
          const bool exists = std::filesystem::exists(dir / "roots");
          switch (mode)
@@ -6401,7 +6525,7 @@ namespace sal_art_ref::radix
          if (!exists)
             std::filesystem::create_directories(dir);
          return std::make_shared<database>(dir, /*wipe=*/false,
-                                           mode == sal::open_mode::read_only);
+                                           mode == sal::open_mode::read_only, cfg.sync_mode);
       }
       // Open an EXISTING database (no wipe). read_only=true: no background
       // threads, data PROT_READ, control pages copy-on-write (file pristine),

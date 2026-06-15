@@ -72,6 +72,12 @@ namespace sal_art_ref
          if (is_subtree())
             s->release(subtree_root());
       }
+      // SAL reachability/refcount-rebuild hook — same nested-subtree root destroy() releases.
+      void visit_children(const std::function<void(sal::ptr_address)>& v) const
+      {
+         if (is_subtree())
+            v(subtree_root());
+      }
    } __attribute__((packed));
 
    static_assert(sizeof(key_val_node) == 25, "versioned(20) + key_len(2)+value_len(2)+vt(1)");

@@ -65,8 +65,45 @@ target_compile_options(mem-recovery-bench PRIVATE -O3 -DNDEBUG)
 set_target_properties(mem-recovery-bench PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+# tree-shape-audit: read-only leak + tree-shape audit of a sal_art_ref cold base.
+add_executable(tree-shape-audit tree_shape_audit.cpp)
+target_link_libraries(tree-shape-audit PRIVATE sal_art_ref psitri)
+target_include_directories(tree-shape-audit PRIVATE
+    ${CMAKE_SOURCE_DIR}/libraries/sal_art_ref/test)
+target_compile_definitions(tree-shape-audit PRIVATE XXH_INLINE_ALL)
+target_compile_options(tree-shape-audit PRIVATE -O3 -DNDEBUG)
+set_target_properties(tree-shape-audit PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# churn-leak: reproduce cold-base bloat via controlled overwrite/remove churn.
+add_executable(churn-leak churn_leak.cpp)
+target_link_libraries(churn-leak PRIVATE delta_art start_ver sal_art_ref psitri)
+target_include_directories(churn-leak PRIVATE
+    ${CMAKE_SOURCE_DIR}/libraries/sal_art_ref/test)
+target_compile_definitions(churn-leak PRIVATE XXH_INLINE_ALL)
+target_compile_options(churn-leak PRIVATE -O3 -DNDEBUG)
+set_target_properties(churn-leak PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# oplog-replay: replay a captured Silkworm op-stream into delta_art, track footprint.
+add_executable(oplog-replay oplog_replay.cpp)
+target_link_libraries(oplog-replay PRIVATE delta_art start_ver sal_art_ref psitri)
+target_include_directories(oplog-replay PRIVATE
+    ${CMAKE_SOURCE_DIR}/libraries/sal_art_ref/test)
+target_compile_definitions(oplog-replay PRIVATE XXH_INLINE_ALL)
+target_compile_options(oplog-replay PRIVATE -O3 -DNDEBUG)
+set_target_properties(oplog-replay PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 # delta_art reopen-race repro (TSan): reopen a populated tiered DB + write.
 add_executable(delta_art-reopen-repro delta_art_reopen_repro.cpp)
 target_link_libraries(delta_art-reopen-repro PRIVATE delta_art start_ver sal_art_ref psitri)
 target_include_directories(delta_art-reopen-repro PRIVATE ${CMAKE_SOURCE_DIR}/libraries/sal_art_ref/test)
 target_compile_definitions(delta_art-reopen-repro PRIVATE XXH_INLINE_ALL)
+
+# sal_art_ref cold-base corruption repro: sorted bulk drains of vt_extern/large values
+add_executable(delta_art-largeval-repro delta_art_largeval_repro.cpp)
+target_link_libraries(delta_art-largeval-repro PRIVATE delta_art start_ver sal_art_ref psitri)
+target_include_directories(delta_art-largeval-repro PRIVATE ${CMAKE_SOURCE_DIR}/libraries/sal_art_ref/test)
+target_compile_definitions(delta_art-largeval-repro PRIVATE XXH_INLINE_ALL)
+target_compile_options(delta_art-largeval-repro PRIVATE -O2 -g)

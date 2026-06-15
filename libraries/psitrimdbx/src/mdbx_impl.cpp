@@ -2293,6 +2293,21 @@ int mdbx_env_create(MDBX_env** penv)
    return MDBX_SUCCESS;
 }
 
+// Map MDBX env durability flags to the adb commit-sync level (the commit config that
+// flows to BOTH tiers). Matches MDBX semantics: a synced commit is the boundary that
+// writes the seal record so the cold base compacts/recycles — without it the file grows
+// by the full COW-garbage rate. Default (SYNC_DURABLE, flags==0) is a true fsync.
+static sal::sync_type mdbx_flags_to_sync(MDBX_env_flags_t flags) noexcept
+{
+   if ((flags & MDBX_UTTERLY_NOSYNC) == MDBX_UTTERLY_NOSYNC)
+      return sal::sync_type::none;
+   if (flags & MDBX_SAFE_NOSYNC)
+      return sal::sync_type::msync_async;
+   if (flags & MDBX_NOMETASYNC)
+      return sal::sync_type::msync_sync;
+   return sal::sync_type::fsync;  // MDBX_SYNC_DURABLE (MDBX's default)
+}
+
 int mdbx_env_open(MDBX_env* env, const char* pathname,
                   MDBX_env_flags_t flags, mdbx_mode_t /*mode*/)
 {
@@ -2318,6 +2333,18 @@ int mdbx_env_open(MDBX_env* env, const char* pathname,
       auto open_mode = sal::open_mode::create_or_open;
 
       TK::config cfg;
+      // Durability: derive the adb commit-sync from the MDBX env flags (the commit config),
+      // fanned out to both tiers at open. PSITRI_SYNC overrides for A/B benchmarking.
+      cfg.commit_sync = mdbx_flags_to_sync(flags);
+      if (const char* s = std::getenv("PSITRI_SYNC"))
+      {
+         const std::string_view v{s};
+         if (v == "none")                              cfg.commit_sync = sal::sync_type::none;
+         else if (v == "async" || v == "msync_async")  cfg.commit_sync = sal::sync_type::msync_async;
+         else if (v == "msync" || v == "msync_sync")   cfg.commit_sync = sal::sync_type::msync_sync;
+         else if (v == "fsync")                        cfg.commit_sync = sal::sync_type::fsync;
+         else if (v == "full")                         cfg.commit_sync = sal::sync_type::full;
+      }
       // Optional delta_art knobs from the psitri cache options (best-effort
       // mapping; cache_size -> arena budget, in MB).
       if (auto it = env->options.find(MDBX_opt_psitri_cache_size_mb);

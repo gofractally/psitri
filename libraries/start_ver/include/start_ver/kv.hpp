@@ -655,20 +655,31 @@ namespace start_ver::kv
          (reg_type_<Ts>(), ...);
       }
 
-      // wait until the drain ring is empty (tests / shutdown ordering)
+      // Drain all RELEASABLE garbage now (tests / shutdown ordering). Two callers'
+      // worth of safety:
+      //   • no background consumer (background_release=false, or before the thread
+      //     starts): nobody drains the ring, so a notify-and-wait would spin forever.
+      //     Drain INLINE here (drain_() is the single consumer — safe, since no thread
+      //     is running), exactly like the destructor.
+      //   • a background consumer IS running: nudge it and wait for the RING to drain
+      //     and the in-flight pass to finish. Do NOT wait for the SPILL — chains a live
+      //     reader pins stay gated there until the pin drops; blocking on them would
+      //     spin forever (a held snapshot + flush_releases = hang).
       void flush_releases() noexcept
       {
-         auto spill_empty = [&] {
-            std::lock_guard<std::mutex> g(_reg_spill_mx);
-            return _reg_spill.empty();
-         };
-         while (_reg_tail.load(std::memory_order_acquire) !=
-                    _reg_head.load(std::memory_order_acquire) ||
-                _drain_active.load(std::memory_order_acquire) ||  // a pass holds
-                !spill_empty())                                   // gated in-flight
+         if (_drain_thread.joinable())
          {
-            _drain_cv.notify_one();
-            std::this_thread::yield();
+            while (_reg_tail.load(std::memory_order_acquire) !=
+                       _reg_head.load(std::memory_order_acquire) ||
+                   _drain_active.load(std::memory_order_acquire))  // a pass holds
+            {
+               _drain_cv.notify_one();
+               std::this_thread::yield();
+            }
+         }
+         else
+         {
+            drain_();  // inline single consumer — no thread to race
          }
          // return ring-parked runs to the freeset (the gate counts free BITS;
          // ring entries are claimed-but-reusable). Caller is the consumer side.
@@ -763,11 +774,13 @@ namespace start_ver::kv
 
      private:
       friend struct tree_root::ctrl;
-      void reap_root_(uint32_t raw) noexcept
+      // vf = the death (displacement) version: a reader pinned at version < vf still
+      // sees this tree, so the reaper must NOT free it until the floor passes vf.
+      void reap_root_(uint32_t raw, uint32_t vf) noexcept
       {
          {
             std::lock_guard g(_dead_mx);
-            _dead_roots.push_back(raw);
+            _dead_roots.push_back({raw, vf});
          }
          _reap_enq.fetch_add(1, std::memory_order_release);
          _dead_cv.notify_one();
@@ -780,22 +793,43 @@ namespace start_ver::kv
          // a second producer corrupts it (measured: allocation livelock).
          // Reaper frees go straight to the thread-safe freesets; the writer
          // reclaims them through claim_.
-         std::unique_lock lk(_dead_mx);
+         // Gated reaping: a displaced tree is deep-freed only once the floor passes
+         // its death version (no reader's snapshot can still reach it). A displaced
+         // tree may be reachable from ANY root's readers — delta_art's rotation moves
+         // a tree across roots 0<->1 — so gate on the GLOBAL floor. Chains a live
+         // reader pins are DEFERRED (retried as the floor advances), never freed early.
+         std::vector<std::pair<uint32_t, uint32_t>> deferred;  // (raw, death-version)
+         std::unique_lock                           lk(_dead_mx);
          for (;;)
          {
-            _dead_cv.wait(lk, [&] { return _reaper_stop || !_dead_roots.empty(); });
-            if (_reaper_stop && _dead_roots.empty())
+            if (_dead_roots.empty() && !_reaper_stop)
+            {
+               if (deferred.empty())
+                  _dead_cv.wait(lk, [&] { return _reaper_stop || !_dead_roots.empty(); });
+               else
+                  _dead_cv.wait_for(lk, std::chrono::milliseconds(1));  // retry gated
+            }
+            if (_reaper_stop && _dead_roots.empty() && deferred.empty())
                return;
-            std::vector<uint32_t> work;
+            std::vector<std::pair<uint32_t, uint32_t>> work;
             work.swap(_dead_roots);
             lk.unlock();
-            for (uint32_t raw : work)
+            work.insert(work.end(), deferred.begin(), deferred.end());
+            deferred.clear();
+            // shutdown: no readers remain, force-reap (matches the pre-gate behavior)
+            const uint32_t fl = _reaper_stop ? UINT32_MAX : floor_();
+            for (auto& d : work)
             {
                root_ptr wp = root_ptr::null();
-               std::memcpy(wp.b, &raw, 4);
-               if (!wp.is_null())
-                  v.vdrain_entry(raw, 0x80000000u);  // DEEP: cascade the whole tree
-               _reap_done.fetch_add(1, std::memory_order_release);
+               std::memcpy(wp.b, &d.first, 4);
+               if (d.second <= fl)  // death version <= floor: no reader still sees it
+               {
+                  if (!wp.is_null())
+                     v.vdrain_entry(d.first, 0x80000000u);  // DEEP: cascade the whole tree
+                  _reap_done.fetch_add(1, std::memory_order_release);
+               }
+               else
+                  deferred.push_back(d);  // a reader pins a version that still sees it
             }
             lk.lock();
          }
@@ -1013,7 +1047,7 @@ namespace start_ver::kv
       std::atomic<uint32_t>     _reg_head{0}, _reg_tail{0};
       std::mutex                _dead_mx;   // dead version roots -> the reaper
       std::condition_variable   _dead_cv;
-      std::vector<uint32_t>     _dead_roots;
+      std::vector<std::pair<uint32_t, uint32_t>> _dead_roots;  // (raw root, death version)
       std::atomic<uint64_t>     _reap_enq{0}, _reap_done{0};
       std::thread               _reaper;
       bool                      _reaper_stop = false;
@@ -1199,7 +1233,7 @@ namespace start_ver::kv
    inline tree_root::ctrl::~ctrl()
    {
       if (armed)
-         db->reap_root_(raw);
+         db->reap_root_(raw, vf);  // vf = death version: reaper gates on the floor
       if (pin_slot)
          pin_slot->store(0, std::memory_order_seq_cst);  // drop the version pin
    }

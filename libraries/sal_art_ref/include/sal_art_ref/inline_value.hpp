@@ -31,9 +31,25 @@ namespace sal_art_ref
       //                cbase code private to the containing leaf_page (which owns the cbase
       //                table that decodes it to a ptr_address). Lifecycle code must
       //                retain/release the decoded address.
-      static constexpr uint8_t vt_bytes   = 0;
-      static constexpr uint8_t vt_subtree = 1;
-      static constexpr uint8_t vt_extern  = 2;
+      //   vt_extern_val — VALUE-ONLY external: the FULL post-cpfx suffix stays in THIS record
+      //                (the page's common prefix keeps it short), and only the VALUE lives in an
+      //                external node (a key_val_node with key_len==0, value at data+0). Payload is
+      //                the same 2-byte cbase code as vt_extern, but the suffix is COMPLETE — so the
+      //                key never needs the external object (exact-match compares the in-page
+      //                suffix). Used when suffix <= ext_frag_cap; a longer suffix falls back to
+      //                vt_extern (full key stored in the external node).
+      static constexpr uint8_t vt_bytes      = 0;
+      static constexpr uint8_t vt_subtree    = 1;
+      static constexpr uint8_t vt_extern     = 2;
+      static constexpr uint8_t vt_extern_val = 3;
+
+      // The value is stored in an external SAL object (record holds a 2-byte cbase code).
+      static constexpr bool external_value(uint8_t vt) noexcept
+      {
+         return vt == vt_extern || vt == vt_extern_val;
+      }
+      // The in-page suffix is the COMPLETE post-cpfx suffix (only vt_extern keeps a fragment).
+      static constexpr bool suffix_complete(uint8_t vt) noexcept { return vt != vt_extern; }
 
       uint8_t suffix_len;
       uint8_t value_len;

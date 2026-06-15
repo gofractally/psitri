@@ -1781,15 +1781,26 @@ namespace sal
       //      SAL_ERROR("compact_segment: {:L}", seg_num);
       auto        state = ses.lock();
       const auto* s     = get_segment(seg_num);
-
-      // if it is read only, then we don't have to worry about locking!
-      assert(s->is_read_only() && "segment must be read only before compacting");
-
-      // collect the range we will be iterating over
       const auto* shead = (const mapped_memory::segment*)s;
-      const auto* send  = reinterpret_cast<const alloc_header*>(
+
+      // Runtime guard (not just assert, which is gone in release): only ever
+      // walk a segment the writer has frozen. A non-read-only segment may still
+      // be receiving the writer's set_alloc_pos, and walking it with a stale or
+      // torn alloc_pos runs the alloc_header chain past the live region into
+      // uninitialized bytes — manufacturing a garbage ptr_address that faults
+      // (SIGBUS) in get_ref. Observed on Silkworm startup.
+      if (not shead->is_read_only())
+      {
+         SAL_ERROR("compact_segment: segment {} not read-only; skipping", seg_num);
+         return;
+      }
+
+      // collect the range we will be iterating over. get_alloc_pos_acquire()
+      // pairs with set_alloc_pos's release store: it observes the writer's final,
+      // complete alloc_pos (establishing happens-before — no torn/stale read).
+      const auto* send = reinterpret_cast<const alloc_header*>(
           shead->data +
-          std::min<uint32_t>(shead->end_pos(), shead->get_alloc_pos()));
+          std::min<uint32_t>(shead->end_pos(), shead->get_alloc_pos_acquire()));
 
       // cast the start to first object_header
       const alloc_header* foo = (const alloc_header*)(shead);

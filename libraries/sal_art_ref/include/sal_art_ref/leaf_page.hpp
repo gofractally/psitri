@@ -106,6 +106,13 @@ namespace sal_art_ref
       // silently lost every key whose length crossed 256 (contract test 4.7a)
       uint16_t         _cpfx_len;   // factored common prefix length
       tail_ptr<>       _cpfx_pos;   // common prefix bytes in the tail heap (0 = none)
+      // The page DIVIDER: this page's lower-bound separator (the routing key the radix uses to
+      // reach it). Set ONCE at creation (split right-half = the split divider; left-half / leftmost
+      // = inherited / empty), copied verbatim by every rebuild, never touched by in-place ops.
+      // Lets a page attach DIRECTLY under a branch byte (no single-child setlist): route_to_page
+      // re-screens key[depth..] against _div[depth..] on arrival. Mirrors _cpfx_len/_cpfx_pos.
+      uint16_t         _div_len;    // page divider (lower-bound separator) length
+      tail_ptr<>       _div_pos;    // divider bytes in the tail heap (0 = none / leftmost)
       sal::ptr_address _cbases[max_cbases];
       // CACHELINE INDEX (the wtree lesson): the FIRST stem of every (stride-th) prefix-column
       // cacheline, sampled HERE in the header — resident from reading the fields above, so the
@@ -161,9 +168,10 @@ namespace sal_art_ref
       };
       struct split_op  // one half of a split: src entries [lo,hi)
       {
-         const leaf_page* src;
-         uint16_t         lo, hi;
-         kv_resolver      res{};
+         const leaf_page*         src;
+         uint16_t                 lo, hi;
+         kv_resolver              res{};
+         std::span<const uint8_t> div{};  // this half's divider: left = src's, right = split divider
       };
 
       // ── SAL lifecycle ────────────────────────────────────────────────────────────
@@ -214,7 +222,8 @@ namespace sal_art_ref
          // compaction never changes cpfx (prepend == 0): fragments copy verbatim, already
          // maximal — no resolver needed (SAL's passive compactor has no session).
          static_cast<leaf_page*>(dst)->init_from(this, 0, _nkeys, _cpfx_len, nullptr, 0, nullptr,
-                                                 nullptr, /*drop=*/-1, /*max_w=*/_pfxw);
+                                                 nullptr, /*drop=*/-1, /*max_w=*/_pfxw,
+                                                 kv_resolver{}, {div_data(), _div_len});
       }
       void copy_to(sal::alloc_header* dst) const noexcept { blit_head_tail(dst, head_size()); }
 
@@ -234,6 +243,12 @@ namespace sal_art_ref
                                    iv->value().size()});
          }
       }
+      // SAL reachability/refcount-rebuild hook — same external-value + subtree-root set destroy()
+      // releases (default alloc_header::visit_children is empty → these would look unreachable).
+      void visit_children(const std::function<void(sal::ptr_address)>& v) const
+      {
+         for_each_child([&](sal::ptr_address c) { v(c); });
+      }
 
       /// Visit SAL children (external values + nested subtree roots) — the release/
       /// retain cascade and ref audits walk this.
@@ -243,7 +258,7 @@ namespace sal_art_ref
          for (uint32_t i = 0; i < _nkeys; ++i)
          {
             const inline_value* iv = record(i);
-            if (iv->value_type == inline_value::vt_extern)
+            if (inline_value::external_value(iv->value_type))
                f(decode_extern(iv));
             else if (iv->is_subtree())
             {
@@ -273,19 +288,19 @@ namespace sal_art_ref
          const uint16_t ncp = uint16_t(
              shared_prefix(op.ins.key.data(), op.ins.key.size(), s->cpfx_data(), s->_cpfx_len));
          init_from(s, 0, s->_nkeys, ncp, nullptr, 0, &op.ins, nullptr, -1, 4,
-                   op.ins.res);
+                   op.ins.res, {s->div_data(), s->_div_len});  // divider unchanged by insert
       }
       leaf_page(uint32_t asize, sal::ptr_address_seq seq, const clone_update_op& op) noexcept
       {
          this->init_page(asize, type_id, seq);
          init_from(op.src, 0, op.src->_nkeys, op.src->_cpfx_len, nullptr, 0, nullptr, &op.upd,
-                   -1, 4, op.res);
+                   -1, 4, op.res, {op.src->div_data(), op.src->_div_len});  // divider unchanged
       }
       leaf_page(uint32_t asize, sal::ptr_address_seq seq, const clone_remove_op& op) noexcept
       {
          this->init_page(asize, type_id, seq);
          init_from(op.src, 0, op.src->_nkeys, op.src->_cpfx_len, nullptr, 0, nullptr, nullptr,
-                   int(op.index), 4, op.res);
+                   int(op.index), 4, op.res, {op.src->div_data(), op.src->_div_len});  // unchanged
       }
       leaf_page(uint32_t asize, sal::ptr_address_seq seq, const split_op& op) noexcept
       {
@@ -298,7 +313,7 @@ namespace sal_art_ref
          auto       b     = s->suffix(op.hi - 1);
          const auto extra = shared_prefix(a.data(), a.size(), b.data(), b.size());
          init_from(s, op.lo, op.hi, uint16_t(s->_cpfx_len + extra), a.data(), uint32_t(extra),
-                   nullptr, nullptr, -1, 4, op.res);
+                   nullptr, nullptr, -1, 4, op.res, op.div);
       }
 
       // ── accessors ────────────────────────────────────────────────────────────────
@@ -310,6 +325,7 @@ namespace sal_art_ref
       {
          return {cpfx_data(), _cpfx_len};
       }
+      std::span<const uint8_t> divider() const noexcept { return {div_data(), _div_len}; }
       std::span<const uint8_t> suffix(uint32_t i) const noexcept { return record(i)->suffix(); }
       uint8_t                  value_type(uint32_t i) const noexcept
       {
@@ -324,7 +340,7 @@ namespace sal_art_ref
       }
       bool is_external(uint32_t i) const noexcept
       {
-         return record(i)->value_type == inline_value::vt_extern;
+         return inline_value::external_value(record(i)->value_type);
       }
       sal::ptr_address external_addr(uint32_t i) const noexcept
       {
@@ -459,7 +475,7 @@ namespace sal_art_ref
          if (ins.vtype == inline_value::vt_bytes &&
              int(n - _cpfx_len + ins.value.size()) > max_inline_entry)
             return can_apply_mode::none;  // engine should have externalized this entry
-         if (ins.vtype == inline_value::vt_extern && !can_add_address(ins.ext))
+         if (inline_value::external_value(ins.vtype) && !can_add_address(ins.ext))
             return can_apply_mode::none;  // 17th cline => split early
          const uint32_t need = uint32_t(record_bytes(n - _cpfx_len, ins)) +
                                (_nkeys == _cap ? (3u + _pfxw) * 4u : 0u);
@@ -495,7 +511,7 @@ namespace sal_art_ref
          if (upd.vtype == inline_value::vt_bytes &&
              int(iv->suffix_len + upd.value.size()) > max_inline_entry)
             return can_apply_mode::none;  // engine should have externalized this value
-         if (upd.vtype == inline_value::vt_extern && !can_add_address(upd.ext))
+         if (inline_value::external_value(upd.vtype) && !can_add_address(upd.ext))
             return can_apply_mode::none;
          const uint32_t npay = payload_bytes(upd.value.size(), upd.vtype);
          if (npay <= iv->value_len)
@@ -552,7 +568,7 @@ namespace sal_art_ref
          if (uint32_t(_cpfx_len - ncp) + max_live_suffix() > max_suffix_len)
             return false;  // re-expanding INLINE suffixes must stay within the u8 bound
          uint32_t cb = live_cbase_count();
-         if (ins.vtype == inline_value::vt_extern)
+         if (inline_value::external_value(ins.vtype))
             cb += 1;  // conservative: may need a fresh base
          if (cb > max_cbases)
             return false;
@@ -571,7 +587,7 @@ namespace sal_art_ref
          const uint32_t      npay = payload_bytes(upd.value.size(), upd.vtype);
          if (upd.vtype == inline_value::vt_bytes && int(iv->suffix_len + npay) > max_inline_entry)
             return false;
-         if (upd.vtype == inline_value::vt_extern && live_cbase_count() + 1 > max_cbases)
+         if (inline_value::external_value(upd.vtype) && live_cbase_count() + 1 > max_cbases)
             return false;
          // width upper bound for the rebuild (cold path: one walk) — the run rule can widen
          // past the current _pfxw when in-place inserts have lengthened the u16 runs.
@@ -662,7 +678,7 @@ namespace sal_art_ref
             return false;
          if (head_size() + tail_used() > size())
             return false;
-         uint32_t live = _cpfx_len;
+         uint32_t live = _cpfx_len + _div_len;  // both are live tail content
          uint8_t  kbuf[1056];  // full key <= 1024 (+slack)
          uint8_t  pbuf[1056];
          uint32_t plen     = 0;
@@ -710,7 +726,7 @@ namespace sal_art_ref
             std::memcpy(pbuf, kbuf, klen);
             plen     = klen;
             prev_ext = ext;
-            if (iv->value_type == inline_value::vt_extern)
+            if (inline_value::external_value(iv->value_type))
             {
                if (iv->value_len != 2)
                   return false;
@@ -854,6 +870,11 @@ namespace sal_art_ref
          return reinterpret_cast<const uint8_t*>(resolve(tail_ptr<const uint8_t>{
              _cpfx_pos.offset_from_tail}));
       }
+      const uint8_t* div_data() const noexcept
+      {
+         return reinterpret_cast<const uint8_t*>(resolve(tail_ptr<const uint8_t>{
+             _div_pos.offset_from_tail}));
+      }
 
       uint32_t live_tail() const noexcept { return tail_used() - _dead; }
 
@@ -934,12 +955,14 @@ namespace sal_art_ref
       }
       static uint32_t payload_bytes(size_t vlen, uint8_t vtype) noexcept
       {
-         return vtype == inline_value::vt_extern ? 2u : uint32_t(vlen);
+         return inline_value::external_value(vtype) ? 2u : uint32_t(vlen);  // cbase code
       }
       static uint32_t record_bytes(uint32_t sn, const insert_op& ins) noexcept
       {
-         if (ins.vtype == inline_value::vt_extern)  // fragment + cbase code, item cap 128
+         if (ins.vtype == inline_value::vt_extern)  // FRAGMENT + cbase code (full key external)
             return 3u + (sn < ext_frag_cap ? sn : uint32_t(ext_frag_cap)) + 2u;
+         if (ins.vtype == inline_value::vt_extern_val)  // FULL suffix in-page + cbase code (value-only)
+            return 3u + sn + 2u;
          return 3u + sn + payload_bytes(ins.value.size(), ins.vtype);
       }
       /// Largest live INLINE suffix length (rebuild prepend must keep them <= 255; extern
@@ -950,7 +973,9 @@ namespace sal_art_ref
          for (uint32_t i = 0; i < _nkeys; ++i)
          {
             const inline_value* iv = record(i);
-            if (iv->value_type != inline_value::vt_extern && iv->suffix_len > m)
+            // inline + vt_extern_val carry the full post-cpfx suffix (re-expands on rebuild);
+            // vt_extern keeps only a re-capped fragment so it never constrains.
+            if (inline_value::suffix_complete(iv->value_type) && iv->suffix_len > m)
                m = iv->suffix_len;
          }
          return m;
@@ -963,7 +988,7 @@ namespace sal_art_ref
          for (uint32_t i = 0; i < _nkeys && n < max_cbases; ++i)
          {
             const inline_value* iv = record(i);
-            if (iv->value_type != inline_value::vt_extern)
+            if (!inline_value::external_value(iv->value_type))
                continue;
             const uint32_t base = *decode_extern(iv) & ~0xFu;
             if (ucc::find_u32x16(bases, max_cbases, base) == int(max_cbases))
@@ -975,7 +1000,7 @@ namespace sal_art_ref
       // ── extern coding ────────────────────────────────────────────────────────────
       sal::ptr_address decode_extern(const inline_value* iv) const noexcept
       {
-         assert(iv->value_type == inline_value::vt_extern && iv->value_len == 2);
+         assert(inline_value::external_value(iv->value_type) && iv->value_len == 2);
          uint16_t code;
          std::memcpy(&code, iv->data + iv->suffix_len, 2);
          assert(code >= ext_code_base);
@@ -996,7 +1021,7 @@ namespace sal_art_ref
       }
       void write_payload(uint8_t* dst, const auto& op) noexcept  // insert_op or update_op
       {
-         if (op.vtype == inline_value::vt_extern)
+         if (inline_value::external_value(op.vtype))
          {
             const uint16_t code = encode_extern(op.ext);
             std::memcpy(dst, &code, 2);
@@ -1061,6 +1086,8 @@ namespace sal_art_ref
          _cpfx_len      = 0;
          _dead          = 0;
          _cpfx_pos      = tail_ptr<>{0};
+         _div_len       = 0;
+         _div_pos       = tail_ptr<>{0};
          for (auto& b : _cbases)
             b = sal::null_ptr_address;
          std::memset(_clidx, 0xFF, sizeof(_clidx));
@@ -1075,7 +1102,7 @@ namespace sal_art_ref
       void init_from(const leaf_page* src, uint32_t lo, uint32_t hi, uint16_t ncp,
                      const uint8_t* extra_src, uint32_t extra_n, const insert_op* ins,
                      const update_op* upd, int drop = -1, uint32_t max_w = 4,
-                     const kv_resolver& R = {}) noexcept
+                     const kv_resolver& R = {}, std::span<const uint8_t> div = {}) noexcept
       {
          init_empty();
          _version_history = src->_version_history;
@@ -1152,6 +1179,15 @@ namespace sal_art_ref
             }
             _cpfx_pos = tail_pos();
          }
+         // the page divider: copied verbatim (inherit) or set (split right-half). Like cpfx, it is
+         // live tail content; allocate it here so the blit/compact used-tail region carries it.
+         _div_len = uint16_t(div.size());
+         if (!div.empty())
+         {
+            uint8_t* dd = reinterpret_cast<uint8_t*>(alloc_tail(uint16_t(div.size())));
+            std::memcpy(dd, div.data(), div.size());
+            _div_pos = tail_pos();
+         }
          const int prepend = int(src->_cpfx_len) - int(ncp);  // >0: suffixes re-expand
 
          uint32_t w = 0;
@@ -1204,9 +1240,9 @@ namespace sal_art_ref
                nv->value_type = upd->vtype;
                write_payload(nv->data + sn, *upd);
             }
-            else if (iv->value_type == inline_value::vt_extern)
+            else if (inline_value::external_value(iv->value_type))
             {
-               nv->value_type      = inline_value::vt_extern;
+               nv->value_type      = iv->value_type;  // preserve vt_extern vs vt_extern_val
                const uint16_t code = encode_extern(src->decode_extern(iv));  // re-base compactly
                std::memcpy(nv->data + sn, &code, 2);
             }
@@ -1268,5 +1304,5 @@ namespace sal_art_ref
       }
    } __attribute__((packed));
 
-   static_assert(sizeof(leaf_page) == 162, "paged(22) + fields(12) + cbases(64) + clidx(64)");
+   static_assert(sizeof(leaf_page) == 166, "paged(22) + fields(16) + cbases(64) + clidx(64)");
 }  // namespace sal_art_ref

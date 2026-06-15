@@ -151,6 +151,13 @@ namespace sal_art_ref
       {
          self().for_each_child([&](sal::ptr_address c) { s->release(c); });
       }
+      // SAL reachability/refcount-rebuild hook (recover, audits). Must enumerate the SAME child
+      // set destroy() releases; the radix family carries children as smart_addresses + a term
+      // pointer, none of which the default (empty) alloc_header::visit_children would surface.
+      void visit_children(const std::function<void(sal::ptr_address)>& v) const
+      {
+         self().for_each_child([&](sal::ptr_address c) { v(c); });
+      }
    } __attribute__((packed));
 
    // The 256-branch space is split into RANGE_COUNT ranges (top 3 bits of the branch byte); each

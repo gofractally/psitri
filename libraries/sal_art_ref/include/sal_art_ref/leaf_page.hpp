@@ -113,7 +113,11 @@ namespace sal_art_ref
       // re-screens key[depth..] against _div[depth..] on arrival. Mirrors _cpfx_len/_cpfx_pos.
       uint16_t         _div_len;    // page divider (lower-bound separator) length
       tail_ptr<>       _div_pos;    // divider bytes in the tail heap (0 = none / leftmost)
-      sal::ptr_address _cbases[max_cbases];
+      // CBASES are VARIABLE: only ~0.9% of Eth keys are external, so ~99% of pages have _ncb==0 and
+      // need NO cbase storage. The 16-slot (64B) base-address block lives in the TAIL, allocated
+      // lazily on the first external (0 = none). find_u32x16 reads a full 64B regardless of _ncb, so
+      // the block is always the full 16 slots (0xFFFFFFFF-filled) — no over-read past it.
+      tail_ptr<>       _cbases_pos;  // 16-slot ptr_address block in the tail (0 = no externs)
       // CACHELINE INDEX (the wtree lesson): the FIRST stem of every (stride-th) prefix-column
       // cacheline, sampled HERE in the header — resident from reading the fields above, so the
       // probe is free — letting lower_bound scan ONE column cacheline instead of all of them.
@@ -477,8 +481,11 @@ namespace sal_art_ref
             return can_apply_mode::none;  // engine should have externalized this entry
          if (inline_value::external_value(ins.vtype) && !can_add_address(ins.ext))
             return can_apply_mode::none;  // 17th cline => split early
+         // first extern on a page with no cbase block → encode_extern lazily alloc_tail(64); reserve it
+         const uint32_t cb_need = (inline_value::external_value(ins.vtype) &&
+                                   _cbases_pos.offset_from_tail == 0) ? 64u : 0u;
          const uint32_t need = uint32_t(record_bytes(n - _cpfx_len, ins)) +
-                               (_nkeys == _cap ? (3u + _pfxw) * 4u : 0u);
+                               (_nkeys == _cap ? (3u + _pfxw) * 4u : 0u) + cb_need;
          return free_bytes(cols_end()) >= need ? can_apply_mode::modify : can_apply_mode::none;
       }
 
@@ -513,10 +520,13 @@ namespace sal_art_ref
             return can_apply_mode::none;  // engine should have externalized this value
          if (inline_value::external_value(upd.vtype) && !can_add_address(upd.ext))
             return can_apply_mode::none;
+         // first extern on a page with no cbase block → encode_extern lazily alloc_tail(64); reserve it
+         const uint32_t cb_need = (inline_value::external_value(upd.vtype) &&
+                                   _cbases_pos.offset_from_tail == 0) ? 64u : 0u;
          const uint32_t npay = payload_bytes(upd.value.size(), upd.vtype);
-         if (npay <= iv->value_len)
-            return can_apply_mode::modify;  // rewrite in the existing record
-         const uint32_t need = 3u + iv->suffix_len + npay;
+         if (npay <= iv->value_len)  // rewrite in the existing record (+ maybe the lazy cbase block)
+            return free_bytes(cols_end()) >= cb_need ? can_apply_mode::modify : can_apply_mode::none;
+         const uint32_t need = 3u + iv->suffix_len + npay + cb_need;
          return free_bytes(cols_end()) >= need ? can_apply_mode::modify : can_apply_mode::none;
       }
 
@@ -537,12 +547,13 @@ namespace sal_art_ref
          _dead += uint16_t(iv->byte_size());
          auto* nv = reinterpret_cast<inline_value*>(
              alloc_tail(uint16_t(3u + iv->suffix_len + npay)));
+         const uint16_t off = tail_used();  // BEFORE write_payload (which may alloc the cbase block)
          nv->suffix_len = iv->suffix_len;
          nv->value_len  = uint8_t(npay);
          nv->value_type = upd.vtype;
          std::memcpy(nv->data, iv->data, iv->suffix_len);
          write_payload(nv->data + nv->suffix_len, upd);
-         vals()[upd.index] = tail_used();
+         vals()[upd.index] = off;
       }
 
       /// In-place remove (always possible). The record's tail bytes orphan (reclaimed
@@ -577,7 +588,10 @@ namespace sal_art_ref
          const uint32_t wb      = pick_pfx_width(sn);
          const uint32_t content = head_bytes() + (3u + wb) * round_cap(_nkeys + 1u) + ncp +
                                   (live_tail() - _cpfx_len) +
-                                  uint32_t(_cpfx_len - ncp) * _nkeys + record_bytes(sn, ins);
+                                  uint32_t(_cpfx_len - ncp) * _nkeys + record_bytes(sn, ins) +
+                                  // a FRESH 16-slot cbase block only if the rebuild gains externs and
+                                  // this page has none yet (an existing block is already in live_tail)
+                                  ((cb > 0 && _cbases_pos.offset_from_tail == 0) ? 64u : 0u);
          return content <= page_bytes();
       }
 
@@ -593,14 +607,19 @@ namespace sal_art_ref
          // past the current _pfxw when in-place inserts have lengthened the u16 runs.
          const uint32_t wb      = pick_pfx_width(live_min_suffix());
          const uint32_t content = head_bytes() + (3u + wb) * round_cap(_nkeys) + live_tail() +
-                                  npay - iv->value_len;
+                                  npay - iv->value_len +
+                                  // fresh cbase block only if this update introduces the first extern
+                                  ((inline_value::external_value(upd.vtype) &&
+                                    _cbases_pos.offset_from_tail == 0) ? 64u : 0u);
          return content <= page_bytes();
       }
 
       bool can_add_address(sal::ptr_address addr) const noexcept
       {
+         if (_cbases_pos.offset_from_tail == 0)
+            return _ncb < max_cbases;  // no block yet → never deref it (find_u32x16 reads 64B)
          const uint32_t base = *addr & ~0xFu;
-         if (ucc::find_u32x16(reinterpret_cast<const uint32_t*>(_cbases), max_cbases, base) <
+         if (ucc::find_u32x16(reinterpret_cast<const uint32_t*>(cbase_ptr()), max_cbases, base) <
              int(max_cbases))
             return true;
          return _ncb < max_cbases;
@@ -678,7 +697,8 @@ namespace sal_art_ref
             return false;
          if (head_size() + tail_used() > size())
             return false;
-         uint32_t live = _cpfx_len + _div_len;  // both are live tail content
+         // cpfx + divider + (the 16-slot cbase block, when present) are all live tail content
+         uint32_t live = _cpfx_len + _div_len + (_cbases_pos.offset_from_tail ? 64u : 0u);
          uint8_t  kbuf[1056];  // full key <= 1024 (+slack)
          uint8_t  pbuf[1056];
          uint32_t plen     = 0;
@@ -733,7 +753,7 @@ namespace sal_art_ref
                uint16_t code;
                std::memcpy(&code, iv->data + iv->suffix_len, 2);
                if (code < ext_code_base || ((code >> 4) & 0xF) >= _ncb)
-                  return false;
+            return false;
             }
          }
          return live + _dead == tail_used();
@@ -875,6 +895,16 @@ namespace sal_art_ref
          return reinterpret_cast<const uint8_t*>(resolve(tail_ptr<const uint8_t>{
              _div_pos.offset_from_tail}));
       }
+      // The 16-slot cbase block in the tail (valid only when _cbases_pos != 0, i.e. _ncb>0).
+      sal::ptr_address* cbase_ptr() noexcept
+      {
+         return reinterpret_cast<sal::ptr_address*>(resolve(tail_ptr<>{_cbases_pos.offset_from_tail}));
+      }
+      const sal::ptr_address* cbase_ptr() const noexcept
+      {
+         return reinterpret_cast<const sal::ptr_address*>(
+             resolve(tail_ptr<const uint8_t>{_cbases_pos.offset_from_tail}));
+      }
 
       uint32_t live_tail() const noexcept { return tail_used() - _dead; }
 
@@ -1004,18 +1034,26 @@ namespace sal_art_ref
          uint16_t code;
          std::memcpy(&code, iv->data + iv->suffix_len, 2);
          assert(code >= ext_code_base);
-         return sal::ptr_address(*_cbases[(code >> 4) & 0xF] + (code & 0xF));
+         assert(_cbases_pos.offset_from_tail != 0 && "extern record but no cbase block");
+         return sal::ptr_address(*cbase_ptr()[(code >> 4) & 0xF] + (code & 0xF));
       }
-      /// @pre can_add_address(addr)
+      /// @pre can_add_address(addr) AND caller reserved the 64B block via can_apply/rebuilt_fits
       uint16_t encode_extern(sal::ptr_address addr) noexcept
       {
+         if (_cbases_pos.offset_from_tail == 0)  // lazy: 16-slot block on the FIRST extern
+         {
+            constexpr uint16_t blk = uint16_t(sizeof(sal::ptr_address) * max_cbases);  // 64B
+            uint8_t*           d   = reinterpret_cast<uint8_t*>(alloc_tail(blk));
+            std::memset(d, 0xFF, blk);  // null_ptr_address sentinels (find_u32x16 reads all 16)
+            _cbases_pos = tail_pos();
+         }
          const uint32_t base = *addr & ~0xFu;
-         int idx = ucc::find_u32x16(reinterpret_cast<const uint32_t*>(_cbases), max_cbases, base);
+         int idx = ucc::find_u32x16(reinterpret_cast<const uint32_t*>(cbase_ptr()), max_cbases, base);
          if (idx == int(max_cbases))
          {
             assert(_ncb < max_cbases);
-            idx                  = _ncb;
-            _cbases[_ncb++]      = sal::ptr_address(base);
+            idx                 = _ncb;
+            cbase_ptr()[_ncb++] = sal::ptr_address(base);
          }
          return uint16_t(ext_code_base | (uint32_t(idx) << 4) | (*addr & 0xFu));
       }
@@ -1037,12 +1075,14 @@ namespace sal_art_ref
             sn = ext_frag_cap;  // store the comparison fragment; the key_val_node has the rest
          auto* iv = reinterpret_cast<inline_value*>(
              alloc_tail(uint16_t(record_bytes(sn, ins))));
+         const uint16_t off = tail_used();  // record offset — capture BEFORE write_payload, which
+                                            // may lazily alloc_tail the cbase block (moving tail_used)
          iv->suffix_len = uint8_t(sn);
          iv->value_len  = uint8_t(payload_bytes(ins.value.size(), ins.vtype));
          iv->value_type = ins.vtype;
          std::memcpy(iv->data, s, sn);
          write_payload(iv->data + sn, ins);
-         return tail_used();
+         return off;
       }
 
       // ── column splice (in-place) ─────────────────────────────────────────────────
@@ -1088,8 +1128,7 @@ namespace sal_art_ref
          _cpfx_pos      = tail_ptr<>{0};
          _div_len       = 0;
          _div_pos       = tail_ptr<>{0};
-         for (auto& b : _cbases)
-            b = sal::null_ptr_address;
+         _cbases_pos    = tail_ptr<>{0};  // no cbase block until the first extern (lazy)
          std::memset(_clidx, 0xFF, sizeof(_clidx));
       }
 
@@ -1222,6 +1261,7 @@ namespace sal_art_ref
                pay = uint8_t(payload_bytes(upd->value.size(), upd->vtype));
             assert(sn <= max_suffix_len);
             auto* nv = reinterpret_cast<inline_value*>(alloc_tail(uint16_t(3u + sn + pay)));
+            const uint16_t off = tail_used();  // capture BEFORE encode_extern may alloc the cbase block
             nv->suffix_len = uint8_t(sn);
             nv->value_len  = pay;
             if (ext_src)
@@ -1253,7 +1293,7 @@ namespace sal_art_ref
             }
             fp()[w] = src->fp()[si];  // full-key fingerprints survive any refactoring
             pfx_set(w, stem(nv->data, sn));
-            vals()[w] = tail_used();
+            vals()[w] = off;
             ++w;
          };
 
@@ -1304,5 +1344,5 @@ namespace sal_art_ref
       }
    } __attribute__((packed));
 
-   static_assert(sizeof(leaf_page) == 166, "paged(22) + fields(16) + cbases(64) + clidx(64)");
+   static_assert(sizeof(leaf_page) == 104, "paged(22) + fields(18, cbases now variable) + clidx(64)");
 }  // namespace sal_art_ref

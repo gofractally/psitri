@@ -38,6 +38,14 @@ elseif(NOT PSITRIMDBX_BACKEND STREQUAL "delta_art")
 endif()
 message(STATUS "psitrimdbx backend: ${PSITRIMDBX_BACKEND}")
 
+# Shim debug tracing (PSITRI_NF_LOG last-NOTFOUND dump, etc.). Off by default;
+# enable to diagnose engine integration (e.g. a fatal MDBX_NOTFOUND at startup).
+option(PSITRIMDBX_DEBUG "Enable psitrimdbx debug tracing (PSITRI_DEBUG_BUILD)" OFF)
+if(PSITRIMDBX_DEBUG)
+    target_compile_definitions(psitrimdbx PUBLIC PSITRI_DEBUG_BUILD=1)
+    message(STATUS "psitrimdbx: debug tracing ON")
+endif()
+
 option(PSITRIMDBX_BUILD_TESTS "Build the psitrimdbx test suite" ON)
 if(PSITRIMDBX_BUILD_TESTS)
     enable_testing()

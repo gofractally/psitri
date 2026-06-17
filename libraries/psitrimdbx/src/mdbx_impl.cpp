@@ -3209,6 +3209,11 @@ int mdbx_dbi_open(MDBX_txn* txn, const char* name,
       return MDBX_PANIC;
    }
 
+#ifdef PSITRI_DEBUG_BUILD
+   if (sal::env::get("PSITRI_TRACE"))
+      std::fprintf(stderr, "[TRACE] dbi_open name=%s dbi=%u root=%u flags=0x%x\n", sname.c_str(),
+                   unsigned(*dbi), txn_dbi_metadata(txn, *dbi).root_index, unsigned(flags));
+#endif
    return MDBX_SUCCESS;
 }
 
@@ -3597,6 +3602,11 @@ int mdbx_put(MDBX_txn* txn, MDBX_dbi dbi,
       return MDBX_EINVAL;
 
    auto meta = txn_dbi_metadata(txn, dbi);
+#ifdef PSITRI_DEBUG_BUILD
+   if (sal::env::get("PSITRI_TRACE"))
+      std::fprintf(stderr, "[TRACE] put dbi=%u root=%u klen=%zu vlen=%zu\n", unsigned(dbi),
+                   meta.root_index, key->iov_len, data->iov_len);
+#endif
    return mdbx_put_impl(txn, meta.root_index, meta.is_dupsort,
                         meta.reverse_dup, key, data, flags);
 }
@@ -4073,6 +4083,10 @@ int mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
       const uint32_t root = (cursor && cursor->state) ? cursor->root_idx : 0u;
       dbg_log_notfound(cursor ? cursor->dbi : MDBX_dbi(0), root, in_key, where);
    }
+   if (sal::env::get("PSITRI_TRACE") && (op == MDBX_FIRST || op == MDBX_LAST))
+      std::fprintf(stderr, "[TRACE] cursor_get op=%d dbi=%u root=%u rc=%d\n", int(op),
+                   cursor ? unsigned(cursor->dbi) : 0u,
+                   (cursor && cursor->state) ? cursor->root_idx : 0u, rc);
    return rc;
 #else
    return mdbx_cursor_get_impl(cursor, key, data, op);

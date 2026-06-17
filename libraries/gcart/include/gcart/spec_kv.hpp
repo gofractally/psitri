@@ -95,38 +95,55 @@ namespace gcart::st::kv
       }
 
       // ── ordered forward iteration (adb::kv_cursor) ──────────────────────────
+      // lower_bound/seek_begin do ONE descent (a 1-entry batch → point positioning
+      // stays single-descent fast). next() amortizes: when the batch is consumed it
+      // collects the next `batch` keys in one descent (cur_scan), so a scan is one
+      // descent per `batch` steps instead of per step.
+      static constexpr size_t batch_min = 8, batch_max = 512;
       bool     seek_begin() { return seek_ge_(key_view{}); }
       bool     lower_bound(key_view k) { return seek_ge_(k); }
       bool     next()
-      { if (_end) return false; if (_rend) return seek_ge_(key_view{}); std::string t = _key; t.push_back('\0'); return seek_ge_(t); }
+      {
+         if (_end) return false;
+         if (_rend) return seek_ge_(key_view{});
+         if (++_cur < _buf.size()) return true;
+         if (!_s.eng() || _s.tag() == bt::null) { _end = true; return false; }
+         std::string t = _buf.back().first; t.push_back('\0');   // refill after the last emitted key
+         _buf.clear(); _cur = 0;
+         cur_scan(*_s.eng(), _s.tag(), resolve(*_s.eng(), _s.tag(), _s.ptr()), t, 0, std::string(), _buf, _bsz);
+         _bsz = _bsz < batch_max ? _bsz * 2 : batch_max;   // grow: short ranges collect little, scans ramp up
+         if (_buf.empty()) { _end = true; return false; }
+         return true;
+      }
       bool     is_end() const { return _end; }
-      key_view key() const { return _key; }
+      key_view key() const { return (_end || _rend) ? key_view{} : key_view(_buf[_cur].first); }
       template <class S = std::string>
       std::optional<S> value() const
-      { if (_end || _rend) return std::nullopt; return S(_val.data(), _val.size()); }
+      { if (_end || _rend) return std::nullopt; const auto& v = _buf[_cur].second; return S(v.data(), v.size()); }
       // value at the current position, lambda form (adb::mergeable_cursor)
       template <class F>
-      bool get_value(F&& f) const { if (_end || _rend) return false; f(value_view(_val.data(), _val.size())); return true; }
+      bool get_value(F&& f) const { if (_end || _rend) return false; const auto& v = _buf[_cur].second; f(value_view(v.data(), v.size())); return true; }
       // gcart::st has no composable subtrees (yet) — a value is never a subtree.
       bool is_subtree() const { return false; }
 
       // ── ordered reverse iteration (adb::mergeable_cursor) ───────────────────
       bool seek_last()
       {
-         _key.clear(); _val.clear();
-         if (!_s.eng() || _s.tag() == bt::null) { _end = true; _rend = false; return false; }
-         cur_rightmost(*_s.eng(), _s.tag(), resolve(*_s.eng(), _s.tag(), _s.ptr()), std::string(), _key, _val);
-         _end = false; _rend = false; return true;
+         _buf.clear(); _cur = 0; _rend = false;
+         if (!_s.eng() || _s.tag() == bt::null) { _end = true; return false; }
+         std::string k, v;
+         cur_rightmost(*_s.eng(), _s.tag(), resolve(*_s.eng(), _s.tag(), _s.ptr()), std::string(), k, v);
+         _buf.emplace_back(std::move(k), std::move(v)); _end = false; return true;
       }
       bool upper_bound(key_view k) { std::string t(k); t.push_back('\0'); return seek_ge_(t); }  // smallest > k
-      bool prev()
+      bool prev()  // restart-based reverse (forward scan is the buffered hot path)
       {
          if (_rend) return false;
          if (_end) return seek_last();
          if (!_s.eng() || _s.tag() == bt::null) { _rend = true; return false; }
          std::string nk, nv;
-         if (cur_lt(*_s.eng(), _s.tag(), resolve(*_s.eng(), _s.tag(), _s.ptr()), _key, 0, std::string(), nk, nv))
-         { _key = std::move(nk); _val = std::move(nv); _end = false; _rend = false; return true; }
+         if (cur_lt(*_s.eng(), _s.tag(), resolve(*_s.eng(), _s.tag(), _s.ptr()), _buf[_cur].first, 0, std::string(), nk, nv))
+         { _buf.clear(); _buf.emplace_back(std::move(nk), std::move(nv)); _cur = 0; _end = false; return true; }
          _rend = true; return false;
       }
       bool is_rend() const { return _rend; }
@@ -134,15 +151,18 @@ namespace gcart::st::kv
      private:
       bool seek_ge_(key_view target)
       {
-         _key.clear(); _val.clear(); _rend = false;
+         _buf.clear(); _cur = 0; _rend = false; _bsz = batch_min;
          if (!_s.eng() || _s.tag() == bt::null) { _end = true; return false; }
-         void* node = resolve(*_s.eng(), _s.tag(), _s.ptr());
-         _end = !cur_ge(*_s.eng(), _s.tag(), node, target, 0, std::string(), _key, _val);
-         return !_end;
+         std::string k, v;
+         if (cur_ge(*_s.eng(), _s.tag(), resolve(*_s.eng(), _s.tag(), _s.ptr()), target, 0, std::string(), k, v))
+         { _buf.emplace_back(std::move(k), std::move(v)); _end = false; return true; }
+         _end = true; return false;
       }
-      snap        _s;
-      std::string _key, _val;
-      bool        _end = true, _rend = false;
+      snap     _s;
+      kv_batch _buf;             // current run of (key,value), in order
+      size_t   _cur = 0;         // index into _buf
+      size_t   _bsz = batch_min; // next refill size (grows on each refill)
+      bool     _end = true, _rend = false;
    };
 
    // ── snapshot: an owned, FROZEN root (adb kv_tree + copyable shared_snapshot).

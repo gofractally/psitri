@@ -25,6 +25,8 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace gcart::st
 {
@@ -826,6 +828,106 @@ namespace gcart::st
       if (tk == 2) { const nested_setlist* n = static_cast<const nested_setlist*>(node); ok = std::move(acc); sv v = n->in_value(n->nbranch); ov.assign(v.data(), v.size()); return true; }
       if (tk == 1) { ok = std::move(acc); sv v = leaf_value_body(tt, resolve(e, tt, tp)); ov.assign(v.data(), v.size()); return true; }
       return false;
+   }
+
+   // ── batched in-order scan (amortizes cursor next(): one descent collects up to
+   //    `limit` keys instead of re-descending per step) ──────────────────────────
+   using kv_pair  = std::pair<std::string, std::string>;
+   using kv_batch = std::vector<kv_pair>;
+
+   // Emit EVERY key in the subtree (t, node) in order (term first, then byte-branches
+   // ascending), appending this node's prefix, until out.size() == limit.
+   inline void cur_scan_all(engine& e, bt t, const void* node, std::string acc, kv_batch& out, size_t limit)
+   {
+      if (out.size() >= limit) return;
+      if (is_leaf_tag(t))
+      { acc.append(leaf_suffix_body(t, node)); sv v = leaf_value_body(t, node); out.emplace_back(std::move(acc), std::string(v.data(), v.size())); return; }
+      if (t == bt::full)
+      {
+         const full* n = static_cast<const full*>(node); acc.append(n->prefix());
+         if (n->has_term()) { bt tt = bt(n->term_tag); cur_scan_all(e, tt, resolve(e, tt, n->term_ptr), acc, out, limit); if (out.size() >= limit) return; }
+         for (uint32_t b = 0; b < 256; ++b)
+         { bt ct = n->btype(b); if (ct != bt::null) { std::string a = acc; a.push_back(char(b)); cur_scan_all(e, ct, resolve(e, ct, n->branch(b)), std::move(a), out, limit); if (out.size() >= limit) return; } }
+         return;
+      }
+      if (t == bt::nested_setlist)
+      {
+         const nested_setlist* n = static_cast<const nested_setlist*>(node); acc.append(n->prefix());
+         if (n->has_term())
+         { const uint32_t ti = n->nbranch;
+           if (n->is_inline(ti)) { sv v = n->in_value(ti); out.emplace_back(acc, std::string(v.data(), v.size())); }
+           else { bt tt = n->otype(ti); cur_scan_all(e, tt, resolve(e, tt, n->ext_ptr(ti)), acc, out, limit); }
+           if (out.size() >= limit) return; }
+         for (uint32_t i = 0; i < n->nbranch; ++i)
+         { const uint8_t ob = n->okeys()[i]; std::string a = acc; a.push_back(char(ob));
+           if (n->is_inline(i))
+           { if (n->otype(i) == bt::suffix_value) { a.append(n->in_suffix(i)); sv v = n->in_value(i); out.emplace_back(std::move(a), std::string(v.data(), v.size())); }
+             else cur_scan_all(e, bt::setlist, n->in_setlist(i), std::move(a), out, limit); }
+           else { bt ct = n->otype(i); cur_scan_all(e, ct, resolve(e, ct, n->ext_ptr(i)), std::move(a), out, limit); }
+           if (out.size() >= limit) return; }
+         return;
+      }
+      const setlist* n = static_cast<const setlist*>(node); acc.append(n->prefix());
+      if (n->has_term()) { bt tt = n->term_type(); cur_scan_all(e, tt, resolve(e, tt, n->term_branch()), acc, out, limit); if (out.size() >= limit) return; }
+      for (uint32_t i = 0; i < n->nbranch; ++i)
+      { std::string a = acc; a.push_back(char(n->keys()[i])); bt ct = n->btype(i); cur_scan_all(e, ct, resolve(e, ct, n->branch(i)), std::move(a), out, limit); if (out.size() >= limit) return; }
+   }
+
+   // Emit keys >= `target` in (t, node) in order, until out.size() == limit
+   // (cur_ge generalized to collect the run, not just the first hit).
+   inline void cur_scan(engine& e, bt t, const void* node, sv target, uint32_t depth, std::string acc, kv_batch& out, size_t limit)
+   {
+      if (out.size() >= limit) return;
+      if (is_leaf_tag(t))
+      { std::string fk = acc; fk.append(leaf_suffix_body(t, node)); if (fk < target) return; sv v = leaf_value_body(t, node); out.emplace_back(std::move(fk), std::string(v.data(), v.size())); return; }
+      const sv       P   = (t == bt::full) ? static_cast<const full*>(node)->prefix()
+                         : (t == bt::nested_setlist) ? static_cast<const nested_setlist*>(node)->prefix()
+                         : static_cast<const setlist*>(node)->prefix();
+      const uint32_t rem = uint32_t(target.size()) - depth;
+      const uint32_t pl  = uint32_t(P.size());
+      const uint32_t cl  = pl < rem ? pl : rem;
+      uint32_t       i   = 0;
+      while (i < cl && P[i] == target[depth + i]) ++i;
+      if (i < cl) { if (uint8_t(P[i]) > uint8_t(target[depth + i])) cur_scan_all(e, t, node, std::move(acc), out, limit); return; }
+      if (pl > rem) { cur_scan_all(e, t, node, std::move(acc), out, limit); return; }
+      if (depth + pl == target.size()) { cur_scan_all(e, t, node, std::move(acc), out, limit); return; }
+      acc.append(P); depth += pl;
+      const uint8_t tb = uint8_t(target[depth]);
+      if (t == bt::full)
+      {
+         const full* n = static_cast<const full*>(node);
+         { bt ct = n->btype(tb); if (ct != bt::null) { std::string a = acc; a.push_back(char(tb)); cur_scan(e, ct, resolve(e, ct, n->branch(tb)), target, depth + 1, std::move(a), out, limit); if (out.size() >= limit) return; } }
+         for (uint32_t b = tb + 1; b < 256; ++b) { bt c2 = n->btype(b); if (c2 != bt::null) { std::string a = acc; a.push_back(char(b)); cur_scan_all(e, c2, resolve(e, c2, n->branch(b)), std::move(a), out, limit); if (out.size() >= limit) return; } }
+         return;
+      }
+      if (t == bt::nested_setlist)
+      {
+         const nested_setlist* n = static_cast<const nested_setlist*>(node);
+         int idx = int(ucc::lower_bound_padded(n->okeys(), n->nbranch, tb));
+         uint32_t start = uint32_t(idx);
+         if (idx < int(n->nbranch) && n->okeys()[idx] == tb)
+         {
+            const uint32_t ui = uint32_t(idx);
+            if (n->is_inline(ui))
+            { if (n->otype(ui) == bt::suffix_value) { std::string fk = acc; fk.push_back(char(tb)); fk.append(n->in_suffix(ui)); if (fk >= target) { sv v = n->in_value(ui); out.emplace_back(std::move(fk), std::string(v.data(), v.size())); } }
+              else { std::string a = acc; a.push_back(char(tb)); cur_scan(e, bt::setlist, n->in_setlist(ui), target, depth + 1, std::move(a), out, limit); } }
+            else { bt ct = n->otype(ui); std::string a = acc; a.push_back(char(tb)); cur_scan(e, ct, resolve(e, ct, n->ext_ptr(ui)), target, depth + 1, std::move(a), out, limit); }
+            start = ui + 1; if (out.size() >= limit) return;
+         }
+         for (uint32_t j = start; j < n->nbranch; ++j)
+         { const uint8_t ob = n->okeys()[j]; std::string a = acc; a.push_back(char(ob));
+           if (n->is_inline(j)) { if (n->otype(j) == bt::suffix_value) { a.append(n->in_suffix(j)); sv v = n->in_value(j); out.emplace_back(std::move(a), std::string(v.data(), v.size())); } else cur_scan_all(e, bt::setlist, n->in_setlist(j), std::move(a), out, limit); }
+           else { bt ct = n->otype(j); cur_scan_all(e, ct, resolve(e, ct, n->ext_ptr(j)), std::move(a), out, limit); }
+           if (out.size() >= limit) return; }
+         return;
+      }
+      const setlist* n = static_cast<const setlist*>(node);
+      int idx = int(ucc::lower_bound_padded(n->keys(), n->nbranch, tb));
+      uint32_t start = uint32_t(idx);
+      if (idx < int(n->nbranch) && n->keys()[idx] == tb)
+      { bt ct = n->btype(uint32_t(idx)); std::string a = acc; a.push_back(char(tb)); cur_scan(e, ct, resolve(e, ct, n->branch(uint32_t(idx))), target, depth + 1, std::move(a), out, limit); start = uint32_t(idx) + 1; if (out.size() >= limit) return; }
+      for (uint32_t j = start; j < n->nbranch; ++j)
+      { std::string a = acc; a.push_back(char(n->keys()[j])); bt ct = n->btype(j); cur_scan_all(e, ct, resolve(e, ct, n->branch(j)), std::move(a), out, limit); if (out.size() >= limit) return; }
    }
 
    // Visit a nested_setlist's REFCOUNTABLE byte-branch children (external ptrs +

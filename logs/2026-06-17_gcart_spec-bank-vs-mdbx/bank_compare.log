@@ -1,0 +1,9 @@
+bank compare: 1000000 accts x 1000000, 2000000 transfers, batch 1000, 4 readers
+engine                     load/s        wtx/s      rd/s(+wr)   wtx/s(+rd)     rd/s(solo)  live(MB)  disk(MB)  balance
+delta_art(sv→sar)       1002327        97167       47025679        80570       45759946         0       675  PASS
+delta_art(sr→sar)       3210994       464275       42691076       466937       45095819         0       839  PASS
+start_ver                10008858      2268805       49750317      2085093       52199001         0       293  PASS
+start_ref                 6747858       874524       46403149       520717       48631120         0       457  PASS
+sal_art_ref               3005255       551010       15233451       479190       22483905         0       542  PASS
+gcart                     3405586      1143136       55639758       522395       63810691         0       186  PASS
+gcart_spec                2869963      1138597       36102343       553568       42982589        39       154  PASS

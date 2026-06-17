@@ -1,0 +1,4 @@
+
+mdbx (real libmdbx, WRITEMAP|SAFE_NOSYNC): 1000000 accts x 2000000 transfers, batch 1000, 4 readers
+engine                     load/s        wtx/s      rd/s(+wr)   wtx/s(+rd)     rd/s(solo)  live(MB)  disk(MB)  balance
+mdbx                       588685        77214       10431636        67695       11624799        36        64  PASS

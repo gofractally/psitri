@@ -6,6 +6,7 @@ first.
 
 | date | run | headline |
 |---|---|---|
+| 2026-06-17 | [gcart_spec-bank-vs-mdbx](2026-06-17_gcart_spec-bank-vs-mdbx/) | post-dying-sentinel: gcart_spec 4.9x load / 14.7x wtx / 3.5-3.7x reads over REAL libmdbx, ~par live (39 vs 36 MB), 2.4x disk high-water; balance PASS |
 | 2026-06-13 | [mem-recovery-50M](2026-06-13_mem-recovery-50M/) | delta_art is fastest-load AND lowest-RAM at 50M (21.8s/8.35GB vs start_ver 103s/12.8GB); recovery 8-155ms, no WAL |
 | 2026-06-13 | [delta_art-1B](2026-06-13_delta_art-1B/) | 1B keys in 10.7 min, 100% hit, 58 GB RSS — ~2.1× faster than raw-heart 1B, no thrash |
 | 2026-06-13 | [start_ver-per-root-floor](2026-06-13_start_ver-per-root-floor/) | per-root version floors: delta 10 GB → 4.2 GB @ 100M, reuse 97% → 100% |

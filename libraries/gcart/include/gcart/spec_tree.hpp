@@ -202,6 +202,18 @@ namespace gcart::st
       (void)p;
 #endif
    }
+   // lock-free pin attempt: bump only if alive (snapshot acquire). false = dead.
+   [[nodiscard]] inline bool try_retain(engine& e, bt t, uint32_t p) noexcept
+   {
+      switch (t)
+      {
+         case bt::full: return e.cl9.try_retain(p);
+         case bt::double_setlist: case bt::big_nested: return e.cl2.try_retain(p);
+         case bt::setlist: case bt::nested_setlist: return e.cl1.try_retain(p);
+         case bt::suffix_value: return e.sal.try_retain(p);
+         default: return false;
+      }
+   }
    inline void retain(engine& e, bt t, uint32_t p)
    {
       switch (t)
@@ -232,6 +244,79 @@ namespace gcart::st
    // a decoded branch (scratch, for copy-construct-rebuild of a routing node)
    struct br { uint8_t byte; bt tag; uint32_t ptr; };
 
+   inline bool pfx_ok_(sv pfx, sv key, uint32_t depth) noexcept
+   {
+      return key.size() - depth >= pfx.size() &&
+             (pfx.empty() || std::memcmp(key.data() + depth, pfx.data(), pfx.size()) == 0);
+   }
+
+   // Read-path find from a (tag,ptr) root — usable by readers/cursors with NO
+   // write sessions. Dispatch on the branch tag, PREFETCH the child before the
+   // dependent load (full prefetches the offset cacheline before the type hdr).
+   inline bool find_in(engine& e, bt t, uint32_t p, sv key, std::string& out)
+   {
+      uint32_t depth = 0;
+      for (;;)
+      {
+         if (t == bt::null) return false;
+         void* node = resolve(e, t, p);
+         if (t == bt::suffix_value)
+         {
+            if (sv_leaf::suffix(e, p) == key.substr(depth))
+            { sv v = sv_leaf::value(e, p); out.assign(v.data(), v.size()); return true; }
+            return false;
+         }
+         if (t == bt::full)
+         {
+            const full* n = static_cast<const full*>(node);
+            if (!pfx_ok_(n->prefix(), key, depth)) return false;
+            depth += n->prefixlen();
+            if (depth == key.size())
+            { if (!n->has_term()) return false; t = bt(n->term_tag); p = n->term_ptr; prefetch(resolve(e, t, p)); continue; }
+            const uint8_t byte = uint8_t(key[depth]);
+            prefetch(n->branches() + byte);          // offset cacheline before the type header
+            const bt ct = n->btype(byte);
+            if (ct == bt::null) return false;
+            t = ct; p = n->branch(byte); ++depth; prefetch(resolve(e, t, p)); continue;
+         }
+         const setlist* n = static_cast<const setlist*>(node);
+         if (!pfx_ok_(n->prefix(), key, depth)) return false;
+         depth += n->prefixlen();
+         if (depth == key.size())
+         { if (!n->has_term()) return false; t = n->term_type(); p = n->term_branch(); prefetch(resolve(e, t, p)); continue; }
+         const int idx = n->find_index(uint8_t(key[depth]));
+         if (idx < 0) return false;
+         t = n->btype(uint32_t(idx)); p = n->branch(uint32_t(idx)); ++depth;
+         prefetch(resolve(e, t, p)); continue;
+      }
+   }
+
+   // ── free reclamation (snapshots / readers; no write sessions needed) ───────
+   inline void release_subtree(engine& e, bt t, uint32_t p)
+   {
+      if (t == bt::null) return;
+      if (t == bt::suffix_value)
+      { if (e.sal.release_one(p)) e.sal.free(p, sv_leaf::total_bytes(e, p)); return; }
+      if (!is_routing(t)) return;
+      if (!release_one(e, t, p)) return;   // still shared (another snapshot pins it)
+      // hit zero: recurse children + term, then free the node's slot.
+      if (t == bt::full)
+      {
+         full* n = static_cast<full*>(resolve(e, t, p));
+         for (uint32_t b = 0; b < 256; ++b)
+         { const bt ct = n->btype(b); if (ct != bt::null) release_subtree(e, ct, n->branch(b)); }
+         if (n->has_term()) release_subtree(e, bt(n->term_tag), n->term_ptr);
+         e.cl9.free(p);
+      }
+      else
+      {
+         setlist* n = static_cast<setlist*>(resolve(e, t, p));
+         for (uint32_t i = 0; i < n->nbranch; ++i) release_subtree(e, n->btype(i), n->branch(i));
+         if (n->has_term()) release_subtree(e, n->term_type(), n->term_branch());
+         (t == bt::double_setlist || t == bt::big_nested) ? e.cl2.free(p) : e.cl1.free(p);
+      }
+   }
+
    class tree
    {
      public:
@@ -244,52 +329,14 @@ namespace gcart::st
       // ── read path: dispatch on the branch tag, prefetch the child BEFORE the
       //    dependent load (Dan's hard rule; full node prefetches the offset
       //    cacheline before reading the 3-bit type header). ────────────────────
-      bool find(sv key, std::string& out) const
-      {
-         engine&  e = const_cast<engine&>(_e);
-         bt       t = _rt;
-         uint32_t p = _rp, depth = 0;
-         for (;;)
-         {
-            if (t == bt::null) return false;
-            void* node = resolve(e, t, p);
-            if (t == bt::suffix_value)
-            {
-               if (sv_leaf::suffix(e, p) == key.substr(depth))
-               { sv v = sv_leaf::value(e, p); out.assign(v.data(), v.size()); return true; }
-               return false;
-            }
-            if (t == bt::full)
-            {
-               const full* n = static_cast<const full*>(node);
-               if (!pfx_ok(n->prefix(), key, depth)) return false;
-               depth += n->prefixlen();
-               if (depth == key.size())
-               {
-                  if (!n->has_term()) return false;
-                  t = bt(n->term_tag); p = n->term_ptr; prefetch(resolve(e, t, p)); continue;
-               }
-               const uint8_t byte = uint8_t(key[depth]);
-               prefetch(n->branches() + byte);   // offset cacheline before the type header
-               const bt ct = n->btype(byte);
-               if (ct == bt::null) return false;
-               t = ct; p = n->branch(byte); ++depth; prefetch(resolve(e, t, p)); continue;
-            }
-            // setlist family (cl1/cl2 share the layout)
-            const setlist* n = static_cast<const setlist*>(node);
-            if (!pfx_ok(n->prefix(), key, depth)) return false;
-            depth += n->prefixlen();
-            if (depth == key.size())
-            {
-               if (!n->has_term()) return false;
-               t = n->term_type(); p = n->term_branch(); prefetch(resolve(e, t, p)); continue;
-            }
-            const int idx = n->find_index(uint8_t(key[depth]));
-            if (idx < 0) return false;
-            t = n->btype(uint32_t(idx)); p = n->branch(uint32_t(idx)); ++depth;
-            prefetch(resolve(e, t, p)); continue;
-         }
-      }
+      bool find(sv key, std::string& out) const { return find_in(const_cast<engine&>(_e), _rt, _rp, key, out); }
+
+      bt       root_tag() const noexcept { return _rt; }
+      uint32_t root_ptr() const noexcept { return _rp; }
+      void     set_root(bt t, uint32_t p) noexcept { _rt = t; _rp = p; }
+      engine&  eng() noexcept { return _e; }
+      // release a (tag,ptr) subtree through refcount (snapshot drop / abort).
+      void     release(bt t, uint32_t p) { release_ref(t, p); }
 
       // ── write path ─────────────────────────────────────────────────────────
       void upsert(sv key, sv val)

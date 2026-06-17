@@ -17,6 +17,7 @@
 #include <start_ver/kv.hpp>       // start_ver::kv (hot, standalone)
 #include <start_ref/kv.hpp>       // start_ref::kv (hot, standalone)
 #include <gcart/kv.hpp>           // gcart::kv (sal2, lock-free MVCC reads)
+#include <gcart/spec_kv.hpp>      // gcart::st::kv (spec node taxonomy, 3 regions)
 
 #include <atomic>
 #include <chrono>
@@ -240,6 +241,11 @@ int main(int argc, char** argv)
       std::filesystem::remove_all(base + "/gcart");
       auto db = gcart::kv::database::create(base + "/gcart");
       rows.push_back(run_bank("gcart", db, p));
+   }
+   {  // gcart SPEC engine (3-region node taxonomy: FIX routing + SAL suffix_value)
+      std::filesystem::remove_all(base + "/gcart_spec");
+      auto db = gcart::st::kv::database::create(base + "/gcart_spec");
+      rows.push_back(run_bank("gcart_spec", db, p));
    }
 
    printf("\n%-20s %12s %12s %14s %12s %14s  %s\n", "engine", "load/s", "wtx/s",

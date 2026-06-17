@@ -65,4 +65,17 @@ namespace sal2gc
    // teardown (the reader-vs-writer reclaim race) — and the release path needs no
    // gather-before-release. 255 ≥ ref_ceiling so try_retain/retain already reject it.
    inline constexpr uint8_t  dying_ref         = 255;
+
+   // ── version-liveness GC (design §4.2/§4.3/§5) — replaces the refcount above ──
+   // Each slot carries a u32 DEATH version instead of a refcount. The object's
+   // structural life is the half-open interval [birth, death): birth is stamped in
+   // the node header at alloc (the committing version); death defaults to `alive`
+   // and is stamped by COW supersession (the version that replaced the node). The
+   // GC reclaims a slot when it is death-stamped AND no held-root version lies in
+   // [birth, death) — turning it back to `free` (reusable). Commit versions start
+   // at 1, so 0 is never a real death version and serves as the free sentinel.
+   using version_t                       = uint32_t;
+   inline constexpr version_t death_free  = 0u;            // slot reusable (reclaimed / never used)
+   inline constexpr version_t death_alive = 0xFFFFFFFFu;   // live: not yet superseded
+   inline constexpr version_t version_first = 1u;          // first commit version
 }  // namespace sal2gc

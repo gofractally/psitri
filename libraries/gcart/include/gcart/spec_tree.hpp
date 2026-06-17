@@ -821,29 +821,49 @@ namespace gcart::st
          return {bt::full, pack_full(prefix, brs, nb, term, tt, tp)};
       }
 
-      // Try to build a nested_setlist that INLINES private suffix_value leaf
-      // children (a leaf with NO SAL object — value+suffix packed in the line);
-      // non-leaf / shared / oversize children stay external 4-byte ptrs. Returns the
-      // cl1 slot, or UINT32_MAX if it doesn't fit one line or no leaf would inline.
-      // Inlined leaves are release_ref'd (consumed); external children are TAKEN.
+      // Copy setlist `c` into `dst` re-packed TIGHT (cap == content) — the inline
+      // form for a nested tail (its u32 grandchildren ride along unchanged).
+      void copy_setlist_tight(char* dst, const setlist* c)
+      {
+         setlist*       d     = reinterpret_cast<setlist*>(dst);
+         const uint32_t total = c->total();
+         d->meta = c->meta; d->nbranch = c->nbranch; d->cap = uint8_t(total);
+         std::memcpy(d->prefix_ptr(), c->prefix_ptr(), c->prefixlen());
+         std::memcpy(d->keys(), c->keys(), c->nbranch);
+         for (uint32_t i = 0; i < total; ++i)
+         { tag3_set(d->types(), i, tag3_get(c->types(), i)); d->branches()[i] = c->branches()[i]; }
+      }
+
+      // Try to build a nested_setlist that INLINES private small children into the
+      // line: a suffix_value LEAF (value+suffix body, no SAL object) or a plain
+      // SETLIST (tight body; its u32 grandchildren stay external). shared / non-
+      // inlineable / oversize children stay external 4-byte ptrs. Returns the cl1
+      // slot, or UINT32_MAX if it doesn't fit one line or nothing would inline.
+      // Inlined children are consumed (the source node freed; grandchildren
+      // transfer); external children are TAKEN.
       uint32_t pack_nested_leaves(sv prefix, const br* brs, uint32_t nb, bool term, bt tt, uint32_t tp)
       {
          const uint32_t pl    = uint32_t(prefix.size());
          const uint32_t nslot = nb + (term ? 1u : 0u);
-         uint8_t  inl[257]; uint32_t esize[257]; const char* esrc[257]; uint32_t ninline = 0, tail = 0;
+         uint8_t  kind[257]; uint32_t esize[257]; const char* esrc[257];  // kind: 0=ext,1=leaf,2=setlist
+         uint32_t ninline = 0, tail = 0;
          auto decide = [&](uint32_t idx, bt tag, uint32_t ptr)
          {
-            bool        can = (tag == bt::suffix_value) && _e.sal.unique(ptr);
-            uint32_t    sz  = 4;
-            const char* src = nullptr;
-            if (can)
+            uint8_t     k = 0; uint32_t sz = 4; const char* src = nullptr;
+            if (tag == bt::suffix_value && _e.sal.unique(ptr))
             {
                src = static_cast<const char*>(_e.sal.get(ptr));     // resolve the SAL slot ONCE
                uint16_t v16; std::memcpy(&v16, src, 2);
-               sz = sv_leaf::bytes_for(v16, uint8_t(src[2]));
-               if (sz > 127) { can = false; sz = 4; src = nullptr; }
+               const uint32_t b = sv_leaf::bytes_for(v16, uint8_t(src[2]));
+               if (b <= 127) { k = 1; sz = b; } else src = nullptr;
             }
-            inl[idx] = can ? 1 : 0; esize[idx] = sz; esrc[idx] = src; ninline += can; tail += sz;
+            else if (tag == bt::setlist && _e.cl1.unique(ptr))
+            {
+               const setlist* c = static_cast<const setlist*>(_e.cl1.get(ptr));
+               const uint32_t b = setlist::bytes_for_cap(c->total(), c->prefixlen());  // TIGHT
+               if (b <= 127) { k = 2; sz = b; src = reinterpret_cast<const char*>(c); }
+            }
+            kind[idx] = k; esize[idx] = sz; esrc[idx] = src; ninline += (k != 0); tail += sz;
          };
          for (uint32_t i = 0; i < nb; ++i) decide(i, brs[i].tag, brs[i].ptr);
          if (term) decide(nb, tt, tp);
@@ -860,11 +880,14 @@ namespace gcart::st
          auto lay = [&](uint32_t idx, bt tag, uint32_t ptr)
          {
             eoff += esize[idx];
-            n->ooff()[idx] = uint8_t((inl[idx] ? nested_setlist::inline_flag : 0) | eoff);
+            n->ooff()[idx] = uint8_t((kind[idx] ? nested_setlist::inline_flag : 0) | eoff);
             char* dst = n->base() + 128 - eoff;
-            if (inl[idx])
+            if (kind[idx] == 1)        // inline leaf: copy body, consume the SAL leaf
             { std::memcpy(dst, esrc[idx], esize[idx]); tag3_set(n->otypes(), idx, bt::suffix_value); release_ref(bt::suffix_value, ptr); }
-            else
+            else if (kind[idx] == 2)   // inline setlist: tight copy, free the source slot (grandchildren transfer)
+            { copy_setlist_tight(dst, reinterpret_cast<const setlist*>(esrc[idx])); tag3_set(n->otypes(), idx, bt::setlist);
+              if (_e.cl1.release_one(ptr)) _e.cl1.free(ptr); }
+            else                       // external: 4-byte region ptr, TAKEN
             { std::memcpy(dst, &ptr, 4); tag3_set(n->otypes(), idx, tag); }
          };
          for (uint32_t i = 0; i < nb; ++i) lay(i, brs[i].tag, brs[i].ptr);

@@ -10,6 +10,8 @@
 #pragma once
 #include <gcart/tree.hpp>
 
+#include <sal/config.hpp>  // sal::open_mode (embedder open factory)
+
 #include <array>
 #include <filesystem>
 #include <memory>
@@ -427,6 +429,29 @@ namespace gcart::kv
       }
       static std::shared_ptr<database> open(std::filesystem::path dir, runtime_config cfg = {})
       {
+         return create(std::move(dir), cfg);
+      }
+      // Unified open semantics (adb::openable_database — the embedder contract).
+      static std::shared_ptr<database> open(std::filesystem::path dir,
+                                            sal::open_mode        mode,
+                                            runtime_config        cfg = {})
+      {
+         const bool exists = std::filesystem::exists(dir / "cl1.dat");
+         switch (mode)
+         {
+            case sal::open_mode::create_only:
+               if (exists)
+                  throw std::runtime_error("database already exists: " + dir.generic_string());
+               break;
+            case sal::open_mode::open_existing:
+               if (!exists)
+                  throw std::runtime_error("database does not exist: " + dir.generic_string());
+               break;
+            case sal::open_mode::read_only:
+               throw std::runtime_error("gcart: read-only opens not implemented yet");
+            case sal::open_mode::create_or_open:
+               break;
+         }
          return create(std::move(dir), cfg);
       }
 

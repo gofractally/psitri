@@ -74,11 +74,57 @@ namespace adb
       { ws.get_root(root) } -> kv_tree;
    };
 
+   // The READ path: a read session mints cursors over a committed root. This is
+   // half the engine surface every embedder (the MDBX drop-in shim, any reader)
+   // binds to, yet it lived only in the behavioral battery — so an engine could
+   // satisfy kv_database with NO readable cursor and nothing caught it until a
+   // shim build. It is a first-class requirement now.
+   template <class RS>
+   concept kv_read_session = requires(RS rs, uint32_t root) {
+      { rs.create_cursor(root) } -> kv_cursor;
+   };
+
    template <class DB>
    concept kv_database = requires(DB& db, std::filesystem::path dir) {
       { db.start_write_session() };
       requires kv_write_session<
           typename std::pointer_traits<decltype(db.start_write_session())>::element_type>;
+      { db.start_read_session() };
+      requires kv_read_session<
+          typename std::pointer_traits<decltype(db.start_read_session())>::element_type>;
+   };
+
+   // The ENGINE BUNDLE: the type a tiered engine (delta_art) or a drop-in
+   // embedder (psitrimdbx) binds to as `using TK = Engine;` then drives through
+   // TK::database / TK::write_session / TK::read_session / TK::transaction /
+   // TK::cursor. Requiring it as a concept makes "drop-in backend" a COMPILE
+   // contract: an engine missing a role type, or whose cursor isn't fully
+   // mergeable, is a static_assert naming the class — not a surprise when
+   // Silkworm fails to link the shim. (The cursor here is the read cursor the
+   // embedder drives bidirectionally, so it must be mergeable, not just base.)
+   template <class E>
+   concept kv_engine = requires {
+      typename E::database;
+      typename E::write_session;
+      typename E::read_session;
+      typename E::transaction;
+      typename E::cursor;
+   } && kv_database<typename E::database>          //
+       && kv_write_session<typename E::write_session>  //
+       && kv_read_session<typename E::read_session>    //
+       && kv_transaction<typename E::transaction>      //
+       && mergeable_cursor<typename E::cursor>;
+
+   // Openable by an embedder: a static factory taking a directory and a storage
+   // open-mode, returning a handle. The mode type is the storage layer's
+   // (sal::open_mode) so it is a TEMPLATE PARAMETER here — adb stays std-only
+   // while the contract is still a concept the embedder applies
+   // (openable_database<Engine::database, sal::open_mode>). The drop-in MDBX
+   // shim's `be_db::open(path, open_mode)` binds to exactly this; an engine with
+   // only open(path) (the gap gcart::st had) fails it.
+   template <class DB, class Mode>
+   concept openable_database = requires(std::filesystem::path dir, Mode m) {
+      { DB::open(dir, m) };
    };
 
    // ═══ Concept extensions (locked 2026-06-12, Dan; conformance enforced by

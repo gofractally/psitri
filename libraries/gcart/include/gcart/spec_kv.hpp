@@ -5,6 +5,8 @@
 #pragma once
 #include <gcart/spec_tree.hpp>
 
+#include <sal/config.hpp>  // sal::open_mode (embedder open factory)
+
 #include <array>
 #include <atomic>
 #include <filesystem>
@@ -37,7 +39,7 @@ namespace gcart::st::kv
    {
      public:
       snap() = default;
-      static snap acquire(engine& e, std::atomic<uint64_t>& slot)
+      static snap acquire(st::engine& e, std::atomic<uint64_t>& slot)
       {
          for (;;)
          {
@@ -55,7 +57,7 @@ namespace gcart::st::kv
       }
       // ADOPT an existing owned (tag,ptr) WITHOUT retaining — the caller transfers a
       // ref it already holds (the set_root exchange: a work tree's root → a snapshot).
-      static snap adopt(engine& e, bt t, uint32_t p) noexcept { return snap(&e, t, p); }
+      static snap adopt(st::engine& e, bt t, uint32_t p) noexcept { return snap(&e, t, p); }
       snap(const snap& o) : _e(o._e), _t(o._t), _p(o._p)
       {
          if (_e && _t != bt::null)
@@ -91,7 +93,7 @@ namespace gcart::st::kv
 
       bt       tag() const noexcept { return _t; }
       uint32_t ptr() const noexcept { return _p; }
-      engine*  eng() const noexcept { return _e; }
+      st::engine* eng() const noexcept { return _e; }
       void     give() noexcept { _t = bt::null; }  // relinquish without releasing
       // the pin OWNS its release. (A/B: SYNC release to isolate the bump allocator
       // from the async bg cascade.)
@@ -103,8 +105,8 @@ namespace gcart::st::kv
       }
 
      private:
-      snap(engine* e, bt t, uint32_t p) : _e(e), _t(t), _p(p) {}
-      engine*  _e = nullptr;
+      snap(st::engine* e, bt t, uint32_t p) : _e(e), _t(t), _p(p) {}
+      st::engine* _e = nullptr;
       bt       _t = bt::null;
       uint32_t _p = 0;
    };
@@ -312,7 +314,7 @@ namespace gcart::st::kv
       bt       tag() const noexcept { return _s.tag(); }
       uint32_t ptr() const noexcept { return _s.ptr(); }
       void     give() noexcept { _s.give(); }  // relinquish the ref (it moved into a work tree)
-      static snapshot adopt(engine& e, bt t, uint32_t p) { return snapshot(snap::adopt(e, t, p)); }
+      static snapshot adopt(st::engine& e, bt t, uint32_t p) { return snapshot(snap::adopt(e, t, p)); }
 
      private:
       snap _s;
@@ -326,7 +328,8 @@ namespace gcart::st::kv
    {
      public:
       root_handle() = default;
-      root_handle(engine* e, tree* w) : _e(e), _w(w) {}
+      root_handle(st::engine* e, tree* w) : _e(e), _w(w) {}
+      // (node engine, not the kv::engine bundle)
       void insert(key_view k, value_view v) { _w->upsert(k, v); }
       void upsert(key_view k, value_view v) { _w->upsert(k, v); }
       int  remove(key_view k) { return _w->remove(k); }
@@ -361,7 +364,7 @@ namespace gcart::st::kv
       }
 
      private:
-      engine* _e = nullptr;
+      st::engine* _e = nullptr;
       tree*   _w = nullptr;
    };
 
@@ -465,6 +468,29 @@ namespace gcart::st::kv
       {
          return create(std::move(dir));
       }
+      // Unified open semantics (adb::openable_database — the embedder contract the
+      // MDBX shim / delta_art tier binds to). The spec engine's segment files live
+      // under `dir` (cl1.dat is the first); mode gates create-vs-open.
+      static std::shared_ptr<database> open(std::filesystem::path dir, sal::open_mode mode)
+      {
+         const bool exists = std::filesystem::exists(dir / "cl1.dat");
+         switch (mode)
+         {
+            case sal::open_mode::create_only:
+               if (exists)
+                  throw std::runtime_error("database already exists: " + dir.generic_string());
+               break;
+            case sal::open_mode::open_existing:
+               if (!exists)
+                  throw std::runtime_error("database does not exist: " + dir.generic_string());
+               break;
+            case sal::open_mode::read_only:
+               throw std::runtime_error("gcart::st: read-only opens not implemented yet");
+            case sal::open_mode::create_or_open:
+               break;
+         }
+         return create(std::move(dir));
+      }
 
       std::shared_ptr<write_session> start_write_session()
       {
@@ -476,7 +502,7 @@ namespace gcart::st::kv
       }
       void sync(uint32_t = 0) noexcept {}
 
-      engine&                eng() noexcept { return _e; }
+      st::engine&            eng() noexcept { return _e; }
       std::atomic<uint64_t>& root_slot(uint32_t i) noexcept { return _roots[i]; }
       tree&                  work_tree(uint32_t i)
       {
@@ -495,7 +521,7 @@ namespace gcart::st::kv
             r.store(null_root, std::memory_order_relaxed);
       }
 
-      engine                                _e;
+      st::engine                            _e;
       std::array<std::atomic<uint64_t>, 64> _roots;
       std::array<std::unique_ptr<tree>, 64> _work{};
    };
@@ -582,4 +608,19 @@ namespace gcart::st::kv
    {
       return cursor(snap::acquire(_db->eng(), _db->root_slot(idx)));
    }
+
+   // ── adb engine bundle (adb::kv_engine) ───────────────────────────────────────
+   // The five role types as nested typedefs — the shape a tiered engine
+   // (delta_art) or a drop-in embedder (psitrimdbx: `using TK = engine;`) binds
+   // to. `engine` here is the BUNDLE; the actual node/storage engine is
+   // gcart::st::engine (written `st::engine` throughout this file to keep the
+   // bundle name free for the convention every other engine uses, X::kv::engine).
+   struct engine
+   {
+      using database      = gcart::st::kv::database;
+      using write_session = gcart::st::kv::write_session;
+      using read_session  = gcart::st::kv::read_session;
+      using transaction   = gcart::st::kv::transaction;
+      using cursor        = gcart::st::kv::cursor;
+   };
 }  // namespace gcart::st::kv

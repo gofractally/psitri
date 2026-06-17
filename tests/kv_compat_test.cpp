@@ -39,6 +39,22 @@ static_assert(adb::kv_database<gcart::st::kv::database>);  // spec engine: curso
 static_assert(adb::mergeable_cursor<decltype(std::declval<gcart::st::kv::write_session>().get_root(0).snapshot_cursor())>);
 static_assert(adb::shared_snapshot<decltype(std::declval<gcart::st::kv::write_session>().get_root(0))>);
 
+// ── the ENGINE BUNDLE + embedder open factory (the drop-in-backend contract) ──
+// Every engine the MDBX shim / delta_art tier can bind to must expose the five
+// role types AND open(path, sal::open_mode). Asserting it HERE is why the gap is
+// a named compile error, not a Silkworm link failure. (sal_art_ref::kv + psitri
+// are excluded: they are bound as a dwal cold-base / legacy direct, not via a
+// kv::engine bundle.)
+static_assert(adb::kv_engine<start_ref::kv::engine>);
+static_assert(adb::kv_engine<start_ver::kv::engine>);
+static_assert(adb::kv_engine<gcart::kv::engine>);
+static_assert(adb::kv_engine<gcart::st::kv::engine>);  // spec engine: bundle enforced here
+
+static_assert(adb::openable_database<start_ref::kv::database, sal::open_mode>);
+static_assert(adb::openable_database<start_ver::kv::database, sal::open_mode>);
+static_assert(adb::openable_database<gcart::kv::database, sal::open_mode>);
+static_assert(adb::openable_database<gcart::st::kv::database, sal::open_mode>);  // the gap gcart::st had
+
 namespace
 {
    // ── side-by-side perf accounting (same battery, engines back-to-back) ────

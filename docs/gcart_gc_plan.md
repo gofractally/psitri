@@ -41,40 +41,34 @@ freed. Liveness is consulted **only by the GC**: an object is reclaimable iff it
 COW path; no version registry (held roots *are* the live set); no death certificates
 (death is reconstructible by reachability, §5.6).
 
-## 2. Allocator strategy — the key architectural decision
+## 2. Allocator strategy — INDEPENDENT COPY (Dan, 2026-06-17)
 
-rcart pins sal2's **refcount** allocators, so gcart-GC cannot just mutate sal2 in
-place. Three options (recommend **C** for v1):
+**Decision: an independent copy, not a shared/templated allocator.** The refcount
+and version-liveness engines have **genuinely different memory layouts** — the GC
+engine carries the **object version (birth) IN the node header** (design §4.2),
+which the refcount nodes do not. Straddling two layouts with a `liveness_policy`
+template or `#ifdef`s makes both dirty; two clean copies stay readable and let each
+optimize its own bytes. So:
 
-- **A. Fork `sal2` → `sal2gc`** (copy + evolve to version-liveness). Clean isolation;
-  duplicates ~all allocator code (maintenance burden, two reopen/recovery paths).
-- **B. Template sal2 on a `liveness_policy {refcount, version}`.** One code family,
-  rcart picks refcount, gcart-GC picks version. Elegant but invasive to a dependency
-  rcart relies on — high blast-radius; every sal2 change must keep rcart green.
-- **C. Reuse sal2's slab machinery; layer version-liveness in gcart-GC.** ← recommend.
-  Keep sal2's segments / freeset-or-bump / sessions / **reopen recovery** (all hard,
-  done, validated). gcart-GC: at alloc, stamp the slot's **baseline** (no per-COW
-  retain); add **parallel `birth_ver[]` + `death_ver[]` mmap arrays** per region
-  (one `u32` per slot — FIX per-slot, var/big per-slot too in v1, indexed by slot
-  not CB); never call `retain`/`release_one` on the COW path; reclaim via a **GC
-  pass** that calls the allocator's `free(slot)` on dead-uncovered slots.
+- **rcart + sal2** stay exactly as they are (refcount, no node version field).
+- **gcart gets its own version-liveness allocator** — a fork of sal2
+  (`libraries/sal2gc/`, copy-and-evolve, the same Phase-0 move as sal→sal2):
+  - **drop** the per-slot refcount array (`.rc`) + dying-sentinel + `retain`/
+    `release_one` machinery;
+  - **add** a per-slot `death_ver[]` array (`.dv`, one `u32`, default `ALIVE`;
+    mmap'd, not force-synced, rebuilt on crash) + a GC-facing `free(slot)`;
+  - keep all the proven slab infra (segments, freeset/bump, sessions, recycle,
+    **reopen recovery / `adopt_existing_`** — adapted: rebuild `death` not refcount);
+  - a monotonic commit counter lives in `.meta`.
+- **gcart's nodes carry `birth` in their header** (a `u32` version field, design
+  §4.2). This costs ~4 B/node and changes the node structs + `alloc_size`/ctor — but
+  it's exactly why the copies are independent: the version IS part of this engine's
+  layout. Birth is written once at alloc (in the bytes the mutator already writes,
+  §5.2 — no extra cacheline). Death stays a parallel array (it's stamped post-hoc).
 
-Option C reuses the proven infra and isolates the experiment in gcart-GC. The cost:
-sal2's allocators currently *expect* the engine to drive refcount reclaim
-(`release_one→0→free`). gcart-GC instead drives `free(slot)` directly from the GC.
-That needs a tiny allocator surface addition (a public `free(slot)` that doesn't
-assert a refcount path, and an alloc that stamps `ref=baseline` and is never
-retained). If that proves awkward, escalate to **B** (policy template) — but only
-after C exposes the real friction.
-
-**Where birth lives.** gcart nodes are 128-byte cachelines with **no version field**
-today. Two choices: (a) a parallel `birth_ver[slot]` mmap array (no node-format
-change; matches the design's `death_ver[]` sibling-array pattern; one extra cacheline
-touched at alloc — but it's a dense sequential write), or (b) carve a `u32` birth
-into each node header (costs 4 B/node, changes every node struct + `alloc_size`).
-**Recommend (a) parallel arrays** for v1 — zero node-format churn, symmetric with
-death, GC-scan-local. Births are written once at alloc (sequential, cheap);
-re-evaluate (b) if the alloc-time second-cacheline write shows up in a profile.
+Cost owned: ~one allocator's worth of duplicated infra to maintain. Bought:
+clean, independently-optimizable layouts; zero blast-radius on rcart; the COW path
+touches **no** refcount at all (the design's whole point), because there isn't one.
 
 ## 3. Reference code to mirror (don't reinvent)
 
@@ -169,16 +163,27 @@ re-evaluate (b) if the alloc-time second-cacheline write shows up in a profile.
 - **Coexistence with rcart/sal2** — Option C keeps blast-radius in gcart-GC; if sal2
   needs changes that risk rcart, gate them behind the policy template (B) instead.
 
-## 6. Open decisions (resolve at GC-1)
-- 32-bit `version_t` (design default; 4 B commits, bounded-span wrap) vs keep wider.
+## 6. Decided / open
+**Decided (Dan):** independent copy, not templated (§2); **birth in the node header**
+(§2/§4.2), not a parallel array; death stays a parallel `.dv` array.
+
+**Open (resolve at GC-1):**
+- 32-bit `version_t` (design default; 4 B commits, bounded-span wrap) vs wider.
   **Recommend 32-bit** per the design; wrap handled by bounded-span compare.
-- birth as parallel array (recommended) vs node-header field.
 - Keep a vestigial slot `ref` for a future `smart_ptr`, or pure version-liveness in
   v1 (snapshots = held root pointer + watermark, no per-slot ref). **Recommend pure
   version-liveness v1** (simplest; add `smart_ptr` ref later if a use needs it).
 - How gcart-GC and rcart coexist in the shim/bench: both as separate backends
   (`PSITRIMDBX_BACKEND_GCART` = GC, add `PSITRIMDBX_BACKEND_RCART` = refcount) + both
   rows in bank/oplog/scan benches for a direct refcount-vs-GC comparison.
+
+## 7'. Progress bar (Dan, 2026-06-17)
+The acceptance bar is comparative, not absolute: **as long as gcart-GC is faster
+than native libmdbx and uses less disk than our prior impls** (delta_art ~334 GB /
+native 134 GB at 8M Silkworm), it's progress. The GC engine's job is to push *both*
+levers — faster (no refcount-COW traffic) and denser (less COW garbage via
+deferred, reachability-driven reclaim) — past those marks; it need not beat rcart on
+every axis to be the right direction.
 
 ## 7. Sequencing note
 Land GC-1..GC-2 behind the existing gcart tests staying green at each step

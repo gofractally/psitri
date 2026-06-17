@@ -22,4 +22,10 @@ if(BUILD_TESTS)
     set_target_properties(sal2-fa-tests PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME sal2-fa-tests COMMAND sal2-fa-tests)
+
+    add_executable(sal2-va-tests tests/var_allocator_test.cpp)
+    target_link_libraries(sal2-va-tests PRIVATE sal2)
+    set_target_properties(sal2-va-tests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME sal2-va-tests COMMAND sal2-va-tests)
 endif()

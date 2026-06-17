@@ -1,4 +1,4 @@
-// gcart::kv — adb-conforming engine over gcart::tree on sal2.
+// gcart::legacy::kv — adb-conforming engine over gcart::legacy::tree on sal2.
 //
 // Transactions are COW: a txn pins the committed root (retain), mutates a private
 // copy (writable clones the pinned root on first write), and on commit publishes
@@ -19,7 +19,7 @@
 #include <string>
 #include <string_view>
 
-namespace gcart::kv
+namespace gcart::legacy::kv
 {
    using key_view   = std::string_view;
    using value_view = std::string_view;
@@ -104,14 +104,14 @@ namespace gcart::kv
       std::optional<S> value() const
       {
          if (_cur == null_ptr) return std::nullopt;
-         value_view v = gcart::read_value_view(*_a, leaf_at(_cur));
+         value_view v = gcart::legacy::read_value_view(*_a, leaf_at(_cur));
          return S(v.data(), v.size());
       }
       template <class F>
       bool get_value(F&& f) const
       {
          if (_cur == null_ptr) return false;
-         f(gcart::read_value_view(*_a, leaf_at(_cur)));
+         f(gcart::legacy::read_value_view(*_a, leaf_at(_cur)));
          return true;
       }
       uint16_t value_type() const { return 0; }
@@ -124,7 +124,7 @@ namespace gcart::kv
       {
          const leaf* lf = find_leaf(_a, _root, k);
          if (!lf) return std::nullopt;
-         value_view v = gcart::read_value_view(*_a, lf);
+         value_view v = gcart::legacy::read_value_view(*_a, lf);
          return S(v.data(), v.size());
       }
       template <class F>
@@ -132,7 +132,7 @@ namespace gcart::kv
       {
          const leaf* lf = find_leaf(_a, _root, k);
          if (!lf) return false;
-         f(gcart::read_value_view(*_a, lf));
+         f(gcart::legacy::read_value_view(*_a, lf));
          return true;
       }
 
@@ -347,7 +347,7 @@ namespace gcart::kv
    class write_session;
    class read_session;
 
-   // ── transaction: COW-snapshot over one root's gcart::tree ──────────────────
+   // ── transaction: COW-snapshot over one root's gcart::legacy::tree ──────────────────
    class transaction
    {
      public:
@@ -367,7 +367,7 @@ namespace gcart::kv
       {
          const leaf* lf = _t->find(k);
          if (!lf) return false;
-         fn(gcart::read_value_view(_t->arena(), lf));
+         fn(gcart::legacy::read_value_view(_t->arena(), lf));
          return true;
       }
       template <class S = std::string>
@@ -375,7 +375,7 @@ namespace gcart::kv
       {
          const leaf* lf = _t->find(k);
          if (!lf) return std::nullopt;
-         value_view v = gcart::read_value_view(_t->arena(), lf);
+         value_view v = gcart::legacy::read_value_view(_t->arena(), lf);
          return S(v.data(), v.size());
       }
 
@@ -399,20 +399,20 @@ namespace gcart::kv
          // un-released give() so the restored root lands at the right refcount.
          const nptr work = _t->root();
          _t->set_root(_snap.give());
-         if (work != null_ptr) gcart::release_subtree(*_a, work);
+         if (work != null_ptr) gcart::legacy::release_subtree(*_a, work);
          _done = true;
       }
 
      private:
       friend class write_session;
-      transaction(gcart::tree* t, sal2::arena* a, uint32_t slot)
+      transaction(gcart::legacy::tree* t, sal2::arena* a, uint32_t slot)
           : _t(t), _a(a), _arena_slot(slot), _snap(smart_ptr::acquire(*a, slot))
       {
          // _snap pins the committed root (the rollback target + COW base). At a
          // txn boundary the working tree's root == the published arena root, so
          // acquire() pins exactly what _t is about to COW from.
       }
-      gcart::tree* _t = nullptr;
+      gcart::legacy::tree* _t = nullptr;
       sal2::arena* _a = nullptr;
       uint32_t     _arena_slot = 0;
       smart_ptr    _snap;
@@ -460,11 +460,11 @@ namespace gcart::kv
       void sync(sal2::line_idx = 0) noexcept {}
 
       sal2::arena& store() noexcept { return _arena; }
-      gcart::tree& tree_for(uint32_t idx)
+      gcart::legacy::tree& tree_for(uint32_t idx)
       {
          if (!_trees[idx])
          {
-            _trees[idx] = std::make_unique<gcart::tree>(_arena);
+            _trees[idx] = std::make_unique<gcart::legacy::tree>(_arena);
             _trees[idx]->set_root(_arena.get_root(idx));  // adopt any persisted root
          }
          return *_trees[idx];
@@ -476,7 +476,7 @@ namespace gcart::kv
       {
       }
       sal2::arena                                   _arena;
-      std::array<std::unique_ptr<gcart::tree>, 64>  _trees{};
+      std::array<std::unique_ptr<gcart::legacy::tree>, 64>  _trees{};
    };
 
    // ── write_session ──────────────────────────────────────────────────────────
@@ -486,7 +486,7 @@ namespace gcart::kv
       explicit write_session(database* db) : _db(db) {}
       transaction start_transaction(uint32_t root_index = 0)
       {
-         gcart::tree& t = _db->tree_for(root_index);
+         gcart::legacy::tree& t = _db->tree_for(root_index);
          return transaction(&t, &_db->store(), root_index);
       }
       tree get_root(uint32_t root_index)
@@ -528,11 +528,11 @@ namespace gcart::kv
    // ── engine traits bundle (psitri::dwal::kv_engine form) ────────────────────
    struct engine
    {
-      using database      = gcart::kv::database;
-      using write_session = gcart::kv::write_session;
-      using read_session  = gcart::kv::read_session;
-      using transaction   = gcart::kv::transaction;
-      using cursor        = gcart::kv::cursor;
-      using config        = gcart::kv::runtime_config;
+      using database      = gcart::legacy::kv::database;
+      using write_session = gcart::legacy::kv::write_session;
+      using read_session  = gcart::legacy::kv::read_session;
+      using transaction   = gcart::legacy::kv::transaction;
+      using cursor        = gcart::legacy::kv::cursor;
+      using config        = gcart::legacy::kv::runtime_config;
    };
-}  // namespace gcart::kv
+}  // namespace gcart::legacy::kv

@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-namespace gcart
+namespace gcart::legacy
 {
    using sv = std::string_view;
 
@@ -676,4 +676,4 @@ namespace gcart
       nptr          _root = null_ptr;
       uint64_t      _size = 0;
    };
-}  // namespace gcart
+}  // namespace gcart::legacy

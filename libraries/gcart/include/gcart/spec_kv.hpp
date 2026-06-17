@@ -1,5 +1,5 @@
-// gcart::st::kv — adb-style adapter over the spec engine (gcart::st), with
-// lock-free MVCC. Mirrors the v1 gcart::kv discipline (smart_ptr IS the pin,
+// gcart::kv — adb-style adapter over the spec engine (gcart), with
+// lock-free MVCC. Mirrors the v1 gcart::legacy::kv discipline (smart_ptr IS the pin,
 // try_retain+verify acquire, COW-to-root, give() hand-off) but the root is a
 // (branch_type tag, u32 ptr) pair packed into an atomic u64 published slot.
 #pragma once
@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-namespace gcart::st::kv
+namespace gcart::kv
 {
    using key_view   = std::string_view;
    using value_view = std::string_view;
@@ -39,7 +39,7 @@ namespace gcart::st::kv
    {
      public:
       snap() = default;
-      static snap acquire(st::engine& e, std::atomic<uint64_t>& slot)
+      static snap acquire(gcart::engine& e, std::atomic<uint64_t>& slot)
       {
          for (;;)
          {
@@ -57,7 +57,7 @@ namespace gcart::st::kv
       }
       // ADOPT an existing owned (tag,ptr) WITHOUT retaining — the caller transfers a
       // ref it already holds (the set_root exchange: a work tree's root → a snapshot).
-      static snap adopt(st::engine& e, bt t, uint32_t p) noexcept { return snap(&e, t, p); }
+      static snap adopt(gcart::engine& e, bt t, uint32_t p) noexcept { return snap(&e, t, p); }
       snap(const snap& o) : _e(o._e), _t(o._t), _p(o._p)
       {
          if (_e && _t != bt::null)
@@ -93,7 +93,7 @@ namespace gcart::st::kv
 
       bt       tag() const noexcept { return _t; }
       uint32_t ptr() const noexcept { return _p; }
-      st::engine* eng() const noexcept { return _e; }
+      gcart::engine* eng() const noexcept { return _e; }
       void     give() noexcept { _t = bt::null; }  // relinquish without releasing
       // the pin OWNS its release. (A/B: SYNC release to isolate the bump allocator
       // from the async bg cascade.)
@@ -105,8 +105,8 @@ namespace gcart::st::kv
       }
 
      private:
-      snap(st::engine* e, bt t, uint32_t p) : _e(e), _t(t), _p(p) {}
-      st::engine* _e = nullptr;
+      snap(gcart::engine* e, bt t, uint32_t p) : _e(e), _t(t), _p(p) {}
+      gcart::engine* _e = nullptr;
       bt       _t = bt::null;
       uint32_t _p = 0;
    };
@@ -204,7 +204,7 @@ namespace gcart::st::kv
          f(value_view(v.data(), v.size()));
          return true;
       }
-      // gcart::st has no composable subtrees (yet) — a value is never a subtree.
+      // gcart has no composable subtrees (yet) — a value is never a subtree.
       bool is_subtree() const { return false; }
 
       // ── ordered reverse iteration (adb::mergeable_cursor) ───────────────────
@@ -314,7 +314,7 @@ namespace gcart::st::kv
       bt       tag() const noexcept { return _s.tag(); }
       uint32_t ptr() const noexcept { return _s.ptr(); }
       void     give() noexcept { _s.give(); }  // relinquish the ref (it moved into a work tree)
-      static snapshot adopt(st::engine& e, bt t, uint32_t p) { return snapshot(snap::adopt(e, t, p)); }
+      static snapshot adopt(gcart::engine& e, bt t, uint32_t p) { return snapshot(snap::adopt(e, t, p)); }
 
      private:
       snap _s;
@@ -328,7 +328,7 @@ namespace gcart::st::kv
    {
      public:
       root_handle() = default;
-      root_handle(st::engine* e, tree* w) : _e(e), _w(w) {}
+      root_handle(gcart::engine* e, tree* w) : _e(e), _w(w) {}
       // (node engine, not the kv::engine bundle)
       void insert(key_view k, value_view v) { _w->upsert(k, v); }
       void upsert(key_view k, value_view v) { _w->upsert(k, v); }
@@ -364,7 +364,7 @@ namespace gcart::st::kv
       }
 
      private:
-      st::engine* _e = nullptr;
+      gcart::engine* _e = nullptr;
       tree*   _w = nullptr;
    };
 
@@ -485,7 +485,7 @@ namespace gcart::st::kv
                   throw std::runtime_error("database does not exist: " + dir.generic_string());
                break;
             case sal::open_mode::read_only:
-               throw std::runtime_error("gcart::st: read-only opens not implemented yet");
+               throw std::runtime_error("gcart: read-only opens not implemented yet");
             case sal::open_mode::create_or_open:
                break;
          }
@@ -502,7 +502,7 @@ namespace gcart::st::kv
       }
       void sync(uint32_t = 0) noexcept {}
 
-      st::engine&            eng() noexcept { return _e; }
+      gcart::engine&            eng() noexcept { return _e; }
       std::atomic<uint64_t>& root_slot(uint32_t i) noexcept { return _roots[i]; }
       tree&                  work_tree(uint32_t i)
       {
@@ -521,7 +521,7 @@ namespace gcart::st::kv
             r.store(null_root, std::memory_order_relaxed);
       }
 
-      st::engine                            _e;
+      gcart::engine                            _e;
       std::array<std::atomic<uint64_t>, 64> _roots;
       std::array<std::unique_ptr<tree>, 64> _work{};
    };
@@ -613,14 +613,15 @@ namespace gcart::st::kv
    // The five role types as nested typedefs — the shape a tiered engine
    // (delta_art) or a drop-in embedder (psitrimdbx: `using TK = engine;`) binds
    // to. `engine` here is the BUNDLE; the actual node/storage engine is
-   // gcart::st::engine (written `st::engine` throughout this file to keep the
-   // bundle name free for the convention every other engine uses, X::kv::engine).
+   // gcart::engine (the node/storage engine, written qualified throughout this
+   // file to keep the bare name `engine` free for this bundle — the X::kv::engine
+   // convention every engine uses).
    struct engine
    {
-      using database      = gcart::st::kv::database;
-      using write_session = gcart::st::kv::write_session;
-      using read_session  = gcart::st::kv::read_session;
-      using transaction   = gcart::st::kv::transaction;
-      using cursor        = gcart::st::kv::cursor;
+      using database      = gcart::kv::database;
+      using write_session = gcart::kv::write_session;
+      using read_session  = gcart::kv::read_session;
+      using transaction   = gcart::kv::transaction;
+      using cursor        = gcart::kv::cursor;
    };
-}  // namespace gcart::st::kv
+}  // namespace gcart::kv

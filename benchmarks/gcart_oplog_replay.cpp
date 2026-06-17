@@ -38,9 +38,9 @@ struct mem_stats
    uint64_t setlist_n_hist[10] = {0};              // 0,1,2,..,8,9+ children
    uint64_t setlist_has_term = 0;
 };
-static void walk_stats(sal2::arena& a, gcart::nptr n, mem_stats& s)
+static void walk_stats(sal2::arena& a, gcart::legacy::nptr n, mem_stats& s)
 {
-   using namespace gcart;
+   using namespace gcart::legacy;
    if (n == null_ptr) return;
    void* p = a.get(n);
    if (is_leaf(p))
@@ -74,7 +74,7 @@ static void walk_stats(sal2::arena& a, gcart::nptr n, mem_stats& s)
       if (nd->h.term != null_ptr) walk_stats(a, nd->h.term, s);
    }
 }
-static void report_stats(sal2::arena& a, gcart::nptr root)
+static void report_stats(sal2::arena& a, gcart::legacy::nptr root)
 {
    mem_stats s;
    walk_stats(a, root, s);
@@ -129,7 +129,7 @@ int main(int argc, char** argv)
    if (!f) { std::perror("fopen"); return 2; }
    fs::remove_all(dir);
 
-   auto db = gcart::kv::database::create(dir);
+   auto db = gcart::legacy::kv::database::create(dir);
    auto ws = db->start_write_session();
 
    std::map<std::string, std::string> truth;  // oracle (only if verify)
@@ -142,7 +142,7 @@ int main(int argc, char** argv)
    auto t0  = Clock::now();
    auto secs = [](auto a, auto b) { return std::chrono::duration<double>(b - a).count(); };
 
-   std::optional<gcart::kv::transaction> tx;
+   std::optional<gcart::legacy::kv::transaction> tx;
    tx.emplace(ws->start_transaction(0));
 
    int c;
@@ -177,7 +177,7 @@ int main(int argc, char** argv)
          val.resize(vl);
          if (vl && !rd(val.data(), vl)) break;
          std::string_view kv(key.data(), kl), vv(val.data(), vl);
-         if (gcart::leaf::alloc_size(kv, vv) > cap_lines)
+         if (gcart::legacy::leaf::alloc_size(kv, vv) > cap_lines)
             ++oversized;  // large value — now stored via the value_chunk chain
          tx->upsert(kv, vv);
          if (verify) truth[std::string(kv)] = std::string(vv);

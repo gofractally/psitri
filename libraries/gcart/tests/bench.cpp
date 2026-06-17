@@ -30,7 +30,7 @@ int main(int argc, char** argv)
    }
 
    sal2::arena a(sal2::arena_config{.dir = dir});
-   gcart::tree t(a);
+   gcart::legacy::tree t(a);
    const std::string val = "value-payload-100b........................................................................xx";
 
    auto t0 = Clock::now();
@@ -41,7 +41,7 @@ int main(int argc, char** argv)
    std::shuffle(idx.begin(), idx.end(), r);
    volatile uint64_t sink = 0;
    auto t2 = Clock::now();
-   for (uint32_t i : idx) { const gcart::leaf* lf = t.find(keys[i]); sink += lf ? lf->vlen : 0; }
+   for (uint32_t i : idx) { const gcart::legacy::leaf* lf = t.find(keys[i]); sink += lf ? lf->vlen : 0; }
    auto t3 = Clock::now();
    // get misses
    size_t misses = 0;

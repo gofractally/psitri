@@ -1,4 +1,4 @@
-// gcart::st::kv adb adapter — CRUD + snapshot isolation + concurrent MVCC
+// gcart::kv adb adapter — CRUD + snapshot isolation + concurrent MVCC
 // (4 readers + writer, lock-free across the 3 regions). 0 fails expected.
 #include <adb/concepts.hpp>
 #include <atomic>
@@ -9,7 +9,7 @@
 #include <string>
 #include <thread>
 #include <vector>
-using namespace gcart::st::kv;
+using namespace gcart::kv;
 
 // Compiler-enforced conformance: the spec engine MUST satisfy the adb concepts —
 // transaction (upsert/remove/commit/get) AND the ordered cursor surface
@@ -28,7 +28,7 @@ static_assert(adb::shared_snapshot<snapshot>,
               "snapshot must satisfy adb::shared_snapshot (copyable + mergeable snapshot_cursor)");
 static_assert(adb::kv_write_session<write_session>,
               "write_session must satisfy adb::kv_write_session (start_transaction + get_root)");
-static_assert(adb::kv_database<database>, "gcart::st::kv::database must satisfy adb::kv_database");
+static_assert(adb::kv_database<database>, "gcart::kv::database must satisfy adb::kv_database");
 static_assert(adb::root_handle<root_handle>,
               "root_handle must satisfy adb::root_handle (upsert/remove/get/set_root exchange)");
 static_assert(adb::multi_root_transaction<transaction>,

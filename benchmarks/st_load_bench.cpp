@@ -1,4 +1,4 @@
-// Focused gcart::st (spec engine) load profile: sequential uint64 keys, 8-byte
+// Focused gcart (spec engine) load profile: sequential uint64 keys, 8-byte
 // values, batched transactions — the bank LOAD phase in isolation so `sample`
 // attributes time to the spec engine alone (not the 6 other bank engines).
 //   st-load-bench [keys=2000000] [batch=1000] [dir=/tmp/st_load]
@@ -20,7 +20,7 @@ int main(int argc, char** argv)
    const std::string dir   = argc > 3 ? argv[3] : "/tmp/st_load";
 
    std::filesystem::remove_all(dir);
-   auto db = gcart::st::kv::database::create(dir);
+   auto db = gcart::kv::database::create(dir);
    auto ws = db->start_write_session();
 
    const uint64_t val = 1'000'000ull;

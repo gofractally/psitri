@@ -6,7 +6,7 @@
 //      engine (optional): gcart | start_ver | start_ref | sal_art_ref | all
 //   (run one engine per process to isolate footprint/RSS and survive a crash.)
 #include <gcart/kv.hpp>
-#include <gcart/spec_kv.hpp>  // gcart::st::kv (the new spec engine)
+#include <gcart/spec_kv.hpp>  // gcart::kv (the new spec engine)
 #include <start_ver/kv.hpp>
 #include <start_ref/kv.hpp>
 #include <heart_kv.hpp>  // sal_art_ref::kv
@@ -111,9 +111,9 @@ int main(int argc, char** argv)
    if (want("start_ref"))
    { auto d = base / "start_ref"; fs::remove_all(d); rows.push_back(replay("start_ref", oplog, d, start_ref::kv::database::create(d))); }
    if (want("gcart"))
-   { auto d = base / "gcart"; fs::remove_all(d); rows.push_back(replay("gcart", oplog, d, gcart::kv::database::create(d))); }
+   { auto d = base / "gcart"; fs::remove_all(d); rows.push_back(replay("gcart", oplog, d, gcart::legacy::kv::database::create(d))); }
    if (want("gcart_spec"))
-   { auto d = base / "gcart_spec"; fs::remove_all(d); rows.push_back(replay("gcart_spec", oplog, d, gcart::st::kv::database::create(d))); }
+   { auto d = base / "gcart_spec"; fs::remove_all(d); rows.push_back(replay("gcart_spec", oplog, d, gcart::kv::database::create(d))); }
    if (want("sal_art_ref"))
    { auto d = base / "sal_art_ref"; fs::remove_all(d); rows.push_back(replay("sal_art_ref", oplog, d, sal_art_ref::kv::database::create(d))); }
 

@@ -1,4 +1,4 @@
-// gcart::st — the spec node taxonomy over the three regions (refcount era).
+// gcart — the spec node taxonomy over the three regions (refcount era).
 //
 // Routing lives in FIX (cl1 setlist, cl2 double, cl9 full); terminal (suffix,
 // value) leaves live in SAL (32B); large values in BIG. A branch is a 4-byte
@@ -12,7 +12,8 @@
 // new slot bubbles up; COW-to-root); pointer children are retained per region,
 // inline-none (suffix_value is its own SAL object, refcounted there).
 #pragma once
-#include <gcart/node.hpp>  // branch_type, tag3_get/set, tag3_bytes
+#include <gcart/branch_tag.hpp>  // branch_type, tag3_get/set, tag3_bytes
+#include <ucc/lower_bound.hpp>   // ucc::lower_bound_padded (vectorized in-node scan)
 #include <sal2/big_allocator.hpp>
 #include <sal2/fixed_allocator.hpp>
 #include <sal2/var_allocator.hpp>
@@ -28,7 +29,7 @@
 #include <utility>
 #include <vector>
 
-namespace gcart::st
+namespace gcart
 {
    using sv = std::string_view;
    using bt = branch_type;
@@ -644,9 +645,9 @@ namespace gcart::st
             return false;
       }
    }
-}  // namespace gcart::st
+}  // namespace gcart
 
-namespace gcart::st
+namespace gcart
 {
    // a decoded branch (scratch, for copy-construct-rebuild of a routing node)
    struct br
@@ -2854,4 +2855,4 @@ namespace gcart::st
       uint64_t                             _size = 0;
       std::string _scan;  // reused buffer for remove()'s presence pre-check (no per-call alloc)
    };
-}  // namespace gcart::st
+}  // namespace gcart

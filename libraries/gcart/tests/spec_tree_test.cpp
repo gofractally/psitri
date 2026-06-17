@@ -1,4 +1,4 @@
-// gcart::st spec-engine oracle — the §7 node taxonomy over 3 regions (FIX
+// gcart spec-engine oracle — the §7 node taxonomy over 3 regions (FIX
 // setlist/full + SAL suffix_value), refcount COW. get/upsert vs std::map on
 // mixed string + hashed keys; reports bytes/key (target: beat sal_art_ref's 83).
 #include <algorithm>
@@ -13,8 +13,8 @@ int main()
    namespace fs = std::filesystem;
    auto dir     = fs::temp_directory_path() / "st_oracle";
    fs::remove_all(dir);
-   gcart::st::engine                  e(dir);
-   gcart::st::tree                    t(e);
+   gcart::engine                  e(dir);
+   gcart::tree                    t(e);
    std::map<std::string, std::string> oracle;
    std::mt19937                       r(2024);
    int                                checks = 0, fails = 0;

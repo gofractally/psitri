@@ -1,4 +1,4 @@
-// gcart::kv adb-conformance + functional gate.
+// gcart::legacy::kv adb-conformance + functional gate.
 #include <gcart/kv.hpp>
 #include <adb/concepts.hpp>
 
@@ -7,9 +7,9 @@
 #include <random>
 #include <string>
 
-static_assert(adb::kv_database<gcart::kv::database>, "gcart::kv::database must model adb::kv_database");
-static_assert(adb::kv_cursor<gcart::kv::cursor>, "gcart cursor must model adb::kv_cursor");
-static_assert(adb::kv_tree<gcart::kv::tree>, "gcart snapshot tree must model adb::kv_tree");
+static_assert(adb::kv_database<gcart::legacy::kv::database>, "gcart::legacy::kv::database must model adb::kv_database");
+static_assert(adb::kv_cursor<gcart::legacy::kv::cursor>, "gcart cursor must model adb::kv_cursor");
+static_assert(adb::kv_tree<gcart::legacy::kv::tree>, "gcart snapshot tree must model adb::kv_tree");
 
 namespace
 {
@@ -23,7 +23,7 @@ int main()
    const fs::path dir = fs::temp_directory_path() / "gcart_kv_test";
    fs::remove_all(dir);
 
-   auto db  = gcart::kv::database::create(dir);
+   auto db  = gcart::legacy::kv::database::create(dir);
    auto ws  = db->start_write_session();
    std::map<std::string, std::string> oracle;
    std::mt19937 r(2024);

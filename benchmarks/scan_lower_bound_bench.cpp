@@ -159,13 +159,13 @@ int main(int argc, char** argv)
    {
       auto d = base / "gcart";
       fs::remove_all(d);
-      rows.push_back(run("gcart", gcart::kv::database::create(d), keys, probes, rlen));
+      rows.push_back(run("gcart", gcart::legacy::kv::database::create(d), keys, probes, rlen));
    }
    if (want("gcart_spec"))
    {
       auto d = base / "gcart_spec";
       fs::remove_all(d);
-      rows.push_back(run("gcart_spec", gcart::st::kv::database::create(d), keys, probes, rlen));
+      rows.push_back(run("gcart_spec", gcart::kv::database::create(d), keys, probes, rlen));
    }
    std::printf("\n%-12s %8s %14s %16s %16s\n", "engine", "load/s", "lower_bound(ns)",
                "full-scan(ns/k)", "range-next(ns/k)");

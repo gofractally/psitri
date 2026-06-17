@@ -44,7 +44,7 @@ target_compile_options(bank-compare-bench PRIVATE -O3 -DNDEBUG)
 set_target_properties(bank-compare-bench PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
-# focused gcart::st load profile (one engine, for `sample`/perf attribution)
+# focused gcart load profile (one engine, for `sample`/perf attribution)
 add_executable(st-load-bench st_load_bench.cpp)
 target_link_libraries(st-load-bench PRIVATE gcart)
 target_compile_options(st-load-bench PRIVATE -O3 -DNDEBUG -fno-omit-frame-pointer)
@@ -66,7 +66,7 @@ target_compile_options(gcart-oplog-replay PRIVATE -O3 -DNDEBUG)
 set_target_properties(gcart-oplog-replay PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
-# gcart SPEC oplog replay: read+write VALIDATION of gcart::st::kv on the Silkworm capture.
+# gcart SPEC oplog replay: read+write VALIDATION of gcart::kv on the Silkworm capture.
 add_executable(gcart-spec-oplog-replay gcart_spec_oplog_replay.cpp)
 target_link_libraries(gcart-spec-oplog-replay PRIVATE gcart)
 target_compile_definitions(gcart-spec-oplog-replay PRIVATE XXH_INLINE_ALL)

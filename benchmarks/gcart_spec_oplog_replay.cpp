@@ -1,8 +1,8 @@
 // gcart_spec_oplog_replay — replay a captured Silkworm op-stream through the NEW
-// spec engine (gcart::st::kv) and VALIDATE its reads against the recorded
+// spec engine (gcart::kv) and VALIDATE its reads against the recorded
 // results. This is the read+write validation of the spec engine on the real
 // mainnet-sync stream (the MDBX shim's capture); gcart_oplog_replay.cpp does the
-// same for V1 gcart::kv. Every 'G' op carries Silkworm's observed result
+// same for V1 gcart::legacy::kv. Every 'G' op carries Silkworm's observed result
 // (found-byte + fnv value-hash); we do tx->get (read-own-writes over the open
 // txn) and count divergences. 'L' (lower_bound) records are skipped faithfully
 // (the spec cursor has no forward/range surface yet — that's the remaining gap).
@@ -67,7 +67,7 @@ int main(int argc, char** argv)
    }
    fs::remove_all(dir);
 
-   auto db = gcart::st::kv::database::create(dir);
+   auto db = gcart::kv::database::create(dir);
    auto ws = db->start_write_session();
 
    std::vector<char> key, val, rkey;
@@ -75,7 +75,7 @@ int main(int argc, char** argv)
    auto              rd = [&](void* p, size_t n) { return std::fread(p, 1, n, f) == n; };
    auto secs = [](auto a, auto b) { return std::chrono::duration<double>(b - a).count(); };
 
-   std::optional<gcart::st::kv::transaction> tx;
+   std::optional<gcart::kv::transaction> tx;
    tx.emplace(ws->start_transaction(0));
    const auto t0 = Clock::now();
 

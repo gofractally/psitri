@@ -1,4 +1,4 @@
-// gcart::tree correctness gate vs std::map oracle: insert / get / update /
+// gcart::legacy::tree correctness gate vs std::map oracle: insert / get / update /
 // in-order iterate / erase, on dictionary-shaped and random keys.
 #include <gcart/tree.hpp>
 
@@ -46,10 +46,10 @@ namespace
       return buf;
    }
 
-   bool verify_inorder(const gcart::tree& t, const std::map<std::string, std::string>& oracle)
+   bool verify_inorder(const gcart::legacy::tree& t, const std::map<std::string, std::string>& oracle)
    {
       std::vector<std::pair<std::string, std::string>> got;
-      t.for_each([&](gcart::sv k, gcart::sv v) { got.emplace_back(std::string(k), std::string(v)); });
+      t.for_each([&](gcart::legacy::sv k, gcart::legacy::sv v) { got.emplace_back(std::string(k), std::string(v)); });
       if (got.size() != oracle.size())
       {
          std::fprintf(stderr, "size mismatch: tree=%zu oracle=%zu\n", got.size(), oracle.size());
@@ -79,7 +79,7 @@ int main()
    {
       fs::remove_all(dir);
       sal2::arena a(sal2::arena_config{.dir = dir});
-      gcart::tree t(a);
+      gcart::legacy::tree t(a);
       std::map<std::string, std::string> oracle;
       std::mt19937 r(1234 + mode);
 
@@ -99,7 +99,7 @@ int main()
       // point gets
       for (auto& [k, v] : oracle)
       {
-         const gcart::leaf* lf = t.find(k);
+         const gcart::legacy::leaf* lf = t.find(k);
          ok(lf != nullptr && lf->value() == v, "get matches oracle");
       }
       // misses
@@ -125,7 +125,7 @@ int main()
       ok(t.size() == oracle.size(), "size matches oracle after erase");
       for (auto& [k, v] : oracle)
       {
-         const gcart::leaf* lf = t.find(k);
+         const gcart::legacy::leaf* lf = t.find(k);
          ok(lf && lf->value() == v, "surviving key still present + correct");
       }
       ok(verify_inorder(t, oracle), "in-order matches oracle after erase");

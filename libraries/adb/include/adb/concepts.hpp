@@ -121,7 +121,7 @@ namespace adb
    // while the contract is still a concept the embedder applies
    // (openable_database<Engine::database, sal::open_mode>). The drop-in MDBX
    // shim's `be_db::open(path, open_mode)` binds to exactly this; an engine with
-   // only open(path) (the gap gcart::st had) fails it.
+   // only open(path) (the gap the gcart spec engine had) fails it.
    template <class DB, class Mode>
    concept openable_database = requires(std::filesystem::path dir, Mode m) {
       { DB::open(dir, m) };

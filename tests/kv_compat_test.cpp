@@ -25,7 +25,7 @@
 
 #include <start_ver/kv.hpp>  // the 4th engine: vpart must pass standalone (Dan)
 #include <gcart/kv.hpp>      // the 5th engine: gcart (sal2 GC-ART)
-#include <gcart/spec_kv.hpp> // the 6th engine: gcart::st (spec engine)
+#include <gcart/spec_kv.hpp> // the 6th engine: gcart (spec engine)
 
 // The harness shape is compiler-enforced (SPEC §12.3): a drift in any engine
 // fails HERE, by name, before a single test runs.
@@ -33,11 +33,11 @@ static_assert(adb::kv_database<sal_art_ref::kv::database>);
 static_assert(adb::kv_database<start_ref::kv::database>);
 static_assert(adb::kv_database<psitri::database>);
 static_assert(adb::kv_database<start_ver::kv::database>);
-static_assert(adb::kv_database<gcart::kv::database>);
-static_assert(adb::kv_database<gcart::st::kv::database>);  // spec engine: cursor + get_root enforced here
+static_assert(adb::kv_database<gcart::legacy::kv::database>);
+static_assert(adb::kv_database<gcart::kv::database>);  // spec engine: cursor + get_root enforced here
 // the spec engine's snapshot cursor is fully mergeable (delta_art tier-capable).
-static_assert(adb::mergeable_cursor<decltype(std::declval<gcart::st::kv::write_session>().get_root(0).snapshot_cursor())>);
-static_assert(adb::shared_snapshot<decltype(std::declval<gcart::st::kv::write_session>().get_root(0))>);
+static_assert(adb::mergeable_cursor<decltype(std::declval<gcart::kv::write_session>().get_root(0).snapshot_cursor())>);
+static_assert(adb::shared_snapshot<decltype(std::declval<gcart::kv::write_session>().get_root(0))>);
 
 // ── the ENGINE BUNDLE + embedder open factory (the drop-in-backend contract) ──
 // Every engine the MDBX shim / delta_art tier can bind to must expose the five
@@ -47,13 +47,13 @@ static_assert(adb::shared_snapshot<decltype(std::declval<gcart::st::kv::write_se
 // kv::engine bundle.)
 static_assert(adb::kv_engine<start_ref::kv::engine>);
 static_assert(adb::kv_engine<start_ver::kv::engine>);
-static_assert(adb::kv_engine<gcart::kv::engine>);
-static_assert(adb::kv_engine<gcart::st::kv::engine>);  // spec engine: bundle enforced here
+static_assert(adb::kv_engine<gcart::legacy::kv::engine>);
+static_assert(adb::kv_engine<gcart::kv::engine>);  // spec engine: bundle enforced here
 
 static_assert(adb::openable_database<start_ref::kv::database, sal::open_mode>);
 static_assert(adb::openable_database<start_ver::kv::database, sal::open_mode>);
-static_assert(adb::openable_database<gcart::kv::database, sal::open_mode>);
-static_assert(adb::openable_database<gcart::st::kv::database, sal::open_mode>);  // the gap gcart::st had
+static_assert(adb::openable_database<gcart::legacy::kv::database, sal::open_mode>);
+static_assert(adb::openable_database<gcart::kv::database, sal::open_mode>);  // the gap gcart had
 
 namespace
 {
@@ -890,7 +890,7 @@ int main()
    bool v = !want("start_ver") ||
             guarded("start_ver", [&] { return run<start_ver::kv::database>("start_ver", tmp("kvcompat_start_ver")); });
    bool g = !want("gcart") ||
-            guarded("gcart", [&] { return run<gcart::kv::database>("gcart", tmp("kvcompat_gcart")); });
+            guarded("gcart", [&] { return run<gcart::legacy::kv::database>("gcart", tmp("kvcompat_gcart")); });
    perf_report();
    std::printf("RESULT: sal_art_ref %s, psitri %s, start_ref %s, start_ver %s, gcart %s\n",
                h ? "PASS" : "FAIL", p ? "PASS" : "FAIL", a ? "PASS" : "FAIL", v ? "PASS" : "FAIL",

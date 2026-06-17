@@ -1,4 +1,4 @@
-// Focused inline-leaf READ microbench for gcart::st (nested_setlist). Inserts
+// Focused inline-leaf READ microbench for gcart (nested_setlist). Inserts
 // PAIRS of keys that each form a surviving 2-leaf node (base[7] + 'a'/'b'); with
 // nested ON each pair is one cl1 line holding two INLINE leaves (read = 1 line),
 // with nested OFF (GCART_NO_NESTED=1) it's a flat setlist + 2 SAL leaves (read =
@@ -33,7 +33,7 @@ int main(int argc, char** argv)
    const std::string dir   = argc > 3 ? argv[3] : "/tmp/st_inl";
 
    std::filesystem::remove_all(dir);
-   auto db = gcart::st::kv::database::create(dir);
+   auto db = gcart::kv::database::create(dir);
    auto ws = db->start_write_session();
 
    const std::string val(8, 'V');

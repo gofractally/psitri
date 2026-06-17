@@ -246,9 +246,8 @@ namespace gcart
       {
          const uint32_t vl = uint32_t(value.size()), sl = uint32_t(suffix.size());
          const uint32_t slot = ses.alloc(birth_bytes + bytes_for(vl, sl));
-         char*          p    = static_cast<char*>(e.sal.get(slot));
-         const uint32_t b0   = 0;  // birth stamped by the latch at commit (GC-2c)
-         std::memcpy(p, &b0, 4);
+         char*          p    = static_cast<char*>(e.sal.get(slot));  // slot base is grain-aligned
+         *reinterpret_cast<uint32_t*>(p) = 0;  // birth stamped by make_sv at alloc (GC-2c)
          char*          d    = p + birth_bytes;
          const uint16_t v16  = uint16_t(vl);
          std::memcpy(d, &v16, 2);
@@ -259,13 +258,11 @@ namespace gcart
       }
       static uint32_t birth(const engine& e, uint32_t slot) noexcept
       {
-         uint32_t b;
-         std::memcpy(&b, e.sal.get(slot), 4);
-         return b;
+         return *reinterpret_cast<const uint32_t*>(e.sal.get(slot));  // birth @ slot base
       }
       static void set_birth(engine& e, uint32_t slot, uint32_t v) noexcept
       {
-         std::memcpy(e.sal.get(slot), &v, 4);
+         *reinterpret_cast<uint32_t*>(e.sal.get(slot)) = v;
       }
       static sv value(const engine& e, uint32_t slot) noexcept
       {
@@ -311,9 +308,8 @@ namespace gcart
       {
          const uint32_t vl = uint32_t(value.size()), sl = uint32_t(suffix.size());
          const uint32_t h = e.big.alloc(body_bytes(vl, sl));
-         char*          p = static_cast<char*>(e.big.get(h));
-         const uint32_t b0 = 0;
-         std::memcpy(p, &b0, 4);
+         char*          p = static_cast<char*>(e.big.get(h));  // big body is 8-byte aligned
+         *reinterpret_cast<uint32_t*>(p) = 0;  // birth stamped by make_sv at alloc (GC-2c)
          char*          d = p + birth_bytes;
          std::memcpy(d, &vl, 4);
          d[4] = char(uint8_t(sl));
@@ -323,13 +319,11 @@ namespace gcart
       }
       static uint32_t birth(const engine& e, uint32_t h) noexcept
       {
-         uint32_t b;
-         std::memcpy(&b, e.big.get(h), 4);
-         return b;
+         return *reinterpret_cast<const uint32_t*>(e.big.get(h));  // birth @ body base
       }
       static void set_birth(engine& e, uint32_t h, uint32_t v) noexcept
       {
-         std::memcpy(e.big.get(h), &v, 4);
+         *reinterpret_cast<uint32_t*>(e.big.get(h)) = v;
       }
       static sv value(const engine& e, uint32_t h) noexcept
       {
@@ -643,6 +637,48 @@ namespace gcart
             return e.cl1.unique(p);
          default:
             return false;
+      }
+   }
+   // version-liveness latch (design §5.2): a routing node's BIRTH version, read from
+   // its header. birth==V (the current txn) ⟹ private (mutate in place); birth<V ⟹
+   // born in an earlier committed txn ⟹ potentially snapshot-shared (clone). This is
+   // the spec's latch — independent of any refcount. setlist & nested_setlist share
+   // birth_off=4 (cl1/cl2); full has it at +8.
+   inline uint32_t node_birth(engine& e, bt t, uint32_t p) noexcept
+   {
+      switch (t)
+      {
+         case bt::full:
+            return static_cast<const full*>(e.cl9.get(p))->birth();
+         case bt::double_setlist:
+         case bt::big_nested:
+            return static_cast<const setlist*>(e.cl2.get(p))->birth();
+         case bt::setlist:
+         case bt::nested_setlist:
+            return static_cast<const setlist*>(e.cl1.get(p))->birth();
+         default:
+            return 0;
+      }
+   }
+   // stamp a routing node's header birth (e.g. after a verbatim clone copies the
+   // source's birth, or after promoting an inline child to a standalone node).
+   inline void set_node_birth(engine& e, bt t, uint32_t p, uint32_t v) noexcept
+   {
+      switch (t)
+      {
+         case bt::full:
+            static_cast<full*>(e.cl9.get(p))->set_birth(v);
+            return;
+         case bt::double_setlist:
+         case bt::big_nested:
+            static_cast<setlist*>(e.cl2.get(p))->set_birth(v);
+            return;
+         case bt::setlist:
+         case bt::nested_setlist:
+            static_cast<setlist*>(e.cl1.get(p))->set_birth(v);
+            return;
+         default:
+            return;
       }
    }
    // lock-free pin attempt: bump only if alive (snapshot acquire). false = dead.
@@ -1991,6 +2027,11 @@ namespace gcart
          _rt = t;
          _rp = p;
       }
+      // version-liveness latch (design §5.2): the birth stamped on nodes created by
+      // this tree. spec_kv sets it to a fresh per-txn version at start_transaction so
+      // committed nodes (birth<V) clone and in-txn nodes (birth==V) mutate in place.
+      uint32_t write_version() const noexcept { return _V; }
+      void     set_write_version(uint32_t v) noexcept { _V = v; }
       engine& eng() noexcept { return _e; }
       // release a (tag,ptr) subtree through refcount (snapshot drop / abort).
       void release(bt t, uint32_t p) { release_ref(t, p); }
@@ -2030,8 +2071,14 @@ namespace gcart
       {
          if (sv_leaf::bytes_for(uint32_t(val.size()), uint32_t(suffix.size())) <=
              engine::sal_max_body)
-            return {bt::suffix_value, sv_leaf::make(_e, _ssal, suffix, val)};
-         return {bt::big_suffix_value, big_leaf::make(_e, suffix, val)};
+         {
+            const uint32_t s = sv_leaf::make(_e, _ssal, suffix, val);
+            sv_leaf::set_birth(_e, s, _V);  // version liveness: born this txn
+            return {bt::suffix_value, s};
+         }
+         const uint32_t h = big_leaf::make(_e, suffix, val);
+         big_leaf::set_birth(_e, h, _V);
+         return {bt::big_suffix_value, h};
       }
       // WRITER-ONLY COW reclaim (work tree husks). Single-threaded with the writer's
       // alloc, and a release cascade never allocates, so no concurrent slot reuse can
@@ -2272,10 +2319,11 @@ namespace gcart
             uint8_t     k   = 0;
             uint32_t    sz  = 4;
             const char* src = nullptr;
-            if (tag == bt::suffix_value && _e.sal.unique(ptr))
+            if (tag == bt::suffix_value && sv_leaf::birth(_e, ptr) == _V)
             {
-               // point past the standalone birth prefix → the birth-FREE body, which
-               // is what gets copied verbatim into the (birth-free) inline entry.
+               // born this txn ⟹ private: safe to consume the SAL leaf + inline its
+               // body. Point past the standalone birth prefix → the birth-FREE body,
+               // which is copied verbatim into the (birth-free) inline entry.
                src = static_cast<const char*>(_e.sal.get(ptr)) + sv_leaf::birth_bytes;
                uint16_t v16;
                std::memcpy(&v16, src, 2);
@@ -2288,7 +2336,8 @@ namespace gcart
                else
                   src = nullptr;
             }
-            else if (tag == bt::setlist && _e.cl1.unique(ptr))
+            else if (tag == bt::setlist &&
+                     static_cast<const setlist*>(_e.cl1.get(ptr))->birth() == _V)
             {
                const setlist* c = static_cast<const setlist*>(_e.cl1.get(ptr));
                const uint32_t b = setlist::bytes_for_cap(c->total(), c->prefixlen());  // TIGHT
@@ -2315,6 +2364,7 @@ namespace gcart
 
          const uint32_t  slot = _s1.alloc();
          nested_setlist* n    = static_cast<nested_setlist*>(_e.cl1.get(slot));
+         n->set_birth(_V);  // version liveness: born this txn
          n->meta              = uint8_t((term ? 0x80 : 0) | (pl & 0x7f));
          n->nbranch           = uint8_t(nb);
          std::memcpy(n->base() + nested_setlist::hdr, prefix.data(), pl);
@@ -2360,6 +2410,7 @@ namespace gcart
       {
          const uint32_t slot = ses.alloc();
          auto*          n = static_cast<setlist*>(SB == 128 ? _e.cl1.get(slot) : _e.cl2.get(slot));
+         n->set_birth(_V);  // version liveness: born this txn
          n->meta          = uint8_t((term ? 0x80 : 0) | (prefix.size() & 0x7f));
          n->nbranch       = uint8_t(nb);
          n->cap = uint8_t(setlist::derive_cap(uint32_t(prefix.size()),
@@ -2402,6 +2453,7 @@ namespace gcart
       {
          const uint32_t slot = _s9.alloc();
          auto*          n    = static_cast<full*>(_e.cl9.get(slot));
+         n->set_birth(_V);  // version liveness: born this txn
          n->meta             = uint8_t((term ? 0x80 : 0) | (prefix.size() & 0x7f));
          n->term_tag         = uint8_t(term ? uint8_t(tt) : uint8_t(bt::null));
          n->nbranch          = uint16_t(nb);
@@ -2596,12 +2648,13 @@ namespace gcart
             return build_node(common, brs, nb, term, tt, tp, /*may_inline=*/true);
          }
          depth += uint32_t(pfx.size());
-         // The latch, compile-time: in <unique> read the refcount once — a private
-         // node mutates in place (children stay <unique>); a shared one clones and
-         // its children recurse <shared>. In <shared> there is NO refcount read at
+         // The latch, compile-time (design §5.2): in <unique> read this node's BIRTH
+         // once — birth==V (born this txn) ⟹ private, mutate in place (children stay
+         // <unique>); birth<V (an earlier committed txn) ⟹ potentially snapshot-shared,
+         // clone and recurse children <shared>. In <shared> there is NO birth read at
          // all — the instantiation is the clone path only.
          if constexpr (M == cow_mode::unique)
-            if (unique(_e, t, p))
+            if (node_birth(_e, t, p) == _V)
                return edit_node<cow_mode::unique>(t, p, key, depth, val);
          return edit_node<cow_mode::shared>(t, p, key, depth, val);
       }
@@ -2723,6 +2776,9 @@ namespace gcart
                std::memcpy(_e.cl1.get(s), resolve(_e, t, p), 128);
                out = {t, s};
             }
+            // the verbatim copy carried the source's (older) birth; this clone is
+            // born THIS txn → stamp _V so the latch treats it as private.
+            set_node_birth(_e, out.first, out.second, _V);
             bt       tt;
             uint32_t tp;
             read_branches(out.first, out.second, [&](const br& b) { retain(_e, b.tag, b.ptr); });
@@ -2756,7 +2812,7 @@ namespace gcart
       // nested (its ref>1 so it survives for the snapshot).
       std::pair<bt, uint32_t> promote_nested(bt t, uint32_t p)
       {
-         const bool      priv  = unique(_e, t, p);
+         const bool      priv  = node_birth(_e, t, p) == _V;  // born this txn ⟹ private
          nested_setlist* n     = static_cast<nested_setlist*>(resolve(_e, t, p));
          const uint32_t  onb   = n->nbranch;
          const bool      oterm = n->has_term();
@@ -2773,15 +2829,15 @@ namespace gcart
             {
                uint32_t s = _s1.alloc();
                std::memcpy(_e.cl1.get(s), n->entry(i), n->entry_size(i));
+               static_cast<setlist*>(_e.cl1.get(s))->set_birth(_V);  // born this txn
                scratch[nb++] = br{n->okeys()[i], bt::setlist, s};
             }
             else  // inline suffix_value → fresh SAL leaf (birth-free body, prepend birth)
             {
                const uint32_t sz = n->entry_size(i);  // birth-free inline body
                const uint32_t s  = _ssal.alloc(sv_leaf::birth_bytes + sz);
-               char*          d  = static_cast<char*>(_e.sal.get(s));
-               const uint32_t b0 = 0;  // birth stamped by the latch at commit (GC-2c)
-               std::memcpy(d, &b0, 4);
+               char*          d  = static_cast<char*>(_e.sal.get(s));  // slot base aligned
+               *reinterpret_cast<uint32_t*>(d) = _V;  // version liveness: born this txn
                std::memcpy(d + sv_leaf::birth_bytes, n->entry(i), sz);
                scratch[nb++] = br{n->okeys()[i], bt::suffix_value, s};
             }
@@ -2844,7 +2900,7 @@ namespace gcart
          }
          depth += uint32_t(node_prefix(t, p).size());  // prefix matched (pre-check); consume it
          if constexpr (M == cow_mode::unique)
-            if (unique(_e, t, p))
+            if (node_birth(_e, t, p) == _V)  // born this txn ⟹ private, edit in place
                return edit_remove<cow_mode::unique>(t, p, key, depth);
          return edit_remove<cow_mode::shared>(t, p, key, depth);
       }
@@ -2926,6 +2982,12 @@ namespace gcart
       bt                                   _rt   = bt::null;
       uint32_t                             _rp   = 0;
       uint64_t                             _size = 0;
+      // Write version: the birth stamped on every node this tree creates. Bumped
+      // per transaction (by spec_kv at txn start), so nodes committed by an earlier
+      // txn read back birth<_V → the latch clones them (COW); nodes born this txn
+      // read birth==_V → mutate in place. Default 1 = the always-in-place case used
+      // by direct (snapshot-free) tree drivers like the spec oracle.
+      uint32_t                             _V    = 1;
       std::string _scan;  // reused buffer for remove()'s presence pre-check (no per-call alloc)
    };
 }  // namespace gcart

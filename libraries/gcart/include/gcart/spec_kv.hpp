@@ -916,6 +916,7 @@ namespace gcart::kv
             _slot(o._slot),
             _snap(std::move(o._snap)),
             _extra(std::move(o._extra)),
+            _ver(o._ver),
             _done(o._done)
       {
          o._db = nullptr;
@@ -962,6 +963,7 @@ namespace gcart::kv
       uint32_t                _slot = 0;
       snap                    _snap;
       std::vector<root_state> _extra;  // roots opened beyond the primary
+      uint32_t                _ver  = 0;  // this txn's commit version (birth of new nodes)
       bool                    _done = false;
    };
 
@@ -1055,6 +1057,16 @@ namespace gcart::kv
             _work[i] = std::make_unique<tree>(_e);
          return *_work[i];
       }
+      // Monotonic commit-version counter (design §GC-1 ".meta counter"), persisted in
+      // roots.dat just past the root slots so births never collide across a reopen.
+      // Each transaction takes a fresh version = the birth stamped on its new nodes;
+      // committed nodes read birth<V on the next txn → the COW latch clones them.
+      uint32_t next_write_version() noexcept
+      {
+         return uint32_t(_roots_map.as<std::atomic<uint64_t>>()[ver_index].fetch_add(
+                    1, std::memory_order_relaxed)) +
+                1;
+      }
       // settled once the engine's background cascade has caught up.
       uint64_t live_bytes() noexcept { return _e.live_bytes(); }
       void     drain() noexcept { _e.drain(); }  // measurement barrier
@@ -1062,6 +1074,7 @@ namespace gcart::kv
 
      private:
       static constexpr uint32_t max_roots   = 64;
+      static constexpr uint32_t ver_index   = max_roots;  // commit-version slot (past the roots)
       static constexpr size_t   roots_bytes = max_roots * sizeof(uint64_t);
 
       explicit database(std::filesystem::path dir)
@@ -1073,6 +1086,7 @@ namespace gcart::kv
             auto* r = _roots_map.as<std::atomic<uint64_t>>();
             for (uint32_t i = 0; i < max_roots; ++i)
                r[i].store(null_root, std::memory_order_relaxed);
+            r[ver_index].store(1, std::memory_order_relaxed);  // first txn gets version 2
          }
       }
 
@@ -1083,9 +1097,14 @@ namespace gcart::kv
 
    // ── bodies ─────────────────────────────────────────────────────────────────
    inline transaction::transaction(database* db, tree* t, uint32_t slot)
-       : _db(db), _t(t), _slot(slot), _snap(snap::acquire(db->eng(), db->root_slot(slot)))
+       : _db(db),
+         _t(t),
+         _slot(slot),
+         _snap(snap::acquire(db->eng(), db->root_slot(slot))),
+         _ver(db->next_write_version())
    {
       _t->set_root(_snap.tag(), _snap.ptr());  // working tree starts from the committed root
+      _t->set_write_version(_ver);  // nodes born this txn get birth=_ver (latch: in place)
    }
    inline transaction::~transaction()
    {
@@ -1145,6 +1164,7 @@ namespace gcart::kv
       tree& w = _db->work_tree(idx);
       snap  s = snap::acquire(_db->eng(), _db->root_slot(idx));
       w.set_root(s.tag(), s.ptr());
+      w.set_write_version(_ver);  // share the txn's version across all opened roots
       _extra.push_back(root_state{idx, &w, std::move(s)});
       return root_handle(&_db->eng(), &w);
    }

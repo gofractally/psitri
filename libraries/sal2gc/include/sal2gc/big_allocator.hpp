@@ -12,9 +12,10 @@
 //     immediately (no waiting for a whole segment to recycle). A request with no
 //     free block of its size bumps the contiguous region tail.
 //
-// Liveness is a per-object refcount in an INLINE header ([u32 ngrains|u32 ref] in
-// the block's first grain), so retain/release_one drive freeing exactly like the
-// FIX/SAL regions: free() is reached ONLY via release_one()->0 (it asserts ref==0).
+// Liveness is a per-object 32-bit DEATH version in an INLINE header
+// ([u32 ngrains|u32 death] in the block's first grain), like the FIX/SAL regions:
+// the COW path stamp_death()s the superseded object and the GC reclaim()s it once
+// no held root covers [birth, death). No refcount; reads touch nothing.
 // Big allocs/frees are rare relative to FIX/SAL traffic, so the alloc/free path
 // is a single mutex; get/ref/retain/release_one are lock-free.
 //
@@ -33,6 +34,8 @@
 #include <stdexcept>
 
 #include <sal/block_allocator.hpp>
+
+#include <sal2gc/config.hpp>  // version_t, death_alive / death_free sentinels
 
 namespace sal2gc
 {
@@ -94,7 +97,7 @@ namespace sal2gc
       struct hdr
       {
          uint32_t              ngrains;
-         std::atomic<uint32_t> ref;
+         std::atomic<version_t> death;  // version-liveness (was refcount): [birth in node, death here)
       };
 
       hdr* hdr_at(uint32_t g) noexcept { return reinterpret_cast<hdr*>(_base + size_t(g) * Grain); }
@@ -110,32 +113,23 @@ namespace sal2gc
          return (hdr_bytes + body_bytes + Grain - 1) / Grain;
       }
 
-      uint32_t ref(uint32_t g) const noexcept
+      // ── version liveness (death stamp; no refcount) — see fixed_allocator ──────
+      version_t death(uint32_t g) const noexcept
       {
-         return hdr_at(g)->ref.load(std::memory_order_relaxed);
+         return hdr_at(g)->death.load(std::memory_order_relaxed);
       }
-      bool unique(uint32_t g) const noexcept { return ref(g) == 1; }
-      void retain(uint32_t g) { hdr_at(g)->ref.fetch_add(1, std::memory_order_relaxed); }
-      [[nodiscard]] bool try_retain(uint32_t g) noexcept
+      bool alive(uint32_t g) const noexcept { return death(g) == death_alive; }
+      bool dead(uint32_t g) const noexcept
       {
-         auto& r = hdr_at(g)->ref;
-         auto  c = r.load(std::memory_order_acquire);
-         do
-         {
-            if (c == 0)
-               return false;
-         } while (!r.compare_exchange_weak(c, c + 1, std::memory_order_acq_rel,
-                                           std::memory_order_acquire));
-         return true;
+         const version_t d = death(g);
+         return d != death_alive && d != death_free;
       }
-      [[nodiscard]] bool release_one(uint32_t g) noexcept
+      void stamp_death(uint32_t g, version_t v) noexcept
       {
-         const uint32_t prior = hdr_at(g)->ref.fetch_sub(1, std::memory_order_acq_rel);
-         assert(prior >= 1 && "release of a dead big object");
-         return prior == 1;
+         hdr_at(g)->death.store(v, std::memory_order_release);
       }
 
-      // allocate a body of `body_bytes` (ref stamped 1). LOCKED — big allocs are rare.
+      // allocate a body of `body_bytes` (born death_alive). LOCKED — big allocs are rare.
       uint32_t alloc(uint32_t body_bytes)
       {
          const uint32_t              ng = grains_for(body_bytes);
@@ -156,16 +150,17 @@ namespace sal2gc
          }
          hdr* h     = hdr_at(g);
          h->ngrains = ng;
-         h->ref.store(1, std::memory_order_relaxed);
+         h->death.store(death_alive, std::memory_order_relaxed);  // born live
          _live_grains += ng;
          return g;
       }
 
-      // return a dead block (ref already 0) to its size-class free-list.
-      void free(uint32_t g) noexcept
+      // GC reclaim: return a block to its size-class free-list. Called by the GC once
+      // death-stamped + uncovered (or by abort). Marks death_free, then LIFO-pushes.
+      void reclaim(uint32_t g) noexcept
       {
-         assert(hdr_at(g)->ref.load(std::memory_order_relaxed) == 0 &&
-                "big free() of an object whose ref != 0 — route the drop through release");
+         assert(death(g) != death_free && "double reclaim of a big object");
+         hdr_at(g)->death.store(death_free, std::memory_order_release);
          const uint32_t              ng = hdr_at(g)->ngrains;
          std::lock_guard<std::mutex> lk(_mx);
          _live_grains -= ng;

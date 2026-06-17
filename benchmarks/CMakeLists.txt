@@ -147,3 +147,11 @@ target_link_libraries(delta_art-largeval-repro PRIVATE delta_art start_ver sal_a
 target_include_directories(delta_art-largeval-repro PRIVATE ${CMAKE_SOURCE_DIR}/libraries/sal_art_ref/test)
 target_compile_definitions(delta_art-largeval-repro PRIVATE XXH_INLINE_ALL)
 target_compile_options(delta_art-largeval-repro PRIVATE -O2 -g)
+
+# scan / lower_bound comparison across the adb engines (ordered cursor).
+add_executable(scan-lower-bound-bench scan_lower_bound_bench.cpp)
+target_link_libraries(scan-lower-bound-bench PRIVATE gcart start_ver start_ref sal_art_ref psitri)
+target_include_directories(scan-lower-bound-bench PRIVATE ${CMAKE_SOURCE_DIR}/libraries/sal_art_ref/test)
+target_compile_definitions(scan-lower-bound-bench PRIVATE XXH_INLINE_ALL)
+target_compile_options(scan-lower-bound-bench PRIVATE -O3 -DNDEBUG)
+set_target_properties(scan-lower-bound-bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

@@ -102,14 +102,14 @@ namespace gcart::kv
       std::optional<S> value() const
       {
          if (_cur == null_ptr) return std::nullopt;
-         value_view v = leaf_at(_cur)->value();
+         value_view v = gcart::read_value_view(*_a, leaf_at(_cur));
          return S(v.data(), v.size());
       }
       template <class F>
       bool get_value(F&& f) const
       {
          if (_cur == null_ptr) return false;
-         f(leaf_at(_cur)->value());
+         f(gcart::read_value_view(*_a, leaf_at(_cur)));
          return true;
       }
       uint16_t value_type() const { return 0; }
@@ -122,7 +122,7 @@ namespace gcart::kv
       {
          const leaf* lf = find_leaf(_a, _root, k);
          if (!lf) return std::nullopt;
-         value_view v = lf->value();
+         value_view v = gcart::read_value_view(*_a, lf);
          return S(v.data(), v.size());
       }
       template <class F>
@@ -130,7 +130,7 @@ namespace gcart::kv
       {
          const leaf* lf = find_leaf(_a, _root, k);
          if (!lf) return false;
-         f(lf->value());
+         f(gcart::read_value_view(*_a, lf));
          return true;
       }
 
@@ -365,7 +365,7 @@ namespace gcart::kv
       {
          const leaf* lf = _t->find(k);
          if (!lf) return false;
-         fn(lf->value());
+         fn(gcart::read_value_view(_t->arena(), lf));
          return true;
       }
       template <class S = std::string>
@@ -373,7 +373,7 @@ namespace gcart::kv
       {
          const leaf* lf = _t->find(k);
          if (!lf) return std::nullopt;
-         value_view v = lf->value();
+         value_view v = gcart::read_value_view(_t->arena(), lf);
          return S(v.data(), v.size());
       }
 

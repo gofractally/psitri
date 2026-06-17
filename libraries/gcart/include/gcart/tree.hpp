@@ -29,6 +29,53 @@ namespace gcart
       return i;
    }
 
+   // Free a LARGE value's chunk chain. The chain is owned 1:1 by its leaf (no
+   // refcount of its own) — free each chunk's lines directly.
+   inline void free_value_chain(sal2::arena& a, nptr c)
+   {
+      while (c != null_ptr)
+      {
+         auto*      vc  = static_cast<value_chunk*>(a.get(c));
+         const nptr nxt = vc->next;
+         a.free_lines(c, vc->nlines);
+         c = nxt;
+      }
+   }
+
+   // Free a leaf's lines (and its value chain if the value spilled to one).
+   inline void free_leaf(sal2::arena& a, nptr n, leaf* lf)
+   {
+      if (lf->is_large())
+         free_value_chain(a, lf->chunk_head());
+      a.free_lines(n, lf->nlines);
+   }
+
+   // Reconstruct a leaf's value into `out` (handles the large chunk chain).
+   inline void read_value(const sal2::arena& a, const leaf* lf, std::string& out)
+   {
+      if (!lf->is_large())
+      { const auto v = lf->value(); out.assign(v.data(), v.size()); return; }
+      out.clear();
+      out.reserve(lf->total_vlen());
+      for (nptr c = lf->chunk_head(); c != null_ptr;)
+      {
+         const auto* vc = static_cast<const value_chunk*>(a.get(c));
+         out.append(vc->data(), vc->len);
+         c = vc->next;
+      }
+   }
+
+   // A contiguous view of a leaf's value. For large values it materializes into
+   // a per-thread scratch buffer valid until the next call on this thread.
+   inline std::string_view read_value_view(const sal2::arena& a, const leaf* lf)
+   {
+      if (!lf->is_large())
+         return lf->value();
+      thread_local std::string buf;
+      read_value(a, lf, buf);
+      return {buf.data(), buf.size()};
+   }
+
    // recursive refcount release of a subtree, using the arena alone (no session)
    // — reusable by snapshot holders. Frees a node's lines once its ref hits 0,
    // recursing into children + term.
@@ -37,7 +84,7 @@ namespace gcart
       if (n == null_ptr || !a.release_one(n))
          return;
       void* p = a.get(n);
-      if (is_leaf(p)) { a.free_lines(n, static_cast<leaf*>(p)->nlines); return; }
+      if (is_leaf(p)) { free_leaf(a, n, static_cast<leaf*>(p)); return; }
       if (type_of(p) == uint8_t(ntype::setlist))
       {
          auto* s = static_cast<setlist*>(p);
@@ -283,8 +330,37 @@ namespace gcart
       nptr make_leaf(sv key, sv val)
       {
          const uint32_t nl = leaf::alloc_size(key, val);
-         const nptr     ln = _ses.alloc_lines(nl);
-         new (_a.get(ln)) leaf(nl, key, val);
+         if (nl <= sal2::max_alloc_lines)  // fits inline
+         {
+            const nptr ln = _ses.alloc_lines(nl);
+            new (_a.get(ln)) leaf(nl, key, val);
+            return ln;
+         }
+         return make_large_leaf(key, val);  // spill the value to a chunk chain
+      }
+
+      // Build a LARGE leaf: split the value into <= max_payload chunks (a chain,
+      // tail-first so each chunk's `next` is already allocated), then a leaf head
+      // holding the key + the chain head. The chain is owned 1:1 by this leaf.
+      nptr make_large_leaf(sv key, sv val)
+      {
+         const uint32_t cap = value_chunk::max_payload;
+         nptr           head = null_ptr;
+         uint32_t       end  = uint32_t(val.size());  // build [start,end) back-to-front
+         while (end > 0)
+         {
+            const uint32_t len   = std::min(cap, end);
+            const uint32_t start = end - len;
+            const uint32_t cnl   = value_chunk::alloc_size(len);
+            const nptr     cn    = _ses.alloc_lines(cnl);
+            new (_a.get(cn)) value_chunk(cnl, val.substr(start, len), head);
+            head = cn;
+            end  = start;
+         }
+         const leaf::large_op op{key, uint32_t(val.size()), head};
+         const uint32_t       lnl = leaf::alloc_size(op);
+         const nptr           ln  = _ses.alloc_lines(lnl);
+         new (_a.get(ln)) leaf(lnl, op);
          return ln;
       }
       nptr make_setlist_fresh(uint32_t cap, sv prefix, nptr term)
@@ -347,7 +423,7 @@ namespace gcart
          void* p = _a.get(n);
          if (is_leaf(p))
          {
-            _a.free_lines(n, static_cast<leaf*>(p)->nlines);
+            free_leaf(_a, n, static_cast<leaf*>(p));
             return;
          }
          visit_kids(n, [&](nptr c) { release_node(c); });

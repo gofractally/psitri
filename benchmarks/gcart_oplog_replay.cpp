@@ -97,10 +97,7 @@ int main(int argc, char** argv)
          if (vl && !rd(val.data(), vl)) break;
          std::string_view kv(key.data(), kl), vv(val.data(), vl);
          if (gcart::leaf::alloc_size(kv, vv) > cap_lines)
-         {
-            ++oversized;  // > gcart's 8 KB node cap (BIG-region large values: TODO)
-            continue;
-         }
+            ++oversized;  // large value — now stored via the value_chunk chain
          tx->upsert(kv, vv);
          if (verify) truth[std::string(kv)] = std::string(vv);
          ++ups;

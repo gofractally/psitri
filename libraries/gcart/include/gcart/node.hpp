@@ -21,23 +21,61 @@ namespace gcart
    inline constexpr nptr null_ptr = sal2::null_idx;
    inline constexpr uint32_t LINE = sal2::line_bytes;
 
-   enum class ntype : uint8_t { leaf = 0, setlist = 1, node256 = 2 };
+   enum class ntype : uint8_t { leaf = 0, setlist = 1, node256 = 2, value_chunk = 3 };
 
    inline uint32_t lines_for(uint32_t bytes) noexcept { return (bytes + LINE - 1) / LINE; }
    inline uint8_t  type_of(const void* p) noexcept { return *static_cast<const uint8_t*>(p); }
    inline bool     is_leaf(const void* p) noexcept { return type_of(p) == uint8_t(ntype::leaf); }
 
-   // ── leaf: [hdr 12B][key klen][value vlen] ────────────────────────────────
+   // ── value_chunk: a segment of a LARGE value's chain ──────────────────────
+   // [hdr 12B][bytes len]. Used when a value won't fit in an inline leaf node
+   // (> the FIX-allocator's max_alloc_lines). The chain is owned 1:1 by its
+   // leaf — it is reached only through that leaf, so it needs no refcount of its
+   // own; when the leaf's ref hits zero the whole chain is freed.
+   struct value_chunk
+   {
+      uint8_t  type;    // ntype::value_chunk
+      uint8_t  nlines;  // allocation size in lines
+      uint16_t _rsv;
+      uint32_t len;     // value bytes carried by this chunk
+      nptr     next;    // next chunk, or null_ptr at the tail
+      // data follows: bytes[len]
+
+      static constexpr uint32_t hdr         = 12;
+      static constexpr uint32_t max_payload = sal2::max_alloc_lines * LINE - hdr;  // ~8180 B
+      static uint32_t alloc_size(uint32_t chunk_len) noexcept { return lines_for(hdr + chunk_len); }
+      value_chunk(uint32_t nl, std::string_view bytes, nptr nxt) noexcept
+      {
+         type   = uint8_t(ntype::value_chunk);
+         nlines = uint8_t(nl);
+         _rsv   = 0;
+         len    = uint32_t(bytes.size());
+         next   = nxt;
+         std::memcpy(data(), bytes.data(), bytes.size());
+      }
+      char*            data() noexcept { return reinterpret_cast<char*>(this) + hdr; }
+      const char*      data() const noexcept { return reinterpret_cast<const char*>(this) + hdr; }
+      std::string_view bytes() const noexcept { return {data(), len}; }
+      uint32_t         line_count() const noexcept { return nlines; }
+   };
+   static_assert(sizeof(value_chunk) == 12);
+
+   // ── leaf ─────────────────────────────────────────────────────────────────
+   // inline (default): [hdr 12B][key klen][value vlen]
+   // large (_rsv & FLAG_LARGE): [hdr 12B][key klen][nptr chunk_head] — vlen is
+   //   the FULL value length, the bytes live in a value_chunk chain.
    struct leaf
    {
       uint8_t  type;    // ntype::leaf
       uint8_t  nlines;  // allocation size in lines (for free)
-      uint16_t _rsv;
+      uint16_t _rsv;    // FLAG_LARGE bit
       uint32_t klen;
-      uint32_t vlen;
-      // data follows: key[klen], value[vlen]
+      uint32_t vlen;    // value length (inline byte count, or total length if large)
 
-      static constexpr uint32_t hdr = 12;
+      static constexpr uint32_t hdr        = 12;
+      static constexpr uint16_t FLAG_LARGE = 1;
+
+      // inline leaf (value fits in the node)
       static uint32_t alloc_size(std::string_view key, std::string_view val) noexcept
       {
          return lines_for(hdr + uint32_t(key.size()) + uint32_t(val.size()));
@@ -52,11 +90,38 @@ namespace gcart
          std::memcpy(data(), key.data(), key.size());
          std::memcpy(data() + klen, val.data(), val.size());
       }
+
+      // large leaf (value spilled to a value_chunk chain)
+      struct large_op { std::string_view key; uint32_t total_vlen; nptr chunk_head; };
+      static uint32_t alloc_size(const large_op& o) noexcept
+      {
+         return lines_for(hdr + uint32_t(o.key.size()) + uint32_t(sizeof(nptr)));
+      }
+      leaf(uint32_t nl, const large_op& o) noexcept
+      {
+         type   = uint8_t(ntype::leaf);
+         nlines = uint8_t(nl);
+         _rsv   = FLAG_LARGE;
+         klen   = uint32_t(o.key.size());
+         vlen   = o.total_vlen;
+         std::memcpy(data(), o.key.data(), o.key.size());
+         std::memcpy(data() + klen, &o.chunk_head, sizeof(nptr));
+      }
+
       char*            data() noexcept { return reinterpret_cast<char*>(this) + hdr; }
       const char*      data() const noexcept { return reinterpret_cast<const char*>(this) + hdr; }
       std::string_view key() const noexcept { return {data(), klen}; }
+      bool             is_large() const noexcept { return _rsv & FLAG_LARGE; }
+      uint32_t         total_vlen() const noexcept { return vlen; }
+      // inline value (valid only when !is_large)
       std::string_view value() const noexcept { return {data() + klen, vlen}; }
-      uint32_t         line_count() const noexcept { return nlines; }
+      nptr             chunk_head() const noexcept
+      {
+         nptr h;
+         std::memcpy(&h, data() + klen, sizeof(nptr));
+         return h;
+      }
+      uint32_t line_count() const noexcept { return nlines; }
    };
    static_assert(sizeof(leaf) == 12);
 

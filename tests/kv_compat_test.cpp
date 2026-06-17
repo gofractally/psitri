@@ -735,6 +735,66 @@ namespace
          }
       }
 
+      // ── Phase 4.7: LARGE VALUES — spanning a typical inline node cap (gcart's
+      // 8 KB) up to 128 KB (Silkworm contract code is ~24-38 KB). Any adb kv
+      // engine must store, read back byte-exact (point get + cursor), overwrite
+      // (large→small, small→large, large→large'), keep a snapshot frozen across
+      // a large overwrite, and free them on remove (the drain gate below). These
+      // keys go into `oracle` so Phase 5 removal + the drain census cover them.
+      {
+         auto bigval = [](size_t n, uint64_t seed) {
+            std::string v(n, 0);
+            uint64_t    x = seed * 0x9E3779B97F4A7C15ull + 1;
+            for (size_t i = 0; i < n; ++i)
+            { x ^= x << 13; x ^= x >> 7; x ^= x << 17; v[i] = char(uint8_t(x)); }
+            return v;
+         };
+         const size_t sizes[] = {64, 1000, 4096, 8000, 8192, 9000, 16384, 38813, 131072};
+         std::vector<std::pair<std::string, std::string>> lv;
+         for (size_t s : sizes)
+         {
+            std::string k = "large/" + std::to_string(s);
+            std::string v = bigval(s, s + 1);
+            lv.emplace_back(k, v);
+            oracle[k] = v;
+         }
+         upsert_pairs(lv, "large-load");
+
+         {  // byte-exact point get
+            auto tx = ses->start_transaction(0);
+            for (auto& [k, v] : lv)
+               ok(tx.template get<std::string>(k) == v);
+            tx.abort();
+         }
+         {  // byte-exact cursor value() at each large key
+            auto c = ses->get_root(0).snapshot_cursor();
+            for (auto& [k, v] : lv)
+            { c.lower_bound(k); ok(!c.is_end() && std::string(c.key()) == k && *c.template value<std::string>() == v); }
+         }
+         {  // overwrites that cross the inline/large boundary in both directions
+            auto tx = ses->start_transaction(0);
+            std::string a = "large/38813", av = "small-now";          tx.upsert(a, av); oracle[a] = av;
+            std::string b = "large/64",    bv = bigval(50000, 999);   tx.upsert(b, bv); oracle[b] = bv;
+            std::string c = "large/16384", cv = bigval(20000, 888);   tx.upsert(c, cv); oracle[c] = cv;
+            tx.commit();
+            auto rx = ses->start_transaction(0);
+            ok(rx.template get<std::string>(a) == oracle[a]);
+            ok(rx.template get<std::string>(b) == oracle[b]);
+            ok(rx.template get<std::string>(c) == oracle[c]);
+            rx.abort();
+         }
+         {  // snapshot stays frozen across a large-value overwrite (MVCC + big val)
+            std::string k    = "large/131072";
+            auto        snap = ses->get_root(0);
+            auto        sval = snap.template get<std::string>(k);
+            ok(sval.has_value() && sval->size() == 131072);
+            { auto tx = ses->start_transaction(0); tx.upsert(k, "tiny"); oracle[k] = "tiny"; tx.commit(); }
+            ok(snap.template get<std::string>(k) == sval);  // old big value still readable via the pin
+            ok(ses->start_transaction(0).template get<std::string>(k) == std::string("tiny"));
+         }
+      }
+      verify_present();
+
       // ── Phase 5: remove everything → all miss
       {
          std::vector<std::string> keys;

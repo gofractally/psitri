@@ -66,6 +66,28 @@ namespace sal2
              const_cast<void*>(_data->mapped_base()));  // reservation base (fixed)
          for (auto& h : _flist)
             h.store(null_grain, std::memory_order_relaxed);
+         adopt_existing_();
+      }
+
+      // ── reopen recovery ───────────────────────────────────────────────────────
+      // block_allocator remmaps the .big file, so a clean reopen's object bytes +
+      // inline [ngrains|ref] headers survive — old big objects are reachable
+      // (get(g) = base + g·grain) and releasable for free. The bump tail can't be
+      // reconstructed from the data (object boundaries are only walkable from a
+      // known tail), so we resume the cursor at the END of the committed region:
+      // new objects append there; the unused tail of the last old segment is
+      // wasted (negligible). Free-lists start empty (old freed-big holes are not
+      // re-pooled). live_bytes is a stat only — left 0 here.
+      void adopt_existing_() noexcept
+      {
+         const uint32_t existing = uint32_t(_data->mapped_blocks());
+         if (existing == 0)
+            return;
+         _data->resize(existing);
+         _base             = static_cast<std::byte*>(const_cast<void*>(_data->mapped_base()));
+         _nseg             = existing;
+         _committed_grains = existing * grains_per_seg;
+         _tail             = _committed_grains;  // append after committed (safe)
       }
 
       // inline block header at the block's first grain.

@@ -66,6 +66,35 @@ namespace sal2
          _seg_class   = std::make_unique<std::atomic<uint8_t>[]>(_cfg.max_segments);
          _recyc       = std::make_unique<std::atomic<uint64_t>[]>((_cfg.max_segments + 63) / 64);
          cache_bases_();
+         adopt_existing_();
+      }
+
+      // ── reopen recovery ───────────────────────────────────────────────────────
+      // block_allocator remmaps the .dat + .rc files, so a clean reopen's object
+      // bytes AND per-grain refcounts survive. Restore the in-memory view: resize
+      // the block_allocators so the next alloc() appends after `existing` segments
+      // (never overwrites), set _nseg, and RETIRE every existing segment with the
+      // sentinel class 0xFF so take_recyclable_ (which only reuses a segment whose
+      // grain-class matches the request) never re-fills it — we can't reconstruct a
+      // segment's grain-class from refcounts alone, and reusing it under the wrong
+      // stride would corrupt the walk. Old objects stay reachable + releasable via
+      // the preserved refcounts; new objects grow fresh segments.
+      void adopt_existing_() noexcept
+      {
+         const uint32_t existing = uint32_t(_data->mapped_blocks());
+         if (existing == 0)
+            return;
+         _data->resize(existing);
+         _refs->resize(existing);
+         cache_bases_();
+         _nseg.store(existing, std::memory_order_relaxed);
+         for (uint32_t s = 0; s < existing; ++s)
+         {
+            _seg_class[s].store(0xFF, std::memory_order_relaxed);  // sentinel: never recyclable
+            _seg_sealed[s].store(1, std::memory_order_relaxed);
+            _seg_alloced[s].store(slots_per_segment, std::memory_order_relaxed);
+            _seg_freed[s].store(0, std::memory_order_relaxed);
+         }
       }
 
       void*           get(uint32_t slot) noexcept { return _base + size_t(slot) * Grain; }

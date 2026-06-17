@@ -5,7 +5,8 @@
 #pragma once
 #include <gcart/spec_tree.hpp>
 
-#include <sal/config.hpp>  // sal::open_mode (embedder open factory)
+#include <sal/config.hpp>   // sal::open_mode (embedder open factory)
+#include <sal/mapping.hpp>  // sal::mapping — mmap-backed durable root table (SAL roots pattern)
 
 #include <array>
 #include <atomic>
@@ -502,9 +503,17 @@ namespace gcart::kv
       }
       void sync(uint32_t = 0) noexcept {}
 
-      gcart::engine&            eng() noexcept { return _e; }
-      std::atomic<uint64_t>& root_slot(uint32_t i) noexcept { return _roots[i]; }
-      tree&                  work_tree(uint32_t i)
+      gcart::engine&         eng() noexcept { return _e; }
+      // The published roots live in an mmap'd file (SAL's "roots" pattern): a
+      // commit's store into this slot is durable via the page cache, so a
+      // clean close+reopen restores every root for free — the engine's segment
+      // files reopen with the same base-relative slot indices, so a restored
+      // (tag, ptr) root resolves correctly in the new run.
+      std::atomic<uint64_t>& root_slot(uint32_t i) noexcept
+      {
+         return _roots_map.as<std::atomic<uint64_t>>()[i];
+      }
+      tree& work_tree(uint32_t i)
       {
          if (!_work[i])
             _work[i] = std::make_unique<tree>(_e);
@@ -513,16 +522,26 @@ namespace gcart::kv
       // settled once the engine's background cascade has caught up.
       uint64_t live_bytes() noexcept { return _e.live_bytes(); }
       void     drain() noexcept { _e.drain(); }  // measurement barrier
+      ~database() { _roots_map.sync(sal::sync_type::full); }  // clean close
 
      private:
-      explicit database(std::filesystem::path dir) : _e(std::move(dir))
+      static constexpr uint32_t max_roots   = 64;
+      static constexpr size_t   roots_bytes = max_roots * sizeof(uint64_t);
+
+      explicit database(std::filesystem::path dir)
+          : _e(dir), _roots_map(dir / "roots.dat", sal::access_mode::read_write)
       {
-         for (auto& r : _roots)
-            r.store(null_root, std::memory_order_relaxed);
+         if (_roots_map.size() < roots_bytes)  // fresh file → init all slots to null_root
+         {                                      // (null_root = bt::null<<32 is NON-zero, so a
+            _roots_map.resize(4096);            //  zero-filled mmap would NOT be null)
+            auto* r = _roots_map.as<std::atomic<uint64_t>>();
+            for (uint32_t i = 0; i < max_roots; ++i)
+               r[i].store(null_root, std::memory_order_relaxed);
+         }
       }
 
-      gcart::engine                            _e;
-      std::array<std::atomic<uint64_t>, 64> _roots;
+      gcart::engine                         _e;
+      sal::mapping                          _roots_map;
       std::array<std::unique_ptr<tree>, 64> _work{};
    };
 

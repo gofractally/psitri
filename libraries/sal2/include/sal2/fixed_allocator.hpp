@@ -73,6 +73,51 @@ namespace sal2
          _base        = static_cast<std::byte*>(const_cast<void*>(_data->mapped_base()));
          _ref_base =
              reinterpret_cast<std::atomic<uint8_t>*>(const_cast<void*>(_refs->mapped_base()));
+         adopt_existing_();
+      }
+
+      // ── reopen recovery ───────────────────────────────────────────────────────
+      // The block_allocator already remmaps the .dat (data) + .rc (refcounts) files
+      // on construction, so a clean reopen's slot contents AND per-slot refcounts
+      // survive for free. What's lost is the in-memory view: the segment count and
+      // the bump/recycle accounting. Restore it: tell the block_allocators they
+      // already hold `existing` blocks (so the next alloc() appends, never
+      // overwrites), set _nseg, then SCAN the preserved refcounts to rebuild each
+      // segment's live count. Sealed existing segments that are >50% dead rejoin the
+      // recyclable set, so their dead slots are written around (space reclaimed)
+      // while live slots (ref!=0) are stepped over — no data loss. This is the
+      // "rebuild by scan" path; it is cheap at the small DB sizes where reopen
+      // happens (e.g. Silkworm's schema-init close+reopen).
+      void adopt_existing_() noexcept
+      {
+         const uint32_t existing = uint32_t(_data->mapped_blocks());
+         if (existing == 0)
+            return;
+         _data->resize(existing);  // _num_blocks = existing → alloc() appends after
+         _refs->resize(existing);
+         _base     = static_cast<std::byte*>(const_cast<void*>(_data->mapped_base()));
+         _ref_base = reinterpret_cast<std::atomic<uint8_t>*>(const_cast<void*>(_refs->mapped_base()));
+         _nseg.store(existing, std::memory_order_relaxed);
+         uint64_t total_live = 0;
+         for (uint32_t s = 0; s < existing; ++s)
+         {
+            uint32_t       live = 0;
+            const uint32_t base = s * slots_per_segment;
+            for (uint32_t k = 0; k < slots_per_segment; ++k)
+            {
+               const uint8_t r = _ref_base[base + k].load(std::memory_order_relaxed);
+               if (r != 0 && r != dying_ref)
+                  ++live;
+            }
+            _seg_alloced[s].store(live, std::memory_order_relaxed);
+            _seg_freed[s].store(0, std::memory_order_relaxed);
+            _seg_sealed[s].store(1, std::memory_order_relaxed);  // retired; sessions grow/recycle
+            total_live += live;
+            if (live <= recycle_below)
+               _recyc[s >> 6].fetch_or(1ull << (s & 63), std::memory_order_relaxed);
+         }
+         _allocated.store(total_live, std::memory_order_relaxed);
+         _freed.store(0, std::memory_order_relaxed);
       }
 
       // ── addressing (slot index → bytes) ──────────────────────────────────────

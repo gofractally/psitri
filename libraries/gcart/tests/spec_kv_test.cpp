@@ -523,6 +523,48 @@ int main()
          std::printf("KV-DRAIN-LEAK live=%lluB\n", (unsigned long long)lb);
       }
    }
+   // ── reopen recovery: a CLEAN close + reopen must restore committed data ────
+   // (mmap-backed root table + allocator adopt_existing_). This is the Silkworm
+   // requirement — it closes+reopens the env during startup.
+   {
+      auto rdir = fs::temp_directory_path() / "sk_reopen";
+      fs::remove_all(rdir);
+      const int                          N = 8000;
+      std::map<std::string, std::string> exp;
+      auto kk = [](int i) { return "reopen_key_" + std::to_string(i * 2654435761u % 1000003); };
+      auto vv = [](int i) { return "val_" + std::to_string(i) + "_payloadpayloadpayload"; };
+      {
+         auto rdb = database::create(rdir);
+         auto rws = rdb->start_write_session();
+         auto tx  = rws->start_transaction(0);
+         for (int i = 0; i < N; ++i)
+         {
+            tx.upsert(kk(i), vv(i));
+            exp[kk(i)] = vv(i);
+         }
+         tx.commit();
+      }  // CLEAN close: rdb/rws destroyed here
+      {
+         auto rdb  = database::open(rdir);  // REOPEN the same dir
+         auto rrs  = rdb->start_read_session();
+         auto cur  = rrs->create_cursor(0);
+         int  miss = 0;
+         for (auto& [k, v] : exp)
+         {
+            auto got = cur.get<std::string>(k);
+            if (!got || *got != v)
+               ++miss;
+         }
+         ++checks;
+         if (miss)
+         {
+            ++fails;
+            std::printf("KV-REOPEN-MISS %d/%d keys lost after clean close+reopen\n", miss, N);
+         }
+         else
+            std::printf("reopen: %d/%d keys survived clean close+reopen\n", N, N);
+      }
+   }
    std::printf("sk-test: %d checks, %d fails, keys=%zu, bytes/key=%.0f\n", checks, fails,
                oracle.size(), oracle.empty() ? 0 : double(db->live_bytes()) / oracle.size());
    return fails ? 1 : 0;

@@ -17,3 +17,10 @@ if(BUILD_TESTS)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME gcart-tree-tests COMMAND gcart-tree-tests)
 endif()
+
+if(BUILD_BENCHMARKS)
+    add_executable(gcart-bench tests/bench.cpp)
+    target_link_libraries(gcart-bench PRIVATE gcart)
+    set_target_properties(gcart-bench PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endif()

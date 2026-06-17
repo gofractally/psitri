@@ -246,20 +246,29 @@ namespace sal2
 
    inline line_idx session::alloc_slow_(uint32_t n)
    {
-      for (int attempts = 0;; ++attempts)
+      // The cursor region can't fit an n-line run. Scan every segment for a real
+      // n-contiguous run (a segment may have many free lines but no n-run under
+      // fragmentation); grow a fresh segment if none fits (fresh = all-free, so it
+      // always satisfies n<=64).
+      const uint32_t ns = _a->num_segments();
+      for (uint32_t s = 0; s < ns; ++s)
       {
-         _seg    = _a->claim_(_seg);
-         _cursor = 0;
-         seg_freeset&   fs    = _a->freeset_(_seg);
-         const uint32_t local = fs.alloc(n, _cursor);
+         seg_freeset& fs = _a->freeset_(s);
+         if (fs.free_lines() < n)
+            continue;
+         const uint32_t local = fs.alloc(n, 0);
          if (local != UINT32_MAX)
          {
+            _seg    = s;
             _cursor = local + n;
             return finish_(local);
          }
-         if (attempts > 4096)
-            throw std::runtime_error("sal2: allocation livelock");
       }
+      const uint32_t s     = _a->grow_();
+      const uint32_t local = _a->freeset_(s).alloc(n, 0);  // fresh seg: cannot fail
+      _seg                 = s;
+      _cursor              = local + n;
+      return finish_(local);
    }
 
    // (declared inline in the class? no — define finish_ here)

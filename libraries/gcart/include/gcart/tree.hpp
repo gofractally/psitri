@@ -29,6 +29,32 @@ namespace gcart
       return i;
    }
 
+   // recursive refcount release of a subtree, using the arena alone (no session)
+   // — reusable by snapshot holders. Frees a node's lines once its ref hits 0,
+   // recursing into children + term.
+   inline void release_subtree(sal2::arena& a, nptr n)
+   {
+      if (n == null_ptr || !a.release_one(n))
+         return;
+      void* p = a.get(n);
+      if (is_leaf(p)) { a.free_lines(n, static_cast<leaf*>(p)->nlines); return; }
+      if (type_of(p) == uint8_t(ntype::setlist))
+      {
+         auto* s = static_cast<setlist*>(p);
+         for (uint32_t i = 0; i < s->h.n; ++i) release_subtree(a, s->children()[i]);
+         if (s->h.term != null_ptr) release_subtree(a, s->h.term);
+         a.free_lines(n, s->h.nlines);
+      }
+      else
+      {
+         auto* nd = static_cast<node256*>(p);
+         const nptr* c = nd->children();
+         for (uint32_t b = 0; b < 256; ++b) if (c[b] != null_ptr) release_subtree(a, c[b]);
+         if (nd->h.term != null_ptr) release_subtree(a, nd->h.term);
+         a.free_lines(n, nd->h.nlines);
+      }
+   }
+
    class tree
    {
      public:

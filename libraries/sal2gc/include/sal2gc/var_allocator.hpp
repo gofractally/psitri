@@ -57,8 +57,8 @@ namespace sal2gc
          _data = std::make_unique<sal::block_allocator>(_cfg.dir / (_cfg.name + ".dat"),
                                                         segment_bytes, _cfg.max_segments,
                                                         sal::access_mode::read_write);
-         _refs = std::make_unique<sal::block_allocator>(
-             _cfg.dir / (_cfg.name + ".rc"), std::bit_ceil(uint64_t(slots_per_segment)),
+         _deaths = std::make_unique<sal::block_allocator>(
+             _cfg.dir / (_cfg.name + ".dv"), std::bit_ceil(uint64_t(slots_per_segment) * 4),
              _cfg.max_segments, sal::access_mode::read_write);
          _seg_alloced = std::make_unique<std::atomic<uint32_t>[]>(_cfg.max_segments);
          _seg_freed   = std::make_unique<std::atomic<uint32_t>[]>(_cfg.max_segments);
@@ -85,7 +85,7 @@ namespace sal2gc
          if (existing == 0)
             return;
          _data->resize(existing);
-         _refs->resize(existing);
+         _deaths->resize(existing);
          cache_bases_();
          _nseg.store(existing, std::memory_order_relaxed);
          for (uint32_t s = 0; s < existing; ++s)
@@ -101,59 +101,28 @@ namespace sal2gc
       const void*     get(uint32_t slot) const noexcept { return _base + size_t(slot) * Grain; }
       static uint32_t grains_for(uint32_t bytes) noexcept { return (bytes + Grain - 1) / Grain; }
 
-      uint8_t ref(uint32_t i) const noexcept
+      // ── version liveness (death stamp; no refcount) — see fixed_allocator ──────
+      version_t death(uint32_t i) const noexcept
       {
-         return _ref_base[i].load(std::memory_order_relaxed);
+         return _death_base[i].load(std::memory_order_relaxed);
       }
-      bool unique(uint32_t i) const noexcept { return ref(i) == 1; }
-      void retain(uint32_t i)
+      bool alive(uint32_t i) const noexcept { return death(i) == death_alive; }
+      bool dead(uint32_t i) const noexcept
       {
-         auto& r = _ref_base[i];
-         auto  c = r.load(std::memory_order_relaxed);
-         do
-         {
-            if (c >= ref_ceiling)
-               throw std::runtime_error("sal2gc: var_allocator refcount overflow");
-         } while (!r.compare_exchange_weak(c, uint8_t(c + 1), std::memory_order_relaxed));
+         const version_t d = death(i);
+         return d != death_alive && d != death_free;
       }
-      [[nodiscard]] bool try_retain(uint32_t i) noexcept
+      void stamp_death(uint32_t i, version_t v) noexcept
       {
-         auto& r = _ref_base[i];
-         auto  c = r.load(std::memory_order_acquire);
-         do
-         {
-            if (c == 0 || c >= ref_ceiling)
-               return false;
-         } while (!r.compare_exchange_weak(c, uint8_t(c + 1), std::memory_order_acq_rel,
-                                           std::memory_order_acquire));
-         return true;
+         _death_base[i].store(v, std::memory_order_release);
       }
-      // Last ref drops to the DYING sentinel (not 0): the slot is being torn down
-      // (the releaser still reads `bytes` from its content) and must NOT be reused
-      // until free() sets ref=0. Write-around reuses only ref==0. CAS so there is
-      // no transient ref==0 window before the sentinel. See fixed_allocator.
-      [[nodiscard]] bool release_one(uint32_t i) noexcept
+      // GC reclaim: death→free + recycle accounting (by grain count). `bytes` is the
+      // object size (read by the caller before reclaim). bg writes _seg_freed,
+      // foreground _seg_alloced (separate cachelines); a sealed segment crossing
+      // >50% free joins its class's recyclable set.
+      void reclaim(uint32_t i, uint32_t bytes) noexcept
       {
-         auto&   r = _ref_base[i];
-         uint8_t c = r.load(std::memory_order_acquire);
-         for (;;)
-         {
-            assert(c >= 1 && c != dying_ref && "release of a dead/dying object");
-            const uint8_t nv = (c == 1) ? dying_ref : uint8_t(c - 1);
-            if (r.compare_exchange_weak(c, nv, std::memory_order_acq_rel, std::memory_order_acquire))
-               return c == 1;
-         }
-      }
-      // Mark an object dead (refcount already 0). bg writes _seg_freed, foreground
-      // writes _seg_alloced (separate arrays = separate cachelines, no false
-      // sharing); a sealed segment crossing >50% free joins its class's recyclable
-      // set. The alloc hot path never reads this, so frees don't contend with it.
-      void free(uint32_t i, uint32_t bytes) noexcept
-      {
-         // Publish REUSABLE (ref dying→0) with RELEASE so the write-around alloc's
-         // ACQUIRE load of ref==0 orders the releaser's content reads (done before
-         // free()) ahead of any reuse-write. See fixed_allocator::free.
-         _ref_base[i].store(0, std::memory_order_release);
+         _death_base[i].store(death_free, std::memory_order_release);
          const uint32_t n = grains_for(bytes);
          _freed_grains.fetch_add(n, std::memory_order_relaxed);
          const uint32_t s     = i / slots_per_segment;
@@ -177,8 +146,8 @@ namespace sal2gc
       void cache_bases_() noexcept
       {
          _base = static_cast<std::byte*>(const_cast<void*>(_data->mapped_base()));
-         _ref_base =
-             reinterpret_cast<std::atomic<uint8_t>*>(const_cast<void*>(_refs->mapped_base()));
+         _death_base =
+             reinterpret_cast<std::atomic<version_t>*>(const_cast<void*>(_deaths->mapped_base()));
       }
       // Grow a fresh segment dedicated to grain-count `cls`.
       uint32_t grow_(uint8_t cls)
@@ -188,7 +157,7 @@ namespace sal2gc
          if (s >= _cfg.max_segments)
             throw std::runtime_error("sal2gc: var_allocator full");
          _data->alloc();
-         _refs->alloc();
+         _deaths->alloc();  // fresh .dv pages zero-filled = death_free
          cache_bases_();
          _seg_alloced[s].store(0, std::memory_order_relaxed);
          _seg_freed[s].store(0, std::memory_order_relaxed);
@@ -227,9 +196,9 @@ namespace sal2gc
       }
 
       config                                _cfg;
-      std::unique_ptr<sal::block_allocator> _data, _refs;
+      std::unique_ptr<sal::block_allocator> _data, _deaths;
       std::byte*                            _base     = nullptr;
-      std::atomic<uint8_t>*                 _ref_base = nullptr;
+      std::atomic<version_t>*               _death_base = nullptr;
       std::atomic<uint32_t>                 _nseg{0};
       std::mutex                            _grow_mx;
       alignas(64) std::atomic<uint64_t> _allocated_grains{0};  // foreground
@@ -289,12 +258,12 @@ namespace sal2gc
             }
             else
             {
-               const std::atomic<uint8_t>* refs = _a->_ref_base + size_t(c.seg) * slots_per_segment;
+               const std::atomic<version_t>* dv = _a->_death_base + size_t(c.seg) * slots_per_segment;
                while (c.pos + g <= slots_per_segment)
                {
-                  // ACQUIRE (see fixed_allocator): orders the releaser's pre-release
-                  // content reads before our reuse of a ref==0 slot.
-                  if (refs[c.pos].load(std::memory_order_acquire) == 0)
+                  // ACQUIRE (see fixed_allocator): orders the GC's pre-reclaim content
+                  // reads before our reuse of a death_free slot.
+                  if (dv[c.pos].load(std::memory_order_acquire) == death_free)
                   {
                      const uint32_t l = c.pos;
                      c.pos += g;
@@ -338,7 +307,7 @@ namespace sal2gc
       uint32_t finish_(uint32_t seg, uint32_t local, uint32_t g) noexcept
       {
          const uint32_t slot = seg * slots_per_segment + local;
-         _a->_ref_base[slot].store(1, std::memory_order_relaxed);
+         _a->_death_base[slot].store(death_alive, std::memory_order_relaxed);  // born live
          _a->_seg_alloced[seg].fetch_add(g, std::memory_order_release);
          _a->_allocated_grains.fetch_add(g, std::memory_order_relaxed);
          return slot;

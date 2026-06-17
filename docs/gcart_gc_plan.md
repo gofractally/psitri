@@ -177,13 +177,22 @@ touches **no** refcount at all (the design's whole point), because there isn't o
   (`PSITRIMDBX_BACKEND_GCART` = GC, add `PSITRIMDBX_BACKEND_RCART` = refcount) + both
   rows in bank/oplog/scan benches for a direct refcount-vs-GC comparison.
 
-## 7'. Progress bar (Dan, 2026-06-17)
-The acceptance bar is comparative, not absolute: **as long as gcart-GC is faster
-than native libmdbx and uses less disk than our prior impls** (delta_art ~334 GB /
-native 134 GB at 8M Silkworm), it's progress. The GC engine's job is to push *both*
-levers — faster (no refcount-COW traffic) and denser (less COW garbage via
-deferred, reachability-driven reclaim) — past those marks; it need not beat rcart on
-every axis to be the right direction.
+## 7'. Progress bar + what GC does / doesn't buy (Dan, 2026-06-17)
+The acceptance bar is comparative: **as long as the engine is faster than native
+libmdbx and uses less disk than our prior impls** (delta_art ~334 GB / native 134 GB
+at 8M Silkworm), it's progress.
+
+**What version-GC buys: speed, NOT disk (Dan).** GC eliminates the refcount
+COW traffic — the cold-cacheline retain-on-every-shared-child cost; that is the
+perf lever (≈ the gap to start_ver). It does **not** reduce disk: the COW garbage a
+write produces is identical whether liveness is a refcount or a version, so the
+disk high-water is the *same* (if anything GC's deferred reclaim can hold garbage a
+touch longer). **Disk is a separate problem** — solved by reclaim timing /
+compaction (the movable-region compactor, design §6.2), not by the liveness model.
+So gcart-GC's job is the SPEED bar; the disk bar is owned by compaction/reclaim
+work, tracked separately. Silkworm-scale evidence: the tiered start_ver→gcart run
+held ~115 GB at 5M (≈ gcart-direct), confirming tiering didn't densify either — disk
+needs its own lever.
 
 ## 7. Sequencing note
 Land GC-1..GC-2 behind the existing gcart tests staying green at each step

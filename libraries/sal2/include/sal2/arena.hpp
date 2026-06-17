@@ -118,6 +118,8 @@ namespace sal2
       bool unique(line_idx i) const noexcept { return ref(i) == 1; }
 
       // Pin: +1, throws at the 255 sentinel (reader/snapshot pins, COW shares).
+      // Caller must already hold the node alive (ref >= 1) — used on the COW /
+      // writer path and to copy a pin the caller already owns.
       void retain(line_idx i)
       {
          auto& r   = _ref_base[i];
@@ -127,6 +129,30 @@ namespace sal2
             if (cur >= ref_ceiling)
                throw ref_overflow();
          } while (!r.compare_exchange_weak(cur, uint8_t(cur + 1), std::memory_order_relaxed));
+      }
+
+      // Lock-free snapshot acquire (concurrent readers, no mutex): bump the
+      // refcount ONLY if it is currently non-zero — i.e. the node is still
+      // alive. Returns false if the node is already dead (ref 0), so a reader
+      // that lost the race with a freeing writer simply retries with the newer
+      // root. The refcount array is a stable mmap, so probing ref(i) for any
+      // line is always memory-safe even after the line's data is freed/recycled;
+      // a benign ABA (probing a recycled line) is balanced by the caller's
+      // matching release and never resurrects a dead node. Pair with a re-read
+      // of the root slot to confirm the pinned root is the one intended.
+      [[nodiscard]] bool try_retain(line_idx i) noexcept
+      {
+         auto& r   = _ref_base[i];
+         auto  cur = r.load(std::memory_order_acquire);
+         do
+         {
+            if (cur == 0)
+               return false;               // already dead — caller retries
+            if (cur >= ref_ceiling)
+               return false;               // saturated; treat as un-pinnable
+         } while (!r.compare_exchange_weak(cur, uint8_t(cur + 1), std::memory_order_acq_rel,
+                                           std::memory_order_acquire));
+         return true;
       }
 
       // Release one reference to the node at head line i. Returns true iff it hit

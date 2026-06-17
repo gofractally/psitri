@@ -31,8 +31,13 @@ namespace gcart::kv
    class cursor
    {
      public:
+      // A cursor holds a smart_ptr — the pin IS that handle: the snapshot stays
+      // readable for the cursor's whole lifetime while a concurrent writer COWs
+      // and frees other versions around it. Rule of zero: copy shares the pin,
+      // move transfers it, destruction releases it — all via the smart_ptr
+      // member. The raw _a/_root are cached from the pin for the hot read path.
       cursor() = default;
-      cursor(const sal2::arena* a, nptr root) : _a(a), _root(root) {}
+      explicit cursor(smart_ptr pin) : _pin(std::move(pin)), _a(_pin.arena()), _root(_pin.root()) {}
 
       bool seek_begin()
       {
@@ -199,8 +204,9 @@ namespace gcart::kv
       // bytes descends at most N nodes (no prefix compression in the worst case).
       std::array<frame, 1088> _stk{};
       int    _depth = 0;
-      const sal2::arena* _a = nullptr;
-      nptr   _root = null_ptr;
+      smart_ptr _pin;              // the snapshot pin (lifetime == this cursor)
+      sal2::arena* _a = nullptr;   // cached _pin.arena() for the read hot path
+      nptr   _root = null_ptr;     // cached _pin.root()
       nptr   _cur  = null_ptr;  // current leaf
       bool   _end = true, _rend = true;
 
@@ -317,45 +323,23 @@ namespace gcart::kv
    class database;
 
    // ── snapshot tree (owned, frozen) ─────────────────────────────────────────
+   // A tree IS a snapshot: it holds a smart_ptr, so the version it was acquired
+   // at stays readable for its lifetime. Rule of zero — the smart_ptr member
+   // does all the refcount work (copy shares, move transfers, dtor releases).
    class tree
    {
      public:
       tree() = default;
-      tree(sal2::arena* a, nptr root) : _a(a), _root(root)
-      {
-         if (_root != null_ptr) _a->retain(_root);
-      }
-      tree(const tree& o) : _a(o._a), _root(o._root)
-      {
-         if (_root != null_ptr) _a->retain(_root);
-      }
-      tree& operator=(const tree& o)
-      {
-         if (this != &o) { reset_(); _a = o._a; _root = o._root; if (_root != null_ptr) _a->retain(_root); }
-         return *this;
-      }
-      tree(tree&& o) noexcept : _a(o._a), _root(o._root) { o._root = null_ptr; }
-      tree& operator=(tree&& o) noexcept
-      {
-         if (this != &o) { reset_(); _a = o._a; _root = o._root; o._root = null_ptr; }
-         return *this;
-      }
-      ~tree() { reset_(); }
+      explicit tree(smart_ptr pin) : _pin(std::move(pin)) {}
 
-      cursor snapshot_cursor() const { return cursor(_a, _root); }
+      cursor snapshot_cursor() const { return cursor(_pin); }  // shares the pin
       template <class S = std::string>
       std::optional<S> get(key_view k) const { return snapshot_cursor().template get<S>(k); }
-      explicit operator bool() const noexcept { return _root != null_ptr; }
-      nptr root_raw() const noexcept { return _root; }
+      explicit operator bool() const noexcept { return bool(_pin); }
+      nptr root_raw() const noexcept { return _pin.root(); }
 
      private:
-      void reset_()
-      {
-         if (_a && _root != null_ptr) gcart::release_subtree(*_a, _root);
-         _root = null_ptr;
-      }
-      sal2::arena* _a    = nullptr;
-      nptr         _root = null_ptr;
+      smart_ptr _pin;
    };
 
    class write_session;
@@ -366,7 +350,7 @@ namespace gcart::kv
    {
      public:
       transaction(transaction&& o) noexcept
-          : _t(o._t), _a(o._a), _arena_slot(o._arena_slot), _snap(o._snap), _done(o._done)
+          : _t(o._t), _a(o._a), _arena_slot(o._arena_slot), _snap(std::move(o._snap)), _done(o._done)
       { o._t = nullptr; }
       transaction(const transaction&)            = delete;
       transaction& operator=(const transaction&) = delete;
@@ -396,30 +380,40 @@ namespace gcart::kv
       void commit()
       {
          if (_done) return;
-         if (_snap != null_ptr) gcart::release_subtree(*_a, _snap);  // drop the old committed root
-         _a->set_root(_arena_slot, _t->root());                      // publish
+         // Publish the new root ATOMICALLY first: a concurrent reader acquiring
+         // now sees the new version; one that already pinned the old root keeps
+         // it alive. Then drop our snapshot pin on the old committed root — it is
+         // freed unless a reader still holds it (lock-free, no reader barrier).
+         _a->set_root(_arena_slot, _t->root());
+         _snap.reset();
          _done = true;
       }
       void abort() noexcept
       {
          if (_done) return;
+         // Hand the snapshot pin back to the live tree as its ownership ref
+         // (give() = relinquish without releasing — never re-adopt a raw addr),
+         // then free the discarded work tree. The release of `work` balances the
+         // un-released give() so the restored root lands at the right refcount.
          const nptr work = _t->root();
-         _t->set_root(_snap);                       // restore committed (pin → live)
+         _t->set_root(_snap.give());
          if (work != null_ptr) gcart::release_subtree(*_a, work);
          _done = true;
       }
 
      private:
       friend class write_session;
-      transaction(gcart::tree* t, sal2::arena* a, uint32_t slot) : _t(t), _a(a), _arena_slot(slot)
+      transaction(gcart::tree* t, sal2::arena* a, uint32_t slot)
+          : _t(t), _a(a), _arena_slot(slot), _snap(smart_ptr::acquire(*a, slot))
       {
-         _snap = _t->root();
-         if (_snap != null_ptr) _a->retain(_snap);  // pin committed root for rollback/COW
+         // _snap pins the committed root (the rollback target + COW base). At a
+         // txn boundary the working tree's root == the published arena root, so
+         // acquire() pins exactly what _t is about to COW from.
       }
       gcart::tree* _t = nullptr;
       sal2::arena* _a = nullptr;
       uint32_t     _arena_slot = 0;
-      nptr         _snap = null_ptr;
+      smart_ptr    _snap;
       bool         _done = false;
    };
 
@@ -472,8 +466,9 @@ namespace gcart::kv
       }
       tree get_root(uint32_t root_index)
       {
-         gcart::tree& t = _db->tree_for(root_index);
-         return tree(&_db->store(), t.root());
+         // a tree IS a snapshot: lock-free pin of the COMMITTED (atomic) root —
+         // never the writer's in-flight work tree.
+         return tree(smart_ptr::acquire(_db->store(), root_index));
       }
 
      private:
@@ -487,8 +482,9 @@ namespace gcart::kv
       explicit read_session(database* db) : _db(db) {}
       cursor create_cursor(uint32_t root_index)
       {
-         gcart::tree& t = _db->tree_for(root_index);
-         return cursor(&_db->store(), t.root());
+         // lock-free pin of the COMMITTED (atomic) root (try_retain + verify);
+         // concurrent readers never block each other or the writer.
+         return cursor(smart_ptr::acquire(_db->store(), root_index));
       }
 
      private:

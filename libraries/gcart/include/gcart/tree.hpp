@@ -55,6 +55,75 @@ namespace gcart
       }
    }
 
+   // ── smart_ptr: a held root IS the pin (no explicit pin/unpin) ──────────────
+   // An owning handle to a tree root. Holding one keeps that exact version
+   // readable under MVCC — a concurrent writer COWs and frees OTHER versions
+   // around it. The handle's lifetime is the pin: ctor acquires, dtor releases,
+   // copy shares (retain), move transfers. acquire() reads a root slot
+   // LOCK-FREE (try_retain + re-verify) so concurrent readers never block each
+   // other or a writer; give() relinquishes ownership without releasing (the
+   // commit/abort root hand-off, never take()/re-adopt a raw address).
+   class smart_ptr
+   {
+     public:
+      smart_ptr() = default;
+
+      // Lock-free acquire of root slot `slot`'s currently-committed snapshot.
+      static smart_ptr acquire(sal2::arena& a, uint32_t slot)
+      {
+         for (;;)
+         {
+            const nptr r = a.get_root(slot);
+            if (r == null_ptr)
+               return smart_ptr(&a, null_ptr);
+            if (!a.try_retain(r))
+               continue;                          // lost the race to a freeing writer — retry
+            if (r == a.get_root(slot))
+               return smart_ptr(&a, r);           // pinned and still the published root
+            release_subtree(a, r);                // root moved under us — undo this pin, retry
+         }
+      }
+
+      // Adopt a ref the caller already owns (a freshly built / transferred root).
+      static smart_ptr adopt(sal2::arena& a, nptr root) { return smart_ptr(&a, root); }
+
+      smart_ptr(const smart_ptr& o) : _a(o._a), _root(o._root)
+      {
+         if (_a && _root != null_ptr) _a->retain(_root);
+      }
+      smart_ptr& operator=(const smart_ptr& o)
+      {
+         if (this != &o) { reset(); _a = o._a; _root = o._root; if (_a && _root != null_ptr) _a->retain(_root); }
+         return *this;
+      }
+      smart_ptr(smart_ptr&& o) noexcept : _a(o._a), _root(o._root) { o._root = null_ptr; }
+      smart_ptr& operator=(smart_ptr&& o) noexcept
+      {
+         if (this != &o) { reset(); _a = o._a; _root = o._root; o._root = null_ptr; }
+         return *this;
+      }
+      ~smart_ptr() { reset(); }
+
+      nptr         root() const noexcept { return _root; }
+      sal2::arena* arena() const noexcept { return _a; }
+      explicit operator bool() const noexcept { return _root != null_ptr; }
+
+      // Relinquish ownership WITHOUT releasing — the new owner inherits the ref
+      // (commit publishes / abort restores by handing the pin to the live tree).
+      nptr give() noexcept { const nptr r = _root; _root = null_ptr; return r; }
+
+      void reset() noexcept
+      {
+         if (_a && _root != null_ptr) release_subtree(*_a, _root);
+         _root = null_ptr;
+      }
+
+     private:
+      smart_ptr(sal2::arena* a, nptr root) : _a(a), _root(root) {}
+      sal2::arena* _a    = nullptr;
+      nptr         _root = null_ptr;
+   };
+
    class tree
    {
      public:

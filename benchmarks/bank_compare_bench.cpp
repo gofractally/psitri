@@ -16,6 +16,7 @@
 #include <heart_kv.hpp>           // sal_art_ref::kv (standalone)
 #include <start_ver/kv.hpp>       // start_ver::kv (hot, standalone)
 #include <start_ref/kv.hpp>       // start_ref::kv (hot, standalone)
+#include <gcart/kv.hpp>           // gcart::kv (sal2, lock-free MVCC reads)
 
 #include <atomic>
 #include <chrono>
@@ -234,6 +235,11 @@ int main(int argc, char** argv)
       std::filesystem::remove_all(base + "/sal_art_ref");
       auto db = sal_art_ref::kv::database::create(base + "/sal_art_ref");
       rows.push_back(run_bank("sal_art_ref", db, p));
+   }
+   {  // gcart standalone (sal2, lock-free MVCC reads)
+      std::filesystem::remove_all(base + "/gcart");
+      auto db = gcart::kv::database::create(base + "/gcart");
+      rows.push_back(run_bank("gcart", db, p));
    }
 
    printf("\n%-20s %12s %12s %14s %12s %14s  %s\n", "engine", "load/s", "wtx/s",

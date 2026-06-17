@@ -36,7 +36,7 @@ set_target_properties(delta_art-bank-bench PROPERTIES
 # bank comparison: the same workload on delta_art<start_ver,sal_art_ref> vs
 # standalone start_ver vs standalone sal_art_ref.
 add_executable(bank-compare-bench bank_compare_bench.cpp)
-target_link_libraries(bank-compare-bench PRIVATE delta_art start_ver start_ref sal_art_ref psitri)
+target_link_libraries(bank-compare-bench PRIVATE delta_art start_ver start_ref sal_art_ref psitri gcart)
 target_include_directories(bank-compare-bench PRIVATE
     ${CMAKE_SOURCE_DIR}/libraries/sal_art_ref/test)
 target_compile_definitions(bank-compare-bench PRIVATE XXH_INLINE_ALL)

@@ -115,17 +115,21 @@ namespace gcart::kv
    class database;
 
    // ── cursor: a pinned snapshot + point get + ORDERED iteration (adb::kv_cursor)
-   //    Iteration is restart-based: each positioning is one root descent (cur_ge =
-   //    smallest key >= target); next() = cur_ge(curkey + '\0'). lower_bound is
-   //    therefore as cheap as any engine's; multi-step scans pay one O(depth)
-   //    descent per step (a frame-stack optimization is a follow-up). ────────────
+   //    STATEFUL FRAME-STACK cursor (mirrors the hkv cursor): seek/lower_bound
+   //    descend ONCE building a path stack; next()/prev() WALK the stack (advance
+   //    the top frame, pop when exhausted, descend the new child) — never re-descend
+   //    from root. The key is NOT built during iteration: it is materialized ON
+   //    DEMAND in key() by replaying the frame prefixes into a reusable buffer.
+   //    No std::string anywhere in the hot path. Each frame's `cur` is the slot we
+   //    descended at this node: -1 = the node's TERM (sorts before all byte-children),
+   //    else the ordered child slot (setlist/nested: key index; full: byte value).
    class cursor
    {
      public:
       cursor() = default;
       explicit cursor(snap s) : _s(std::move(s)) {}
 
-      // point get (no positioning)
+      // point get (no positioning) — find_in is a direct descent, no key build.
       template <class S = std::string>
       std::optional<S> get(key_view k) const
       {
@@ -136,7 +140,6 @@ namespace gcart::kv
             return std::nullopt;
          return S(out.data(), out.size());
       }
-      // point get, lambda form (adb::mergeable_cursor)
       template <class F>
       bool get(key_view k, F&& f) const
       {
@@ -149,143 +152,657 @@ namespace gcart::kv
          return true;
       }
 
-      // ── ordered forward iteration (adb::kv_cursor) ──────────────────────────
-      // lower_bound/seek_begin do ONE descent (a 1-entry batch → point positioning
-      // stays single-descent fast). next() amortizes: when the batch is consumed it
-      // collects the next `batch` keys in one descent (cur_scan), so a scan is one
-      // descent per `batch` steps instead of per step.
-      static constexpr size_t batch_min = 8, batch_max = 512;
-      bool                    seek_begin() { return seek_ge_(key_view{}); }
-      bool                    lower_bound(key_view k) { return seek_ge_(k); }
-      bool                    next()
+      // ── ordered forward iteration ───────────────────────────────────────────
+      bool seek_begin()
       {
-         if (_end)
+         if (!root_ok_())
             return false;
-         if (_rend)
-            return seek_ge_(key_view{});
-         if (++_cur < _buf.size())
-            return true;
-         if (!_s.eng() || _s.tag() == bt::null)
-         {
-            _end = true;
-            return false;
-         }
-         std::string t = _buf.back().first;
-         t.push_back('\0');  // refill after the last emitted key
-         _buf.clear();
-         _cur = 0;
-         cur_scan(*_s.eng(), _s.tag(), resolve(*_s.eng(), _s.tag(), _s.ptr()), t, 0, std::string(),
-                  _buf, _bsz);
-         _bsz = _bsz < batch_max ? _bsz * 2
-                                 : batch_max;  // grow: short ranges collect little, scans ramp up
-         if (_buf.empty())
-         {
-            _end = true;
-            return false;
-         }
-         return true;
-      }
-      bool     is_end() const { return _end; }
-      key_view key() const { return (_end || _rend) ? key_view{} : key_view(_buf[_cur].first); }
-      template <class S = std::string>
-      std::optional<S> value() const
-      {
-         if (_end || _rend)
-            return std::nullopt;
-         const auto& v = _buf[_cur].second;
-         return S(v.data(), v.size());
-      }
-      // value at the current position, lambda form (adb::mergeable_cursor)
-      template <class F>
-      bool get_value(F&& f) const
-      {
-         if (_end || _rend)
-            return false;
-         const auto& v = _buf[_cur].second;
-         f(value_view(v.data(), v.size()));
-         return true;
-      }
-      // gcart has no composable subtrees (yet) — a value is never a subtree.
-      bool is_subtree() const { return false; }
-
-      // ── ordered reverse iteration (adb::mergeable_cursor) ───────────────────
-      bool seek_last()
-      {
-         _buf.clear();
-         _cur  = 0;
+         _n = 0;
+         go_left_(_s.tag(), root_());
+         _end  = false;
          _rend = false;
-         if (!_s.eng() || _s.tag() == bt::null)
-         {
-            _end = true;
-            return false;
-         }
-         std::string k, v;
-         cur_rightmost(*_s.eng(), _s.tag(), resolve(*_s.eng(), _s.tag(), _s.ptr()), std::string(),
-                       k, v);
-         _buf.emplace_back(std::move(k), std::move(v));
-         _end = false;
+         _kv   = false;
          return true;
       }
-      bool upper_bound(key_view k)
+      bool lower_bound(key_view k)
       {
-         std::string t(k);
-         t.push_back('\0');
-         return seek_ge_(t);
-      }            // smallest > k
-      bool prev()  // restart-based reverse (forward scan is the buffered hot path)
-      {
-         if (_rend)
+         if (!root_ok_())
             return false;
-         if (_end)
-            return seek_last();
-         if (!_s.eng() || _s.tag() == bt::null)
+         _n  = 0;
+         _kv = false;
+         if (seek_ge_(_s.tag(), root_(), k, 0))
          {
-            _rend = true;
-            return false;
-         }
-         std::string nk, nv;
-         if (cur_lt(*_s.eng(), _s.tag(), resolve(*_s.eng(), _s.tag(), _s.ptr()), _buf[_cur].first,
-                    0, std::string(), nk, nv))
-         {
-            _buf.clear();
-            _buf.emplace_back(std::move(nk), std::move(nv));
-            _cur = 0;
-            _end = false;
-            return true;
-         }
-         _rend = true;
-         return false;
-      }
-      bool is_rend() const { return _rend; }
-
-     private:
-      bool seek_ge_(key_view target)
-      {
-         _buf.clear();
-         _cur  = 0;
-         _rend = false;
-         _bsz  = batch_min;
-         if (!_s.eng() || _s.tag() == bt::null)
-         {
-            _end = true;
-            return false;
-         }
-         std::string k, v;
-         if (cur_ge(*_s.eng(), _s.tag(), resolve(*_s.eng(), _s.tag(), _s.ptr()), target, 0,
-                    std::string(), k, v))
-         {
-            _buf.emplace_back(std::move(k), std::move(v));
-            _end = false;
+            _end  = false;
+            _rend = false;
             return true;
          }
          _end = true;
          return false;
       }
-      snap     _s;
-      kv_batch _buf;              // current run of (key,value), in order
-      size_t   _cur = 0;          // index into _buf
-      size_t   _bsz = batch_min;  // next refill size (grows on each refill)
-      bool     _end = true, _rend = false;
+      bool next()
+      {
+         if (_end)
+            return false;
+         if (_rend)
+            return seek_begin();
+         _kv = false;
+         return advance_();
+      }
+      bool     is_end() const { return _end; }
+      key_view key() const
+      {
+         if (_end || _rend)
+            return {};
+         if (!_kv)
+            materialize_key_();
+         return key_view(_kb, _klen);
+      }
+      template <class S = std::string>
+      std::optional<S> value() const
+      {
+         if (_end || _rend)
+            return std::nullopt;
+         const sv v = cur_value_();
+         return S(v.data(), v.size());
+      }
+      template <class F>
+      bool get_value(F&& f) const
+      {
+         if (_end || _rend)
+            return false;
+         f(cur_value_());
+         return true;
+      }
+      bool is_subtree() const { return false; }
+
+      // ── ordered reverse iteration ───────────────────────────────────────────
+      bool seek_last()
+      {
+         if (!root_ok_())
+            return false;
+         _n = 0;
+         go_right_(_s.tag(), root_());
+         _end  = false;
+         _rend = false;
+         _kv   = false;
+         return true;
+      }
+      bool upper_bound(key_view k)  // smallest key > k
+      {
+         std::string t(k);
+         t.push_back('\0');
+         return lower_bound(t);
+      }
+      bool prev()
+      {
+         if (_rend)
+            return false;
+         if (_end)
+            return seek_last();
+         _kv = false;
+         return retreat_();
+      }
+      bool is_rend() const { return _rend; }
+
+     private:
+      // ── geometry ────────────────────────────────────────────────────────────
+      static constexpr int MAXF = 160;
+      struct frame
+      {
+         bt          t;
+         const void* node;
+         int         cur;  // -1 = term; else ordered child slot (idx / byte)
+      };
+
+      bool        root_ok_() const { return _s.eng() && _s.tag() != bt::null; }
+      const void*  root_() const { return resolve(*_s.eng(), _s.tag(), _s.ptr()); }
+      gcart::engine& eng_() const { return *_s.eng(); }
+
+      void set_leaf_ext_(bt t, const void* n)
+      {
+         _inl = false;
+         _lt  = t;
+         _ln  = n;
+      }
+      void set_leaf_inl_(sv suf, sv val)
+      {
+         _inl  = true;
+         _isuf = suf;
+         _ival = val;
+      }
+      sv cur_value_() const { return _inl ? _ival : leaf_value_body(_lt, _ln); }
+
+      void push_(bt t, const void* node, int cur)
+      {
+         _f[_n].t    = t;
+         _f[_n].node = node;
+         _f[_n].cur  = cur;
+         ++_n;
+      }
+
+      // Descend to the LEFTMOST leaf of subtree (t,node), pushing a frame per
+      // routing node (cur = the slot taken: -1 term, else first child).
+      void go_left_(bt t, const void* node)
+      {
+         for (;;)
+         {
+            if (is_leaf_tag(t))
+            {
+               set_leaf_ext_(t, node);
+               return;
+            }
+            if (t == bt::full)
+            {
+               const full* n = static_cast<const full*>(node);
+               if (n->has_term())
+               {
+                  push_(t, node, -1);
+                  t    = bt(n->term_tag);
+                  node = resolve(eng_(), t, n->term_ptr);
+                  continue;
+               }
+               int b = 0;
+               while (b < 256 && n->btype(b) == bt::null)
+                  ++b;
+               push_(t, node, b);
+               bt ct = n->btype(b);
+               node  = resolve(eng_(), ct, n->branch(b));
+               t     = ct;
+               continue;
+            }
+            if (t == bt::nested_setlist)
+            {
+               const nested_setlist* n = static_cast<const nested_setlist*>(node);
+               if (n->has_term())
+               {
+                  const uint32_t ti = n->nbranch;
+                  push_(t, node, -1);
+                  if (n->is_inline(ti))
+                  {
+                     set_leaf_inl_(sv{}, n->in_value(ti));
+                     return;
+                  }
+                  bt tt = n->otype(ti);
+                  node  = resolve(eng_(), tt, n->ext_ptr(ti));
+                  t     = tt;
+                  continue;
+               }
+               push_(t, node, 0);
+               if (n->is_inline(0))
+               {
+                  if (n->otype(0) == bt::suffix_value)
+                  {
+                     set_leaf_inl_(n->in_suffix(0), n->in_value(0));
+                     return;
+                  }
+                  t    = bt::setlist;
+                  node = n->in_setlist(0);
+                  continue;
+               }
+               bt ct = n->otype(0);
+               node  = resolve(eng_(), ct, n->ext_ptr(0));
+               t     = ct;
+               continue;
+            }
+            const setlist* n = static_cast<const setlist*>(node);
+            if (n->has_term())
+            {
+               push_(t, node, -1);
+               bt tt = n->term_type();
+               node  = resolve(eng_(), tt, n->term_branch());
+               t     = tt;
+               continue;
+            }
+            push_(t, node, 0);
+            bt ct = n->btype(0);
+            node  = resolve(eng_(), ct, n->branch(0));
+            t     = ct;
+         }
+      }
+
+      // Descend to the RIGHTMOST leaf (largest key) — children last, term first
+      // (so the rightmost is the last byte-child, or the term iff no children).
+      void go_right_(bt t, const void* node)
+      {
+         for (;;)
+         {
+            if (is_leaf_tag(t))
+            {
+               set_leaf_ext_(t, node);
+               return;
+            }
+            if (t == bt::full)
+            {
+               const full* n = static_cast<const full*>(node);
+               int         b  = 255;
+               while (b >= 0 && n->btype(b) == bt::null)
+                  --b;
+               if (b < 0)  // term-only
+               {
+                  push_(t, node, -1);
+                  t    = bt(n->term_tag);
+                  node = resolve(eng_(), t, n->term_ptr);
+                  continue;
+               }
+               push_(t, node, b);
+               bt ct = n->btype(b);
+               node  = resolve(eng_(), ct, n->branch(b));
+               t     = ct;
+               continue;
+            }
+            if (t == bt::nested_setlist)
+            {
+               const nested_setlist* n = static_cast<const nested_setlist*>(node);
+               if (n->nbranch == 0)  // term-only
+               {
+                  const uint32_t ti = n->nbranch;
+                  push_(t, node, -1);
+                  if (n->is_inline(ti))
+                  {
+                     set_leaf_inl_(sv{}, n->in_value(ti));
+                     return;
+                  }
+                  bt tt = n->otype(ti);
+                  node  = resolve(eng_(), tt, n->ext_ptr(ti));
+                  t     = tt;
+                  continue;
+               }
+               const uint32_t last = n->nbranch - 1u;
+               push_(t, node, int(last));
+               if (n->is_inline(last))
+               {
+                  if (n->otype(last) == bt::suffix_value)
+                  {
+                     set_leaf_inl_(n->in_suffix(last), n->in_value(last));
+                     return;
+                  }
+                  t    = bt::setlist;
+                  node = n->in_setlist(last);
+                  continue;
+               }
+               bt ct = n->otype(last);
+               node  = resolve(eng_(), ct, n->ext_ptr(last));
+               t     = ct;
+               continue;
+            }
+            const setlist* n = static_cast<const setlist*>(node);
+            if (n->nbranch == 0)  // term-only
+            {
+               push_(t, node, -1);
+               bt tt = n->term_type();
+               node  = resolve(eng_(), tt, n->term_branch());
+               t     = tt;
+               continue;
+            }
+            const uint32_t last = n->nbranch - 1u;
+            push_(t, node, int(last));
+            bt ct = n->btype(last);
+            node  = resolve(eng_(), ct, n->branch(last));
+            t     = ct;
+         }
+      }
+
+      // Forward: advance to the NEXT leaf by walking the stack.
+      bool advance_()
+      {
+         while (_n > 0)
+         {
+            frame& f = _f[_n - 1];
+            if (step_fwd_(f))
+               return true;
+            --_n;  // node exhausted → pop and continue at the parent
+         }
+         _end = true;
+         return false;
+      }
+      // Reverse: retreat to the PREVIOUS leaf.
+      bool retreat_()
+      {
+         while (_n > 0)
+         {
+            frame& f = _f[_n - 1];
+            if (step_bwd_(f))
+               return true;
+            --_n;
+         }
+         _rend = true;
+         return false;
+      }
+
+      // Advance frame `f` to its next slot (after f.cur) and descend-left into it;
+      // returns false iff this node has no slot after f.cur (caller pops).
+      bool step_fwd_(frame& f)
+      {
+         if (f.t == bt::full)
+         {
+            const full* n = static_cast<const full*>(f.node);
+            int         b = (f.cur < 0) ? 0 : f.cur + 1;  // term was -1 → first child is 0
+            while (b < 256 && n->btype(b) == bt::null)
+               ++b;
+            if (b >= 256)
+               return false;
+            f.cur = b;
+            bt ct = n->btype(b);
+            go_left_(ct, resolve(eng_(), ct, n->branch(b)));
+            return true;
+         }
+         if (f.t == bt::nested_setlist)
+         {
+            const nested_setlist* n = static_cast<const nested_setlist*>(f.node);
+            const uint32_t        i = (f.cur < 0) ? 0u : uint32_t(f.cur) + 1u;
+            if (i >= n->nbranch)
+               return false;
+            f.cur = int(i);
+            if (n->is_inline(i))
+            {
+               if (n->otype(i) == bt::suffix_value)
+               {
+                  set_leaf_inl_(n->in_suffix(i), n->in_value(i));
+                  return true;
+               }
+               go_left_(bt::setlist, n->in_setlist(i));
+               return true;
+            }
+            bt ct = n->otype(i);
+            go_left_(ct, resolve(eng_(), ct, n->ext_ptr(i)));
+            return true;
+         }
+         const setlist* n = static_cast<const setlist*>(f.node);
+         const uint32_t i = (f.cur < 0) ? 0u : uint32_t(f.cur) + 1u;
+         if (i >= n->nbranch)
+            return false;
+         f.cur = int(i);
+         bt ct = n->btype(i);
+         go_left_(ct, resolve(eng_(), ct, n->branch(i)));
+         return true;
+      }
+
+      // Retreat frame `f` to its previous slot (before f.cur) and descend-right;
+      // the term (slot -1) is the smallest, visited last on the way down.
+      bool step_bwd_(frame& f)
+      {
+         if (f.t == bt::full)
+         {
+            const full* n = static_cast<const full*>(f.node);
+            if (f.cur < 0)
+               return false;  // already at term (smallest) → pop
+            int b = f.cur - 1;
+            while (b >= 0 && n->btype(b) == bt::null)
+               --b;
+            if (b < 0)
+            {
+               if (!n->has_term())
+                  return false;
+               f.cur = -1;
+               bt tt = bt(n->term_tag);
+               go_right_(tt, resolve(eng_(), tt, n->term_ptr));
+               return true;
+            }
+            f.cur = b;
+            bt ct = n->btype(b);
+            go_right_(ct, resolve(eng_(), ct, n->branch(b)));
+            return true;
+         }
+         if (f.t == bt::nested_setlist)
+         {
+            const nested_setlist* n = static_cast<const nested_setlist*>(f.node);
+            if (f.cur < 0)
+               return false;
+            if (f.cur == 0)
+            {
+               if (!n->has_term())
+                  return false;
+               const uint32_t ti = n->nbranch;
+               f.cur             = -1;
+               if (n->is_inline(ti))
+               {
+                  set_leaf_inl_(sv{}, n->in_value(ti));
+                  return true;
+               }
+               bt tt = n->otype(ti);
+               go_right_(tt, resolve(eng_(), tt, n->ext_ptr(ti)));
+               return true;
+            }
+            const uint32_t i = uint32_t(f.cur) - 1u;
+            f.cur            = int(i);
+            if (n->is_inline(i))
+            {
+               if (n->otype(i) == bt::suffix_value)
+               {
+                  set_leaf_inl_(n->in_suffix(i), n->in_value(i));
+                  return true;
+               }
+               go_right_(bt::setlist, n->in_setlist(i));
+               return true;
+            }
+            bt ct = n->otype(i);
+            go_right_(ct, resolve(eng_(), ct, n->ext_ptr(i)));
+            return true;
+         }
+         const setlist* n = static_cast<const setlist*>(f.node);
+         if (f.cur < 0)
+            return false;
+         if (f.cur == 0)
+         {
+            if (!n->has_term())
+               return false;
+            f.cur = -1;
+            bt tt = n->term_type();
+            go_right_(tt, resolve(eng_(), tt, n->term_branch()));
+            return true;
+         }
+         const uint32_t i = uint32_t(f.cur) - 1u;
+         f.cur            = int(i);
+         bt ct            = n->btype(i);
+         go_right_(ct, resolve(eng_(), ct, n->branch(i)));
+         return true;
+      }
+
+      // Directed descent: position at the smallest key >= target, pushing frames.
+      // Returns true if such a key exists in this subtree. On a "diverge / target is
+      // a prefix" the whole subtree is > target → its leftmost is the answer.
+      bool seek_ge_(bt t, const void* node, sv target, uint32_t depth)
+      {
+         for (;;)
+         {
+            if (is_leaf_tag(t))
+            {
+               // compare full key (acc-bytes-above already matched target[0:depth])
+               // against the remaining target via the leaf suffix.
+               sv suf = leaf_suffix_body(t, node);
+               if (!suffix_ge_(suf, target, depth))
+                  return false;
+               set_leaf_ext_(t, node);
+               return true;
+            }
+            const sv P = node_prefix_(t, node);
+            const uint32_t rem = uint32_t(target.size()) - depth;
+            const uint32_t pl  = uint32_t(P.size());
+            const uint32_t cl  = pl < rem ? pl : rem;
+            uint32_t       i   = 0;
+            while (i < cl && uint8_t(P[i]) == uint8_t(target[depth + i]))
+               ++i;
+            if (i < cl)  // prefix diverged in the compared region
+            {
+               if (uint8_t(P[i]) > uint8_t(target[depth + i]))
+               {
+                  go_left_(t, node);
+                  return true;
+               }
+               return false;  // subtree entirely < target
+            }
+            if (pl >= rem)  // target is a (proper or full) prefix of P → subtree >= target
+            {
+               go_left_(t, node);
+               return true;
+            }
+            depth += pl;  // P matched; descend at target[depth]
+            const uint8_t tb = uint8_t(target[depth]);
+            if (seek_ge_descend_(t, node, target, depth, tb))
+               return true;
+            return false;
+         }
+      }
+
+      // At routing node (t,node) whose prefix matched, descend toward byte tb at
+      // target[depth]; the matching child is tried for an exact >= continuation, and
+      // if it yields nothing, the first child byte > tb gives the subtree's leftmost.
+      bool seek_ge_descend_(bt t, const void* node, sv target, uint32_t depth, uint8_t tb)
+      {
+         if (t == bt::full)
+         {
+            const full* n = static_cast<const full*>(node);
+            bt          ct = n->btype(tb);
+            if (ct != bt::null)
+            {
+               push_(t, node, tb);
+               if (seek_ge_(ct, resolve(eng_(), ct, n->branch(tb)), target, depth + 1))
+                  return true;
+               --_n;  // matching child had nothing >= target; fall through to next byte
+            }
+            for (int b = tb + 1; b < 256; ++b)
+               if (n->btype(b) != bt::null)
+               {
+                  push_(t, node, b);
+                  bt c2 = n->btype(b);
+                  go_left_(c2, resolve(eng_(), c2, n->branch(b)));
+                  return true;
+               }
+            return false;
+         }
+         if (t == bt::nested_setlist)
+         {
+            const nested_setlist* n   = static_cast<const nested_setlist*>(node);
+            int                   idx = int(ucc::lower_bound_padded(n->okeys(), n->nbranch, tb));
+            uint32_t              start = uint32_t(idx);
+            if (idx < int(n->nbranch) && n->okeys()[idx] == tb)
+            {
+               const uint32_t ui = uint32_t(idx);
+               push_(t, node, int(ui));
+               if (n->is_inline(ui))
+               {
+                  if (n->otype(ui) == bt::suffix_value)
+                  {
+                     if (suffix_ge_(n->in_suffix(ui), target, depth + 1))
+                     {
+                        set_leaf_inl_(n->in_suffix(ui), n->in_value(ui));
+                        return true;
+                     }
+                  }
+                  else if (seek_ge_(bt::setlist, n->in_setlist(ui), target, depth + 1))
+                     return true;
+               }
+               else
+               {
+                  bt ct = n->otype(ui);
+                  if (seek_ge_(ct, resolve(eng_(), ct, n->ext_ptr(ui)), target, depth + 1))
+                     return true;
+               }
+               --_n;
+               start = ui + 1;
+            }
+            if (start < n->nbranch)
+            {
+               push_(t, node, int(start));
+               if (n->is_inline(start))
+               {
+                  if (n->otype(start) == bt::suffix_value)
+                  {
+                     set_leaf_inl_(n->in_suffix(start), n->in_value(start));
+                     return true;
+                  }
+                  go_left_(bt::setlist, n->in_setlist(start));
+                  return true;
+               }
+               bt ct = n->otype(start);
+               go_left_(ct, resolve(eng_(), ct, n->ext_ptr(start)));
+               return true;
+            }
+            return false;
+         }
+         const setlist* n     = static_cast<const setlist*>(node);
+         int            idx   = int(ucc::lower_bound_padded(n->keys(), n->nbranch, tb));
+         uint32_t       start = uint32_t(idx);
+         if (idx < int(n->nbranch) && n->keys()[idx] == tb)
+         {
+            const uint32_t ui = uint32_t(idx);
+            push_(t, node, int(ui));
+            bt ct = n->btype(ui);
+            if (seek_ge_(ct, resolve(eng_(), ct, n->branch(ui)), target, depth + 1))
+               return true;
+            --_n;
+            start = ui + 1;
+         }
+         if (start < n->nbranch)
+         {
+            push_(t, node, int(start));
+            bt ct = n->btype(start);
+            go_left_(ct, resolve(eng_(), ct, n->branch(start)));
+            return true;
+         }
+         return false;
+      }
+
+      // Is the leaf whose suffix is `suf` (key = matched-bytes-above ++ suf) >= target?
+      static bool suffix_ge_(sv suf, sv target, uint32_t depth)
+      {
+         const sv tail = target.substr(depth <= target.size() ? depth : target.size());
+         return suf >= tail;
+      }
+      static sv node_prefix_(bt t, const void* node)
+      {
+         return (t == bt::full)             ? static_cast<const full*>(node)->prefix()
+                : (t == bt::nested_setlist) ? static_cast<const nested_setlist*>(node)->prefix()
+                                            : static_cast<const setlist*>(node)->prefix();
+      }
+
+      // Replay the frame stack into the reusable key buffer (NO alloc, NO std::string).
+      void materialize_key_() const
+      {
+         uint32_t len = 0;
+         auto     app = [&](const char* p, uint32_t k)
+         {
+            if (len + k > sizeof(_kb))
+               k = uint32_t(sizeof(_kb)) - len;  // adb caps keys; never overflow
+            std::memcpy(_kb + len, p, k);
+            len += k;
+         };
+         for (int i = 0; i < _n; ++i)
+         {
+            const frame& f = _f[i];
+            const sv     P = node_prefix_(f.t, f.node);
+            app(P.data(), uint32_t(P.size()));
+            if (f.cur < 0)
+               continue;  // term: no byte
+            if (f.t == bt::full)
+               _kb[len++] = char(uint8_t(f.cur));
+            else if (f.t == bt::nested_setlist)
+               _kb[len++] = char(static_cast<const nested_setlist*>(f.node)->okeys()[f.cur]);
+            else
+               _kb[len++] = char(static_cast<const setlist*>(f.node)->keys()[f.cur]);
+         }
+         if (_inl)
+            app(_isuf.data(), uint32_t(_isuf.size()));
+         else
+         {
+            const sv suf = leaf_suffix_body(_lt, _ln);
+            app(suf.data(), uint32_t(suf.size()));
+         }
+         _klen = len;
+         _kv   = true;
+      }
+
+      snap        _s;
+      frame       _f[MAXF];
+      int         _n  = 0;       // frames in use
+      bt          _lt = bt::null;
+      const void* _ln = nullptr;  // current EXTERNAL leaf
+      bool        _inl = false;
+      sv          _isuf, _ival;   // current INLINE leaf (nested suffix_value)
+      bool        _end = true, _rend = true;
+      mutable char     _kb[2048];  // reused key buffer (adb keys are bounded)
+      mutable uint32_t _klen = 0;
+      mutable bool     _kv   = false;  // key materialized for the current position?
    };
 
    // ── snapshot: an owned, FROZEN root (adb kv_tree + copyable shared_snapshot).

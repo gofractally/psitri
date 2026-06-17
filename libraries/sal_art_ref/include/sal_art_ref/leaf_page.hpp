@@ -3,6 +3,7 @@
 #include <cstring>
 #include <span>
 
+#include <sal_art_ref/env_config.hpp>  // single-init HEART_PAGE_BYTES (no scattered getenv)
 #include <sal_art_ref/inline_value.hpp>
 #include <sal_art_ref/paged.hpp>
 #include <sal_art_ref/radix_type_ids.hpp>
@@ -74,19 +75,7 @@ namespace sal_art_ref
       /// COW-unit page size (default 2KB; the design's chosen point). HEART_PAGE_BYTES
       /// overrides it (512..8192) for size experiments — read once, constant per process.
       /// u16 tail offsets and the 0xFF00 extern-code floor cap it well below 64KB.
-      static uint32_t page_bytes() noexcept
-      {
-         static const uint32_t v = [] {
-            if (const char* e = std::getenv("HEART_PAGE_BYTES"))
-            {
-               const long x = std::atol(e);
-               if (x >= 512 && x <= 8192)
-                  return uint32_t(x);
-            }
-            return 2048u;
-         }();
-         return v;
-      }
+      static uint32_t page_bytes() noexcept { return env_config::get().page_bytes; }
       static constexpr uint32_t max_cbases       = 16;
       static constexpr int      max_inline_entry = 128;  // suffix+value > this => key_val_node
       static constexpr uint16_t ext_code_base    = 0xFF00;

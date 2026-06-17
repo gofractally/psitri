@@ -17,6 +17,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <sal/diag.hpp>  // PSITRI_DEBUG(...) gate + sal::env cached env reader
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
@@ -7137,7 +7138,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          // [debug] page-order assertion — compile-gated (define HKV_PG_VALIDATE). Called pre-op/
          // post-insert on every upsert; a per-call getenv("PG_VAL") was ~5% on the write path.
 #ifdef HKV_PG_VALIDATE
-         if (!getenv("PG_VAL"))
+         if (!sal::env::flag("PG_VAL"))
             return;
          const auto* h = static_cast<const cb_hdr*>(deref_(pg));
          std::string prev;
@@ -7194,16 +7195,17 @@ namespace detail  // implementation types & node helpers — not part of the pub
             const uint8_t* c = cb_find_(h, sfx);
             if (!c)
             {
-               if (getenv("PG_DBG2"))
-               {
-                  fprintf(stderr, "PGFIND miss: page nbr=%u plen=%u sfx.len=%zu sfx0=%02x cnt=[%u %u %u %u]\n",
-                          unsigned(h->rh.hdr.nbranch), unsigned(h->rh.hdr.prefix_len),
-                          sfx.size(), uint8_t(sfx[0]), h->cnt[0], h->cnt[1], h->cnt[2], h->cnt[3]);
-                  cb_for_each_(h, [&](std::string_view s2, std::string_view) {
-                     fprintf(stderr, "  entry slen=%zu s0=%02x%02x\n", s2.size(),
-                             s2.size() > 0 ? uint8_t(s2[0]) : 0, s2.size() > 1 ? uint8_t(s2[1]) : 0);
-                  });
-               }
+               PSITRI_DEBUG(
+                  if (sal::env::flag("PG_DBG2"))
+                  {
+                     fprintf(stderr, "PGFIND miss: page nbr=%u plen=%u sfx.len=%zu sfx0=%02x cnt=[%u %u %u %u]\n",
+                             unsigned(h->rh.hdr.nbranch), unsigned(h->rh.hdr.prefix_len),
+                             sfx.size(), uint8_t(sfx[0]), h->cnt[0], h->cnt[1], h->cnt[2], h->cnt[3]);
+                     cb_for_each_(h, [&](std::string_view s2, std::string_view) {
+                        fprintf(stderr, "  entry slen=%zu s0=%02x%02x\n", s2.size(),
+                                s2.size() > 0 ? uint8_t(s2[0]) : 0, s2.size() > 1 ? uint8_t(s2[1]) : 0);
+                     });
+                  })
                return false;
             }
             out = cb_cell{const_cast<uint8_t*>(c)}.value();  // view into the page
@@ -7228,11 +7230,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
                div.len = 0;
                Ptr* slot = pg_route_mut_(key, &div);  // ONE privatizing descent
                assert(key >= div.view() && "floor route: divider must not exceed the key");
-               if (getenv("PG_OPS"))
-                  fprintf(stderr, "OP pass=%d page=%u div.len=%u dtail=%02x%02x\n", pass,
-                          unsigned(slot->raw() >> 4), div.len,
-                          div.len > 1 ? div.b[div.len - 2] : 0,
-                          div.len ? div.b[div.len - 1] : 0);
+               PSITRI_DEBUG(if (sal::env::flag("PG_OPS"))
+                               fprintf(stderr, "OP pass=%d page=%u div.len=%u dtail=%02x%02x\n", pass,
+                                       unsigned(slot->raw() >> 4), div.len,
+                                       div.len > 1 ? div.b[div.len - 2] : 0,
+                                       div.len ? div.b[div.len - 1] : 0);)
                assert(slot->tag() == K::cbucket && "divider path must end at a page");
                bool    shared = cow_shared_(*slot);
                cb_hdr* h      = static_cast<cb_hdr*>(deref_(*slot));
@@ -7346,8 +7348,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   }
                   r = -1;  // fall to split
                }
-               if (getenv("PG_OPS"))
-                  fprintf(stderr, "OP   r=%d nbr=%u\n", r, unsigned(h->rh.hdr.nbranch));
+               PSITRI_DEBUG(if (sal::env::flag("PG_OPS"))
+                               fprintf(stderr, "OP   r=%d nbr=%u\n", r, unsigned(h->rh.hdr.nbranch));)
                if (r >= 0)
                {
                   pg_validate_(*slot, "post-insert");
@@ -7362,19 +7364,20 @@ namespace detail  // implementation types & node helpers — not part of the pub
                pg_div         nd;  // divider = page prefix + separator
                nd.append(pfx.data(), pfx.size());
                nd.append(sp.b, sp.len);
-               if (getenv("PG_DBG"))
-               {
-                  auto hx = [](const void* p, size_t n2) {
-                     std::string o;
-                     for (size_t j = 0; j < n2; ++j)
-                     { char b2[4]; snprintf(b2, 4, "%02x", ((const uint8_t*)p)[j]); o += b2; }
-                     return o;
-                  };
-                  fprintf(stderr, "SPLIT div=%s pfx.len=%zu n=%u at=%u sep=%s s0=%s sN=%s\n",
-                          hx(div.b, div.len).c_str(), pfx.size(), n, sp.index,
-                          hx(sp.b, sp.len).c_str(), hx(refs[0].sfx, refs[0].slen).c_str(),
-                          hx(refs[n - 1].sfx, refs[n - 1].slen).c_str());
-               }
+               PSITRI_DEBUG(
+                  if (sal::env::flag("PG_DBG"))
+                  {
+                     auto hx = [](const void* p, size_t n2) {
+                        std::string o;
+                        for (size_t j = 0; j < n2; ++j)
+                        { char b2[4]; snprintf(b2, 4, "%02x", ((const uint8_t*)p)[j]); o += b2; }
+                        return o;
+                     };
+                     fprintf(stderr, "SPLIT div=%s pfx.len=%zu n=%u at=%u sep=%s s0=%s sN=%s\n",
+                             hx(div.b, div.len).c_str(), pfx.size(), n, sp.index,
+                             hx(sp.b, sp.len).c_str(), hx(refs[0].sfx, refs[0].slen).c_str(),
+                             hx(refs[n - 1].sfx, refs[n - 1].slen).c_str());
+                  })
                // tighten each half's prefix by its own suffix-LCP (cap 36 total)
                auto half_pfx = [&](unsigned l2, unsigned h2, unsigned& scl) {
                   scl = es_scl_(refs, l2, h2);

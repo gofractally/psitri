@@ -18,32 +18,50 @@ namespace start_ref
 {
    namespace detail
    {
-      // 4-byte indexed branch handle (hkv line_ptr): same byte-array shape as
+      // 5-byte indexed branch handle (hkv line_ptr): same byte-array shape as
       // packed_ptr_t (memcpy load/store, unaligned-safe in packed node arrays).
+      // The index is 36 bits (40-bit handle - 4-bit tag) => 2^36 lines * 128 B =
+      // 8 TB, comfortably above the arena's 32-bit line_idx ceiling (sentinel_base
+      // 0xFFFF0000 lines). A 4-byte handle held only 28 bits => 4096 segments /
+      // 34 GB, which the COW-bloated arena silently overflowed past 2.4M.
+      static constexpr unsigned HANDLE_BYTES = 5;
       struct line_ptr
       {
          static constexpr bool indexed = true;
-         uint8_t               b[4];
+         uint8_t               b[HANDLE_BYTES];
 
          static line_ptr null() noexcept
          {
             line_ptr p;
-            std::memset(p.b, 0xFF, 4);  // tag nibble becomes 0xF == K::null
+            std::memset(p.b, 0xFF, HANDLE_BYTES);  // tag nibble becomes 0xF == K::null
             return p;
          }
          static line_ptr from_off(size_t byte_off, hkv::detail::K k) noexcept
          {
             assert((byte_off & 0x7f) == 0 && "part: node offsets are line-aligned");
-            assert(byte_off >> 35 == 0 && "part: offset exceeds the 28-bit line index");
+            assert(byte_off >> 43 == 0 && "part: offset exceeds the 36-bit line index");
             line_ptr       p;
-            const uint32_t raw = uint32_t(byte_off >> 3) | uint8_t(k);  // (off>>7)<<4 == off>>3
-            std::memcpy(p.b, &raw, 4);
+            const uint64_t raw = uint64_t(byte_off >> 3) | uint8_t(k);  // (off>>7)<<4 == off>>3
+            std::memcpy(p.b, &raw, HANDLE_BYTES);
+            return p;
+         }
+         // LARGE arena: the index counts 8 KB GRAINS, not 128 B lines. The handle
+         // is otherwise identical (36-bit index in the high nibbles, 4-bit tag);
+         // deref multiplies the index by large_grain_bytes instead of line_bytes.
+         static line_ptr from_grain_off(size_t byte_off, hkv::detail::K k) noexcept
+         {
+            assert((byte_off % large_grain_bytes) == 0 && "part: large objects are grain-aligned");
+            const size_t grain = byte_off / large_grain_bytes;
+            assert(grain >> 36 == 0 && "part: large index exceeds the 36-bit field");
+            line_ptr       p;
+            const uint64_t raw = (uint64_t(grain) << 4) | uint8_t(k);
+            std::memcpy(p.b, &raw, HANDLE_BYTES);
             return p;
          }
          uint64_t raw() const noexcept
          {
-            uint32_t v;
-            std::memcpy(&v, b, 4);
+            uint64_t v = 0;
+            std::memcpy(&v, b, HANDLE_BYTES);
             return v;
          }
          hkv::detail::K tag() const noexcept { return hkv::detail::K(b[0] & 0xF); }
@@ -51,7 +69,7 @@ namespace start_ref
 
          line_idx index() const noexcept { return line_idx(raw() >> 4); }
       };
-      static_assert(sizeof(line_ptr) == 4, "line_ptr is exactly 4 bytes");
+      static_assert(sizeof(line_ptr) == HANDLE_BYTES, "line_ptr is exactly 5 bytes");
    }  // namespace detail
 
    // Typed-value lifecycle hooks (LOCKED API, adb): fired when stored value
@@ -80,6 +98,15 @@ namespace start_ref
                                // cascades to the background releaser
       const value_hooks* vhooks = nullptr;
 
+      // ── large-value second arena (8 KB grain; value_large leaves) ─────────
+      // lses (writer-only) is the allocation context; the deref/free base comes
+      // from a->companion() so EVERY allocator copy — views, drain, releaser —
+      // resolves and frees a large leaf without carrying lses. The same COW /
+      // refcount / recovery machinery the line arena has (large_arena IS the
+      // grain-parameterized arena). value_large leaves free via the refcount
+      // cascade (node_free_p_ -> deallocate_large), no version drain.
+      large_session* lses = nullptr;
+
       part_alloc() = default;
       explicit part_alloc(session* s) noexcept : a(&s->store()), ses(s), defer(true) {}
       explicit part_alloc(session& s) noexcept : a(&s.store()), ses(&s), defer(true) {}
@@ -87,11 +114,53 @@ namespace start_ref
       part_alloc(arena* ar, bool d) noexcept : a(ar), defer(d) {}  // writer temp views
       template <class U>
       part_alloc(const part_alloc<U>& o) noexcept
-          : a(o.a), ses(o.ses), defer(o.defer), vhooks(o.vhooks)
+          : a(o.a), ses(o.ses), defer(o.defer), vhooks(o.vhooks), lses(o.lses)
       {
       }
 
       const std::byte* hkv_base() const noexcept { return a ? a->base() : nullptr; }
+
+      // ── large arena addressing/alloc/free (value_large leaves) ────────────
+      // The companion large_arena is held by the LINE arena (set once at db
+      // construction), so any allocator copy reaches it through `a`.
+      large_arena* large_() const noexcept
+      {
+         return a ? static_cast<large_arena*>(a->companion()) : nullptr;
+      }
+      const std::byte* hkv_large_base() const noexcept
+      {
+         large_arena* la = large_();
+         return la ? la->base() : nullptr;
+      }
+      static constexpr bool has_large = true;
+      // Largest value the line arena can hold (64 lines): the tree decides
+      // line-vs-large against this.
+      static constexpr size_t large_threshold_bytes = size_t(max_alloc_lines) * line_bytes;
+      static constexpr size_t large_max_bytes       = large_max_object_bytes;
+
+      // Allocate a large leaf of `bytes`; returns its grain offset (from the
+      // large arena base) — the tree packs it with from_grain_off + value_large.
+      size_t allocate_large(size_t bytes)
+      {
+         large_arena*   la = large_();
+         assert(la && lses && "large-value store has no large arena/session");
+         (void)la;
+         if (bytes > large_max_bytes)
+            throw std::runtime_error("part: value exceeds the large-arena 0.5 MB object cap");
+         const uint32_t units = uint32_t((bytes + large_grain_bytes - 1) / large_grain_bytes);
+         const line_idx g     = lses->alloc_lines(units);
+         return size_t(g) * large_grain_bytes;
+      }
+      void deallocate_large(size_t grain_off, size_t bytes) noexcept
+      {
+         large_arena*   la    = large_();
+         const line_idx g     = line_idx(grain_off / large_grain_bytes);
+         const uint32_t units = uint32_t((bytes + large_grain_bytes - 1) / large_grain_bytes);
+         if (lses)
+            lses->release_run(g, units);
+         else if (la)
+            la->release_run(g, units);
+      }
 
       static constexpr size_t lines_(size_t bytes) noexcept
       {
@@ -134,7 +203,7 @@ namespace start_ref
       // dropping the last snapshot reference).
       static constexpr bool hkv_cow = true;
       uint8_t hkv_ref(uint32_t line) const noexcept { return a->ref(line); }
-      bool hkv_defer(uint32_t raw) noexcept { return defer && a->try_defer(raw); }
+      bool hkv_defer(uint64_t raw) noexcept { return defer && a->try_defer(raw); }
       bool    hkv_retain(uint32_t line) noexcept { return a->retain(line); }
       template <class D>
       bool hkv_release(uint32_t line, D&& d) noexcept(noexcept(d(line)))
@@ -142,5 +211,43 @@ namespace start_ref
          return a->release(line, static_cast<D&&>(d));
       }
       void hkv_free_run(uint32_t line, uint32_t n) noexcept { a->release_run(line, n); }
+
+      // ── large-arena refcount hooks (value_large leaves) ────────────────────
+      // The same per-line refcount liveness as the line arena, but indexed into
+      // the LARGE arena by GRAIN. As with the line arena, the HEAD grain's count
+      // is the object's share count (snapshot pins / COW clones retain the head);
+      // the tail grains stay at their allocation count of 1 and are freed in one
+      // run when the head dies. No version drain — a value_large leaf is freed
+      // exactly when its head grain reaches 0.
+      uint8_t hkv_large_ref(uint32_t grain) const noexcept
+      {
+         large_arena* la = large_();
+         return la ? la->ref(grain) : 0;
+      }
+      bool hkv_large_retain(uint32_t grain) noexcept
+      {
+         large_arena* la = large_();
+         return la ? la->retain(grain) : true;
+      }
+      // Release ONE reference to a `units`-grain large object at `grain`. When the
+      // head grain reaches 0 the object dies: `d()` runs (the leaf-dies hook),
+      // then all `units` grains are freed in one run. Mirrors the line arena's
+      // head-line release + tail free_run.
+      template <class D>
+      void hkv_large_release(uint32_t grain, uint32_t units, D&& d) noexcept(noexcept(d()))
+      {
+         large_arena* la = large_();
+         if (!la)
+            return;
+         // release() runs the destroy while the head grain is still live, then
+         // frees it; fire d() there (it reads the leaf bytes) and free the tail.
+         la->release(grain,
+                     [&](line_idx)
+                     {
+                        d();  // object died: fire the leaf-dies hook once
+                        if (units > 1)
+                           la->free_lines_now(grain + 1, units - 1);
+                     });
+      }
    };
 }  // namespace start_ref

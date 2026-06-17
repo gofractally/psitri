@@ -18,6 +18,7 @@
 #pragma once
 
 #include <sal/config.hpp>  // sal::open_mode (the unified open clause)
+#include <sal/diag.hpp>    // PSITRI_DEBUG(...) gate + sal::env cached env reader
 
 #include <cstdlib>
 #include <atomic>
@@ -709,8 +710,8 @@ namespace delta_art
             if constexpr (requires { wcfg.reuse_threshold; })
             {
                wcfg.reuse_threshold = 0.80;
-               if (const char* rt = getenv("DELTA_REUSE"))  // experiment knob
-                  wcfg.reuse_threshold = atof(rt);
+               PSITRI_DEBUG(if (const char* rt = sal::env::get("DELTA_REUSE"))  // experiment knob
+                               wcfg.reuse_threshold = atof(rt);)
             }
             _w   = W::database::open(dir / "delta", mode, wcfg);
             _b   = B::database::open(dir / "base", mode, bcfg);

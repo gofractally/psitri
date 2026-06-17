@@ -55,6 +55,7 @@
 #define PSITRIMDBX_USES_PSITRI (PSITRIMDBX_BACKEND_PSITRI || PSITRIMDBX_BACKEND_TIERED_PSITRI)
 
 #include <sal/config.hpp>    // sal::open_mode
+#include <sal/diag.hpp>      // sal::env cached env reader + PSITRI_DEBUG gating
 #include <start_ver/kv.hpp>  // start_ver::kv::engine (hot delta / standalone store)
 #if PSITRIMDBX_BACKEND_START_REF
 #include <start_ref/kv.hpp>  // start_ref::kv::engine (part-family ART, refcount liveness)
@@ -108,6 +109,7 @@ static void qlog(const MDBX_txn* txn, char op, int subop, uint32_t dbi, const vo
 // Bug B memmove-from-garbage; lldb batch won't expand the stack). Arm with RADIX_CRASHTRACE=1.
 #include <csignal>
 #include <execinfo.h>
+#ifdef PSITRI_DEBUG_BUILD
 namespace
 {
    void psitri_crash_handler(int sig)
@@ -124,13 +126,49 @@ namespace
    {
       psitri_crash_installer()
       {
-         if (std::getenv("RADIX_CRASHTRACE"))
+         if (sal::env::get("RADIX_CRASHTRACE"))
          {
             ::signal(SIGBUS, psitri_crash_handler);
             ::signal(SIGSEGV, psitri_crash_handler);
          }
       }
    } g_psitri_crash_installer;
+}  // namespace
+#endif  // PSITRI_DEBUG (RADIX_CRASHTRACE)
+
+namespace
+{
+   // Single-init snapshot of the shim's runtime env knobs (read ONCE at first use,
+   // never re-read). These are consumed at mdbx_env_open; routing them through one
+   // static-local struct keeps the open path free of scattered getenv calls.
+   struct shim_env
+   {
+      const char* write_mode    = nullptr;  // PSITRI_MDBX_WRITE_MODE (raw; parsed by caller)
+      bool        no_read_cache = false;    // PSITRI_NO_READ_CACHE present
+      uint64_t    cache_mb      = 0;        // PSITRI_CACHE_MB (0 = unset)
+      const char* sync          = nullptr;  // PSITRI_SYNC (raw; mapped by caller)
+      uint64_t    hi_water_mb   = 0;        // PSITRI_MDBX_HI_WATER_MB (0 = unset)
+
+      static const shim_env& get()
+      {
+         static const shim_env e = load();
+         return e;
+      }
+
+     private:
+      static shim_env load()
+      {
+         shim_env e;
+         e.write_mode    = sal::env::get("PSITRI_MDBX_WRITE_MODE");
+         e.no_read_cache = sal::env::get("PSITRI_NO_READ_CACHE") != nullptr;
+         if (const char* m = sal::env::get("PSITRI_CACHE_MB"))
+            e.cache_mb = std::strtoull(m, nullptr, 10);
+         e.sync = sal::env::get("PSITRI_SYNC");
+         if (const char* h = sal::env::get("PSITRI_MDBX_HI_WATER_MB"))
+            e.hi_water_mb = std::strtoull(h, nullptr, 10);
+         return e;
+      }
+   };
 }  // namespace
 
 // ── delta_art tiered backend aliases ─────────────────────────────────
@@ -1848,6 +1886,7 @@ static bool txn_get_value(const MDBX_txn* txn, uint32_t root_idx,
    return physical && txn_get_physical_value(txn, *physical, out);
 }
 
+#ifdef PSITRI_DEBUG_BUILD
 // [oplog] Backend-agnostic capture of the engine-facing op stream (env MDBX_OPLOG=path).
 // Records U(key,val)/R(key)/C exactly as the shim drives TK::transaction — independent of which
 // backend TK is compiled in — so a log captured on a KNOWN-WORKING engine (e.g. start_ver) can be
@@ -1862,7 +1901,7 @@ static void oplog_record(char op, std::string_view key, std::string_view val)
    if (!init)
    {
       init = true;
-      if (const char* p = std::getenv("MDBX_OPLOG"))
+      if (const char* p = sal::env::get("MDBX_OPLOG"))
       {
          f = std::fopen(p, "wb");
          if (f)
@@ -1889,6 +1928,9 @@ static void oplog_record(char op, std::string_view key, std::string_view val)
          std::fwrite(val.data(), 1, vl, f);
    }
 }
+#else
+static inline void oplog_record(char, std::string_view, std::string_view) {}
+#endif  // PSITRI_DEBUG (MDBX_OPLOG)
 
 #ifdef SAL_STALL_DEBUG
 // [stall-debug] Overwrites /tmp/sal_hb.txt with the current engine-call phase on every entry/exit,
@@ -1934,7 +1976,7 @@ static void qlog(const MDBX_txn* txn, char op, int subop, uint32_t dbi, const vo
    if (!init)
    {
       init = true;
-      if (const char* p = std::getenv("MDBX_QLOG"))
+      if (const char* p = sal::env::get("MDBX_QLOG"))
       {
          f = std::fopen(p, "w");
          if (f)
@@ -2564,7 +2606,7 @@ int mdbx_env_open(MDBX_env* env, const char* pathname,
       env->env_flags = flags;
       if (!env->write_mode_explicit)
       {
-         if (auto mode = parse_psitri_write_mode(std::getenv("PSITRI_MDBX_WRITE_MODE")))
+         if (auto mode = parse_psitri_write_mode(shim_env::get().write_mode))
             env->write_mode = *mode;
       }
 
@@ -2590,17 +2632,17 @@ int mdbx_env_open(MDBX_env* env, const char* pathname,
       // [stall-bisect] read-cache knobs to isolate the compactor/pinned-cache stall.
       //   PSITRI_NO_READ_CACHE=1     → disable the read cache entirely (no pinned-segment churn)
       //   PSITRI_CACHE_MB=<n>        → cap the pinned cache at n MB (multiple of 32)
-      if (std::getenv("PSITRI_NO_READ_CACHE"))
+      if (shim_env::get().no_read_cache)
          cfg.enable_read_cache = false;
-      if (const char* mb = std::getenv("PSITRI_CACHE_MB"))
-         cfg.max_pinned_cache_size_mb = std::strtoull(mb, nullptr, 10);
+      if (const uint64_t mb = shim_env::get().cache_mb)
+         cfg.max_pinned_cache_size_mb = mb;
       env->db = be_db::open(env->path, open_mode, cfg);
 #else
       TK::config cfg;
       // Durability: derive the adb commit-sync from the MDBX env flags (the commit config),
       // fanned out to both tiers at open. PSITRI_SYNC overrides for A/B benchmarking.
       cfg.commit_sync = mdbx_flags_to_sync(flags);
-      if (const char* s = std::getenv("PSITRI_SYNC"))
+      if (const char* s = shim_env::get().sync)
       {
          const std::string_view v{s};
          if (v == "none")                              cfg.commit_sync = sal::sync_type::none;
@@ -2616,8 +2658,8 @@ int mdbx_env_open(MDBX_env* env, const char* pathname,
          cfg.knobs.arena_budget_bytes = it->second << 20;
       // Flush-threshold override (testing/tuning): force hot->cold flushes at a
       // chosen hot-delta size so large-value flush paths get exercised.
-      if (const char* hw = std::getenv("PSITRI_MDBX_HI_WATER_MB"))
-         cfg.knobs.hi_water_bytes = std::strtoull(hw, nullptr, 10) << 20;
+      if (const uint64_t hw = shim_env::get().hi_water_mb)
+         cfg.knobs.hi_water_bytes = hw << 20;
 
       env->db = be_db::open(env->path, open_mode, cfg);
 #endif
@@ -3304,10 +3346,11 @@ int mdbx_dbi_flags_ex(const MDBX_txn* txn, MDBX_dbi dbi,
 
 // ── Key-value operations ─────────────────────────────────────────
 
+#ifdef PSITRI_DEBUG_BUILD
 // [PSITRI_NF_LOG] Debug: keep ONLY the last NOTFOUND read (near-zero cost — no per-call I/O,
 // since Silkworm legitimately probes-via-cursor millions of times) and dump it at process exit.
 // The fatal MDBX_NOTFOUND is the very last read before exit, so the last-recorded entry is it.
-static const bool      g_nf_on = std::getenv("PSITRI_NF_LOG") != nullptr;
+static const bool      g_nf_on = sal::env::get("PSITRI_NF_LOG") != nullptr;
 static char            g_lnf_key[80];
 static char            g_lnf_where[40];
 static std::atomic<uint32_t> g_lnf_klen{0}, g_lnf_dbi{0}, g_lnf_root{0};
@@ -3316,7 +3359,7 @@ static std::atomic<bool>     g_lnf_registered{false};
 
 static void dbg_nf_dump_atexit()
 {
-   const char* path = std::getenv("PSITRI_NF_LOG");
+   const char* path = sal::env::get("PSITRI_NF_LOG");
    if (!path)
       return;
    FILE* f = std::fopen(path, "w");
@@ -3350,6 +3393,9 @@ static inline void dbg_log_notfound(MDBX_dbi dbi, uint32_t root_idx, std::string
    g_lnf_root.store(root_idx);
    g_lnf_count.fetch_add(1, std::memory_order_relaxed);
 }
+#else
+static inline void dbg_log_notfound(MDBX_dbi, uint32_t, std::string_view, const char*) {}
+#endif  // PSITRI_DEBUG (PSITRI_NF_LOG)
 
 int mdbx_get(const MDBX_txn* txn, MDBX_dbi dbi,
              const MDBX_val* key, MDBX_val* data)
@@ -3991,11 +4037,10 @@ static int mdbx_cursor_get_impl(MDBX_cursor* cursor, MDBX_val* key,
 int mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
                     MDBX_val* data, MDBX_cursor_op op)
 {
+#ifdef PSITRI_DEBUG_BUILD
    // [PSITRI_NF_LOG] capture the incoming key (lookup key for SET-family ops) and the op,
    // then log on a NOTFOUND result. The last entry before a fatal MDBX_NOTFOUND is the culprit.
-   // [perf] cache the env check ONCE — mdbx_cursor_get is the read-heavy hot path; a per-call
-   // std::getenv("PSITRI_NF_LOG") locks+scans environ (~5% __findenv_locked in Silkworm sync).
-   static const bool nf_log = std::getenv("PSITRI_NF_LOG") != nullptr;
+   static const bool nf_log = sal::env::get("PSITRI_NF_LOG") != nullptr;
    std::string in_key;
    if (nf_log && key && key->iov_base)
       in_key.assign(static_cast<const char*>(key->iov_base), key->iov_len);
@@ -4008,6 +4053,9 @@ int mdbx_cursor_get(MDBX_cursor* cursor, MDBX_val* key,
       dbg_log_notfound(cursor ? cursor->dbi : MDBX_dbi(0), root, in_key, where);
    }
    return rc;
+#else
+   return mdbx_cursor_get_impl(cursor, key, data, op);
+#endif
 }
 
 int mdbx_cursor_put(MDBX_cursor* cursor, const MDBX_val* key,

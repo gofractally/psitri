@@ -26,6 +26,7 @@
 #include <bit>
 #include <cassert>
 #include <cstdint>
+#include <sal/diag.hpp>  // PSITRI_DEBUG(...) gate + sal::env cached env reader
 #include <cstring>
 #include <filesystem>
 #include <mutex>
@@ -296,8 +297,8 @@ namespace start_ver
             // lives at the same offset, the derived region is ignored).
             freeset_(s).rebuild_from_l0();
          }
-         if (getenv("PART_PRINT_REFBASE"))
-            fprintf(stderr, "REFBASE %p DATABASE %p\n", (void*)_ref_base, (void*)_base);
+         PSITRI_DEBUG(if (sal::env::flag("PART_PRINT_REFBASE"))
+                         fprintf(stderr, "REFBASE %p DATABASE %p\n", (void*)_ref_base, (void*)_base);)
       }
 
       ~arena_t()
@@ -372,14 +373,18 @@ namespace start_ver
       // Exact decrement; on 1->0 runs destroy(i) while the line is still valid,
       // then frees the line immediately (crash safety is the COW contract's
       // job — SPEC §7). Returns true when the line died.
-      // PART_TRACE_LINE=<n>: stderr trace of one line's count lifecycle (debug)
+      // PART_TRACE_LINE=<n>: stderr trace of one line's count lifecycle (debug).
+      // Returns -1 (matches no line) unless PSITRI_DEBUG is defined — so there is
+      // no getenv in production and every `i == trace_line_()` trace branch folds
+      // away at -O3 (the call inlines to a constant -1, the compare is always false).
       static long trace_line_()
       {
-         static long v = [] {
-            const char* e = getenv("PART_TRACE_LINE");
-            return e ? atol(e) : -1;
-         }();
+#ifdef PSITRI_DEBUG_BUILD
+         static long v = sal::env::num("PART_TRACE_LINE", -1);
          return v;
+#else
+         return -1;
+#endif
       }
       template <typename Destroy>
       bool release(line_idx i, Destroy&& destroy) noexcept(noexcept(destroy(i)))

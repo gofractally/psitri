@@ -81,8 +81,14 @@ namespace start_ref
    // this thread. Proves O(1) behavior without wall clocks.
    inline thread_local uint32_t g_freeset_probes = 0;
 
-   struct seg_freeset
+   // Grain-AGNOSTIC: templated on UNITS-per-segment (bits in l0), never on bytes.
+   // The line arena and the large-value arena instantiate the SAME freeset (both
+   // have units_per_segment == lines_per_segment by the large_geometry choice),
+   // so the default instantiation is byte-identical to the pre-template struct.
+   template <uint32_t UnitsPerSegment = lines_per_segment>
+   struct seg_freeset_t
    {
+      static constexpr uint32_t lines_per_segment = UnitsPerSegment;
       static constexpr uint32_t W0 = lines_per_segment / 64;  // l0 words
       static constexpr uint32_t W1 = (lines_per_segment / 2) / 64;
       static constexpr uint32_t W2 = (lines_per_segment / 4) / 64;
@@ -499,4 +505,7 @@ namespace start_ref
          return false;
       }
    };
+
+   // Default (128 B grain) alias — byte-identical to the pre-template struct.
+   using seg_freeset = seg_freeset_t<lines_per_segment>;
 }  // namespace start_ref

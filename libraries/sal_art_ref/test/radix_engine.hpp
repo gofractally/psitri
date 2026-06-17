@@ -37,7 +37,9 @@
 #include <sal/read_lock.hpp>
 #include <ucc/round.hpp>
 
+#include <sal/diag.hpp>            // PSITRI_STATS / PSITRI_DEBUG gating + sal::stat_counter
 #include <sal_art_ref/bucket_node.hpp>
+#include <sal_art_ref/env_config.hpp>  // single-init env knobs (no scattered getenv)
 #include <sal_art_ref/leaf_node.hpp>
 #include <sal_art_ref/key_val_node.hpp>
 #include <sal_art_ref/leaf_page.hpp>
@@ -181,8 +183,7 @@ namespace sal_art_ref::radix
          // [BISECT] RADIX_NO_COMPACT=1 stops the compactor (keeps the release thread, so
          // get_new_segment doesn't stall). If the cold-base SIGBUS vanishes, the race is the
          // compactor relocating live tree nodes that route_to_page reads via a RAW pointer.
-         if (std::getenv("RADIX_NO_COMPACT"))
-            _alloc->stop_compactor_thread();
+         PSITRI_DEBUG(if (sal::env::flag("RADIX_NO_COMPACT")) _alloc->stop_compactor_thread(););
       }
 
       // Radix + bucket hybrid: leaf -> bucket-of-leaves -> radix with bucket/leaf branches.
@@ -789,18 +790,22 @@ namespace sal_art_ref::radix
       // COW/alloc accounting: how mutation actually played out over the run. `clones`
       // and `grows` are the COW-to-root cost (a clone forced by sharing or a full heap);
       // `in_place` is the cheap path (unique node, room to spare).
+      // Hot-path COW/alloc accounting. Each field is a sal::stat_counter: a real
+      // uint64_t under -DPSITRI_STATS, otherwise a zero-cost stand-in whose ++/+=
+      // inline to nothing and whose reads yield 0 (so this struct, counters(), and
+      // every ++_cc.* site below all compile unchanged — only the work disappears).
       struct cow_counters
       {
-         uint64_t node_allocs = 0;     // routers built
-         uint64_t leaf_allocs = 0;     // >60 SAL value-holders
-         uint64_t inline_values = 0;   // tail (local) terminal values
-         uint64_t clones = 0;          // COW clones (shared OR heap-full)
-         uint64_t child_retains = 0;   // per-child retains done by clone() (the dense-clone cost)
-         uint64_t grows = 0;           // subset of clones forced by a full tail heap
-         uint64_t in_place = 0;        // unique + room: mutated in place (no copy)
-         uint64_t restrides = 0;       // wide-node splits (re_stride to a narrower stride)
-         uint64_t upgrades = 0;        // grow_and_set tier widenings (setlist→c1/r2/r4/full)
-         uint64_t page_splits = 0;     // leaf_page splits (page model)
+         sal::stat_counter node_allocs   = 0;   // routers built
+         sal::stat_counter leaf_allocs   = 0;   // >60 SAL value-holders
+         sal::stat_counter inline_values = 0;   // tail (local) terminal values
+         sal::stat_counter clones        = 0;   // COW clones (shared OR heap-full)
+         sal::stat_counter child_retains = 0;   // per-child retains done by clone() (the dense-clone cost)
+         sal::stat_counter grows         = 0;   // subset of clones forced by a full tail heap
+         sal::stat_counter in_place      = 0;   // unique + room: mutated in place (no copy)
+         sal::stat_counter restrides     = 0;   // wide-node splits (re_stride to a narrower stride)
+         sal::stat_counter upgrades      = 0;   // grow_and_set tier widenings (setlist→c1/r2/r4/full)
+         sal::stat_counter page_splits   = 0;   // leaf_page splits (page model)
       };
       const cow_counters&        counters() const { return _cc; }
       sal::allocator_session_ptr session() const { return _ses; }
@@ -992,23 +997,6 @@ namespace sal_art_ref::radix
          }
       }
 
-      // [sync] PSITRI_SYNC env → SAL commit sync level (default none, the bench setting). Cached once
-      // (NOT per-commit getenv). none | async(msync_async) | msync(msync_sync) | fsync | full.
-      static sal::sync_type radix_sync_mode() noexcept
-      {
-         static const sal::sync_type s = [] {
-            const char* e = std::getenv("PSITRI_SYNC");
-            if (!e) return sal::sync_type::none;
-            const std::string_view v{e};
-            if (v == "async" || v == "msync_async") return sal::sync_type::msync_async;
-            if (v == "msync" || v == "msync_sync") return sal::sync_type::msync_sync;
-            if (v == "fsync") return sal::sync_type::fsync;
-            if (v == "full") return sal::sync_type::full;
-            return sal::sync_type::none;
-         }();
-         return s;
-      }
-
       static std::unique_ptr<sal::allocator> make_alloc(const std::filesystem::path& dir,
                                                         bool wipe      = true,
                                                         bool read_only = false,
@@ -1023,13 +1011,21 @@ namespace sal_art_ref::radix
          cfg.read_only               = read_only;
          cfg.sync_mode               = sync;  // commit durability: derived from the adb commit config
          cfg.write_protect_on_commit = false;
-         cfg.enable_read_cache       = false;
+         // [MFU read cache] Runtime toggle (HEART_READ_CACHE=1), NOT hardcoded — promotes
+         // read-hot, read-only objects into mlock'd pinned segments so the active working
+         // set stays resident. This is the lever for swap + TLB pressure once the cold base
+         // outgrows RAM (mlock keeps pages present but does nothing for TLB coverage, so the
+         // win is in BOUNDING the resident set, not just pinning it). Default OFF preserves
+         // the historical baseline; flip the env var to A/B it under memory pressure.
+         cfg.enable_read_cache = env_config::get().read_cache;
+         if (const uint64_t w = env_config::get().read_cache_window_sec)
+            cfg.read_cache_window_sec = w;
          // Sessions allocate into PINNED (mlock'd) segments by default and pinned
          // segments are exempt from the unpinned compactor — the file's steady-state
          // high-water is ~max_pinned_cache_size_mb (8 GB default) regardless of live
          // size. Knob for scale benches (mirrors HEART_PAGE_BYTES).
-         if (const char* mb = std::getenv("HEART_PINNED_MB"); mb && atoi(mb) > 0)
-            cfg.max_pinned_cache_size_mb = uint64_t(atoi(mb));
+         if (const uint64_t pinned = env_config::get().pinned_mb)
+            cfg.max_pinned_cache_size_mb = pinned;
          return std::make_unique<sal::allocator>(dir, cfg, false);  // threads started post-ctor
       }
 
@@ -1792,16 +1788,17 @@ namespace sal_art_ref::radix
          return empty;
       }
       // [debug] SIGBUS-hunt diagnostics (dump-if-bad + subtree validation). Compile-time
-      // gated: define RADIX_DEBUG to enable. Production builds expand these to nothing, so
+      // gated: define PSITRI_DEBUG to enable. Production builds expand these to nothing, so
       // there is ZERO branch/call overhead in the hot routing path (route_to_page/max_page).
-#ifdef RADIX_DEBUG
+#ifdef PSITRI_DEBUG_BUILD
 #  define RADIX_DUMP_IF_BAD(...) radix_dump_if_bad(__VA_ARGS__)
 #else
 #  define RADIX_DUMP_IF_BAD(...) ((void)0)
 #endif
+#ifdef PSITRI_DEBUG_BUILD
       static bool radix_validate_on()
       {
-         static const bool on = std::getenv("RADIX_VALIDATE") != nullptr;
+         static const bool on = sal::env::flag("RADIX_VALIDATE");
          return on;
       }
       // [RADIX_VALIDATE] POST-OP, NON-INTRUSIVE: walk the whole (just-committed) page-model
@@ -1850,21 +1847,23 @@ namespace sal_art_ref::radix
             }
          });
       }
+#endif  // PSITRI_DEBUG (radix_validate_on + validate_subtree)
       void validate_root([[maybe_unused]] ptr_address root, [[maybe_unused]] const char* where)
       {
-#ifdef RADIX_DEBUG
+#ifdef PSITRI_DEBUG_BUILD
          if (radix_validate_on())
             validate_subtree(*_ses, root, 0, where);
 #endif
       }
 
+#ifdef PSITRI_DEBUG_BUILD
       static void radix_dump_if_bad(const char* where, sal::allocator_session& ses,
                                     ptr_address parent, const sal::alloc_header* h, int info,
                                     ptr_address child)
       {
          // [perf] cache the env check ONCE — this is called on every route_to_page/max_page
          // (hot path); a per-call std::getenv locks+scans environ (~20% in Silkworm sync).
-         static const bool dump_on = std::getenv("RADIX_DUMP") != nullptr;
+         static const bool dump_on = sal::env::flag("RADIX_DUMP");
          if (!dump_on)
             return;
          const uint32_t child_raw = uint32_t(*child);
@@ -1919,6 +1918,7 @@ namespace sal_art_ref::radix
          }
          std::abort();
       }
+#endif  // PSITRI_DEBUG (radix_dump_if_bad)
 
       // The rightmost page under `addr` (the page of the subtree's MAX divider). Appends the
       // divider bytes it walks when `div` is non-null. ONE get_ref per hop.
@@ -4605,6 +4605,7 @@ namespace sal_art_ref::radix
          transaction& operator=(const transaction&)     = delete;
          ~transaction() { if (_open) abort(); }
 
+#ifdef PSITRI_DEBUG_BUILD
          // [RADIX_OPLOG — TEMPORARY DIAGNOSTIC] Replayable op-log: capture every upsert/remove/
          // commit at the transaction boundary so a Silkworm-free standalone tool can replay the
          // exact sequence into a fresh sal_art_ref DB and reproduce the crash deterministically.
@@ -4612,7 +4613,7 @@ namespace sal_art_ref::radix
          static std::FILE* oplog()
          {
             static std::FILE* f = [] {
-               const char* p = std::getenv("RADIX_OPLOG");
+               const char* p = sal::env::get("RADIX_OPLOG");
                std::FILE*  h = p ? std::fopen(p, "wb") : nullptr;
                if (h)
                   std::setvbuf(h, nullptr, _IONBF, 0);  // unbuffered: survive abort()
@@ -4639,10 +4640,11 @@ namespace sal_art_ref::radix
             std::fputc(op, f);
             std::fwrite(&kl, 4, 1, f); std::fwrite(k.data(), 1, kl, f);
          }
+#endif  // PSITRI_DEBUG (RADIX_OPLOG)
 
          // ── primary-root mutations / reads (forward to the primary handle) ──
-         void upsert(key_view k, value_view v) { oplog_kv('U', k, v); _primary.upsert(k, v); }
-         int  remove(key_view k) { oplog_k('R', k); return _primary.remove(k); }
+         void upsert(key_view k, value_view v) { PSITRI_DEBUG(oplog_kv('U', k, v);); _primary.upsert(k, v); }
+         int  remove(key_view k) { PSITRI_DEBUG(oplog_k('R', k);); return _primary.remove(k); }
          uint64_t remove_range_counted(key_view lower, key_view upper)
          {
             return _primary.remove_range_counted(lower, upper);
@@ -4678,7 +4680,7 @@ namespace sal_art_ref::radix
          void commit()
          {
             if (!_open) return;
-            if (std::FILE* f = oplog()) std::fputc('C', f);  // [RADIX_OPLOG] commit marker
+            PSITRI_DEBUG(if (std::FILE* f = oplog()) std::fputc('C', f););  // [RADIX_OPLOG] commit marker
             publish(_primary_idx, _primary.flush());      // flush bottom-up + publish primary
             for (auto& [i, h] : _extra) publish(i, h->flush());
             _extra.clear();

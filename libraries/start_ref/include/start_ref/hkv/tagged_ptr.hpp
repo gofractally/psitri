@@ -39,19 +39,31 @@ namespace start_ref::hkv::detail
                          // CL0 holds per-line pointers to individually-refcounted
                          // direct lines — COW of one branch shares the other lines
                          // instead of copying them (design5 implicit-to-explicit)
+      value_large  = 14, // LARGE terminal: a leaf (suffix + value) structurally
+                         // identical to value_ptr, but allocated from the SECOND
+                         // (8 KB-grain) arena and indexed off the large base. Read
+                         // paths treat it as value_ptr's verbatim; only alloc/free
+                         // routes to the large arena (deref/pack use grain encoding).
       null         = 0xF,
    };
    // 4-bit tag contract: null is the all-ones nibble (an all-0xFF handle reads as null),
    // real kinds stay <= 0xE. An indexed handle has no spare bits — don't grow past this.
-   static_assert(unsigned(K::cx) <= 0xE && unsigned(K::null) == 0xF, "tags fit 4 bits");
+   static_assert(unsigned(K::value_large) <= 0xE && unsigned(K::null) == 0xF, "tags fit 4 bits");
    // Highest real tag. Bump this FIRST when adding a kind: the read descent hoists a
    // `tag > K_max → miss` guard ahead of its exhaustive switch (keeps the jump table
    // dense and rejects corrupt tags), so a kind above K_max would silently miss.
    // NOTE: tag values are free to renumber only until a persisted (WAL/disk) format
    // exists; after that they are frozen.
-   inline constexpr unsigned K_max = unsigned(K::cbucket);
+   inline constexpr unsigned K_max = unsigned(K::value_large);
 
-   constexpr bool is_terminal(K k) noexcept { return k == K::value_ptr || k == K::value_inline; }
+   constexpr bool is_terminal(K k) noexcept
+   {
+      return k == K::value_ptr || k == K::value_inline || k == K::value_large;
+   }
+   // A heap leaf carrying value bytes (suffix + value): value_ptr (line arena) or
+   // value_large (large arena). Same byte layout; the read path is identical and
+   // only the arena/deref base differs. (value_inline lives in the handle, not heap.)
+   constexpr bool is_leaf(K k) noexcept { return k == K::value_ptr || k == K::value_large; }
    static_assert(uint8_t(K::setlist_u16) == uint8_t(K::c8) + 1,
                  "router tags are contiguous: setlist_u8..setlist_u16 is one range check");
    constexpr bool is_router(K k) noexcept { return k >= K::setlist_u8 && k <= K::setlist_u16; }

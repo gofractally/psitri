@@ -486,3 +486,177 @@ TEST_CASE("kv churn: repeated overwrites under generation turnover drain fully")
    }
    require_drained(*db);
 }
+
+// ── large values (>8 KB): the second 8 KB-grain arena (value_large) ──────────
+// Ethereum contract bytecode (up to ~0.5 MB) exceeds the line arena's single-CAS
+// 8 KB object cap, so those leaves must route to the LARGE arena. This exercises
+// the full value_large refcount lifecycle: create, read-back, COW overwrite
+// (grows/shrinks across the line/large boundary), remove, and the snapshot-
+// sharing path — and asserts the large arena DRAINS (no per-grain leak via the
+// refcount cascade).
+namespace
+{
+   std::string big_val(size_t len, uint64_t seed)
+   {
+      std::string v(len, 0);
+      for (size_t j = 0; j < len; ++j)
+         v[j] = char(uint8_t(seed * 2654435761u + j * 40503u + (j >> 8)));
+      return v;
+   }
+}  // namespace
+
+TEST_CASE("large values: >8KB and 0.5MB leaves route to the large arena and drain")
+{
+   auto dir = fs::temp_directory_path() / "part_kv_large";
+   fs::remove_all(dir);
+   auto db  = start_ref::kv::database::create(dir);
+   auto ses = db->start_write_session();
+
+   const std::string ka = "code/aaa";  // a >8KB value
+   const std::string kb = "code/bbb";  // a 0.5MB-class value
+   const std::string ks = "code/small";  // stays in the line arena (value_ptr)
+
+   const std::string va  = big_val(20000, 1);     // 20 KB  -> value_large
+   const std::string vb  = big_val(100000, 2);    // 100 KB -> value_large
+   const std::string vsm = mkval(7);              // small  -> value_ptr (line arena)
+
+   // 1) create + read back, verify bytes exactly.
+   {
+      auto tx = ses->start_transaction(0);
+      tx.upsert(ka, va);
+      tx.upsert(kb, vb);
+      tx.upsert(ks, vsm);
+      tx.commit();
+   }
+   REQUIRE(db->large_used_grains() > 0);  // the large arena actually fired
+   {
+      auto tx = ses->start_transaction(0);
+      auto ga = tx.get<std::string>(ka);
+      auto gb = tx.get<std::string>(kb);
+      auto gs = tx.get<std::string>(ks);
+      REQUIRE(ga.has_value());
+      REQUIRE(gb.has_value());
+      REQUIRE(gs.has_value());
+      REQUIRE(*ga == va);
+      REQUIRE(*gb == vb);
+      REQUIRE(*gs == vsm);
+      tx.abort();
+   }
+
+   // 2) a SNAPSHOT cursor pins the committed generation; overwriting under it
+   //    must COW the large leaf (not corrupt the snapshot's bytes).
+   {
+      auto snap = ses->get_root(0).snapshot_cursor();
+      {
+         auto tx = ses->start_transaction(0);
+         tx.upsert(ka, big_val(20000, 99));  // same size, new bytes -> COW clone
+         tx.upsert(kb, big_val(250000, 99)); // grow -> stays large, COW clone
+         tx.commit();
+      }
+      // the snapshot still sees the ORIGINAL bytes (point read against the pin)
+      auto sa = snap.get<std::string>(ka);
+      auto sb = snap.get<std::string>(kb);
+      REQUIRE(sa.has_value());
+      REQUIRE(sb.has_value());
+      REQUIRE(*sa == va);
+      REQUIRE(*sb == vb);
+   }
+   db->flush_releases();  // the snapshot is gone: its generation drains
+
+   // 3) COW-overwrite churn across the line/large boundary, many rounds.
+   for (int round = 0; round < 50; ++round)
+   {
+      auto tx = ses->start_transaction(0);
+      // grow small->large and shrink large->small to exercise both leaf_alloc_
+      // arena decisions and the cross-arena rebuild on overwrite
+      tx.upsert(ka, (round & 1) ? big_val(40000, uint64_t(round))
+                                : mkval(uint64_t(round)));         // large <-> line
+      tx.upsert(kb, big_val(8193 + size_t(round) * 1000, uint64_t(round)));  // always large
+      tx.commit();
+   }
+   {  // final read-back is consistent
+      auto tx  = ses->start_transaction(0);
+      auto gb  = tx.get<std::string>(kb);
+      REQUIRE(gb.has_value());
+      REQUIRE(*gb == big_val(8193 + 49 * 1000, 49));
+      tx.abort();
+   }
+
+   // 4) remove everything: both arenas must drain to empty.
+   {
+      auto tx = ses->start_transaction(0);
+      tx.remove(ka);
+      tx.remove(kb);
+      tx.remove(ks);
+      tx.commit();
+   }
+   // End the write session so its line/large allocation windows flush their
+   // reserved-but-unused grains back to the freesets (mirrors start_ver's test).
+   ses.reset();
+   require_drained(*db);             // line arena empty
+   db->flush_releases();
+   REQUIRE(db->large_used_grains() == 0);  // NO value_large leak
+}
+
+// A many-key large-value workload (Silkworm-shaped: a code table of contract
+// bytecode), repeatedly overwritten, then removed — the large arena must not
+// grow without bound and must drain fully.
+TEST_CASE("large values: many-key code-table churn drains the large arena")
+{
+   auto dir = fs::temp_directory_path() / "part_kv_large_churn";
+   fs::remove_all(dir);
+   auto db  = start_ref::kv::database::create(dir);
+   auto ses = db->start_write_session();
+
+   const int                N = 200;
+   std::vector<std::string> keys;
+   for (int i = 0; i < N; ++i)
+      keys.push_back("code/" + std::to_string(hashed(uint64_t(i)) % 1000000));
+   std::sort(keys.begin(), keys.end());
+   keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+
+   auto write_round = [&](uint64_t seed)
+   {
+      auto tx = ses->start_transaction(0);
+      for (size_t i = 0; i < keys.size(); ++i)
+         tx.upsert(keys[i], big_val(8200 + (i % 17) * 4096, seed + i));  // all value_large
+      tx.commit();
+   };
+
+   write_round(1);
+   const uint64_t after_first = db->large_used_grains();
+   REQUIRE(after_first > 0);
+
+   for (uint64_t r = 2; r < 12; ++r)  // 10 more full rewrites (COW turnover)
+      write_round(r);
+   db->flush_releases();
+
+   // After turnover the live generation is the only one: grain use must be
+   // bounded near the first round's footprint, not 10x it.
+   const uint64_t after_churn = db->large_used_grains();
+   INFO("large grains: first=" << after_first << " after_churn=" << after_churn);
+   REQUIRE(after_churn <= after_first * 2);
+
+   // verify the live values
+   {
+      auto tx = ses->start_transaction(0);
+      for (size_t i = 0; i < keys.size(); ++i)
+      {
+         auto g = tx.get<std::string>(keys[i]);
+         REQUIRE(g.has_value());
+         REQUIRE(*g == big_val(8200 + (i % 17) * 4096, 11 + i));
+      }
+      tx.abort();
+   }
+
+   {
+      auto tx = ses->start_transaction(0);
+      for (auto& k : keys)
+         tx.remove(k);
+      tx.commit();
+   }
+   ses.reset();  // flush the allocation windows before the drain check
+   require_drained(*db);
+   db->flush_releases();
+   REQUIRE(db->large_used_grains() == 0);
+}

@@ -117,7 +117,7 @@ set_target_properties(tree-shape-audit PROPERTIES
 
 # churn-leak: reproduce cold-base bloat via controlled overwrite/remove churn.
 add_executable(churn-leak churn_leak.cpp)
-target_link_libraries(churn-leak PRIVATE delta_art start_ver sal_art_ref psitri)
+target_link_libraries(churn-leak PRIVATE delta_art start_ver start_ref sal_art_ref psitri)
 target_include_directories(churn-leak PRIVATE
     ${CMAKE_SOURCE_DIR}/libraries/sal_art_ref/test)
 target_compile_definitions(churn-leak PRIVATE XXH_INLINE_ALL)
@@ -127,7 +127,7 @@ set_target_properties(churn-leak PROPERTIES
 
 # oplog-replay: replay a captured Silkworm op-stream into delta_art, track footprint.
 add_executable(oplog-replay oplog_replay.cpp)
-target_link_libraries(oplog-replay PRIVATE delta_art start_ver sal_art_ref psitri)
+target_link_libraries(oplog-replay PRIVATE delta_art start_ver start_ref sal_art_ref psitri)
 target_include_directories(oplog-replay PRIVATE
     ${CMAKE_SOURCE_DIR}/libraries/sal_art_ref/test)
 target_compile_definitions(oplog-replay PRIVATE XXH_INLINE_ALL)

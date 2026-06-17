@@ -43,6 +43,12 @@ if(SAL_ART_REF_BUILD_TESTS)
             Catch2::Catch2WithMain
     )
     target_compile_options(sal_art_ref-tests PRIVATE -Wall -Wextra)
+    # The unit tests assert on cow_counters (e.g. restrides >= 1 after a split), so
+    # they must build with the perf counters live. PSITRI_DEBUG is left OFF here:
+    # the gated paths (op-log/validate/dump) are compile-checked separately, and the
+    # validate path aborts on the first structurally-odd node, which the tests neither
+    # want nor need on the normal path.
+    target_compile_definitions(sal_art_ref-tests PRIVATE PSITRI_STATS)
     set_target_properties(sal_art_ref-tests PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     )

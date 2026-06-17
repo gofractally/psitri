@@ -59,6 +59,34 @@ namespace start_ref::kv
    using engine_t = hkv::kv_tree<std::string_view, bval, hkv::mode::none, part_alloc<bval>>;
    using root_ptr = start_ref::detail::line_ptr;
 
+   // A root node at arena line 0 with a 0 kind-tag has raw()==0 (raw == (line<<4)
+   // | tag). That aliases the "no root / unpublished" sentinel (0) shared by
+   // _live_raw, arena.set_root, and the retired-token reclamation protocol — so
+   // the very first/only key committed into a fresh tree (its single leaf sits at
+   // line 0) would be published as 0 and read back as "empty". start_ver dodges
+   // this incidentally by packing a non-zero version into the high bits; start_ref
+   // is refcount-only with no version, so mark every published root with a high
+   // bit. Readers recover the 4-byte raw via uint32_t() (which drops the marker)
+   // and null-check via != 0, so only the write sites change. (See
+   // [[sal_ptr_address_zero]]: address 0 is a VALID address, never a null sentinel.)
+   // The handle is now 5 bytes (40-bit raw); the "published" marker must live
+   // ABOVE that, so bit 40 (was bit 32, which a >=2^28-line index now occupies).
+   inline constexpr uint64_t kHandleMask = (uint64_t(1) << (8 * detail::HANDLE_BYTES)) - 1;
+   inline constexpr uint64_t kRootPubBit = uint64_t(1) << (8 * detail::HANDLE_BYTES);
+   inline uint64_t           encode_root(root_ptr p) noexcept
+   {
+      return p.is_null() ? 0 : (p.raw() | kRootPubBit);
+   }
+   // Reconstruct the handle from a stored root word (durable slot or retired raw):
+   // strip the publish bit / any high bits, keep the HANDLE_BYTES low bytes.
+   inline root_ptr decode_root(uint64_t stored) noexcept
+   {
+      root_ptr       p;
+      const uint64_t v = stored & kHandleMask;
+      std::memcpy(p.b, &v, detail::HANDLE_BYTES);
+      return p;
+   }
+
    // Multi-root: arena slots [0, kMaxRoots) hold per-root committed raws (the
    // arena table is sized max_roots=16). start_ref and sal_art_ref share the
    // SAME root/snapshot model — a tree is an index + a held refcount;
@@ -538,6 +566,7 @@ namespace start_ref::kv
 
       database*          _db;
       start_ref::session _ses;
+      start_ref::large_session _lses;  // large-arena allocation context (writer)
       engine_t           _t;  // root 0's working tree (continues across txns)
       std::array<std::optional<engine_t>, kMaxRoots> _aux;  // roots >= 1, lazy
    };
@@ -602,23 +631,31 @@ namespace start_ref::kv
          // live root's slot reference.
          for (uint64_t raw : _retired)
          {
-            root_ptr       p;
-            const uint32_t r32 = uint32_t(raw);
-            std::memcpy(p.b, &r32, 4);
+            const root_ptr p = decode_root(raw);
             engine_t v{part_alloc<bval>(&_arena)};
             v.allocator_mut().vhooks = &_vh;
             v.cow_release(p);
          }
-         for (uint32_t i = 0; i < kMaxRoots; ++i)
-            if (!_live_root[i].is_null())
-            {
-               engine_t v{part_alloc<bval>(&_arena)};
-               v.allocator_mut().vhooks = &_vh;
-               v.cow_release(_live_root[i]);
-            }
+         // [persist/reopen] Do NOT release the published live roots on close.
+         // They are the durable committed trees (arena.set_root persisted them);
+         // a later reopen re-adopts them in the ctor. Releasing here would free
+         // the on-disk tree — the old free-on-close (in-RAM-only) behavior that
+         // made start_ref unable to survive an env close→reopen.
       }
 
-      start_ref::arena& store() noexcept { return _arena; }
+      start_ref::arena&       store() noexcept { return _arena; }
+      start_ref::large_arena& large_store() noexcept { return _large; }  // debug/tests
+      // Used grains in the large arena (debug/tests: prove value_large fired and
+      // that large leaves drain — a value_large leak shows up as a nonzero return
+      // after every key is removed and the releaser has flushed).
+      uint64_t large_used_grains() const noexcept
+      {
+         const uint32_t ns    = _large.num_segments();
+         uint64_t       freeU = 0;
+         for (uint32_t s = 0; s < ns; ++s)
+            freeU += const_cast<start_ref::large_arena&>(_large).freeset_of(s).free_lines();
+         return uint64_t(ns) * start_ref::lines_per_segment - freeU;
+      }
 
       // ── typed-value registry (locked adb API) ───────────────────────────
       // Registered ids dispatch retain/release from the tree's value-
@@ -663,12 +700,33 @@ namespace start_ref::kv
       friend class tree_handle;
 
       database(std::filesystem::path dir, runtime_config cfg)
-          : _arena(make_cfg_(std::move(dir), cfg))
+          : _arena(make_cfg_(dir, cfg)), _large(make_large_cfg_(dir, cfg))
       {
+         // Link the large-value arena as _arena's companion BEFORE any tree is
+         // built: every part_alloc copy (writer/view/releaser) resolves and frees
+         // value_large leaves through a->companion().
+         _arena.set_companion(&_large);
          for (auto& r : _live_root)
             r = root_ptr::null();
          for (auto& r : _live_raw)
             r.store(0, std::memory_order_relaxed);
+         // [persist/reopen] Re-expose durable roots committed by a prior session
+         // (mirrors start_ver's ctor): the arena reloaded the published root slots
+         // from disk, so adopt them as the live boundary. Without this a reopen
+         // (Silkworm opens the datadir twice at startup) sees an empty tree. A
+         // slot of 0 means "never published" (zero-init mmap); a real publish
+         // stores a non-zero raw or root_ptr::null()'s all-FF tag.
+         for (uint32_t i = 0; i < kMaxRoots; ++i)
+         {
+            const uint64_t durable = _arena.get_root(i);
+            if (durable == 0)
+               continue;
+            const root_ptr p = decode_root(durable);
+            if (p.is_null())
+               continue;
+            _live_root[i] = p;
+            _live_raw[i].store(durable, std::memory_order_seq_cst);
+         }
          // background releaser (SPEC §19): the writer pushes release-to-zero
          // subtree roots; this thread runs the cascades; a full ring makes the
          // writer release inline (graceful degradation to the old behavior).
@@ -680,11 +738,11 @@ namespace start_ref::kv
             _rel_thread = std::thread([this] { rel_loop_(); });
          }
       }
-      static bool defer_cb_(void* ctx, uint32_t raw) noexcept
+      static bool defer_cb_(void* ctx, uint64_t raw) noexcept
       {
          return static_cast<database*>(ctx)->rel_push_(raw);
       }
-      bool rel_push_(uint32_t raw) noexcept
+      bool rel_push_(uint64_t raw) noexcept
       {
          const uint32_t h = _rel_head.load(std::memory_order_relaxed);
          const uint32_t t = _rel_tail.load(std::memory_order_acquire);
@@ -711,9 +769,8 @@ namespace start_ref::kv
                _rel_cv.wait_for(lk, std::chrono::milliseconds(2));
                continue;
             }
-            const uint32_t raw = uint32_t(_rel[t % kRelRing].load(std::memory_order_relaxed));
-            root_ptr       p;
-            std::memcpy(p.b, &raw, 4);
+            const uint64_t raw = _rel[t % kRelRing].load(std::memory_order_relaxed);
+            const root_ptr p = decode_root(raw);
             v.cow_release(p);  // non-deferring allocator: full cascade here
             _rel_tail.store(t + 1, std::memory_order_release);
          }
@@ -729,6 +786,19 @@ namespace start_ref::kv
          // grow without bound. 1/8 keeps the can-this-segment-serve-allocs
          // guarantee while reclaiming aggressively.
          c.reuse_threshold = 0.125;
+         return c;
+      }
+      // The large-value second arena lives in a `large/` subdirectory (its own
+      // data/free/refs/meta.part), so it persists across reopen exactly like the
+      // line arena. Its index is 28-bit GRAINS of 8 KB (vs 128 B lines), so the
+      // same max_segments would address 64x the bytes — cap segment count to a
+      // modest ceiling (a few hundred 8 MB-equiv grain segments is gigabytes of
+      // 0.5 MB-max objects, well within the grain index band).
+      static start_ref::arena_config make_large_cfg_(std::filesystem::path dir, runtime_config cfg)
+      {
+         start_ref::arena_config c = make_cfg_(std::move(dir), cfg);
+         c.dir /= "large";
+         c.max_segments = std::min<uint32_t>(c.max_segments, 512);
          return c;
       }
 
@@ -747,9 +817,7 @@ namespace start_ref::kv
                ++i;
                continue;
             }
-            root_ptr p;
-            const uint32_t r32 = uint32_t(_retired[i]);
-            std::memcpy(p.b, &r32, 4);
+            const root_ptr p = decode_root(_retired[i]);
             engine_t v{part_alloc<bval>(&_arena, /*defer=*/true)};
             v.allocator_mut().vhooks = &_vh;
             v.cow_release(p);  // big generations route to the releaser
@@ -773,7 +841,7 @@ namespace start_ref::kv
 
       private:
       static constexpr uint32_t kRelRing = 4096;  // big cascades shard into many subtree chunks
-      std::atomic<uint32_t>     _rel[kRelRing] = {};
+      std::atomic<uint64_t>     _rel[kRelRing] = {};  // full 40-bit handles
       std::atomic<uint32_t>     _rel_head{0}, _rel_tail{0};
       std::mutex                _rel_mx;
       std::condition_variable   _rel_cv;
@@ -781,6 +849,12 @@ namespace start_ref::kv
       std::atomic<bool>         _rel_stop{false};
 
       start_ref::arena      _arena;
+      // Large-value second arena (8 KB grain) in a `large/` subdirectory: same
+      // COW/refcount/recovery machinery, max object 0.5 MB. Linked to _arena as
+      // its companion so every part_alloc (writer, view, releaser) reaches it.
+      // value_large leaves live here; value_ptr leaves stay in _arena. Declared
+      // AFTER _arena so it is constructed after (and destroyed before) it.
+      start_ref::large_arena _large;
       std::mutex            _root_mx;                  // serializes commit publication
       std::mutex            _root_locks[kMaxRoots];    // per-root writer locks (ordered)
       root_ptr              _live_root[kMaxRoots];     // committed root per slot
@@ -842,9 +916,25 @@ namespace start_ref::kv
 
    // ── bodies ────────────────────────────────────────────────────────────────
    inline write_session::write_session(database* db)
-       : _db(db), _ses(db->_arena.start_session()), _t(part_alloc<bval>(&_ses))
+       : _db(db), _ses(db->_arena.start_session()),
+         _lses(db->_large.start_session()), _t(part_alloc<bval>(&_ses))
    {
       _t.allocator_mut().vhooks = &db->_vh;
+      _t.allocator_mut().lses   = &_lses;  // large-value allocations on this writer
+      // [persist/reopen] A fresh write session's working tree for root 0 starts
+      // empty; adopt the durable committed root so read-own-writes (mdbx_get on a
+      // RW txn -> direct_tx->get) and the first COW see the committed base. Without
+      // this, after an env reopen (Silkworm opens the datadir twice at startup) the
+      // RW read path misses all committed data while read-session cursors still see
+      // it via _live_raw — the start_ref-only divergence behind the 46147 failure.
+      // Mirrors start_ver's ctor and start_ref's own tree_for(i>=1) (refcount model:
+      // the working tree takes its own ref via cow_retain).
+      const root_ptr r = db->_live_root[0];
+      if (!r.is_null())
+      {
+         _t.cow_retain(r);
+         _t.adopt_root(r, 0);
+      }
    }
 
    inline read_session::read_session(database* db)
@@ -864,10 +954,7 @@ namespace start_ref::kv
             // drain (which runs after replacing the root) must see our slot.
             root_ptr p = root_ptr::null();
             if (r)
-            {
-               const uint32_t r32 = uint32_t(r);
-               std::memcpy(p.b, &r32, 4);
-            }
+               p = decode_root(r);
             return cursor(&_db->_arena, p, &slot);
          }
       }
@@ -1047,10 +1134,10 @@ namespace start_ref::kv
          if (!nr.is_null() && !t.cow_retain(nr))
             throw std::runtime_error("start_ref::kv: root retain refused");
          db->_live_root[r.index] = nr;
-         db->_live_raw[r.index].store(nr.is_null() ? 0 : nr.raw(), std::memory_order_seq_cst);
-         db->_arena.set_root(r.index, nr.is_null() ? 0 : nr.raw());
+         db->_live_raw[r.index].store(encode_root(nr), std::memory_order_seq_cst);
+         db->_arena.set_root(r.index, encode_root(nr));
          if (!old.is_null())
-            db->_retired.push_back(old.raw());
+            db->_retired.push_back(encode_root(old));
       }
       db->drain_retired_();
       for (auto it = _roots.rbegin(); it != _roots.rend(); ++it)
@@ -1076,6 +1163,7 @@ namespace start_ref::kv
       {
          _aux[i].emplace(part_alloc<bval>(&_ses));
          _aux[i]->allocator_mut().vhooks = &_db->_vh;
+         _aux[i]->allocator_mut().lses   = &_lses;  // large-value allocations
          const root_ptr r = _db->_live_root[i];
          if (!r.is_null())
          {

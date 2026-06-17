@@ -11,7 +11,9 @@
 //   | 'G' u32 klen key u8 found u64 fnv | 'L' u32 klen key u8 found u32 rklen
 //   rkey u64 fnv.  (matches benchmarks/oplog_replay.cpp / the shim capture.)
 #include <gcart/kv.hpp>
+#include <gcart/tree.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -24,6 +26,85 @@
 
 namespace fs = std::filesystem;
 using Clock  = std::chrono::steady_clock;
+
+// ── memory breakdown (GCART_STATS=1): where do the bytes go vs the payload ────
+struct mem_stats
+{
+   uint64_t n_leaf = 0, n_setlist = 0, n_node256 = 0, n_chunk = 0, keys = 0;
+   uint64_t ln_leaf = 0, ln_setlist = 0, ln_node256 = 0, ln_chunk = 0;  // lines (×128B)
+   uint64_t pay_leaf = 0, pay_setlist = 0, pay_node256 = 0, pay_chunk = 0;  // useful bytes
+   uint64_t leaf_lines_hist[10] = {0};
+   uint64_t setlist_n_sum = 0, node256_n_sum = 0;  // child counts (fill factor)
+   uint64_t setlist_n_hist[10] = {0};              // 0,1,2,..,8,9+ children
+   uint64_t setlist_has_term = 0;
+};
+static void walk_stats(sal2::arena& a, gcart::nptr n, mem_stats& s)
+{
+   using namespace gcart;
+   if (n == null_ptr) return;
+   void* p = a.get(n);
+   if (is_leaf(p))
+   {
+      auto* lf = static_cast<leaf*>(p);
+      ++s.n_leaf; ++s.keys; s.ln_leaf += lf->nlines;
+      s.pay_leaf += leaf::hdr + lf->klen + (lf->is_large() ? uint32_t(sizeof(nptr)) : lf->vlen);
+      s.leaf_lines_hist[std::min<uint32_t>(lf->nlines, 9)]++;
+      if (lf->is_large())
+         for (nptr c = lf->chunk_head(); c != null_ptr;)
+         { auto* vc = static_cast<value_chunk*>(a.get(c)); ++s.n_chunk; s.ln_chunk += vc->nlines; s.pay_chunk += value_chunk::hdr + vc->len; c = vc->next; }
+      return;
+   }
+   if (type_of(p) == uint8_t(ntype::setlist))
+   {
+      auto* st = static_cast<setlist*>(p);
+      ++s.n_setlist; s.ln_setlist += st->h.nlines; s.setlist_n_sum += st->h.n;
+      s.setlist_n_hist[std::min<uint32_t>(st->h.n, 9)]++;
+      if (st->h.term != null_ptr) ++s.setlist_has_term;
+      s.pay_setlist += sizeof(inner_hdr) + st->h.n + st->h.n * sizeof(nptr) + st->h.plen;
+      for (uint32_t i = 0; i < st->h.n; ++i) walk_stats(a, st->children()[i], s);
+      if (st->h.term != null_ptr) walk_stats(a, st->h.term, s);
+   }
+   else
+   {
+      auto* nd = static_cast<node256*>(p);
+      ++s.n_node256; s.ln_node256 += nd->h.nlines; s.node256_n_sum += nd->h.n16;
+      s.pay_node256 += node256::fixed + nd->h.plen;
+      const nptr* c = nd->children();
+      for (uint32_t b = 0; b < 256; ++b) if (c[b] != null_ptr) walk_stats(a, c[b], s);
+      if (nd->h.term != null_ptr) walk_stats(a, nd->h.term, s);
+   }
+}
+static void report_stats(sal2::arena& a, gcart::nptr root)
+{
+   mem_stats s;
+   walk_stats(a, root, s);
+   const double L = 128.0;
+   auto line = [&](const char* nm, uint64_t cnt, uint64_t ln, uint64_t pay, uint64_t nsum, uint64_t cap)
+   {
+      const double alloc = ln * L;
+      std::printf("  %-9s cnt=%-10llu lines=%-11llu alloc=%7.0fMB payload=%7.0fMB util=%4.0f%%%s\n",
+                  nm, (unsigned long long)cnt, (unsigned long long)ln, alloc / 1e6, pay / 1e6,
+                  alloc > 0 ? 100.0 * pay / alloc : 0.0,
+                  cnt ? (std::string("  avg_children=") + std::to_string(double(nsum) / cnt)).c_str() : "");
+      (void)cap;
+   };
+   const uint64_t tot_ln = s.ln_leaf + s.ln_setlist + s.ln_node256 + s.ln_chunk;
+   std::printf("\n[mem] keys=%llu  total alloc=%.0fMB  bytes/key=%.0f\n",
+               (unsigned long long)s.keys, tot_ln * L / 1e6, s.keys ? tot_ln * L / s.keys : 0.0);
+   line("leaf", s.n_leaf, s.ln_leaf, s.pay_leaf, 0, 0);
+   line("setlist", s.n_setlist, s.ln_setlist, s.pay_setlist, s.setlist_n_sum, 0);
+   line("node256", s.n_node256, s.ln_node256, s.pay_node256, s.node256_n_sum, 0);
+   line("chunk", s.n_chunk, s.ln_chunk, s.pay_chunk, 0, 0);
+   std::printf("  setlist children histogram (0,1,2..8,9+): ");
+   for (int i = 0; i <= 9; ++i) std::printf("%llu ", (unsigned long long)s.setlist_n_hist[i]);
+   std::printf("\n  setlists with a term: %llu (%.0f%%)\n", (unsigned long long)s.setlist_has_term,
+               s.n_setlist ? 100.0 * s.setlist_has_term / s.n_setlist : 0.0);
+   std::printf("  leaf lines histogram (1..9+): ");
+   for (int i = 1; i <= 9; ++i) std::printf("%llu ", (unsigned long long)s.leaf_lines_hist[i]);
+   std::printf("\n  share of alloc: leaf=%.0f%% setlist=%.0f%% node256=%.0f%% chunk=%.0f%%\n",
+               100.0 * s.ln_leaf / tot_ln, 100.0 * s.ln_setlist / tot_ln,
+               100.0 * s.ln_node256 / tot_ln, 100.0 * s.ln_chunk / tot_ln);
+}
 
 static uint64_t fnv_(std::string_view v) noexcept  // matches the shim's oplog_fnv_
 {
@@ -141,6 +222,9 @@ int main(int argc, char** argv)
    std::printf("[replay] get-divergences=%llu  live=%.0fMB segs=%u  (%.0f ups/s)\n",
                (unsigned long long)g_div, mb, db->store().num_segments(),
                dt > 0 ? ups / dt : 0.0);
+
+   if (std::getenv("GCART_STATS"))
+      report_stats(db->store(), db->store().get_root(0));
 
    int rc = (g_div == 0) ? 0 : 1;
    if (verify)

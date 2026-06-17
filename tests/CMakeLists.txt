@@ -4,7 +4,7 @@
 find_package(Catch2 3 QUIET)
 
 add_executable(kv-compat-test kv_compat_test.cpp)
-target_link_libraries(kv-compat-test PRIVATE adb psitri sal_art_ref start_ref start_ver)
+target_link_libraries(kv-compat-test PRIVATE adb psitri sal_art_ref start_ref start_ver gcart)
 target_include_directories(kv-compat-test PRIVATE
     ${CMAKE_SOURCE_DIR}/libraries/sal_art_ref/test)  # heart_kv.hpp (hoist later)
 target_compile_definitions(kv-compat-test PRIVATE XXH_INLINE_ALL)

@@ -195,7 +195,9 @@ namespace gcart::kv
       nptr term_of(nptr n) const { return static_cast<const inner_hdr*>(_a->get(n))->term; }
 
       struct frame { nptr node; int pos; };  // pos: -1 = term, else child index
-      std::array<frame, 272> _stk{};
+      // depth bound = the adb key-length contract (1024 B) + margin; a key of N
+      // bytes descends at most N nodes (no prefix compression in the worst case).
+      std::array<frame, 1088> _stk{};
       int    _depth = 0;
       const sal2::arena* _a = nullptr;
       nptr   _root = null_ptr;
@@ -354,5 +356,162 @@ namespace gcart::kv
       }
       sal2::arena* _a    = nullptr;
       nptr         _root = null_ptr;
+   };
+
+   class write_session;
+   class read_session;
+
+   // ── transaction: COW-snapshot over one root's gcart::tree ──────────────────
+   class transaction
+   {
+     public:
+      transaction(transaction&& o) noexcept
+          : _t(o._t), _a(o._a), _arena_slot(o._arena_slot), _snap(o._snap), _done(o._done)
+      { o._t = nullptr; }
+      transaction(const transaction&)            = delete;
+      transaction& operator=(const transaction&) = delete;
+      ~transaction() { if (_t && !_done) abort(); }
+
+      void insert(key_view k, value_view v) { _t->upsert(k, v); }
+      void upsert(key_view k, value_view v) { _t->upsert(k, v); }
+      int  remove(key_view k) { return _t->erase(k) ? 1 : 0; }
+
+      template <class F>
+      bool get(key_view k, F&& fn) const
+      {
+         const leaf* lf = _t->find(k);
+         if (!lf) return false;
+         fn(lf->value());
+         return true;
+      }
+      template <class S = std::string>
+      std::optional<S> get(key_view k) const
+      {
+         const leaf* lf = _t->find(k);
+         if (!lf) return std::nullopt;
+         value_view v = lf->value();
+         return S(v.data(), v.size());
+      }
+
+      void commit()
+      {
+         if (_done) return;
+         if (_snap != null_ptr) gcart::release_subtree(*_a, _snap);  // drop the old committed root
+         _a->set_root(_arena_slot, _t->root());                      // publish
+         _done = true;
+      }
+      void abort() noexcept
+      {
+         if (_done) return;
+         const nptr work = _t->root();
+         _t->set_root(_snap);                       // restore committed (pin → live)
+         if (work != null_ptr) gcart::release_subtree(*_a, work);
+         _done = true;
+      }
+
+     private:
+      friend class write_session;
+      transaction(gcart::tree* t, sal2::arena* a, uint32_t slot) : _t(t), _a(a), _arena_slot(slot)
+      {
+         _snap = _t->root();
+         if (_snap != null_ptr) _a->retain(_snap);  // pin committed root for rollback/COW
+      }
+      gcart::tree* _t = nullptr;
+      sal2::arena* _a = nullptr;
+      uint32_t     _arena_slot = 0;
+      nptr         _snap = null_ptr;
+      bool         _done = false;
+   };
+
+   // ── database ──────────────────────────────────────────────────────────────
+   class database
+   {
+     public:
+      static std::shared_ptr<database> create(std::filesystem::path dir, runtime_config cfg = {})
+      {
+         return std::shared_ptr<database>(new database(std::move(dir), cfg));
+      }
+      static std::shared_ptr<database> open(std::filesystem::path dir, runtime_config cfg = {})
+      {
+         return create(std::move(dir), cfg);
+      }
+
+      std::shared_ptr<write_session> start_write_session();
+      std::shared_ptr<read_session>  start_read_session();
+      void sync(sal2::line_idx = 0) noexcept {}
+
+      sal2::arena& store() noexcept { return _arena; }
+      gcart::tree& tree_for(uint32_t idx)
+      {
+         if (!_trees[idx])
+         {
+            _trees[idx] = std::make_unique<gcart::tree>(_arena);
+            _trees[idx]->set_root(_arena.get_root(idx));  // adopt any persisted root
+         }
+         return *_trees[idx];
+      }
+
+     private:
+      explicit database(std::filesystem::path dir, runtime_config cfg)
+          : _arena(sal2::arena_config{.dir = std::move(dir), .max_segments = cfg.max_segments})
+      {
+      }
+      sal2::arena                                   _arena;
+      std::array<std::unique_ptr<gcart::tree>, 64>  _trees{};
+   };
+
+   // ── write_session ──────────────────────────────────────────────────────────
+   class write_session
+   {
+     public:
+      explicit write_session(database* db) : _db(db) {}
+      transaction start_transaction(uint32_t root_index = 0)
+      {
+         gcart::tree& t = _db->tree_for(root_index);
+         return transaction(&t, &_db->store(), root_index);
+      }
+      tree get_root(uint32_t root_index)
+      {
+         gcart::tree& t = _db->tree_for(root_index);
+         return tree(&_db->store(), t.root());
+      }
+
+     private:
+      database* _db;
+   };
+
+   // ── read_session ────────────────────────────────────────────────────────────
+   class read_session
+   {
+     public:
+      explicit read_session(database* db) : _db(db) {}
+      cursor create_cursor(uint32_t root_index)
+      {
+         gcart::tree& t = _db->tree_for(root_index);
+         return cursor(&_db->store(), t.root());
+      }
+
+     private:
+      database* _db;
+   };
+
+   inline std::shared_ptr<write_session> database::start_write_session()
+   {
+      return std::make_shared<write_session>(this);
+   }
+   inline std::shared_ptr<read_session> database::start_read_session()
+   {
+      return std::make_shared<read_session>(this);
+   }
+
+   // ── engine traits bundle (psitri::dwal::kv_engine form) ────────────────────
+   struct engine
+   {
+      using database      = gcart::kv::database;
+      using write_session = gcart::kv::write_session;
+      using read_session  = gcart::kv::read_session;
+      using transaction   = gcart::kv::transaction;
+      using cursor        = gcart::kv::cursor;
+      using config        = gcart::kv::runtime_config;
    };
 }  // namespace gcart::kv

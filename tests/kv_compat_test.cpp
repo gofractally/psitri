@@ -24,6 +24,7 @@
 #include <psitri/write_session_impl.hpp>
 
 #include <start_ver/kv.hpp>  // the 4th engine: vpart must pass standalone (Dan)
+#include <gcart/kv.hpp>      // the 5th engine: gcart (sal2 GC-ART)
 
 // The harness shape is compiler-enforced (SPEC §12.3): a drift in any engine
 // fails HERE, by name, before a single test runs.
@@ -31,6 +32,7 @@ static_assert(adb::kv_database<sal_art_ref::kv::database>);
 static_assert(adb::kv_database<start_ref::kv::database>);
 static_assert(adb::kv_database<psitri::database>);
 static_assert(adb::kv_database<start_ver::kv::database>);
+static_assert(adb::kv_database<gcart::kv::database>);
 
 namespace
 {
@@ -806,8 +808,11 @@ int main()
             guarded("start_ref", [&] { return run<start_ref::kv::database>("start_ref", tmp("kvcompat_start_ref")); });
    bool v = !want("start_ver") ||
             guarded("start_ver", [&] { return run<start_ver::kv::database>("start_ver", tmp("kvcompat_start_ver")); });
+   bool g = !want("gcart") ||
+            guarded("gcart", [&] { return run<gcart::kv::database>("gcart", tmp("kvcompat_gcart")); });
    perf_report();
-   std::printf("RESULT: sal_art_ref %s, psitri %s, start_ref %s, start_ver %s\n", h ? "PASS" : "FAIL",
-               p ? "PASS" : "FAIL", a ? "PASS" : "FAIL", v ? "PASS" : "FAIL");
-   return (h && p && a && v) ? 0 : 1;
+   std::printf("RESULT: sal_art_ref %s, psitri %s, start_ref %s, start_ver %s, gcart %s\n",
+               h ? "PASS" : "FAIL", p ? "PASS" : "FAIL", a ? "PASS" : "FAIL", v ? "PASS" : "FAIL",
+               g ? "PASS" : "FAIL");
+   return (h && p && a && v && g) ? 0 : 1;
 }

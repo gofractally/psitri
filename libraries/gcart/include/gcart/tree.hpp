@@ -112,8 +112,25 @@ namespace gcart
       }
 
       // ── erase ──────────────────────────────────────────────────────────────
+      // erase_rec privatizes-on-descent (writable() before mutating), the same
+      // top-down COW as upsert_rec. That is only balanced when EVERY node on the
+      // descent is actually modified: writable() clones a shared node and drops
+      // the original's ref on the contract that the parent will reinstall the
+      // clone. upsert always modifies, so it is safe. erase, however, can bail
+      // mid-descent when the key turns out to be absent below — leaving a node
+      // privatized (original released to ref 1) but NOT reinstalled, so the
+      // parent keeps pointing at the released original and the clone is orphaned.
+      // That under-counts a node shared with a snapshot → premature free on the
+      // snapshot's release. A node's refcount reflects only its parent-pointer
+      // count, never whether an ANCESTOR is shared, so we cannot detect "must
+      // clone" lazily on the way up. The clean fix: a read-only existence check
+      // first (find_in handles term-keys too); only then run the destructive
+      // descent, where removal — and therefore reinstallation at every level —
+      // is guaranteed.
       bool erase(sv key)
       {
+         if (find_in(_root, key) == nullptr)
+            return false;  // absent → no mutation, no COW, nothing to unwind
          bool removed = false;
          _root        = erase_rec(_root, key, 0, removed);
          if (removed)
@@ -489,28 +506,24 @@ namespace gcart
          }
       }
 
-      // collapse a node that now has 0 children + a term (→ the term leaf) or
-      // 1 child + no term (→ merge prefix into the child). v1: only the simple
-      // 0-children cases; otherwise keep the node.
+      // collapse a node that now has 0 children: → its term leaf if it has one,
+      // else → null (the parent drops the branch and frees this husk). Handles
+      // both node kinds — a node256 that loses its last child must drain too,
+      // else empty husks survive a full removal and never return to the freeset.
+      // (Single-child merge — n==1, no term → fold prefix into the lone child —
+      // is a separate minimality optimization, not required for correctness.)
       nptr collapse(nptr cur)
       {
-         void* p = _a.get(cur);
-         if (type_of(p) == uint8_t(ntype::setlist))
-         {
-            auto* s = static_cast<setlist*>(p);
-            if (s->h.n == 0 && s->h.term != null_ptr)
-            {
-               const nptr t = s->h.term;
-               _a.free_lines(cur, s->h.nlines);  // husk; term transferred out
-               return t;
-            }
-            if (s->h.n == 0 && s->h.term == null_ptr)
-            {
-               _a.free_lines(cur, s->h.nlines);
-               return null_ptr;
-            }
-         }
-         return cur;
+         void*          p = _a.get(cur);
+         const bool     sl = type_of(p) == uint8_t(ntype::setlist);
+         const uint32_t n  = sl ? static_cast<setlist*>(p)->h.n
+                                : static_cast<node256*>(p)->h.n16;
+         if (n != 0)
+            return cur;  // still has children — keep
+         const inner_hdr* h = static_cast<inner_hdr*>(p);
+         const nptr       t = h->term;          // the surviving leaf, or null_ptr
+         _a.free_lines(cur, h->nlines);         // husk; term (if any) transferred out
+         return t;
       }
 
       sal2::arena&  _a;

@@ -336,9 +336,16 @@ namespace gcart
       uint8_t meta;     // terminal:1 (bit7), prefixlen:7 (bits0-6)
       uint8_t nbranch;  // byte-branch count
       uint8_t cap;      // total branch slots provisioned (byte + term)
+      // [3] pad; [4..7] birth version (GC: the committing txn version, design §4.2).
 
-      static constexpr uint32_t slot_bytes = 128;
-      static constexpr uint32_t hdr        = 3;
+      static constexpr uint32_t slot_bytes  = 128;
+      static constexpr uint32_t birth_off   = 4;
+      static constexpr uint32_t hdr         = 8;  // was 3; +pad+u32 birth (version liveness)
+      uint32_t birth() const noexcept  // offset 4 is 4-aligned in the cacheline slot
+      {
+         return *reinterpret_cast<const uint32_t*>(base() + birth_off);
+      }
+      void set_birth(uint32_t v) noexcept { *reinterpret_cast<uint32_t*>(base() + birth_off) = v; }
       bool                      has_term() const noexcept { return meta & 0x80; }
       uint32_t                  prefixlen() const noexcept { return meta & 0x7f; }
       uint32_t                  total() const noexcept { return nbranch + (has_term() ? 1u : 0u); }
@@ -430,7 +437,8 @@ namespace gcart
       uint8_t nbranch;  // outer byte-branch count
 
       static constexpr uint32_t slot_bytes  = 128;
-      static constexpr uint32_t hdr         = 2;
+      static constexpr uint32_t birth_off   = 4;
+      static constexpr uint32_t hdr         = 8;  // was 2; +pad+u32 birth (version liveness)
       static constexpr uint8_t  inline_flag = 0x80;  // ooff bit7
 
       bool     has_term() const noexcept { return meta & 0x80; }
@@ -439,6 +447,8 @@ namespace gcart
 
       char*       base() noexcept { return reinterpret_cast<char*>(this); }
       const char* base() const noexcept { return reinterpret_cast<const char*>(this); }
+      uint32_t birth() const noexcept { return *reinterpret_cast<const uint32_t*>(base() + birth_off); }
+      void set_birth(uint32_t v) noexcept { *reinterpret_cast<uint32_t*>(base() + birth_off) = v; }
       sv          prefix() const noexcept { return {base() + hdr, prefixlen()}; }
 
       uint8_t* okeys() noexcept { return reinterpret_cast<uint8_t*>(base() + hdr + prefixlen()); }
@@ -513,15 +523,18 @@ namespace gcart
       uint32_t term_ptr;
 
       static constexpr uint32_t slot_bytes   = 1152;
-      static constexpr uint32_t types_off    = 8;
-      static constexpr uint32_t branches_off = 104;                      // 8 + 96
-      static constexpr uint32_t prefix_off   = 1128;                     // 104 + 1024
-      static constexpr uint32_t max_prefix   = slot_bytes - prefix_off;  // 24
+      static constexpr uint32_t birth_off    = 8;                        // u32 birth (version liveness)
+      static constexpr uint32_t types_off    = 12;                       // was 8; +4 birth
+      static constexpr uint32_t branches_off = 108;                      // 12 + 96
+      static constexpr uint32_t prefix_off   = 1132;                     // 108 + 1024
+      static constexpr uint32_t max_prefix   = slot_bytes - prefix_off;  // 20
 
       bool           has_term() const noexcept { return meta & 0x80; }
       uint32_t       prefixlen() const noexcept { return meta & 0x7f; }
       char*          base() noexcept { return reinterpret_cast<char*>(this); }
       const char*    base() const noexcept { return reinterpret_cast<const char*>(this); }
+      uint32_t birth() const noexcept { return *reinterpret_cast<const uint32_t*>(base() + birth_off); }
+      void set_birth(uint32_t v) noexcept { *reinterpret_cast<uint32_t*>(base() + birth_off) = v; }
       uint8_t*       types() noexcept { return reinterpret_cast<uint8_t*>(base() + types_off); }
       const uint8_t* types() const noexcept
       {

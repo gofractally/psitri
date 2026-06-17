@@ -3,3 +3,7 @@ build-*/
 vendor/
 .DS_Store
 .cache/
+# in-source CMake build artifacts (when configured in the source tree)
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake

@@ -94,56 +94,65 @@ namespace gcart::st
       }
    };
 
-   // ── setlist (cl1, 128 B): the sparse routing node ─────────────────────────
-   // layout: [u8 meta(terminal:1,prefixlen:7)] [u8 nbranch]
-   //         prefix[prefixlen]  keys[nbranch]  types[nbranch+term]:3bit  branches[nbranch+term]:u32
-   // branches[] is region-typed by types[]; the term branch (if any) is the LAST
-   // slot (no key) with type suffix_value/big_suffix_value, slen 0.
+   // ── setlist (cl1/cl2): the sparse routing node, CAP-based for in-place insert
+   // layout: [u8 meta(terminal:1,prefixlen:7)] [u8 nbranch] [u8 cap]
+   //         prefix[prefixlen]  keys[cap]  types[cap]:3bit  branches[cap]:u32
+   // cap = total branch slots (byte-branches + a term slot) the node's fixed slot
+   // can hold; offsets are from cap (NOT nbranch), so an insert shifts within the
+   // pre-sized arrays — no realloc until n reaches cap (then grow to cl2/full).
+   // Same density as compact (the slot is a fixed size regardless); the slack is
+   // reused as growth room. The term (if any) occupies branch slot `nbranch`.
    struct setlist
    {
       uint8_t meta;     // terminal:1 (bit7), prefixlen:7 (bits0-6)
-      uint8_t nbranch;
+      uint8_t nbranch;  // byte-branch count
+      uint8_t cap;      // total branch slots provisioned (byte + term)
 
       static constexpr uint32_t slot_bytes = 128;
+      static constexpr uint32_t hdr        = 3;
       bool     has_term() const noexcept { return meta & 0x80; }
       uint32_t prefixlen() const noexcept { return meta & 0x7f; }
       uint32_t total() const noexcept { return nbranch + (has_term() ? 1u : 0u); }
+      bool     full_cap() const noexcept { return total() >= cap; }
 
-      static uint32_t keys_off() noexcept { return 2; }  // after meta+nbranch+prefix; prefix offset added by caller
-      // offsets are computed from (nbranch, prefixlen, total):
       char*       base() noexcept { return reinterpret_cast<char*>(this); }
       const char* base() const noexcept { return reinterpret_cast<const char*>(this); }
-      char*       prefix_ptr() noexcept { return base() + 2; }
-      const char* prefix_ptr() const noexcept { return base() + 2; }
+      char*       prefix_ptr() noexcept { return base() + hdr; }
+      const char* prefix_ptr() const noexcept { return base() + hdr; }
       sv          prefix() const noexcept { return {prefix_ptr(), prefixlen()}; }
-      uint8_t*    keys() noexcept { return reinterpret_cast<uint8_t*>(base() + 2 + prefixlen()); }
-      const uint8_t* keys() const noexcept { return reinterpret_cast<const uint8_t*>(base() + 2 + prefixlen()); }
-      uint8_t*    types() noexcept { return reinterpret_cast<uint8_t*>(keys() + nbranch); }
-      const uint8_t* types() const noexcept { return reinterpret_cast<const uint8_t*>(keys() + nbranch); }
-      uint32_t    branches_off() const noexcept
+      uint8_t*    keys() noexcept { return reinterpret_cast<uint8_t*>(base() + hdr + prefixlen()); }
+      const uint8_t* keys() const noexcept { return reinterpret_cast<const uint8_t*>(base() + hdr + prefixlen()); }
+      uint8_t*    types() noexcept { return keys() + cap; }
+      const uint8_t* types() const noexcept { return keys() + cap; }
+      static uint32_t branches_off_(uint32_t prefixlen, uint32_t cap) noexcept
       {
-         const uint32_t o = 2 + prefixlen() + nbranch + tag3_bytes(total());
-         return (o + 3u) & ~3u;  // 4-byte align
+         return ((hdr + prefixlen + cap + tag3_bytes(cap)) + 3u) & ~3u;  // 4-byte align
       }
-      uint32_t*   branches() noexcept { return reinterpret_cast<uint32_t*>(base() + branches_off()); }
-      const uint32_t* branches() const noexcept { return reinterpret_cast<const uint32_t*>(base() + branches_off()); }
+      uint32_t*   branches() noexcept { return reinterpret_cast<uint32_t*>(base() + branches_off_(prefixlen(), cap)); }
+      const uint32_t* branches() const noexcept { return reinterpret_cast<const uint32_t*>(base() + branches_off_(prefixlen(), cap)); }
 
-      static uint32_t bytes_for(uint32_t nbranch, uint32_t prefixlen, bool term) noexcept
+      // bytes a node with `cap` total slots + `prefixlen` occupies.
+      static uint32_t bytes_for_cap(uint32_t cap, uint32_t prefixlen) noexcept
       {
-         const uint32_t total = nbranch + (term ? 1u : 0u);
-         const uint32_t o = 2 + prefixlen + nbranch + tag3_bytes(total);
-         return ((o + 3u) & ~3u) + total * 4u;
+         return branches_off_(prefixlen, cap) + cap * 4u;
       }
-      static bool fits(uint32_t nbranch, uint32_t prefixlen, bool term) noexcept
+      // does the CONTENT (nbranch + term) fit `slot`? (minimum cap = content)
+      static bool fits(uint32_t nbranch, uint32_t prefixlen, bool term, uint32_t slot) noexcept
       {
-         return bytes_for(nbranch, prefixlen, term) <= slot_bytes;
+         return bytes_for_cap(nbranch + (term ? 1u : 0u), prefixlen) <= slot;
+      }
+      // largest cap whose node fits `slot` for this prefixlen.
+      static uint32_t derive_cap(uint32_t prefixlen, uint32_t slot) noexcept
+      {
+         uint32_t c = 1;
+         while (c < 255 && bytes_for_cap(c + 1, prefixlen) <= slot) ++c;
+         return c;
       }
 
       branch_type btype(uint32_t i) const noexcept { return tag3_get(types(), i); }
       uint32_t    branch(uint32_t i) const noexcept { return branches()[i]; }
       branch_type term_type() const noexcept { return has_term() ? tag3_get(types(), nbranch) : bt::null; }
       uint32_t    term_branch() const noexcept { return branches()[nbranch]; }
-      // index of byte among keys[0..nbranch), or -1.
       int find_index(uint8_t byte) const noexcept
       {
          int pos = int(ucc::lower_bound_padded(keys(), nbranch, byte));
@@ -456,28 +465,40 @@ namespace gcart::st
       std::pair<bt, uint32_t> build_node(sv prefix, const br* brs, uint32_t nb,
                                          bool term, bt tt, uint32_t tp)
       {
-         // does it fit a setlist (cl1 then cl2)?
-         if (setlist::bytes_for(nb, uint32_t(prefix.size()), term) <= 128)
-            return {bt::setlist, pack_setlist<128>(_s1, bt::setlist, prefix, brs, nb, term, tt, tp)};
-         if (setlist::bytes_for(nb, uint32_t(prefix.size()), term) <= 256)
-            return {bt::double_setlist, pack_setlist<256>(_s2, bt::double_setlist, prefix, brs, nb, term, tt, tp)};
+         const uint32_t pl = uint32_t(prefix.size());
+         if (setlist::fits(nb, pl, term, 128))
+            return {bt::setlist, pack_setlist<128>(_s1, prefix, brs, nb, term, tt, tp)};
+         if (setlist::fits(nb, pl, term, 256))
+            return {bt::double_setlist, pack_setlist<256>(_s2, prefix, brs, nb, term, tt, tp)};
          return {bt::full, pack_full(prefix, brs, nb, term, tt, tp)};
       }
 
       template <uint32_t SB, class Ses>
-      uint32_t pack_setlist(Ses& ses, bt /*kind*/, sv prefix, const br* brs, uint32_t nb,
-                            bool term, bt tt, uint32_t tp)
+      uint32_t pack_setlist(Ses& ses, sv prefix, const br* brs, uint32_t nb, bool term, bt tt, uint32_t tp)
       {
          const uint32_t slot = ses.alloc();
          auto* n = static_cast<setlist*>(SB == 128 ? _e.cl1.get(slot) : _e.cl2.get(slot));
          n->meta    = uint8_t((term ? 0x80 : 0) | (prefix.size() & 0x7f));
          n->nbranch = uint8_t(nb);
+         n->cap     = uint8_t(setlist::derive_cap(uint32_t(prefix.size()), SB));  // fill the slot's slack as growth room
          std::memcpy(n->prefix_ptr(), prefix.data(), prefix.size());
-         for (uint32_t i = 0; i < nb; ++i) n->keys()[i] = brs[i].byte;
-         std::memset(n->types(), 0, tag3_bytes(nb + (term ? 1u : 0u)));
-         for (uint32_t i = 0; i < nb; ++i) { tag3_set(n->types(), i, brs[i].tag); n->branches()[i] = brs[i].ptr; }
+         for (uint32_t i = 0; i < nb; ++i) { n->keys()[i] = brs[i].byte; tag3_set(n->types(), i, brs[i].tag); n->branches()[i] = brs[i].ptr; }
          if (term) { tag3_set(n->types(), nb, tt); n->branches()[nb] = tp; }
          return slot;
+      }
+
+      // in-place sorted insert of a byte-branch into a PRIVATE setlist with room
+      // (total() < cap): shift keys/types/branches within the pre-sized arrays.
+      void setlist_insert_inplace(bt t, uint32_t p, uint8_t byte, bt tag, uint32_t ptr)
+      {
+         auto*          n     = static_cast<setlist*>(resolve(_e, t, p));
+         const uint32_t pos   = uint32_t(ucc::lower_bound_padded(n->keys(), n->nbranch, byte));
+         const uint32_t total = n->total();
+         for (uint32_t i = total; i > pos; --i)
+         { n->branches()[i] = n->branches()[i - 1]; tag3_set(n->types(), i, tag3_get(n->types(), i - 1)); }
+         for (uint32_t i = n->nbranch; i > pos; --i) n->keys()[i] = n->keys()[i - 1];
+         n->keys()[pos] = byte; tag3_set(n->types(), pos, tag); n->branches()[pos] = ptr;
+         ++n->nbranch;
       }
       uint32_t pack_full(sv prefix, const br* brs, uint32_t nb, bool term, bt tt, uint32_t tp)
       {
@@ -629,6 +650,10 @@ namespace gcart::st
                tag3_set(n->types(), byte, nv.first); n->branches()[byte] = nv.second; ++n->nbranch;
                return W;
             }
+            // setlist: in-place insert if the slot has room; else grow (rebuild).
+            if (static_cast<setlist*>(resolve(_e, wt, wp))->total() <
+                static_cast<setlist*>(resolve(_e, wt, wp))->cap)
+            { setlist_insert_inplace(wt, wp, byte, nv.first, nv.second); return W; }
             return rebuild(true, wt, wp, edit{edit::ins, byte, nv.first, nv.second});
          }
          // REP: recurse the byte-child in the latched mode, overwrite the slot.
@@ -660,9 +685,25 @@ namespace gcart::st
       }
 
       // Reprefix a routing node to prefix[drop:] (build a copy, retain children,
-      // release old). Returns the new (tag, ptr).
+      // release old). Returns the new (tag, ptr). drop==0 is the COW clone hot
+      // path: same slot class → verbatim memcpy (no scratch/re-pack) + retain.
       std::pair<bt, uint32_t> reprefix(bt t, uint32_t p, uint32_t drop)
       {
+         if (drop == 0)
+         {
+            std::pair<bt, uint32_t> out;
+            if (t == bt::full)
+            { uint32_t s = _s9.alloc(); std::memcpy(_e.cl9.get(s), resolve(_e, t, p), full::slot_bytes); out = {bt::full, s}; }
+            else if (t == bt::double_setlist || t == bt::big_nested)
+            { uint32_t s = _s2.alloc(); std::memcpy(_e.cl2.get(s), resolve(_e, t, p), 256); out = {t, s}; }
+            else
+            { uint32_t s = _s1.alloc(); std::memcpy(_e.cl1.get(s), resolve(_e, t, p), 128); out = {t, s}; }
+            bt tt; uint32_t tp;
+            read_branches(out.first, out.second, [&](const br& b) { retain(_e, b.tag, b.ptr); });
+            if (node_term(out.first, out.second, tt, tp)) retain(_e, tt, tp);
+            release_ref(t, p);
+            return out;
+         }
          br scratch[257]; uint32_t nb = 0; bt tt = bt::null; uint32_t tp = 0;
          const bool term = node_term(t, p, tt, tp);
          read_branches(t, p, [&](const br& b) { scratch[nb++] = b; });

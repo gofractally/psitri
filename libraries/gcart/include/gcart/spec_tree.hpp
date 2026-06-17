@@ -25,6 +25,14 @@ namespace gcart::st
    using sv  = std::string_view;
    using bt  = branch_type;
 
+   // COW descent mode latch (Dan §5.2): a scoped enum, not a bool. The recursion
+   // CACHES whether the subtree is private or shared so it does not re-check every
+   // node once committed to <shared>. <unique> reads each routing node's refcount
+   // (==1 ⟹ mutate in place); the FIRST shared node clones (retaining children →
+   // they become shared) and latches the rest of the descent to <shared>, which
+   // clones without re-checking. (Refcount stands in for the spec's birth==V.)
+   enum class cow_mode { shared, unique };
+
    // A node reference: which region (by tag) + the 4-byte slot index.
    inline uint32_t lcp(sv a, sv b) noexcept
    {
@@ -202,6 +210,18 @@ namespace gcart::st
       (void)p;
 #endif
    }
+   // a routing node is UNIQUE (ref==1) iff no snapshot pins it → safe to mutate
+   // in place (no clone). Only routing nodes are mutated in place.
+   inline bool unique(engine& e, bt t, uint32_t p) noexcept
+   {
+      switch (t)
+      {
+         case bt::full: return e.cl9.unique(p);
+         case bt::double_setlist: case bt::big_nested: return e.cl2.unique(p);
+         case bt::setlist: case bt::nested_setlist: return e.cl1.unique(p);
+         default: return false;
+      }
+   }
    // lock-free pin attempt: bump only if alive (snapshot acquire). false = dead.
    [[nodiscard]] inline bool try_retain(engine& e, bt t, uint32_t p) noexcept
    {
@@ -339,9 +359,12 @@ namespace gcart::st
       void     release(bt t, uint32_t p) { release_ref(t, p); }
 
       // ── write path ─────────────────────────────────────────────────────────
+      // Public entry descends in <unique> and latches to <shared> on the first
+      // snapshot-pinned node (doc §5.2). One refcount read at the root decides
+      // in-place vs clone; the cost is cached down the descent.
       void upsert(sv key, sv val)
       {
-         auto [t, p] = upsert_rec(_rt, _rp, key, 0, val);
+         auto [t, p] = upsert_rec<cow_mode::unique>(_rt, _rp, key, 0, val);
          _rt = t; _rp = p;
       }
 
@@ -401,6 +424,19 @@ namespace gcart::st
          }
          const setlist* n = static_cast<const setlist*>(resolve(e, t, p));
          if (!n->has_term()) return false; tt = n->term_type(); tp = n->term_branch(); return true;
+      }
+      // O(1) child lookup for a byte (setlist: SWAR find_index; full: direct).
+      bool node_child(bt t, uint32_t p, uint8_t byte, bt& ct, uint32_t& cp) const
+      {
+         engine& e = const_cast<engine&>(_e);
+         if (t == bt::full)
+         {
+            const full* n = static_cast<const full*>(resolve(e, t, p));
+            ct = n->btype(byte); if (ct == bt::null) return false; cp = n->branch(byte); return true;
+         }
+         const setlist* n = static_cast<const setlist*>(resolve(e, t, p));
+         const int idx = n->find_index(byte); if (idx < 0) return false;
+         ct = n->btype(uint32_t(idx)); cp = n->branch(uint32_t(idx)); return true;
       }
       sv node_prefix(bt t, uint32_t p) const
       {
@@ -462,7 +498,7 @@ namespace gcart::st
       // / replace one byte / set term), build a new node retaining the COPIED
       // children, release the old. Returns the new (tag, ptr).
       struct edit { enum K { ins, rep, set_term } k; uint8_t byte; bt tag; uint32_t ptr; };
-      std::pair<bt, uint32_t> rebuild(bt t, uint32_t p, edit ed)
+      std::pair<bt, uint32_t> rebuild(bool is_unique, bt t, uint32_t p, edit ed)
       {
          br       scratch[257];
          uint32_t nb = 0;
@@ -481,10 +517,17 @@ namespace gcart::st
             scratch[pos] = br{ed.byte, ed.tag, ed.ptr}; ++nb;
          }
          auto out = build_node(node_prefix(t, p), scratch, nb, new_term, new_tt, new_tp);
-         // retain the COPIED children (everything that came from the old node).
-         // The edited/new branch (ins/rep) and a set_term value came with ref 1
-         // (owned), so DON'T retain those; the old's corresponding ref is dropped
-         // when the old node is released below.
+         if (is_unique)
+         {
+            // PRIVATE: every child/term is transferred to `out` (no snapshot holds
+            // the old node) — just free the old husk slot. No O(n) retain/release.
+            free_node(t, p);
+            return out;
+         }
+         // SHARED (a snapshot pins the old node): retain the COPIED children +
+         // carried-over term (now referenced by both old and out), then release
+         // the old node (snapshot keeps its copy). The edited/new branch came with
+         // ref 1 (owned), so it is NOT retained here.
          read_branches(out.first, out.second, [&](const br& b)
          {
             const bool is_new = ((ed.k == edit::ins || ed.k == edit::rep) && b.byte == ed.byte);
@@ -501,6 +544,7 @@ namespace gcart::st
          return out;
       }
 
+      template <cow_mode M>
       std::pair<bt, uint32_t> upsert_rec(bt t, uint32_t p, sv key, uint32_t depth, sv val)
       {
          if (t == bt::null) { ++_size; return make_sv(key.substr(depth), val); }
@@ -544,35 +588,62 @@ namespace gcart::st
             return build_node(common, brs, nb, term, tt, tp);
          }
          depth += uint32_t(pfx.size());
-         if (depth == key.size())
-         {
-            // set/replace the term. rebuild(set_term) releases the OLD term via
-            // the old-node cascade — do NOT pre-release it (that double-frees).
-            bt tt; uint32_t tp;
-            if (!node_term(t, p, tt, tp)) ++_size;  // adding a new term
-            auto nv = make_sv(sv{}, val);
-            return rebuild(t, p, edit{edit::set_term, 0, nv.first, nv.second});
-         }
-         const uint8_t byte = uint8_t(key[depth]);
-         // find the byte branch
-         bt ct = bt::null; uint32_t cpp = 0; bool found = false;
-         read_branches(t, p, [&](const br& b) { if (b.byte == byte) { ct = b.tag; cpp = b.ptr; found = true; } });
-         if (!found)
-         {
-            auto nv = make_sv(key.substr(depth + 1), val); ++_size;
-            return rebuild(t, p, edit{edit::ins, byte, nv.first, nv.second});
-         }
-         // REP: clone-first (retain all children + term, release old), THEN
-         // recurse the clone's byte-child (which consumes the clone's ref on it),
-         // THEN overwrite the byte slot in the private clone. No double-release.
-         auto priv = reprefix(t, p, 0);
-         bt   ct2 = bt::null; uint32_t cpp2 = 0;
-         read_branches(priv.first, priv.second, [&](const br& b) { if (b.byte == byte) { ct2 = b.tag; cpp2 = b.ptr; } });
-         auto nc = upsert_rec(ct2, cpp2, key, depth + 1, val);
-         set_branch_inplace(priv.first, priv.second, byte, nc);
-         return priv;
+         // The latch, compile-time: in <unique> read the refcount once — a private
+         // node mutates in place (children stay <unique>); a shared one clones and
+         // its children recurse <shared>. In <shared> there is NO refcount read at
+         // all — the instantiation is the clone path only.
+         if constexpr (M == cow_mode::unique)
+            if (unique(_e, t, p))
+               return edit_node<cow_mode::unique>(t, p, key, depth, val);
+         return edit_node<cow_mode::shared>(t, p, key, depth, val);
       }
 
+      // Mutate a routing node for the key. CM == unique ⟹ the node is private,
+      // mutate (t,p) in place and recurse children <unique>. CM == shared ⟹ the
+      // node is snapshot-pinned, clone it (now private), recurse children <shared>.
+      // Either way the working node W is private, so all edits free-husk / in-place.
+      template <cow_mode CM>
+      std::pair<bt, uint32_t> edit_node(bt t, uint32_t p, sv key, uint32_t depth, sv val)
+      {
+         std::pair<bt, uint32_t> W;
+         if constexpr (CM == cow_mode::unique) W = {t, p};
+         else W = reprefix(t, p, 0);            // clone the shared node (retain children, drop one old ref)
+         const bt wt = W.first; const uint32_t wp = W.second;
+
+         if (depth == key.size())               // term
+         {
+            bt tt; uint32_t tp;
+            if (node_term(wt, wp, tt, tp))       // REPLACE in place
+            { release_ref(tt, tp); set_term_inplace(wt, wp, make_sv(sv{}, val)); return W; }
+            auto nv = make_sv(sv{}, val); ++_size;   // ADD a term → grow → rebuild (W private)
+            return rebuild(true, wt, wp, edit{edit::set_term, 0, nv.first, nv.second});
+         }
+         const uint8_t byte = uint8_t(key[depth]);
+         bt ct; uint32_t cpp;
+         if (!node_child(wt, wp, byte, ct, cpp))   // INS: byte absent
+         {
+            auto nv = make_sv(key.substr(depth + 1), val); ++_size;
+            if (wt == bt::full)                   // O(1) direct-index insert (W is private)
+            {
+               full* n = static_cast<full*>(resolve(_e, wt, wp));
+               tag3_set(n->types(), byte, nv.first); n->branches()[byte] = nv.second; ++n->nbranch;
+               return W;
+            }
+            return rebuild(true, wt, wp, edit{edit::ins, byte, nv.first, nv.second});
+         }
+         // REP: recurse the byte-child in the latched mode, overwrite the slot.
+         auto nc = upsert_rec<CM>(ct, cpp, key, depth + 1, val);
+         set_branch_inplace(wt, wp, byte, nc);
+         return W;
+      }
+
+      void set_term_inplace(bt t, uint32_t p, std::pair<bt, uint32_t> nv)
+      {
+         if (t == bt::full)
+         { auto* n = static_cast<full*>(resolve(_e, t, p)); n->term_tag = uint8_t(nv.first); n->term_ptr = nv.second; }
+         else
+         { auto* n = static_cast<setlist*>(resolve(_e, t, p)); tag3_set(n->types(), n->nbranch, nv.first); n->branches()[n->nbranch] = nv.second; }
+      }
       void set_branch_inplace(bt t, uint32_t p, uint8_t byte, std::pair<bt, uint32_t> nc)
       {
          if (t == bt::full)

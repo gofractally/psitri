@@ -234,29 +234,49 @@ namespace gcart
    // slen==0 => the term (a "leaf" is suffix_value with a 0-length suffix).
    struct sv_leaf
    {
+      // STANDALONE body (own SAL slot): [u32 birth][u16 vlen][u8 slen][value][suffix].
+      // birth = the committing-txn version that created this leaf (version liveness;
+      // the COW latch mutates in place iff birth==V, else clones + stamp_deaths).
+      // The INLINE-into-nested form (nested::in_value) is birth-FREE — it shares the
+      // nested node's header birth — so bytes_for() is the LOGICAL (birth-free) size
+      // used for inline packing; standalone storage prepends birth_bytes.
+      static constexpr uint32_t birth_bytes = 4;
       static uint32_t bytes_for(uint32_t vlen, uint32_t slen) noexcept { return 3 + vlen + slen; }
       static uint32_t make(engine& e, sal2::var_allocator<32>::session& ses, sv suffix, sv value)
       {
          const uint32_t vl = uint32_t(value.size()), sl = uint32_t(suffix.size());
-         const uint32_t slot = ses.alloc(bytes_for(vl, sl));
+         const uint32_t slot = ses.alloc(birth_bytes + bytes_for(vl, sl));
          char*          p    = static_cast<char*>(e.sal.get(slot));
+         const uint32_t b0   = 0;  // birth stamped by the latch at commit (GC-2c)
+         std::memcpy(p, &b0, 4);
+         char*          d    = p + birth_bytes;
          const uint16_t v16  = uint16_t(vl);
-         std::memcpy(p, &v16, 2);
-         p[2] = char(uint8_t(sl));
-         std::memcpy(p + 3, value.data(), vl);
-         std::memcpy(p + 3 + vl, suffix.data(), sl);
+         std::memcpy(d, &v16, 2);
+         d[2] = char(uint8_t(sl));
+         std::memcpy(d + 3, value.data(), vl);
+         std::memcpy(d + 3 + vl, suffix.data(), sl);
          return slot;
+      }
+      static uint32_t birth(const engine& e, uint32_t slot) noexcept
+      {
+         uint32_t b;
+         std::memcpy(&b, e.sal.get(slot), 4);
+         return b;
+      }
+      static void set_birth(engine& e, uint32_t slot, uint32_t v) noexcept
+      {
+         std::memcpy(e.sal.get(slot), &v, 4);
       }
       static sv value(const engine& e, uint32_t slot) noexcept
       {
-         const char* p = static_cast<const char*>(e.sal.get(slot));
+         const char* p = static_cast<const char*>(e.sal.get(slot)) + birth_bytes;
          uint16_t    v16;
          std::memcpy(&v16, p, 2);
          return {p + 3, v16};
       }
       static sv suffix(const engine& e, uint32_t slot) noexcept
       {
-         const char* p = static_cast<const char*>(e.sal.get(slot));
+         const char* p = static_cast<const char*>(e.sal.get(slot)) + birth_bytes;
          uint16_t    v16;
          std::memcpy(&v16, p, 2);
          const uint8_t sl = uint8_t(p[2]);
@@ -264,10 +284,10 @@ namespace gcart
       }
       static uint32_t total_bytes(const engine& e, uint32_t slot) noexcept
       {
-         const char* p = static_cast<const char*>(e.sal.get(slot));
+         const char* p = static_cast<const char*>(e.sal.get(slot)) + birth_bytes;
          uint16_t    v16;
          std::memcpy(&v16, p, 2);
-         return bytes_for(v16, uint8_t(p[2]));
+         return birth_bytes + bytes_for(v16, uint8_t(p[2]));
       }
    };
 
@@ -279,28 +299,48 @@ namespace gcart
    // bt::big_suffix_value branch; no SAL slot, no chunk chain.
    struct big_leaf
    {
-      static uint32_t body_bytes(uint32_t vlen, uint32_t slen) noexcept { return 5 + vlen + slen; }
+      // BIG body: [u32 birth][u32 vlen][u8 slen][value][suffix]. Never inlined
+      // (>2KB), so birth is an unconditional body prefix. birth = creating-txn
+      // version (version liveness; stamped by the latch at commit, GC-2c).
+      static constexpr uint32_t birth_bytes = 4;
+      static uint32_t body_bytes(uint32_t vlen, uint32_t slen) noexcept
+      {
+         return birth_bytes + 5 + vlen + slen;
+      }
       static uint32_t make(engine& e, sv suffix, sv value)
       {
          const uint32_t vl = uint32_t(value.size()), sl = uint32_t(suffix.size());
          const uint32_t h = e.big.alloc(body_bytes(vl, sl));
          char*          p = static_cast<char*>(e.big.get(h));
-         std::memcpy(p, &vl, 4);
-         p[4] = char(uint8_t(sl));
-         std::memcpy(p + 5, value.data(), vl);
-         std::memcpy(p + 5 + vl, suffix.data(), sl);
+         const uint32_t b0 = 0;
+         std::memcpy(p, &b0, 4);
+         char*          d = p + birth_bytes;
+         std::memcpy(d, &vl, 4);
+         d[4] = char(uint8_t(sl));
+         std::memcpy(d + 5, value.data(), vl);
+         std::memcpy(d + 5 + vl, suffix.data(), sl);
          return h;
+      }
+      static uint32_t birth(const engine& e, uint32_t h) noexcept
+      {
+         uint32_t b;
+         std::memcpy(&b, e.big.get(h), 4);
+         return b;
+      }
+      static void set_birth(engine& e, uint32_t h, uint32_t v) noexcept
+      {
+         std::memcpy(e.big.get(h), &v, 4);
       }
       static sv value(const engine& e, uint32_t h) noexcept
       {
-         const char* p = static_cast<const char*>(e.big.get(h));
+         const char* p = static_cast<const char*>(e.big.get(h)) + birth_bytes;
          uint32_t    vl;
          std::memcpy(&vl, p, 4);
          return {p + 5, vl};
       }
       static sv suffix(const engine& e, uint32_t h) noexcept
       {
-         const char* p = static_cast<const char*>(e.big.get(h));
+         const char* p = static_cast<const char*>(e.big.get(h)) + birth_bytes;
          uint32_t    vl;
          std::memcpy(&vl, p, 4);
          const uint8_t sl = uint8_t(p[4]);
@@ -831,11 +871,12 @@ namespace gcart
    }
 
    // ── ordered cursor descents (read-only; usable by snapshot cursors) ─────────
-   // Body-based leaf readers: read (suffix,value) from a RESOLVED leaf body — works
-   // for a standalone leaf (resolve(e,t,p)) and an inline-in-nested suffix_value body.
+   // Body-based leaf readers: read (suffix,value) from a RESOLVED STANDALONE leaf
+   // body (resolve(e,t,p)) — skips the u32 birth prefix. Inline-in-nested
+   // suffix_value bodies are birth-FREE and read via nested::in_value/in_suffix.
    inline sv leaf_suffix_body(bt t, const void* b) noexcept
    {
-      const char* p = static_cast<const char*>(b);
+      const char* p = static_cast<const char*>(b) + sv_leaf::birth_bytes;  // skip birth (==big's)
       if (t == bt::big_suffix_value)
       {
          uint32_t v;
@@ -848,7 +889,7 @@ namespace gcart
    }
    inline sv leaf_value_body(bt t, const void* b) noexcept
    {
-      const char* p = static_cast<const char*>(b);
+      const char* p = static_cast<const char*>(b) + sv_leaf::birth_bytes;  // skip birth (==big's)
       if (t == bt::big_suffix_value)
       {
          uint32_t v;
@@ -2233,7 +2274,9 @@ namespace gcart
             const char* src = nullptr;
             if (tag == bt::suffix_value && _e.sal.unique(ptr))
             {
-               src = static_cast<const char*>(_e.sal.get(ptr));  // resolve the SAL slot ONCE
+               // point past the standalone birth prefix → the birth-FREE body, which
+               // is what gets copied verbatim into the (birth-free) inline entry.
+               src = static_cast<const char*>(_e.sal.get(ptr)) + sv_leaf::birth_bytes;
                uint16_t v16;
                std::memcpy(&v16, src, 2);
                const uint32_t b = sv_leaf::bytes_for(v16, uint8_t(src[2]));
@@ -2732,11 +2775,14 @@ namespace gcart
                std::memcpy(_e.cl1.get(s), n->entry(i), n->entry_size(i));
                scratch[nb++] = br{n->okeys()[i], bt::setlist, s};
             }
-            else  // inline suffix_value → fresh SAL leaf (verbatim body copy)
+            else  // inline suffix_value → fresh SAL leaf (birth-free body, prepend birth)
             {
-               const uint32_t sz = n->entry_size(i);
-               const uint32_t s  = _ssal.alloc(sz);
-               std::memcpy(_e.sal.get(s), n->entry(i), sz);
+               const uint32_t sz = n->entry_size(i);  // birth-free inline body
+               const uint32_t s  = _ssal.alloc(sv_leaf::birth_bytes + sz);
+               char*          d  = static_cast<char*>(_e.sal.get(s));
+               const uint32_t b0 = 0;  // birth stamped by the latch at commit (GC-2c)
+               std::memcpy(d, &b0, 4);
+               std::memcpy(d + sv_leaf::birth_bytes, n->entry(i), sz);
                scratch[nb++] = br{n->okeys()[i], bt::suffix_value, s};
             }
          }

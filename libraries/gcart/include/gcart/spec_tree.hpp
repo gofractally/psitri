@@ -159,12 +159,26 @@ namespace gcart
       // values whose sv_leaf body exceeds the SAL var-allocator's object cap go BIG.
       static constexpr uint32_t sal_max_body = sal2::var_allocator<32>::max_object_bytes;
 
+      // Per-region segment cap = max addressable size before the u32 slot index
+      // wraps (each region's branch pointer is a 4-byte intra-region index). A
+      // segment is PROT_NONE-reserved up front and committed on demand, so a large
+      // cap costs virtual address space, not RSS — sized here for big workloads
+      // (Silkworm-scale sync). FIX caps sit at the u32 ceiling (16384·32MB=512GB);
+      // sal's grain index ceiling is 16384·8MB=128GB. Override per region via env
+      // (GCART_CL1_SEGS / _CL2_ / _CL9_ / _SAL_ / _BIG_SEGS) for tuning.
+      static uint32_t seg_cap(const char* env, uint32_t def) noexcept
+      {
+         if (const char* v = std::getenv(env))
+            if (const unsigned long n = std::strtoul(v, nullptr, 10))
+               return uint32_t(n);
+         return def;
+      }
       explicit engine(std::filesystem::path dir)
-          : cl1({.dir = dir, .name = "cl1", .max_segments = 256}),
-            cl2({.dir = dir, .name = "cl2", .max_segments = 256}),
-            cl9({.dir = dir, .name = "cl9", .max_segments = 256}),
-            sal({.dir = dir, .name = "sal", .max_segments = 512}),
-            big({.dir = dir, .name = "big", .max_segments = 4096})
+          : cl1({.dir = dir, .name = "cl1", .max_segments = seg_cap("GCART_CL1_SEGS", 4096)}),
+            cl2({.dir = dir, .name = "cl2", .max_segments = seg_cap("GCART_CL2_SEGS", 2048)}),
+            cl9({.dir = dir, .name = "cl9", .max_segments = seg_cap("GCART_CL9_SEGS", 2048)}),
+            sal({.dir = dir, .name = "sal", .max_segments = seg_cap("GCART_SAL_SEGS", 16384)}),
+            big({.dir = dir, .name = "big", .max_segments = seg_cap("GCART_BIG_SEGS", 8192)})
       { /* A/B: bg release thread disabled (sync release) */
       }
 

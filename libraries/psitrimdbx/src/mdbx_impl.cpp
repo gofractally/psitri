@@ -43,9 +43,13 @@
 #if !defined(PSITRIMDBX_BACKEND_START_REF)
 #define PSITRIMDBX_BACKEND_START_REF 0
 #endif
+//   PSITRIMDBX_BACKEND_GCART         — gcart spec engine DIRECT (sal2 3-region FIX/SAL/BIG, refcount, node-level COW)
+#if !defined(PSITRIMDBX_BACKEND_GCART)
+#define PSITRIMDBX_BACKEND_GCART 0
+#endif
 #if !PSITRIMDBX_BACKEND_TIERED_PSITRI && !PSITRIMDBX_BACKEND_PSITRI && \
     !PSITRIMDBX_BACKEND_START_VER && !PSITRIMDBX_BACKEND_SAL_ART_REF && \
-    !PSITRIMDBX_BACKEND_START_REF
+    !PSITRIMDBX_BACKEND_START_REF && !PSITRIMDBX_BACKEND_GCART
 #define PSITRIMDBX_BACKEND_DELTA_ART 1
 #else
 #define PSITRIMDBX_BACKEND_DELTA_ART 0
@@ -59,6 +63,9 @@
 #include <start_ver/kv.hpp>  // start_ver::kv::engine (hot delta / standalone store)
 #if PSITRIMDBX_BACKEND_START_REF
 #include <start_ref/kv.hpp>  // start_ref::kv::engine (part-family ART, refcount liveness)
+#endif
+#if PSITRIMDBX_BACKEND_GCART
+#include <gcart/spec_kv.hpp>  // gcart::kv::engine (spec engine: 3-region FIX/SAL/BIG)
 #endif
 #if PSITRIMDBX_USES_TIERED
 #include <delta_art/tiered_kv.hpp>
@@ -186,6 +193,8 @@ using TK         = psitri::dwal::psitri_engine<>;  // legacy psitri DIRECT (old 
 using TK         = start_ver::kv::engine;  // start_ver alone — no cold base / drain
 #elif PSITRIMDBX_BACKEND_START_REF
 using TK         = start_ref::kv::engine;  // start_ref alone — part-family ART, refcount liveness
+#elif PSITRIMDBX_BACKEND_GCART
+using TK         = gcart::kv::engine;  // gcart spec engine DIRECT — 3-region FIX/SAL/BIG, refcount
 #elif PSITRIMDBX_BACKEND_SAL_ART_REF
 using TK         = sal_art_ref::radix::dwal_engine;  // sal_art_ref DIRECT — no tiering / no merger
 #else
@@ -238,7 +247,15 @@ static constexpr size_t   mdbx_namespace_prefix_size = 1;
 // are rejected with MDBX_BAD_VALSIZE (native MDBX's oversize error). 0.5 MB
 // covers Ethereum (bytecode caps at 24 KB/EIP-170); a 16 KB grain would lift it
 // to 1 MB if ever needed.
+#if PSITRIMDBX_BACKEND_GCART
+// gcart's BIG region is an 8 MB-segment heap; a value rides one contiguous
+// big_leaf, so the per-value cap is ~a segment (keep a margin for the inline
+// header + key suffix). Comfortably covers Ethereum's 24 KB bytecode and the
+// 1 MB conformance case.
+static constexpr size_t   backend_value_leaf_budget = 7u * 1024 * 1024;
+#else
 static constexpr size_t   backend_value_leaf_budget = 64 * 8192;  // 524288 (large arena)
+#endif
 static constexpr size_t   max_backend_value_size =
    backend_value_leaf_budget - max_psitri_key_size - 16;  // conservative
 static constexpr size_t   max_mdbx_logical_key_size =
@@ -2621,6 +2638,10 @@ int mdbx_env_open(MDBX_env* env, const char* pathname,
       env->db = be_db::open(env->path, open_mode);
 #elif PSITRIMDBX_BACKEND_START_REF
       // start_ref standalone: part-family ART, refcount liveness; same open shape as start_ver.
+      env->db = be_db::open(env->path, open_mode);
+#elif PSITRIMDBX_BACKEND_GCART
+      // gcart spec engine standalone: node-level COW + refcount; same 2-arg open shape.
+      // Segment caps come from the GCART_*_SEGS env knobs (Silkworm-scale defaults).
       env->db = be_db::open(env->path, open_mode);
 #elif PSITRIMDBX_BACKEND_PSITRI
       // legacy psitri direct: config is sal::runtime_config (no tiered knobs).

@@ -15,8 +15,28 @@ target_include_directories(psitrimdbx
         ${CMAKE_SOURCE_DIR}/libraries/sal_art_ref/test
 )
 
-target_link_libraries(psitrimdbx PUBLIC psitri delta_art start_ver start_ref sal_art_ref)
+target_link_libraries(psitrimdbx PUBLIC psitri delta_art start_ver start_ref sal_art_ref gcart)
 target_compile_features(psitrimdbx PUBLIC cxx_std_20)
+
+# Backend selection (default: delta_art tiered). The shim source picks the engine
+# from a PSITRIMDBX_BACKEND_* macro; this maps a friendly string option to it so an
+# embedder (Silkworm: -DPSITRIMDBX_BACKEND=gcart) can choose without editing source.
+set(PSITRIMDBX_BACKEND "delta_art" CACHE STRING
+    "psitrimdbx storage backend: delta_art|start_ver|start_ref|gcart|sal_art_ref|psitri")
+if(PSITRIMDBX_BACKEND STREQUAL "gcart")
+    target_compile_definitions(psitrimdbx PUBLIC PSITRIMDBX_BACKEND_GCART=1)
+elseif(PSITRIMDBX_BACKEND STREQUAL "start_ver")
+    target_compile_definitions(psitrimdbx PUBLIC PSITRIMDBX_BACKEND_START_VER=1)
+elseif(PSITRIMDBX_BACKEND STREQUAL "start_ref")
+    target_compile_definitions(psitrimdbx PUBLIC PSITRIMDBX_BACKEND_START_REF=1)
+elseif(PSITRIMDBX_BACKEND STREQUAL "sal_art_ref")
+    target_compile_definitions(psitrimdbx PUBLIC PSITRIMDBX_BACKEND_SAL_ART_REF=1)
+elseif(PSITRIMDBX_BACKEND STREQUAL "psitri")
+    target_compile_definitions(psitrimdbx PUBLIC PSITRIMDBX_BACKEND_PSITRI=1)
+elseif(NOT PSITRIMDBX_BACKEND STREQUAL "delta_art")
+    message(FATAL_ERROR "Unknown PSITRIMDBX_BACKEND='${PSITRIMDBX_BACKEND}'")
+endif()
+message(STATUS "psitrimdbx backend: ${PSITRIMDBX_BACKEND}")
 
 option(PSITRIMDBX_BUILD_TESTS "Build the psitrimdbx test suite" ON)
 if(PSITRIMDBX_BUILD_TESTS)

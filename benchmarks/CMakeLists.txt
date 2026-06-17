@@ -44,6 +44,14 @@ target_compile_options(bank-compare-bench PRIVATE -O3 -DNDEBUG)
 set_target_properties(bank-compare-bench PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+# gcart oplog replay: drive a captured Silkworm op-stream through gcart's adb API.
+add_executable(gcart-oplog-replay gcart_oplog_replay.cpp)
+target_link_libraries(gcart-oplog-replay PRIVATE gcart)
+target_compile_definitions(gcart-oplog-replay PRIVATE XXH_INLINE_ALL)
+target_compile_options(gcart-oplog-replay PRIVATE -O3 -DNDEBUG)
+set_target_properties(gcart-oplog-replay PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 # delta_art threshold sweep: same sustained transfer workload at a range of
 # flush high-water marks (Dan: smaller hot delta = faster).
 add_executable(delta_art-threshold-sweep delta_art_threshold_sweep.cpp)

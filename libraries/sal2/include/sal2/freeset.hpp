@@ -85,6 +85,11 @@ namespace sal2
    // The line arena and the large-value arena instantiate the SAME freeset (both
    // have units_per_segment == lines_per_segment by the large_geometry choice),
    // so the default instantiation is byte-identical to the pre-template struct.
+   // Whether a freeset op maintains the g2/g4/g8 run tiers. A single-size slab
+   // (FixedAllocator) only ever allocates one slot, so it never reads the run
+   // tiers — `skip` makes its alloc/free O(1) on l0 + the find-index alone.
+   enum class run_tiers { keep, skip };
+
    template <uint32_t UnitsPerSegment = lines_per_segment>
    struct seg_freeset_t
    {
@@ -236,6 +241,45 @@ namespace sal2
             ;
       }
 
+      // ── single-slot fast path (FixedAllocator slab; skips the run tiers) ──────
+      // Find/take the first free slot at-or-after `from`; no g2/g4/g8 update.
+      uint32_t alloc1(uint32_t from) noexcept
+      {
+         uint32_t gfrom = from;
+         for (;;)
+         {
+            const uint32_t hw = find_word_(0, gfrom / 64);
+            if (hw == UINT32_MAX) return UINT32_MAX;
+            uint64_t cand = l0[hw].load(std::memory_order_relaxed);
+            if (hw == gfrom / 64) cand &= ~0ull << (gfrom % 64);
+            while (cand)
+            {
+               const uint32_t bit  = uint32_t(std::countr_zero(cand));
+               const uint32_t line = hw * 64 + bit;
+               const uint64_t mask = 1ull << bit;
+               uint64_t       cur  = l0[hw].load(std::memory_order_relaxed);
+               while (cur & mask)
+               {
+                  if (l0[hw].compare_exchange_weak(cur, cur & ~mask, std::memory_order_acquire,
+                                                   std::memory_order_relaxed))
+                  { propagate_<run_tiers::skip>(hw, cur, cur & ~mask); return line; }
+               }
+               cand &= ~mask;  // taken under us — next candidate
+            }
+            gfrom = (hw + 1) * 64;
+         }
+      }
+      void free1(uint32_t line) noexcept
+      {
+         const uint32_t w    = line / 64;
+         const uint64_t mask = 1ull << (line % 64);
+         const uint64_t prior = l0[w].fetch_or(mask, std::memory_order_release);
+         assert((prior & mask) == 0 && "double free");
+         propagate_<run_tiers::skip>(w, prior, prior | mask);
+         auto lw = low_water.load(std::memory_order_relaxed);
+         while (line < lw && !low_water.compare_exchange_weak(lw, line, std::memory_order_relaxed)) ;
+      }
+
       bool     is_free(uint32_t line) const noexcept
       {
          return (l0[line / 64].load(std::memory_order_relaxed) >> (line % 64)) & 1;
@@ -292,6 +336,10 @@ namespace sal2
 
       // The responsible-toggler propagation: this thread's atomic op moved l0
       // word `w` prior->now; reflect every boundary transition exactly once.
+      // run_tiers::skip omits the g2/g4/g8 run-tier maintenance — for a single-
+      // size slab (FixedAllocator) that never allocates a multi-slot run, those
+      // tiers are never consulted, so updating them is pure overhead (spec §6.1).
+      template <run_tiers RT = run_tiers::keep>
       void propagate_(uint32_t w, uint64_t prior, uint64_t now) noexcept
       {
          const int dl = std::popcount(now) - std::popcount(prior);
@@ -301,6 +349,7 @@ namespace sal2
             free_count[0].fetch_sub(uint32_t(-dl), std::memory_order_relaxed);
          if ((prior == 0) != (now == 0))
             toggle_meta_(0, w);
+         if constexpr (RT == run_tiers::skip) return;
 
          const detail::full_masks pm = detail::group_masks(prior);
          const detail::full_masks nm = detail::group_masks(now);

@@ -106,7 +106,7 @@ namespace sal2
       void free(uint32_t i) noexcept
       {
          const uint32_t s = i / slots_per_segment;
-         freeset_(s).free_run(i % slots_per_segment, 1);
+         freeset_(s).free1(i % slots_per_segment);
       }
 
       // ── sessions ───────────────────────────────────────────────────────────
@@ -168,7 +168,7 @@ namespace sal2
       {
          if (_seg != UINT32_MAX)
          {
-            const uint32_t local = _a->freeset_(_seg).alloc(1, _cursor);
+            const uint32_t local = _a->freeset_(_seg).alloc1(_cursor);
             if (local != UINT32_MAX) { _cursor = local + 1; return finish_(local); }
          }
          return alloc_slow_();
@@ -185,11 +185,11 @@ namespace sal2
          for (uint32_t s = (_seg + 1 < ns ? _seg + 1 : 0), seen = 0; seen < ns; ++seen, s = (s + 1 < ns ? s + 1 : 0))
          {
             if (_a->freeset_(s).free_lines() == 0) continue;
-            const uint32_t local = _a->freeset_(s).alloc(1, 0);
+            const uint32_t local = _a->freeset_(s).alloc1(0);
             if (local != UINT32_MAX) { _seg = s; _cursor = local + 1; return finish_(local); }
          }
          const uint32_t s     = _a->grow_();
-         const uint32_t local = _a->freeset_(s).alloc(1, 0);
+         const uint32_t local = _a->freeset_(s).alloc1(0);
          _seg = s; _cursor = local + 1;
          return finish_(local);
       }

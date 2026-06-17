@@ -48,9 +48,12 @@ int main(int argc, char** argv)
       }
    }
    const uint64_t nkeys = pairs * 2;
-   printf("inserted %llu keys, %.1f B/key (%s)\n", (unsigned long long)nkeys,
-          double(db->live_bytes()) / double(nkeys),
-          getenv("GCART_NO_NESTED") ? "nested OFF" : "nested ON");
+   // theoretical min (Dan): key.len + val.len + sizeof(key.len) + sizeof(val.len).
+   // keys are 8 bytes, values 8 bytes, gcart length fields slen:u8 + vlen:u16 = 3.
+   const double actbpk = double(db->live_bytes()) / double(nkeys);
+   const double minbpk = 8.0 + 8.0 + 3.0;  // 19 B/key flat-store baseline
+   printf("inserted %llu keys (8B key, 8B val), actual=%.1f B/key  min=%.1f (k+v+3)  ratio=%.2fx  overhead=%.1f B/key\n",
+          (unsigned long long)nkeys, actbpk, minbpk, actbpk / minbpk, actbpk - minbpk);
    fflush(stdout);
 
    // timed random point reads

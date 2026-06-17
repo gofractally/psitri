@@ -13,11 +13,14 @@
 // inline-none (suffix_value is its own SAL object, refcounted there).
 #pragma once
 #include <gcart/node.hpp>           // branch_type, tag3_get/set, tag3_bytes
+#include <sal2/big_allocator.hpp>
 #include <sal2/fixed_allocator.hpp>
 #include <sal2/var_allocator.hpp>
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <string_view>
@@ -115,13 +118,18 @@ namespace gcart::st
       sal2::fixed_allocator<128>  cl1;   // setlist / nested_setlist
       sal2::fixed_allocator<256>  cl2;   // double_setlist / big_nested
       sal2::fixed_allocator<1152> cl9;   // full / node256
-      sal2::var_allocator<32>     sal;   // suffix_value leaves
+      sal2::var_allocator<32>     sal;   // suffix_value leaves (≤2KB)
+      sal2::big_allocator<64>     big;   // big_suffix_value leaves (>2KB, BIG region)
+
+      // values whose sv_leaf body exceeds the SAL var-allocator's object cap go BIG.
+      static constexpr uint32_t sal_max_body = sal2::var_allocator<32>::max_object_bytes;
 
       explicit engine(std::filesystem::path dir)
           : cl1({.dir = dir, .name = "cl1", .max_segments = 256}),
             cl2({.dir = dir, .name = "cl2", .max_segments = 256}),
             cl9({.dir = dir, .name = "cl9", .max_segments = 256}),
-            sal({.dir = dir, .name = "sal", .max_segments = 512})
+            sal({.dir = dir, .name = "sal", .max_segments = 512}),
+            big({.dir = dir, .name = "big", .max_segments = 4096})
       { /* A/B: bg release thread disabled (sync release) */ }
 
       ~engine()
@@ -129,7 +137,7 @@ namespace gcart::st
 
       // raw live bytes; drain() first for an accurate (settled) figure.
       uint64_t live_bytes_raw() noexcept
-      { return cl1.live_bytes() + cl2.live_bytes() + cl9.live_bytes() + sal.live_bytes(); }
+      { return cl1.live_bytes() + cl2.live_bytes() + cl9.live_bytes() + sal.live_bytes() + big.live_bytes(); }
       uint64_t live_bytes() noexcept { drain(); return live_bytes_raw(); }
 
       // smart_ptr release entry: bounded-inline cascade, spill the rest to the bg.
@@ -195,6 +203,48 @@ namespace gcart::st
          return bytes_for(v16, uint8_t(p[2]));
       }
    };
+
+   // ── big_leaf (BIG region): [u32 vlen][u8 slen][value][suffix] ──────────────
+   // The same (suffix,value) leaf as sv_leaf, but the body is too large for the
+   // SAL var-allocator (>2KB) so it lives as ONE contiguous object in the BIG
+   // region (address-stable, refcounted). vlen is u32 (big values can exceed 64K);
+   // slen stays u8 (the trie suffix is short — keys are small). Reached as a
+   // bt::big_suffix_value branch; no SAL slot, no chunk chain.
+   struct big_leaf
+   {
+      static uint32_t body_bytes(uint32_t vlen, uint32_t slen) noexcept { return 5 + vlen + slen; }
+      static uint32_t make(engine& e, sv suffix, sv value)
+      {
+         const uint32_t vl = uint32_t(value.size()), sl = uint32_t(suffix.size());
+         const uint32_t h  = e.big.alloc(body_bytes(vl, sl));
+         char* p = static_cast<char*>(e.big.get(h));
+         std::memcpy(p, &vl, 4); p[4] = char(uint8_t(sl));
+         std::memcpy(p + 5, value.data(), vl);
+         std::memcpy(p + 5 + vl, suffix.data(), sl);
+         return h;
+      }
+      static sv value(const engine& e, uint32_t h) noexcept
+      {
+         const char* p = static_cast<const char*>(e.big.get(h));
+         uint32_t vl; std::memcpy(&vl, p, 4);
+         return {p + 5, vl};
+      }
+      static sv suffix(const engine& e, uint32_t h) noexcept
+      {
+         const char* p = static_cast<const char*>(e.big.get(h));
+         uint32_t vl; std::memcpy(&vl, p, 4);
+         const uint8_t sl = uint8_t(p[4]);
+         return {p + 5 + vl, sl};
+      }
+   };
+
+   // ── leaf dispatch: a terminal is suffix_value (SAL) OR big_suffix_value (BIG);
+   //    read its (suffix,value) without the caller caring which region. ──────────
+   inline sv leaf_suffix(const engine& e, bt t, uint32_t p) noexcept
+   { return t == bt::big_suffix_value ? big_leaf::suffix(e, p) : sv_leaf::suffix(e, p); }
+   inline sv leaf_value(const engine& e, bt t, uint32_t p) noexcept
+   { return t == bt::big_suffix_value ? big_leaf::value(e, p) : sv_leaf::value(e, p); }
+   inline bool is_leaf_tag(bt t) noexcept { return t == bt::suffix_value || t == bt::big_suffix_value; }
 
    // ── setlist (cl1/cl2): the sparse routing node, CAP-based for in-place insert
    // layout: [u8 meta(terminal:1,prefixlen:7)] [u8 nbranch] [u8 cap]
@@ -382,7 +432,8 @@ namespace gcart::st
          case bt::setlist:
          case bt::nested_setlist: return e.cl1.get(p);
          case bt::suffix_value:   return e.sal.get(p);
-         default:                 return nullptr;  // big_suffix_value (BIG) / null
+         case bt::big_suffix_value: return e.big.get(p);
+         default:                 return nullptr;  // null
       }
    }
    inline void prefetch(const void* p) noexcept
@@ -414,6 +465,7 @@ namespace gcart::st
          case bt::double_setlist: case bt::big_nested: return e.cl2.try_retain(p);
          case bt::setlist: case bt::nested_setlist: return e.cl1.try_retain(p);
          case bt::suffix_value: return e.sal.try_retain(p);
+         case bt::big_suffix_value: return e.big.try_retain(p);
          default: return false;
       }
    }
@@ -425,6 +477,7 @@ namespace gcart::st
          case bt::double_setlist: case bt::big_nested: e.cl2.retain(p); break;
          case bt::setlist: case bt::nested_setlist: e.cl1.retain(p); break;
          case bt::suffix_value: e.sal.retain(p); break;
+         case bt::big_suffix_value: e.big.retain(p); break;
          default: break;
       }
    }
@@ -437,6 +490,7 @@ namespace gcart::st
          case bt::double_setlist: case bt::big_nested: return e.cl2.release_one(p);
          case bt::setlist: case bt::nested_setlist: return e.cl1.release_one(p);
          case bt::suffix_value: return e.sal.release_one(p);
+         case bt::big_suffix_value: return e.big.release_one(p);
          default: return false;
       }
    }
@@ -463,10 +517,10 @@ namespace gcart::st
       {
          if (t == bt::null) return false;
          void* node = resolve(e, t, p);
-         if (t == bt::suffix_value)
+         if (is_leaf_tag(t))  // suffix_value (SAL) or big_suffix_value (BIG)
          {
-            if (sv_leaf::suffix(e, p) == key.substr(depth))
-            { sv v = sv_leaf::value(e, p); out.assign(v.data(), v.size()); return true; }
+            if (leaf_suffix(e, t, p) == key.substr(depth))
+            { sv v = leaf_value(e, t, p); out.assign(v.data(), v.size()); return true; }
             return false;
          }
          if (t == bt::full)
@@ -566,6 +620,8 @@ namespace gcart::st
       if (t == bt::null) return;
       if (t == bt::suffix_value)
       { if (e.sal.release_one(p)) e.sal.free(p, sv_leaf::total_bytes(e, p)); return; }
+      if (t == bt::big_suffix_value)
+      { if (e.big.release_one(p)) e.big.free(p); return; }
       if (!is_routing(t)) return;
       if (!release_one(e, t, p)) return;   // still shared (another snapshot pins it)
       // hit zero: recurse children + term, then free the node's slot.
@@ -611,6 +667,8 @@ namespace gcart::st
       if (budget <= 0) { spill(t, p); return; }   // out of inline budget — hand to the bg
       if (t == bt::suffix_value)
       { --budget; if (e.sal.release_one(p)) e.sal.free(p, sv_leaf::total_bytes(e, p)); return; }
+      if (t == bt::big_suffix_value)
+      { --budget; if (e.big.release_one(p)) e.big.free(p); return; }
       if (!is_routing(t)) return;
       if (!release_one(e, t, p)) return;          // still shared (another snapshot pins it)
       --budget;
@@ -704,10 +762,28 @@ namespace gcart::st
          _rt = t; _rp = p;
       }
 
+      // Remove a key. Returns 1 if it was present (and deleted), 0 otherwise.
+      // A read-path pre-check (find_in) confirms presence BEFORE any clone, so
+      // remove_rec is guaranteed to reach the leaf — it carries no not-found
+      // branch and never wastes a clone on a missing key (a missing key is a
+      // pure no-op: the committed tree is unchanged, nothing to COW).
+      int remove(sv key)
+      {
+         if (!find_in(_e, _rt, _rp, key, _scan)) return 0;   // absent — no-op, no clone
+         auto [t, p] = remove_rec<cow_mode::unique>(_rt, _rp, key, 0);
+         _rt = t; _rp = p; --_size;
+         return 1;
+      }
+
      private:
+      // Build a terminal leaf: SAL suffix_value if the body fits the var-allocator
+      // object cap, else a BIG big_suffix_value (single contiguous object in the
+      // address-stable BIG region). Returns the tag so callers stay region-agnostic.
       std::pair<bt, uint32_t> make_sv(sv suffix, sv val)
       {
-         return {bt::suffix_value, sv_leaf::make(_e, _ssal, suffix, val)};
+         if (sv_leaf::bytes_for(uint32_t(val.size()), uint32_t(suffix.size())) <= engine::sal_max_body)
+            return {bt::suffix_value, sv_leaf::make(_e, _ssal, suffix, val)};
+         return {bt::big_suffix_value, big_leaf::make(_e, suffix, val)};
       }
       void release_ref(bt t, uint32_t p)
       {
@@ -718,6 +794,8 @@ namespace gcart::st
             { /* free its grains */ _e.sal.free(p, sv_leaf::total_bytes(_e, p)); }
             return;
          }
+         if (t == bt::big_suffix_value)
+         { if (_e.big.release_one(p)) _e.big.free(p); return; }
          if (!is_routing(t)) return;
          if (!release_one(_e, t, p)) return;          // still shared (snapshot)
          // hit zero: release children, then free the node's slot
@@ -798,6 +876,18 @@ namespace gcart::st
          else if (t == bt::double_setlist || t == bt::big_nested) _e.cl2.free(p);
          else _e.cl1.free(p);
       }
+      // Release a husk whose children were already TRANSFERRED into a freshly
+      // built node (rebuild / rebuild_remove / promote, private path). Pure
+      // refcount: release_one() decides, free() is reached ONLY at ref 0 — and
+      // we do NOT cascade into children (they now live in the new node). The
+      // husk is private (ref 1) in every caller, so this is the 1→0→free path.
+      // (This replaces a manual free_node(husk): in a refcount system only
+      // release may free, and a manual free left the slot ref==1, which the
+      // allocator's write-around treats as live and never reuses.)
+      void release_husk(bt t, uint32_t p)
+      {
+         if (release_one(_e, t, p)) free_node(t, p);
+      }
 
       // Build a routing node from a branch list (sorted by byte) + optional term
       // + prefix; pick cl1/cl2/full by size. Branch ptrs are TAKEN (not retained).
@@ -805,11 +895,13 @@ namespace gcart::st
       // into the line). Pass true ONLY where the caller does NOT release the child
       // set afterward (rebuild-unique free_node / fresh splits) — inlined leaves are
       // consumed (release_ref'd), which would double-free under a later release_ref(t).
+      static bool nested_enabled() noexcept
+      { static const bool on = (std::getenv("GCART_NO_NESTED") == nullptr); return on; }
       std::pair<bt, uint32_t> build_node(sv prefix, const br* brs, uint32_t nb,
                                          bool term, bt tt, uint32_t tp, bool may_inline = false)
       {
          const uint32_t pl = uint32_t(prefix.size());
-         if (may_inline)
+         if (may_inline && nested_enabled())
          {
             const uint32_t s = pack_nested_leaves(prefix, brs, nb, term, tt, tp);
             if (s != UINT32_MAX) return {bt::nested_setlist, s};
@@ -818,6 +910,20 @@ namespace gcart::st
             return {bt::setlist, pack_setlist<128>(_s1, prefix, brs, nb, term, tt, tp)};
          if (setlist::fits(nb, pl, term, 256))
             return {bt::double_setlist, pack_setlist<256>(_s2, prefix, brs, nb, term, tt, tp)};
+         // A full node's prefix slot is only full::max_prefix (24) bytes, but a
+         // long shared prefix can precede a high-fanout point (e.g. Silkworm
+         // storage: dbi + 32B account hash, then a 256-way slot fan-out). Split
+         // the prefix: a wrapper holds the HEAD and routes ONE byte to a full
+         // that holds the TAIL (≤24) + the fan-out. (setlist/double already
+         // account for the prefix in their fits() check, so only full overflows.)
+         if (pl > full::max_prefix)
+         {
+            const uint32_t h   = pl - full::max_prefix - 1;       // head len; 1 byte links to the full
+            const uint8_t  sep = uint8_t(prefix[h]);
+            const uint32_t fs  = pack_full(prefix.substr(h + 1), brs, nb, term, tt, tp);  // tail = 24
+            br link{sep, bt::full, fs};
+            return build_node(prefix.substr(0, h), &link, 1, false, bt::null, 0, false);  // wrapper (recurses if head>127)
+         }
          return {bt::full, pack_full(prefix, brs, nb, term, tt, tp)};
       }
 
@@ -932,6 +1038,7 @@ namespace gcart::st
          n->term_ptr = term ? tp : 0;
          std::memset(n->types(), 0xFF, 96);               // 0xFF bytes => every 3-bit tag = 7 = null
          std::memset(n->branches(), 0, 256 * 4);
+         assert(prefix.size() <= full::max_prefix && "full node prefix overflow (>24B) — must split the prefix");
          std::memcpy(n->prefix_ptr(), prefix.data(), prefix.size());
          for (uint32_t i = 0; i < nb; ++i) { tag3_set(n->types(), brs[i].byte, brs[i].tag); n->branches()[brs[i].byte] = brs[i].ptr; }
          return slot;
@@ -963,8 +1070,9 @@ namespace gcart::st
          if (is_unique)
          {
             // PRIVATE: every child/term is transferred to `out` (no snapshot holds
-            // the old node) — just free the old husk slot. No O(n) retain/release.
-            free_node(t, p);
+            // the old node) — release the old husk (ref 1→0→free, no child
+            // cascade). No O(n) retain/release.
+            release_husk(t, p);
             return out;
          }
          // SHARED (a snapshot pins the old node): retain the COPIED children +
@@ -991,15 +1099,15 @@ namespace gcart::st
       std::pair<bt, uint32_t> upsert_rec(bt t, uint32_t p, sv key, uint32_t depth, sv val)
       {
          if (t == bt::null) { ++_size; return make_sv(key.substr(depth), val); }
-         if (t == bt::suffix_value)
+         if (is_leaf_tag(t))   // suffix_value (SAL) or big_suffix_value (BIG)
          {
-            const sv esuf = sv_leaf::suffix(_e, p);
+            const sv esuf = leaf_suffix(_e, t, p);
             const sv nsuf = key.substr(depth);
-            if (esuf == nsuf) { auto nv = make_sv(nsuf, val); release_ref(bt::suffix_value, p); return nv; }
+            if (esuf == nsuf) { auto nv = make_sv(nsuf, val); release_ref(t, p); return nv; }
             // split two leaves into a setlist
-            std::string es(esuf), ns(nsuf);                       // stable copies (esuf views the old SAL obj we free)
-            std::string eval_s(sv_leaf::value(_e, p));            // existing value
-            release_ref(bt::suffix_value, p);
+            std::string es(esuf), ns(nsuf);                       // stable copies (esuf views the old obj we free)
+            std::string eval_s(leaf_value(_e, t, p));            // existing value
+            release_ref(t, p);
             const uint32_t cp = lcp(es, ns);
             br       brs[2]; uint32_t nb = 0; bool term = false; bt tt = bt::null; uint32_t tp = 0;
             auto place = [&](const std::string& s, sv v)
@@ -1182,7 +1290,9 @@ namespace gcart::st
          auto out = build_node(n->prefix(), scratch, nb, oterm, tt, tp);
          if (priv)
          {
-            _e.cl1.free(p);  // external ptrs + inline-setlist grandchildren TRANSFERRED; inline data dropped with the slot
+            // external ptrs + inline-setlist grandchildren TRANSFERRED; inline data
+            // dropped with the slot. release the husk (ref 1→0→free, no cascade).
+            release_husk(bt::nested_setlist, p);
          }
          else  // shared: the new flat co-references the external/grandchild ptrs → retain, then drop one nested ref
          {
@@ -1190,6 +1300,75 @@ namespace gcart::st
             if (oterm && !n->is_inline(onb)) retain(_e, n->otype(onb), n->ext_ptr(onb));
             release_ref(t, p);
          }
+         return out;
+      }
+
+      // ── remove path (mirrors upsert_rec/edit_node; presence is guaranteed by
+      //    the caller's find_in pre-check, so there is NO not-found branch) ──────
+      // Descend to the leaf (consuming the matched prefix), removing it; on the
+      // way back up REP the changed child, or — when a child's subtree vanished —
+      // rebuild this node without that branch. A node that drops to zero entries
+      // returns {null,0} (the parent then drops ITS branch, cascading up). The
+      // rebuild re-runs build_node(may_inline) so a node that shrank back to a
+      // line of small children RE-NESTS (Dan: merge into a nested setlist on
+      // remove, don't leave it expanded) and de-widens full→double→setlist.
+      template <cow_mode M>
+      std::pair<bt, uint32_t> remove_rec(bt t, uint32_t p, sv key, uint32_t depth)
+      {
+         if (is_leaf_tag(t))                   // the leaf (find_in guaranteed the match)
+         { release_ref(t, p); return {bt::null, 0}; }
+         if (t == bt::nested_setlist)          // promote-on-write, then remove on the flat node
+         { auto fl = promote_nested(t, p); return remove_rec<cow_mode::unique>(fl.first, fl.second, key, depth); }
+         depth += uint32_t(node_prefix(t, p).size());   // prefix matched (pre-check); consume it
+         if constexpr (M == cow_mode::unique)
+            if (unique(_e, t, p))
+               return edit_remove<cow_mode::unique>(t, p, key, depth);
+         return edit_remove<cow_mode::shared>(t, p, key, depth);
+      }
+
+      // Mutate a routing node to drop the key. Like edit_node: <unique> mutates
+      // (t,p) (W is private); <shared> clones to a private W (reprefix retains the
+      // children + drops one old ref). Either way W is private, so the rebuild is
+      // the unique-path one.
+      template <cow_mode CM>
+      std::pair<bt, uint32_t> edit_remove(bt t, uint32_t p, sv key, uint32_t depth)
+      {
+         std::pair<bt, uint32_t> W;
+         if constexpr (CM == cow_mode::unique) W = {t, p};
+         else W = reprefix(t, p, 0);           // clone the shared node → private W
+         const bt wt = W.first; const uint32_t wp = W.second;
+
+         if (depth == key.size())              // remove the TERM at this node
+         {
+            bt tt; uint32_t tp; node_term(wt, wp, tt, tp);   // guaranteed present
+            release_ref(tt, tp);
+            return rebuild_remove(wt, wp, /*del_term=*/true, /*del_byte=*/false, 0);
+         }
+         const uint8_t byte = uint8_t(key[depth]);
+         bt ct; uint32_t cpp; node_child(wt, wp, byte, ct, cpp);   // guaranteed present
+         auto nc = remove_rec<CM>(ct, cpp, key, depth + 1);
+         if (nc.first == bt::null)             // child subtree vanished → drop this branch
+            return rebuild_remove(wt, wp, /*del_term=*/false, /*del_byte=*/true, byte);
+         set_branch_inplace(wt, wp, byte, nc); // child collapsed/changed → REP the slot
+         return W;
+      }
+
+      // Rebuild a PRIVATE node minus one entry (a byte-branch or the term). The
+      // dropped entry's child was ALREADY released by the caller (recursion /
+      // term release). count==0 → free the husk, return {null,0}. Otherwise
+      // build_node TRANSFERS the surviving children (no retain — they move from
+      // the freed husk to the new node) and may re-nest / de-widen.
+      std::pair<bt, uint32_t> rebuild_remove(bt t, uint32_t p, bool del_term, bool del_byte, uint8_t byte)
+      {
+         br       scratch[257]; uint32_t nb = 0;
+         bt       tt = bt::null; uint32_t tp = 0;
+         bool     term = node_term(t, p, tt, tp);
+         read_branches(t, p, [&](const br& b) { if (!(del_byte && b.byte == byte)) scratch[nb++] = b; });
+         if (del_term) term = false;
+         if (nb + (term ? 1u : 0u) == 0) { release_husk(t, p); return {bt::null, 0}; }
+         const std::string pfx(node_prefix(t, p));   // stable (husk freed below)
+         auto out = build_node(pfx, scratch, nb, term, tt, tp, /*may_inline=*/true);
+         release_husk(t, p);   // children transferred to `out` (ref 1→0→free, no cascade)
          return out;
       }
 
@@ -1201,5 +1380,6 @@ namespace gcart::st
       bt       _rt = bt::null;
       uint32_t _rp = 0;
       uint64_t _size = 0;
+      std::string _scan;   // reused buffer for remove()'s presence pre-check (no per-call alloc)
    };
 }  // namespace gcart::st

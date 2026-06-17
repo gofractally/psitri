@@ -107,6 +107,12 @@ namespace sal2
       // so the bg release thread's frees never contend with allocations.
       void free(uint32_t i) noexcept
       {
+         // INVARIANT: free() is reached ONLY through release_one() hitting zero —
+         // never a manual free of a still-referenced slot. ref==0 is what the
+         // write-around alloc keys on to reuse a slot; a slot freed with ref!=0
+         // would be skipped forever (a fully such-freed segment then has no
+         // reusable slot → take_recyclable_→alloc→alloc_slow_ recurses forever).
+         assert(_ref_base[i].load(std::memory_order_relaxed) == 0 && "free() of a slot whose ref != 0 — route the drop through release, not a manual free");
          _freed.fetch_add(1, std::memory_order_relaxed);
          const uint32_t s     = i / slots_per_segment;
          // bg writes _seg_freed; foreground writes _seg_alloced — separate arrays

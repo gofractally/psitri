@@ -92,6 +92,9 @@ namespace sal2
       // set. The alloc hot path never reads this, so frees don't contend with it.
       void free(uint32_t i, uint32_t bytes) noexcept
       {
+         // INVARIANT: only release_one()→0 reaches free(); the start grain's
+         // ref is already 0 (see fixed_allocator::free for why this must hold).
+         assert(_ref_base[i].load(std::memory_order_relaxed) == 0 && "free() of an object whose ref != 0 — route the drop through release");
          const uint32_t n = grains_for(bytes);
          _freed_grains.fetch_add(n, std::memory_order_relaxed);
          const uint32_t s     = i / slots_per_segment;

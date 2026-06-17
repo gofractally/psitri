@@ -93,12 +93,22 @@ namespace gcart::st::kv
 
       void insert(key_view k, value_view v) { _t->upsert(k, v); }
       void upsert(key_view k, value_view v) { _t->upsert(k, v); }
+      int  remove(key_view k) { return _t->remove(k); }
       template <class S = std::string>
       std::optional<S> get(key_view k) const
       {
          std::string out;
          if (!_t->find(k, out)) return std::nullopt;
          return S(out.data(), out.size());
+      }
+      // lambda form (adb::kv_transaction): invoke f(value) on a hit, return found.
+      template <class F>
+      bool get(key_view k, F&& f) const
+      {
+         std::string out;
+         if (!_t->find(k, out)) return false;
+         f(value_view(out.data(), out.size()));
+         return true;
       }
       void commit();
       void abort() noexcept;

@@ -25,6 +25,7 @@
 
 #include <start_ver/kv.hpp>  // the 4th engine: vpart must pass standalone (Dan)
 #include <gcart/kv.hpp>      // the 5th engine: gcart (sal2 GC-ART)
+#include <gcart/spec_kv.hpp> // the 6th engine: gcart::st (spec engine)
 
 // The harness shape is compiler-enforced (SPEC §12.3): a drift in any engine
 // fails HERE, by name, before a single test runs.
@@ -33,6 +34,10 @@ static_assert(adb::kv_database<start_ref::kv::database>);
 static_assert(adb::kv_database<psitri::database>);
 static_assert(adb::kv_database<start_ver::kv::database>);
 static_assert(adb::kv_database<gcart::kv::database>);
+static_assert(adb::kv_database<gcart::st::kv::database>);  // spec engine: cursor + get_root enforced here
+// the spec engine's snapshot cursor is fully mergeable (delta_art tier-capable).
+static_assert(adb::mergeable_cursor<decltype(std::declval<gcart::st::kv::write_session>().get_root(0).snapshot_cursor())>);
+static_assert(adb::shared_snapshot<decltype(std::declval<gcart::st::kv::write_session>().get_root(0))>);
 
 namespace
 {

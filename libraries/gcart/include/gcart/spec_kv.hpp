@@ -63,12 +63,18 @@ namespace gcart::st::kv
 
    class database;
 
-   // ── cursor: a pinned snapshot + point get ──────────────────────────────────
+   // ── cursor: a pinned snapshot + point get + ORDERED iteration (adb::kv_cursor)
+   //    Iteration is restart-based: each positioning is one root descent (cur_ge =
+   //    smallest key >= target); next() = cur_ge(curkey + '\0'). lower_bound is
+   //    therefore as cheap as any engine's; multi-step scans pay one O(depth)
+   //    descent per step (a frame-stack optimization is a follow-up). ────────────
    class cursor
    {
      public:
       cursor() = default;
       explicit cursor(snap s) : _s(std::move(s)) {}
+
+      // point get (no positioning)
       template <class S = std::string>
       std::optional<S> get(key_view k) const
       {
@@ -77,6 +83,80 @@ namespace gcart::st::kv
          if (!find_in(*_s.eng(), _s.tag(), _s.ptr(), k, out)) return std::nullopt;
          return S(out.data(), out.size());
       }
+      // point get, lambda form (adb::mergeable_cursor)
+      template <class F>
+      bool get(key_view k, F&& f) const
+      {
+         if (!_s.eng() || _s.tag() == bt::null) return false;
+         std::string out;
+         if (!find_in(*_s.eng(), _s.tag(), _s.ptr(), k, out)) return false;
+         f(value_view(out.data(), out.size()));
+         return true;
+      }
+
+      // ── ordered forward iteration (adb::kv_cursor) ──────────────────────────
+      bool     seek_begin() { return seek_ge_(key_view{}); }
+      bool     lower_bound(key_view k) { return seek_ge_(k); }
+      bool     next()
+      { if (_end) return false; if (_rend) return seek_ge_(key_view{}); std::string t = _key; t.push_back('\0'); return seek_ge_(t); }
+      bool     is_end() const { return _end; }
+      key_view key() const { return _key; }
+      template <class S = std::string>
+      std::optional<S> value() const
+      { if (_end || _rend) return std::nullopt; return S(_val.data(), _val.size()); }
+      // value at the current position, lambda form (adb::mergeable_cursor)
+      template <class F>
+      bool get_value(F&& f) const { if (_end || _rend) return false; f(value_view(_val.data(), _val.size())); return true; }
+      // gcart::st has no composable subtrees (yet) — a value is never a subtree.
+      bool is_subtree() const { return false; }
+
+      // ── ordered reverse iteration (adb::mergeable_cursor) ───────────────────
+      bool seek_last()
+      {
+         _key.clear(); _val.clear();
+         if (!_s.eng() || _s.tag() == bt::null) { _end = true; _rend = false; return false; }
+         cur_rightmost(*_s.eng(), _s.tag(), resolve(*_s.eng(), _s.tag(), _s.ptr()), std::string(), _key, _val);
+         _end = false; _rend = false; return true;
+      }
+      bool upper_bound(key_view k) { std::string t(k); t.push_back('\0'); return seek_ge_(t); }  // smallest > k
+      bool prev()
+      {
+         if (_rend) return false;
+         if (_end) return seek_last();
+         if (!_s.eng() || _s.tag() == bt::null) { _rend = true; return false; }
+         std::string nk, nv;
+         if (cur_lt(*_s.eng(), _s.tag(), resolve(*_s.eng(), _s.tag(), _s.ptr()), _key, 0, std::string(), nk, nv))
+         { _key = std::move(nk); _val = std::move(nv); _end = false; _rend = false; return true; }
+         _rend = true; return false;
+      }
+      bool is_rend() const { return _rend; }
+
+     private:
+      bool seek_ge_(key_view target)
+      {
+         _key.clear(); _val.clear(); _rend = false;
+         if (!_s.eng() || _s.tag() == bt::null) { _end = true; return false; }
+         void* node = resolve(*_s.eng(), _s.tag(), _s.ptr());
+         _end = !cur_ge(*_s.eng(), _s.tag(), node, target, 0, std::string(), _key, _val);
+         return !_end;
+      }
+      snap        _s;
+      std::string _key, _val;
+      bool        _end = true, _rend = false;
+   };
+
+   // ── snapshot: an owned, FROZEN root (adb kv_tree + copyable shared_snapshot).
+   //    get_root(i) returns one; it keeps its version alive via the pin, and
+   //    snapshot_cursor() walks it. Named `snapshot` (not `tree`) — `tree` is the
+   //    mutable engine work-tree used by transactions. ───────────────────────────
+   class snapshot
+   {
+     public:
+      snapshot() = default;
+      explicit snapshot(snap s) : _s(std::move(s)) {}
+      cursor snapshot_cursor() const { return cursor(_s); }   // copies the pin (retains)
+      explicit operator bool() const noexcept { return _s.eng() != nullptr; }
+
      private:
       snap _s;
    };
@@ -128,7 +208,7 @@ namespace gcart::st::kv
      public:
       explicit write_session(database* db) : _db(db) {}
       transaction start_transaction(uint32_t idx = 0);
-      tree        get_root_unused() = delete;
+      snapshot    get_root(uint32_t idx = 0);   // owned, FROZEN snapshot of root idx
      private:
       database* _db;
    };
@@ -205,6 +285,9 @@ namespace gcart::st::kv
 
    inline transaction write_session::start_transaction(uint32_t idx)
    { return transaction(_db, &_db->work_tree(idx), idx); }
+
+   inline snapshot write_session::get_root(uint32_t idx)
+   { return snapshot(snap::acquire(_db->eng(), _db->root_slot(idx))); }
 
    inline cursor read_session::create_cursor(uint32_t idx)
    { return cursor(snap::acquire(_db->eng(), _db->root_slot(idx))); }

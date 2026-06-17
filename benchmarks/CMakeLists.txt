@@ -155,3 +155,20 @@ target_include_directories(scan-lower-bound-bench PRIVATE ${CMAKE_SOURCE_DIR}/li
 target_compile_definitions(scan-lower-bound-bench PRIVATE XXH_INLINE_ALL)
 target_compile_options(scan-lower-bound-bench PRIVATE -O3 -DNDEBUG)
 set_target_properties(scan-lower-bound-bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# Real libmdbx bank baseline (head-to-head vs the psitri engines' bank_compare).
+# Optional: only built when a prebuilt libmdbx is found (default: arbtrie's vendored
+# copy). Override with -DLIBMDBX_DIR=/path/to/libmdbx (expects <dir>/mdbx.h and a
+# libmdbx.{dylib,so,a} under <dir>/build). Run with the .dylib on the loader path.
+set(LIBMDBX_DIR "$ENV{HOME}/arbtrie/external/libmdbx" CACHE PATH "libmdbx source dir for mdbx-bank-bench")
+find_library(LIBMDBX_LIB NAMES mdbx libmdbx PATHS "${LIBMDBX_DIR}/build" NO_DEFAULT_PATH)
+if(EXISTS "${LIBMDBX_DIR}/mdbx.h" AND LIBMDBX_LIB)
+   add_executable(mdbx-bank-bench mdbx_bank_bench.cpp)
+   target_include_directories(mdbx-bank-bench PRIVATE "${LIBMDBX_DIR}")
+   target_link_libraries(mdbx-bank-bench PRIVATE "${LIBMDBX_LIB}")
+   target_compile_options(mdbx-bank-bench PRIVATE -O3 -DNDEBUG)
+   set_target_properties(mdbx-bank-bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+   message(STATUS "mdbx-bank-bench: using ${LIBMDBX_LIB}")
+else()
+   message(STATUS "mdbx-bank-bench: skipped (no libmdbx at ${LIBMDBX_DIR}; set -DLIBMDBX_DIR=...)")
+endif()

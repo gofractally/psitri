@@ -61,6 +61,7 @@ namespace
    {
       const char* name;
       double      load, wtx, rd_ww, wtx_ww, rd_solo;
+      double      live_mb, disk_mb;  // settled live bytes (if the engine exposes it) vs on-disk high-water
       bool        pass;
    };
 
@@ -69,11 +70,21 @@ namespace
       uint64_t N, NTX, BATCH, READERS;
    };
 
+   // on-disk footprint = sum of the engine dir's files (the mmap high-water).
+   double dir_size_mb(const std::string& path)
+   {
+      uint64_t        b = 0;
+      std::error_code ec;
+      for (auto& e : std::filesystem::recursive_directory_iterator(path, ec))
+         if (e.is_regular_file(ec)) b += e.file_size(ec);
+      return double(b) / (1024.0 * 1024.0);
+   }
+
    template <class DB>
-   row run_bank(const char* name, std::shared_ptr<DB> db, params p)
+   row run_bank(const char* name, std::shared_ptr<DB> db, params p, const std::string& path)
    {
       auto ws = db->start_write_session();
-      row  r{name, 0, 0, 0, 0, 0, false};
+      row  r{name, 0, 0, 0, 0, 0, 0, 0, false};
 
       // bulk load
       {
@@ -182,6 +193,16 @@ namespace
                total += dec_bal(*v);
          r.pass = (total == p.N * INIT);
       }
+
+      // footprint: settle the engine's reclaim, then read live bytes (if exposed)
+      // and the on-disk high-water. live shows the data; disk shows live + COW
+      // garbage not yet reclaimed + segment over-allocation.
+      if constexpr (requires { db->drain(); })
+         db->drain();
+      r.live_mb = 0;
+      if constexpr (requires { db->live_bytes(); })
+         r.live_mb = double(db->live_bytes()) / (1024.0 * 1024.0);
+      r.disk_mb = dir_size_mb(path);
       return r;
    }
 }  // namespace
@@ -211,7 +232,7 @@ int main(int argc, char** argv)
       if (const char* ab = getenv("DELTA_ARENA_MB"))
          cfg.knobs.arena_budget_bytes = strtoull(ab, nullptr, 10) << 20;
       auto db = TK::database::open(base + "/tiered", sal::open_mode::create_or_open, cfg);
-      rows.push_back(run_bank("delta_art(sv→sar)", db, p));
+      rows.push_back(run_bank("delta_art(sv→sar)", db, p, base + "/tiered"));
    }
    {  // delta_art<start_ref, sal_art_ref>
       std::filesystem::remove_all(base + "/tiered_ref");
@@ -220,38 +241,38 @@ int main(int argc, char** argv)
       if (const char* mb = getenv("DELTA_HI_WATER_MB"))
          cfg.knobs.hi_water_bytes = strtoull(mb, nullptr, 10) << 20;
       auto db = TKR::database::open(base + "/tiered_ref", sal::open_mode::create_or_open, cfg);
-      rows.push_back(run_bank("delta_art(sr→sar)", db, p));
+      rows.push_back(run_bank("delta_art(sr→sar)", db, p, base + "/tiered_ref"));
    }
    {  // start_ver standalone
       std::filesystem::remove_all(base + "/start_ver");
       auto db = start_ver::kv::database::create(base + "/start_ver");
-      rows.push_back(run_bank("start_ver", db, p));
+      rows.push_back(run_bank("start_ver", db, p, base + "/start_ver"));
    }
    {  // start_ref standalone
       std::filesystem::remove_all(base + "/start_ref");
       auto db = start_ref::kv::database::create(base + "/start_ref");
-      rows.push_back(run_bank("start_ref", db, p));
+      rows.push_back(run_bank("start_ref", db, p, base + "/start_ref"));
    }
    {  // sal_art_ref standalone
       std::filesystem::remove_all(base + "/sal_art_ref");
       auto db = sal_art_ref::kv::database::create(base + "/sal_art_ref");
-      rows.push_back(run_bank("sal_art_ref", db, p));
+      rows.push_back(run_bank("sal_art_ref", db, p, base + "/sal_art_ref"));
    }
    {  // gcart standalone (sal2, lock-free MVCC reads)
       std::filesystem::remove_all(base + "/gcart");
       auto db = gcart::kv::database::create(base + "/gcart");
-      rows.push_back(run_bank("gcart", db, p));
+      rows.push_back(run_bank("gcart", db, p, base + "/gcart"));
    }
    {  // gcart SPEC engine (3-region node taxonomy: FIX routing + SAL suffix_value)
       std::filesystem::remove_all(base + "/gcart_spec");
       auto db = gcart::st::kv::database::create(base + "/gcart_spec");
-      rows.push_back(run_bank("gcart_spec", db, p));
+      rows.push_back(run_bank("gcart_spec", db, p, base + "/gcart_spec"));
    }
 
-   printf("\n%-20s %12s %12s %14s %12s %14s  %s\n", "engine", "load/s", "wtx/s",
-          "rd/s(+wr)", "wtx/s(+rd)", "rd/s(solo)", "balance");
+   printf("\n%-20s %12s %12s %14s %12s %14s %9s %9s  %s\n", "engine", "load/s", "wtx/s",
+          "rd/s(+wr)", "wtx/s(+rd)", "rd/s(solo)", "live(MB)", "disk(MB)", "balance");
    for (auto& r : rows)
-      printf("%-20s %12.0f %12.0f %14.0f %12.0f %14.0f  %s\n", r.name, r.load, r.wtx, r.rd_ww,
-             r.wtx_ww, r.rd_solo, r.pass ? "PASS" : "FAIL");
+      printf("%-20s %12.0f %12.0f %14.0f %12.0f %14.0f %9.0f %9.0f  %s\n", r.name, r.load, r.wtx,
+             r.rd_ww, r.wtx_ww, r.rd_solo, r.live_mb, r.disk_mb, r.pass ? "PASS" : "FAIL");
    return 0;
 }

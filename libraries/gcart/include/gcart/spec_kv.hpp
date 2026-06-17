@@ -21,6 +21,17 @@ namespace gcart::kv
    using key_view   = std::string_view;
    using value_view = std::string_view;
 
+   // Runtime config (psitri::dwal::kv_engine contract). `sync_mode` is the commit
+   // durability the embedder/tier fans out (delta_art sets bcfg.sync_mode); gcart
+   // currently commits to the mmap page cache + syncs the root table on clean close,
+   // so sync_mode is accepted and recorded but not yet a per-commit msync (a
+   // durability follow-up). A delta_art COLD base only needs the config to exist +
+   // be accepted by open(path, mode, cfg).
+   struct config
+   {
+      sal::sync_type sync_mode = sal::sync_type::none;
+   };
+
    inline uint64_t pack(bt t, uint32_t p) noexcept
    {
       return (uint64_t(uint8_t(t)) << 32) | p;
@@ -1009,6 +1020,14 @@ namespace gcart::kv
          }
          return create(std::move(dir));
       }
+      // 3-arg open (psitri::dwal::kv_engine contract — delta_art cold-base tier). cfg
+      // carries the commit-sync mode; gcart records it (see config) and otherwise
+      // opens identically (mode gates create-vs-open).
+      static std::shared_ptr<database> open(std::filesystem::path dir, sal::open_mode mode,
+                                            const config&)
+      {
+         return open(std::move(dir), mode);
+      }
 
       std::shared_ptr<write_session> start_write_session()
       {
@@ -1159,5 +1178,6 @@ namespace gcart::kv
       using read_session  = gcart::kv::read_session;
       using transaction   = gcart::kv::transaction;
       using cursor        = gcart::kv::cursor;
+      using config        = gcart::kv::config;  // delta_art cold-base tier (dwal::kv_engine)
    };
 }  // namespace gcart::kv

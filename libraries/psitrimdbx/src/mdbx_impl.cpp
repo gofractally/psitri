@@ -47,15 +47,21 @@
 #if !defined(PSITRIMDBX_BACKEND_GCART)
 #define PSITRIMDBX_BACKEND_GCART 0
 #endif
+//   PSITRIMDBX_BACKEND_DELTA_GCART   — start_ver hot delta over a gcart COLD base (tiered; hot absorbs churn, gcart stays dense)
+#if !defined(PSITRIMDBX_BACKEND_DELTA_GCART)
+#define PSITRIMDBX_BACKEND_DELTA_GCART 0
+#endif
 #if !PSITRIMDBX_BACKEND_TIERED_PSITRI && !PSITRIMDBX_BACKEND_PSITRI && \
     !PSITRIMDBX_BACKEND_START_VER && !PSITRIMDBX_BACKEND_SAL_ART_REF && \
-    !PSITRIMDBX_BACKEND_START_REF && !PSITRIMDBX_BACKEND_GCART
+    !PSITRIMDBX_BACKEND_START_REF && !PSITRIMDBX_BACKEND_GCART && \
+    !PSITRIMDBX_BACKEND_DELTA_GCART
 #define PSITRIMDBX_BACKEND_DELTA_ART 1
 #else
 #define PSITRIMDBX_BACKEND_DELTA_ART 0
 #endif
 // derived: which engine families the chosen backend needs to pull in
-#define PSITRIMDBX_USES_TIERED (PSITRIMDBX_BACKEND_DELTA_ART || PSITRIMDBX_BACKEND_TIERED_PSITRI)
+#define PSITRIMDBX_USES_TIERED \
+   (PSITRIMDBX_BACKEND_DELTA_ART || PSITRIMDBX_BACKEND_TIERED_PSITRI || PSITRIMDBX_BACKEND_DELTA_GCART)
 #define PSITRIMDBX_USES_PSITRI (PSITRIMDBX_BACKEND_PSITRI || PSITRIMDBX_BACKEND_TIERED_PSITRI)
 
 #include <sal/config.hpp>    // sal::open_mode
@@ -64,7 +70,7 @@
 #if PSITRIMDBX_BACKEND_START_REF
 #include <start_ref/kv.hpp>  // start_ref::kv::engine (part-family ART, refcount liveness)
 #endif
-#if PSITRIMDBX_BACKEND_GCART
+#if PSITRIMDBX_BACKEND_GCART || PSITRIMDBX_BACKEND_DELTA_GCART
 #include <gcart/spec_kv.hpp>  // gcart::kv::engine (spec engine: 3-region FIX/SAL/BIG)
 #endif
 #if PSITRIMDBX_USES_TIERED
@@ -195,6 +201,9 @@ using TK         = start_ver::kv::engine;  // start_ver alone — no cold base /
 using TK         = start_ref::kv::engine;  // start_ref alone — part-family ART, refcount liveness
 #elif PSITRIMDBX_BACKEND_GCART
 using TK         = gcart::kv::engine;  // gcart spec engine DIRECT — 3-region FIX/SAL/BIG, refcount
+#elif PSITRIMDBX_BACKEND_DELTA_GCART
+using TK         = delta_art::tiered_kv<start_ver::kv::engine,
+                                        gcart::kv::engine>;  // start_ver hot delta -> gcart cold base
 #elif PSITRIMDBX_BACKEND_SAL_ART_REF
 using TK         = sal_art_ref::radix::dwal_engine;  // sal_art_ref DIRECT — no tiering / no merger
 #else

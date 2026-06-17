@@ -11,6 +11,7 @@
 //                      [readers=4] [dir=/tmp/bank_cmp]
 //   env: DELTA_HI_WATER_MB, DELTA_ARENA_MB  (delta_art tier only)
 #include <delta_art/tiered_kv.hpp>
+#include <psitri/dwal/kv_engine.hpp>  // psitri::dwal::kv_engine concept (cold-base contract)
 
 #include <heart_dwal_engine.hpp>  // sal_art_ref::radix::dwal_engine (cold base)
 #include <heart_kv.hpp>           // sal_art_ref::kv (standalone)
@@ -33,6 +34,10 @@
 using Clock = std::chrono::steady_clock;
 using TK    = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::dwal_engine>;
 using TKR   = delta_art::tiered_kv<start_ref::kv::engine, sal_art_ref::radix::dwal_engine>;
+// start_ver hot delta over a gcart COLD base (the tiered config under test).
+using TKG   = delta_art::tiered_kv<start_ver::kv::engine, gcart::kv::engine>;
+static_assert(psitri::dwal::kv_engine<gcart::kv::engine>,
+              "gcart::kv::engine must satisfy the DWAL cold-base concept");
 
 namespace
 {
@@ -233,6 +238,17 @@ int main(int argc, char** argv)
          cfg.knobs.arena_budget_bytes = strtoull(ab, nullptr, 10) << 20;
       auto db = TK::database::open(base + "/tiered", sal::open_mode::create_or_open, cfg);
       rows.push_back(run_bank("delta_art(sv→sar)", db, p, base + "/tiered"));
+   }
+   {  // delta_art<start_ver, gcart> — the tiered config under test (gcart COLD base)
+      std::filesystem::remove_all(base + "/tiered_gcart");
+      std::filesystem::create_directories(base + "/tiered_gcart");
+      TKG::config cfg;
+      if (const char* mb = getenv("DELTA_HI_WATER_MB"))
+         cfg.knobs.hi_water_bytes = strtoull(mb, nullptr, 10) << 20;
+      if (const char* ab = getenv("DELTA_ARENA_MB"))
+         cfg.knobs.arena_budget_bytes = strtoull(ab, nullptr, 10) << 20;
+      auto db = TKG::database::open(base + "/tiered_gcart", sal::open_mode::create_or_open, cfg);
+      rows.push_back(run_bank("delta_art(sv→gcart)", db, p, base + "/tiered_gcart"));
    }
    {  // delta_art<start_ref, sal_art_ref>
       std::filesystem::remove_all(base + "/tiered_ref");

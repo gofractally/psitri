@@ -92,9 +92,9 @@ namespace sal2
       // set. The alloc hot path never reads this, so frees don't contend with it.
       void free(uint32_t i, uint32_t bytes) noexcept
       {
-         // INVARIANT: only release_one()→0 reaches free(); the start grain's
-         // ref is already 0 (see fixed_allocator::free for why this must hold).
-         assert(_ref_base[i].load(std::memory_order_relaxed) == 0 && "free() of an object whose ref != 0 — route the drop through release");
+         // ACCOUNTING only — `bytes` was read by the releaser BEFORE its release_one
+         // (the slot may already be reused by a concurrent writer). See
+         // fixed_allocator::free. Hence NO read of the slot/ref here.
          const uint32_t n = grains_for(bytes);
          _freed_grains.fetch_add(n, std::memory_order_relaxed);
          const uint32_t s     = i / slots_per_segment;
@@ -210,7 +210,9 @@ namespace sal2
                const std::atomic<uint8_t>* refs = _a->_ref_base + size_t(c.seg) * slots_per_segment;
                while (c.pos + g <= slots_per_segment)
                {
-                  if (refs[c.pos].load(std::memory_order_relaxed) == 0)
+                  // ACQUIRE (see fixed_allocator): orders the releaser's pre-release
+                  // content reads before our reuse of a ref==0 slot.
+                  if (refs[c.pos].load(std::memory_order_acquire) == 0)
                   { const uint32_t l = c.pos; c.pos += g; return finish_(c.seg, l, g); }
                   c.pos += g;  // live leftover — write around it
                }

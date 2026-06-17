@@ -957,40 +957,60 @@ namespace gcart::st
       }
    }
 
-   // ── free reclamation (snapshots / readers; no write sessions needed) ───────
-   inline void release_subtree(engine& e, bt t, uint32_t p)
+   // Free a routing-node slot by region tag (free-function form of free_node).
+   inline void free_node_(engine& e, bt t, uint32_t p) noexcept
    {
-      if (t == bt::null) return;
-      if (t == bt::suffix_value)
-      { if (e.sal.release_one(p)) e.sal.free(p, sv_leaf::total_bytes(e, p)); return; }
-      if (t == bt::big_suffix_value)
-      { if (e.big.release_one(p)) e.big.free(p); return; }
-      if (!is_routing(t)) return;
-      if (!release_one(e, t, p)) return;   // still shared (another snapshot pins it)
-      // hit zero: recurse children + term, then free the node's slot.
+      if (t == bt::full) e.cl9.free(p);
+      else if (t == bt::double_setlist || t == bt::big_nested) e.cl2.free(p);
+      else e.cl1.free(p);
+   }
+   // Copy a routing node's refcountable children + external term into caller-owned
+   // locals. CRITICAL for concurrent reclaim: the caller reads the node's content
+   // via this BEFORE its release_one()→0, so a writer's write-around (which reuses a
+   // ref==0 slot, acquire-ordered) can never overwrite the slot while we still read
+   // it. Inline nested data rides with the slot (not a child).
+   inline void gather_children_(engine& e, bt t, uint32_t p, br* kids, uint32_t& nb,
+                                bt& tt, uint32_t& tp, bool& term)
+   {
+      nb = 0; term = false; tt = bt::null; tp = 0;
       if (t == bt::full)
       {
          full* n = static_cast<full*>(resolve(e, t, p));
-         for (uint32_t b = 0; b < 256; ++b)
-         { const bt ct = n->btype(b); if (ct != bt::null) release_subtree(e, ct, n->branch(b)); }
-         if (n->has_term()) release_subtree(e, bt(n->term_tag), n->term_ptr);
-         e.cl9.free(p);
+         for (uint32_t b = 0; b < 256; ++b) { const bt ct = n->btype(b); if (ct != bt::null) kids[nb++] = br{uint8_t(b), ct, n->branch(b)}; }
+         if (n->has_term()) { term = true; tt = bt(n->term_tag); tp = n->term_ptr; }
       }
       else if (t == bt::nested_setlist)
       {
          nested_setlist* n = static_cast<nested_setlist*>(resolve(e, t, p));
-         for_each_nested_branch_(n, [&](bt ct, uint32_t cp) { release_subtree(e, ct, cp); });
-         if (n->has_term() && !n->is_inline(n->nbranch))  // external outer term (inline term = data)
-            release_subtree(e, n->otype(n->nbranch), n->ext_ptr(n->nbranch));
-         e.cl1.free(p);   // ONE free for the whole single-node structure (inline parts go with it)
+         for_each_nested_branch_(n, [&](bt ct, uint32_t cp) { kids[nb++] = br{0, ct, cp}; });
+         if (n->has_term() && !n->is_inline(n->nbranch)) { term = true; tt = n->otype(n->nbranch); tp = n->ext_ptr(n->nbranch); }
       }
       else
       {
          setlist* n = static_cast<setlist*>(resolve(e, t, p));
-         for (uint32_t i = 0; i < n->nbranch; ++i) release_subtree(e, n->btype(i), n->branch(i));
-         if (n->has_term()) release_subtree(e, n->term_type(), n->term_branch());
-         (t == bt::double_setlist || t == bt::big_nested) ? e.cl2.free(p) : e.cl1.free(p);
+         for (uint32_t i = 0; i < n->nbranch; ++i) kids[nb++] = br{n->keys()[i], n->btype(i), n->branch(i)};
+         if (n->has_term()) { term = true; tt = n->term_type(); tp = n->term_branch(); }
       }
+   }
+
+   // ── free reclamation (snapshots / readers; no write sessions needed) ───────
+   // Reads the node's content (total_bytes / children) BEFORE release_one() so a
+   // concurrent writer's slot reuse is safe (see gather_children_ / the allocator
+   // acquire-load). free()/free_node_ are accounting-only — a reused slot is fine.
+   inline void release_subtree(engine& e, bt t, uint32_t p)
+   {
+      if (t == bt::null) return;
+      if (t == bt::suffix_value)
+      { const uint32_t tb = sv_leaf::total_bytes(e, p); if (e.sal.release_one(p)) e.sal.free(p, tb); return; }
+      if (t == bt::big_suffix_value)
+      { if (e.big.release_one(p)) e.big.free(p); return; }
+      if (!is_routing(t)) return;
+      br kids[257]; uint32_t nb; bt tt; uint32_t tp; bool term;
+      gather_children_(e, t, p, kids, nb, tt, tp, term);   // read content BEFORE releasing
+      if (!release_one(e, t, p)) return;                    // still shared (another snapshot pins it)
+      for (uint32_t i = 0; i < nb; ++i) release_subtree(e, kids[i].tag, kids[i].ptr);
+      if (term) release_subtree(e, tt, tp);
+      free_node_(e, t, p);
    }
 
    // ── bounded-inline / async release (SAL's lock-free reclaim design) ─────────
@@ -1009,35 +1029,17 @@ namespace gcart::st
       if (t == bt::null) return;
       if (budget <= 0) { spill(t, p); return; }   // out of inline budget — hand to the bg
       if (t == bt::suffix_value)
-      { --budget; if (e.sal.release_one(p)) e.sal.free(p, sv_leaf::total_bytes(e, p)); return; }
+      { --budget; const uint32_t tb = sv_leaf::total_bytes(e, p); if (e.sal.release_one(p)) e.sal.free(p, tb); return; }
       if (t == bt::big_suffix_value)
       { --budget; if (e.big.release_one(p)) e.big.free(p); return; }
       if (!is_routing(t)) return;
-      if (!release_one(e, t, p)) return;          // still shared (another snapshot pins it)
+      br kids[257]; uint32_t nb; bt tt; uint32_t tp; bool term;
+      gather_children_(e, t, p, kids, nb, tt, tp, term);   // read content BEFORE releasing
+      if (!release_one(e, t, p)) return;                    // still shared (another snapshot pins it)
       --budget;
-      if (t == bt::full)
-      {
-         full* n = static_cast<full*>(resolve(e, t, p));
-         for (uint32_t b = 0; b < 256; ++b)
-         { const bt ct = n->btype(b); if (ct != bt::null) release_async_(e, ct, n->branch(b), budget, spill); }
-         if (n->has_term()) release_async_(e, bt(n->term_tag), n->term_ptr, budget, spill);
-         e.cl9.free(p);
-      }
-      else if (t == bt::nested_setlist)
-      {
-         nested_setlist* n = static_cast<nested_setlist*>(resolve(e, t, p));
-         for_each_nested_branch_(n, [&](bt ct, uint32_t cp) { release_async_(e, ct, cp, budget, spill); });
-         if (n->has_term() && !n->is_inline(n->nbranch))
-            release_async_(e, n->otype(n->nbranch), n->ext_ptr(n->nbranch), budget, spill);
-         e.cl1.free(p);
-      }
-      else
-      {
-         setlist* n = static_cast<setlist*>(resolve(e, t, p));
-         for (uint32_t i = 0; i < n->nbranch; ++i) release_async_(e, n->btype(i), n->branch(i), budget, spill);
-         if (n->has_term()) release_async_(e, n->term_type(), n->term_branch(), budget, spill);
-         (t == bt::double_setlist || t == bt::big_nested) ? e.cl2.free(p) : e.cl1.free(p);
-      }
+      for (uint32_t i = 0; i < nb; ++i) release_async_(e, kids[i].tag, kids[i].ptr, budget, spill);
+      if (term) release_async_(e, tt, tp, budget, spill);
+      free_node_(e, t, p);
    }
 
    // ── engine reclaimer (out-of-line: depends on release_async_) ───────────────
@@ -1132,19 +1134,16 @@ namespace gcart::st
       {
          if (t == bt::null) return;
          if (t == bt::suffix_value)
-         {
-            if (_e.sal.release_one(p))
-            { /* free its grains */ _e.sal.free(p, sv_leaf::total_bytes(_e, p)); }
-            return;
-         }
+         { const uint32_t tb = sv_leaf::total_bytes(_e, p); if (_e.sal.release_one(p)) _e.sal.free(p, tb); return; }
          if (t == bt::big_suffix_value)
          { if (_e.big.release_one(p)) _e.big.free(p); return; }
          if (!is_routing(t)) return;
+         // read content BEFORE release_one (concurrent-reclaim safety; see release_subtree)
+         br kids[257]; uint32_t nb; bt tt; uint32_t tp; bool term;
+         gather_children_(_e, t, p, kids, nb, tt, tp, term);
          if (!release_one(_e, t, p)) return;          // still shared (snapshot)
-         // hit zero: release children, then free the node's slot
-         read_branches(t, p, [&](const br& b) { release_ref(b.tag, b.ptr); });
-         bt tt; uint32_t tp;
-         if (node_term(t, p, tt, tp)) release_ref(tt, tp);
+         for (uint32_t i = 0; i < nb; ++i) release_ref(kids[i].tag, kids[i].ptr);
+         if (term) release_ref(tt, tp);
          free_node(t, p);
       }
 

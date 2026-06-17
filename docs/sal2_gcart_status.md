@@ -35,9 +35,35 @@ Comparison harness (start_ver/sal_art_ref) preserved at `logs/2026-06-17_gcart-r
 | M1 | `libraries/sal2/` — FIX-region line allocator (segments + seg_freeset + per-node refcount, simple session) | ✅ fuzz-green (8.0 M ops, 0 fails) |
 | M2 | `libraries/gcart/` — ART engine core (node.hpp + tree.hpp): get/upsert/update/erase/in-order, required style | ✅ oracle-green (537 K checks vs std::map) |
 | M2.1 | bench + allocator fragmentation fix (multi-line alloc livelock) | ✅ done |
-| M3 | `gcart::kv` adb adapter — cursor (fwd/rev/lower_bound) + snapshot `tree` | 🚧 WIP (cursor + snapshot written; **transaction / write_session / database / read_session not yet written**) |
-| M4 | add gcart as 5th engine in `tests/kv_compat_test.cpp`; `static_assert(adb::kv_database)`; pass templated battery | ⬜ not started |
-| M5 | sal2 version-GC (death stamps + held-roots, design §4–§5) replacing v1 refcount; movable + BIG regions | ⬜ design's later phases |
+| M3 | `gcart::kv` adb adapter — cursor + snapshot tree + transaction + sessions + database | ✅ done |
+| M4 | gcart as 5th engine in `tests/kv_compat_test.cpp` — pass the templated battery | ✅ green on the MAIN battery (165 418 checks; only reds = the 2 OPTIONAL extensions typed_values + multi_root) |
+| M4.1 | lock-free MVCC reads — `gcart::smart_ptr` (the pin IS the handle; `try_retain`+verify, no mutex); bank-bench concurrency-safe, beats sal_art_ref everywhere | ✅ done |
+| M4.2 | large values — `value_chunk` chain owned 1:1 by the leaf; adb large-value unit tests (64 B–128 KB) | ✅ done (arena drains exact) |
+| M4.3 | **full mainnet Silkworm op-stream replay via the adb API** (52 M upserts, 1.26 M removes, ≤38 KB values) | ✅ **byte-exact PASS** (scanned == truth == 50 751 128, 0 mismatches) |
+| M5 | sal2 version-GC (death stamps + held-roots, design §4–§5) replacing v1 refcount; movable + BIG regions; dense 3-bit node + skip-header descent | ⬜ the perf lever (see below) |
+
+## Silkworm via the adb API (the ultimate test)
+
+`benchmarks/gcart-oplog-replay` drives a captured Silkworm engine op-stream
+straight through gcart's adb kv API. Full mainnet stream
+(`startver_oplog.bin`): **byte-exact verify PASSES**, 174 B/key.
+
+Head-to-head on that stream (`oplog-compare-bench`, 52 M ops):
+
+| engine | secs | ups/s | disk |
+|--------|------|-------|------|
+| start_ver | 8.5 | 6.1M | 10.7 GB |
+| start_ref | 9.8 | 5.3M | 16.8 GB |
+| **gcart** | 13.2 | 3.9M | **8.6 GB** (2nd-smallest) |
+| sal_art_ref | 22.0 | 2.4M | 4.2 GB |
+
+gcart is correct + compact on real Ethereum state. **Perf gap to start_ver
+is architectural**: the trie descent (byte-at-a-time, ~5–7 dependent
+cache-misses on random hash keys) + the refcount-COW's retain-all-children
+on every clone — both removed by the version-stamp model (M5: version-GC,
+no refcounts, dense 3-bit node + skip-header descent). A session bump-window
+to amortize the freeset was tried and reverted (≈3 % load, but regressed
+footprint — not the lever).
 
 ## What's built (all on branch `sal2`, committed)
 

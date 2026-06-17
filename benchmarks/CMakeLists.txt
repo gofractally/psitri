@@ -44,6 +44,20 @@ target_compile_options(bank-compare-bench PRIVATE -O3 -DNDEBUG)
 set_target_properties(bank-compare-bench PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+# focused gcart::st load profile (one engine, for `sample`/perf attribution)
+add_executable(st-load-bench st_load_bench.cpp)
+target_link_libraries(st-load-bench PRIVATE gcart)
+target_compile_options(st-load-bench PRIVATE -O3 -DNDEBUG -fno-omit-frame-pointer)
+set_target_properties(st-load-bench PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# focused inline-leaf READ microbench (nested_setlist: reads that hit inline leaves)
+add_executable(st-inline-read-bench st_inline_read_bench.cpp)
+target_link_libraries(st-inline-read-bench PRIVATE gcart)
+target_compile_options(st-inline-read-bench PRIVATE -O3 -DNDEBUG)
+set_target_properties(st-inline-read-bench PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 # gcart oplog replay: drive a captured Silkworm op-stream through gcart's adb API.
 add_executable(gcart-oplog-replay gcart_oplog_replay.cpp)
 target_link_libraries(gcart-oplog-replay PRIVATE gcart)

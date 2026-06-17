@@ -16,14 +16,80 @@
 #include <sal2/fixed_allocator.hpp>
 #include <sal2/var_allocator.hpp>
 
+#include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <thread>
 
 namespace gcart::st
 {
    using sv  = std::string_view;
    using bt  = branch_type;
+
+   // Lock-free MPSC ring of packed (tag,ptr) roots awaiting their release
+   // cascade: any thread's smart_ptr release is a producer; the engine's single
+   // background release thread is the consumer (Vyukov bounded MPMC cells, used
+   // single-consumer). The smart_ptr OWNS its release — it spills here, the bg
+   // runs the cascade off the critical path (SAL's design).
+   template <uint32_t CAP>
+   struct release_ring
+   {
+      static_assert((CAP & (CAP - 1)) == 0, "CAP must be a power of two");
+      struct cell { std::atomic<uint64_t> seq; uint64_t data; };
+      alignas(64) cell _buf[CAP];
+      alignas(64) std::atomic<uint64_t> _enq{0};
+      alignas(64) std::atomic<uint64_t> _deq{0};
+
+      release_ring() { for (uint32_t i = 0; i < CAP; ++i) _buf[i].seq.store(i, std::memory_order_relaxed); }
+
+      bool try_push(uint64_t v) noexcept
+      {
+         uint64_t pos = _enq.load(std::memory_order_relaxed);
+         for (;;)
+         {
+            cell&         c   = _buf[pos & (CAP - 1)];
+            const uint64_t seq = c.seq.load(std::memory_order_acquire);
+            const int64_t  dif = int64_t(seq) - int64_t(pos);
+            if (dif == 0)
+            {
+               if (_enq.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
+               { c.data = v; c.seq.store(pos + 1, std::memory_order_release); return true; }
+            }
+            else if (dif < 0) return false;             // full
+            else pos = _enq.load(std::memory_order_relaxed);
+         }
+      }
+      bool try_pop(uint64_t& v) noexcept                 // single consumer (bg)
+      {
+         uint64_t pos = _deq.load(std::memory_order_relaxed);
+         for (;;)
+         {
+            cell&         c   = _buf[pos & (CAP - 1)];
+            const uint64_t seq = c.seq.load(std::memory_order_acquire);
+            const int64_t  dif = int64_t(seq) - int64_t(pos + 1);
+            if (dif == 0)
+            {
+               if (_deq.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
+               { v = c.data; c.seq.store(pos + CAP, std::memory_order_release); return true; }
+            }
+            else if (dif < 0) return false;             // empty
+            else pos = _deq.load(std::memory_order_relaxed);
+         }
+      }
+      uint64_t usage() const noexcept
+      { return _enq.load(std::memory_order_acquire) - _deq.load(std::memory_order_acquire); }
+   };
+
+   // A top-level drop destroys at most this many nodes inline on the releasing
+   // thread, then spills the rest to the bg release thread (SAL's bounded-inline
+   // budget). The common COW-to-root drop is fully inline; a batch's garbage spills.
+   inline constexpr int      inline_destroy_budget = 64;
+   inline constexpr uint32_t release_ring_cap      = 1u << 18;  // 256K cells (~4 MB)
+
+   // pack a (tag,ptr) reference into one u64 for the release ring.
+   inline uint64_t kv_pack_(bt t, uint32_t p) noexcept { return (uint64_t(uint8_t(t)) << 32) | p; }
 
    // COW descent mode latch (Dan §5.2): a scoped enum, not a bool. The recursion
    // CACHES whether the subtree is private or shared so it does not re-check every
@@ -40,7 +106,10 @@ namespace gcart::st
       uint32_t i = 0; while (i < n && a[i] == b[i]) ++i; return i;
    }
 
-   // ── engine: the four region allocators ────────────────────────────────────
+   // ── engine: the four region allocators + the background reclaimer ───────────
+   // The engine owns the release thread (SAL puts it in the allocator). A
+   // smart_ptr release routes through release_async() — the smart_ptr OWNS its
+   // own (async) reclamation; no caller does manual accounting.
    struct engine
    {
       sal2::fixed_allocator<128>  cl1;   // setlist / nested_setlist
@@ -49,12 +118,45 @@ namespace gcart::st
       sal2::var_allocator<32>     sal;   // suffix_value leaves
 
       explicit engine(std::filesystem::path dir)
-          : cl1({.dir = dir, .name = "cl1"}),
-            cl2({.dir = dir, .name = "cl2"}),
-            cl9({.dir = dir, .name = "cl9"}),
-            sal({.dir = dir, .name = "sal"}) {}
+          : cl1({.dir = dir, .name = "cl1", .max_segments = 256}),
+            cl2({.dir = dir, .name = "cl2", .max_segments = 256}),
+            cl9({.dir = dir, .name = "cl9", .max_segments = 256}),
+            sal({.dir = dir, .name = "sal", .max_segments = 512})
+      { /* A/B: bg release thread disabled (sync release) */ }
 
-      uint64_t live_bytes() noexcept { return cl1.live_bytes() + cl2.live_bytes() + cl9.live_bytes() + sal.live_bytes(); }
+      ~engine()
+      { if (_bg.joinable()) { _bg_stop.store(true, std::memory_order_release); _bg.join(); } }
+
+      // raw live bytes; drain() first for an accurate (settled) figure.
+      uint64_t live_bytes_raw() noexcept
+      { return cl1.live_bytes() + cl2.live_bytes() + cl9.live_bytes() + sal.live_bytes(); }
+      uint64_t live_bytes() noexcept { drain(); return live_bytes_raw(); }
+
+      // smart_ptr release entry: bounded-inline cascade, spill the rest to the bg.
+      void release_async(bt t, uint32_t p) noexcept;
+      // block until every spilled cascade has finished (measurement barrier).
+      void drain() noexcept
+      {
+         while (_rq.usage() != 0 || _bg_inflight.load(std::memory_order_acquire) != 0)
+            std::this_thread::yield();
+      }
+
+      // Spill functor handed to release_async_: push the un-decremented reference
+      // to the bg; if the ring is full, finish inline (backpressure, never block).
+      struct spill_fn
+      {
+         engine* e;
+         void operator()(bt t, uint32_t p) const noexcept;
+      };
+      spill_fn _spill{this};
+
+     private:
+      void bg_loop_() noexcept;
+
+      release_ring<release_ring_cap> _rq;
+      std::thread                    _bg;
+      std::atomic<bool>              _bg_stop{false};
+      std::atomic<uint64_t>          _bg_inflight{0};
    };
 
    // ── suffix_value (SAL leaf): [u16 vlen][u8 slen][value][suffix] ───────────
@@ -159,6 +261,78 @@ namespace gcart::st
          return (pos < int(nbranch) && keys()[pos] == byte) ? pos : -1;
       }
    };
+
+   // ── nested_setlist (cl1, 128B): an outer setlist with INLINE-or-external ───
+   // branches packed in the SAME line (Dan's §7 design). Each outer branch is
+   // EITHER inline (a sub-node packed in the tail: a small setlist body, or a
+   // suffix_value leaf body — a leaf with NO SAL object at all) OR external (a
+   // 4-byte region ptr). Routes the outer byte + (for an inline setlist) the next
+   // byte in ONE cacheline, and inlines small children for density.
+   //   THE WHOLE NODE IS A SINGLE NODE (one cl1 slot, one refcount). Inline parts
+   //   are BODY, freed with the slot — never released/promoted independently. The
+   //   only refcounted children are EXTERNAL ptrs + an inline setlist's u32
+   //   branches (its grandchildren). An inline leaf is pure data (not a child).
+   // layout: [u8 meta(term:1,prefixlen:7)] [u8 nbranch]
+   //         prefix[prefixlen]
+   //         okeys[nbranch]                 (outer bytes, sorted)
+   //         otype[nbranch+has_term]:3bit   (branch_type kind of each entry; term last)
+   //         ooff [nbranch+has_term]:u8     (bit7 = INLINE flag; bits0-6 = offset-from-END)
+   //         ... free gap ...
+   //         [entries packed contiguously, growing DOWN from base()+128]
+   // entry i = [base()+128-eoff(i), base()+128-eoff(i-1)); size(i)=eoff(i)-eoff(i-1)
+   //   (eoff ascending, eoff(-1):=0, tail_used=eoff(nslot-1)). EXTERNAL entry = a
+   //   u32 ptr; INLINE setlist entry = a setlist body; INLINE suffix_value entry =
+   //   [u16 vlen][u8 slen][value][suffix] (sv_leaf body). offsets are from-END so a
+   //   verbatim memcpy keeps them valid.
+   struct nested_setlist
+   {
+      uint8_t meta;     // outer term:1 (bit7), prefixlen:7 (bits0-6)
+      uint8_t nbranch;  // outer byte-branch count
+
+      static constexpr uint32_t slot_bytes  = 128;
+      static constexpr uint32_t hdr         = 2;
+      static constexpr uint8_t  inline_flag = 0x80;  // ooff bit7
+
+      bool     has_term() const noexcept { return meta & 0x80; }
+      uint32_t prefixlen() const noexcept { return meta & 0x7f; }
+      uint32_t nslot() const noexcept { return nbranch + (has_term() ? 1u : 0u); }
+
+      char*       base() noexcept { return reinterpret_cast<char*>(this); }
+      const char* base() const noexcept { return reinterpret_cast<const char*>(this); }
+      sv          prefix() const noexcept { return {base() + hdr, prefixlen()}; }
+
+      uint8_t*       okeys() noexcept { return reinterpret_cast<uint8_t*>(base() + hdr + prefixlen()); }
+      const uint8_t* okeys() const noexcept { return reinterpret_cast<const uint8_t*>(base() + hdr + prefixlen()); }
+      uint8_t*       otypes() noexcept { return okeys() + nbranch; }
+      const uint8_t* otypes() const noexcept { return okeys() + nbranch; }
+      uint8_t*       ooff() noexcept { return otypes() + tag3_bytes(nslot()); }
+      const uint8_t* ooff() const noexcept { return otypes() + tag3_bytes(nslot()); }
+
+      branch_type otype(uint32_t i) const noexcept { return tag3_get(otypes(), i); }
+      bool        is_inline(uint32_t i) const noexcept { return ooff()[i] & inline_flag; }
+      uint32_t    eoff(uint32_t i) const noexcept { return ooff()[i] & 0x7f; }  // offset-from-END of entry start
+      char*       entry(uint32_t i) noexcept { return base() + slot_bytes - eoff(i); }
+      const char* entry(uint32_t i) const noexcept { return base() + slot_bytes - eoff(i); }
+      uint32_t    entry_size(uint32_t i) const noexcept { return eoff(i) - (i == 0 ? 0u : eoff(i - 1)); }
+
+      // EXTERNAL entry → a u32 region pointer.
+      uint32_t       ext_ptr(uint32_t i) const noexcept { uint32_t v; std::memcpy(&v, entry(i), 4); return v; }
+      // INLINE setlist entry → a setlist body (its branches are u32 grandchildren).
+      setlist*       in_setlist(uint32_t i) noexcept { return reinterpret_cast<setlist*>(entry(i)); }
+      const setlist* in_setlist(uint32_t i) const noexcept { return reinterpret_cast<const setlist*>(entry(i)); }
+      // INLINE suffix_value entry → an sv_leaf body in the line (value + suffix).
+      sv in_value(uint32_t i) const noexcept
+      { const char* q = entry(i); uint16_t v; std::memcpy(&v, q, 2); return {q + 3, v}; }
+      sv in_suffix(uint32_t i) const noexcept
+      { const char* q = entry(i); uint16_t v; std::memcpy(&v, q, 2); const uint8_t s = uint8_t(q[2]); return {q + 3 + v, s}; }
+
+      int find_index(uint8_t byte) const noexcept
+      {
+         int pos = int(ucc::lower_bound_padded(okeys(), nbranch, byte));
+         return (pos < int(nbranch) && okeys()[pos] == byte) ? pos : -1;
+      }
+   };
+   static_assert(sizeof(nested_setlist) == 2);
 
    // ── full (cl9, 1152 B): the dense routing node (direct byte index) ─────────
    // [u8 meta(term:1,prefixlen:7)] [u8 term_tag] [u16 nbranch] [u32 term_ptr]
@@ -308,6 +482,45 @@ namespace gcart::st
             if (ct == bt::null) return false;
             t = ct; p = n->branch(byte); ++depth; prefetch(resolve(e, t, p)); continue;
          }
+         if (t == bt::nested_setlist)
+         {
+            const nested_setlist* nn = static_cast<const nested_setlist*>(node);
+            if (!pfx_ok_(nn->prefix(), key, depth)) return false;
+            depth += nn->prefixlen();
+            if (depth == key.size())  // key ends at the outer prefix → outer term
+            {
+               if (!nn->has_term()) return false;
+               const uint32_t ti = nn->nbranch;
+               if (nn->is_inline(ti))   // inline term = the value in the line (0-suffix)
+               { sv v = nn->in_value(ti); out.assign(v.data(), v.size()); return true; }
+               t = nn->otype(ti); p = nn->ext_ptr(ti); prefetch(resolve(e, t, p)); continue;
+            }
+            const int oi = nn->find_index(uint8_t(key[depth]));
+            if (oi < 0) return false;
+            const uint32_t ui = uint32_t(oi);
+            if (nn->is_inline(ui))
+            {
+               if (nn->otype(ui) == bt::suffix_value)   // inline leaf — compare in the line (resolve once)
+               {
+                  const char* q = nn->entry(ui);
+                  uint16_t v; std::memcpy(&v, q, 2); const uint8_t s = uint8_t(q[2]);
+                  if (sv{q + 3 + v, s} != key.substr(depth + 1)) return false;
+                  out.assign(q + 3, v); return true;
+               }
+               const setlist* in = nn->in_setlist(ui);  // inline setlist — route the next byte
+               ++depth;                                  // consumed the outer byte
+               if (!pfx_ok_(in->prefix(), key, depth)) return false;
+               depth += in->prefixlen();
+               if (depth == key.size())
+               { if (!in->has_term()) return false; t = in->term_type(); p = in->term_branch(); prefetch(resolve(e, t, p)); continue; }
+               const int ii = in->find_index(uint8_t(key[depth]));
+               if (ii < 0) return false;
+               t = in->btype(uint32_t(ii)); p = in->branch(uint32_t(ii)); ++depth;
+               prefetch(resolve(e, t, p)); continue;
+            }
+            t = nn->otype(ui); p = nn->ext_ptr(ui); ++depth;  // external child
+            prefetch(resolve(e, t, p)); continue;
+         }
          const setlist* n = static_cast<const setlist*>(node);
          if (!pfx_ok_(n->prefix(), key, depth)) return false;
          depth += n->prefixlen();
@@ -317,6 +530,33 @@ namespace gcart::st
          if (idx < 0) return false;
          t = n->btype(uint32_t(idx)); p = n->branch(uint32_t(idx)); ++depth;
          prefetch(resolve(e, t, p)); continue;
+      }
+   }
+
+   // Visit a nested_setlist's REFCOUNTABLE byte-branch children (external ptrs +
+   // an inline setlist's u32 grandchildren). Inline suffix_value entries are pure
+   // data (no child). The outer term is handled by the caller (node_term parity).
+   template <class F>
+   inline void for_each_nested_branch_(const nested_setlist* n, F&& f)
+   {
+      const char*    bp   = n->base();
+      const uint8_t* off  = n->ooff();
+      const uint8_t* otyp = n->otypes();
+      for (uint32_t i = 0; i < n->nbranch; ++i)
+      {
+         const uint8_t o = off[i];
+         if (o & nested_setlist::inline_flag)
+         {
+            if (tag3_get(otyp, i) == bt::setlist)  // inline setlist body → its u32 grandchildren
+            {
+               const setlist* in = reinterpret_cast<const setlist*>(bp + 128 - (o & 0x7f));
+               for (uint32_t j = 0; j < in->nbranch; ++j) f(in->btype(j), in->branch(j));
+               if (in->has_term()) f(in->term_type(), in->term_branch());
+            }
+            // inline suffix_value → no refcountable child
+         }
+         else  // external child
+         { uint32_t v; std::memcpy(&v, bp + 128 - (o & 0x7f), 4); f(tag3_get(otyp, i), v); }
       }
    }
 
@@ -337,12 +577,99 @@ namespace gcart::st
          if (n->has_term()) release_subtree(e, bt(n->term_tag), n->term_ptr);
          e.cl9.free(p);
       }
+      else if (t == bt::nested_setlist)
+      {
+         nested_setlist* n = static_cast<nested_setlist*>(resolve(e, t, p));
+         for_each_nested_branch_(n, [&](bt ct, uint32_t cp) { release_subtree(e, ct, cp); });
+         if (n->has_term() && !n->is_inline(n->nbranch))  // external outer term (inline term = data)
+            release_subtree(e, n->otype(n->nbranch), n->ext_ptr(n->nbranch));
+         e.cl1.free(p);   // ONE free for the whole single-node structure (inline parts go with it)
+      }
       else
       {
          setlist* n = static_cast<setlist*>(resolve(e, t, p));
          for (uint32_t i = 0; i < n->nbranch; ++i) release_subtree(e, n->btype(i), n->branch(i));
          if (n->has_term()) release_subtree(e, n->term_type(), n->term_branch());
          (t == bt::double_setlist || t == bt::big_nested) ? e.cl2.free(p) : e.cl1.free(p);
+      }
+   }
+
+   // ── bounded-inline / async release (SAL's lock-free reclaim design) ─────────
+   // A top-level drop destroys at most `budget` nodes inline on the calling
+   // thread, then hands each remaining sub-reference to `spill` (a background
+   // queue); the background thread re-enters with an effectively infinite budget
+   // so the cascade runs OFF the writer's critical path. The common COW-to-root
+   // drop is a handful of nodes (fully inline); only a large drop (a batch's
+   // worth of garbage, a snapshot release) spills. `spill` receives an
+   // UN-decremented reference — the bg does the release_one, exactly as the
+   // foreground would — so foreground and background share one traversal.
+   // Mirrors release_subtree's structure verbatim.
+   template <class Spill>
+   inline void release_async_(engine& e, bt t, uint32_t p, int& budget, Spill& spill)
+   {
+      if (t == bt::null) return;
+      if (budget <= 0) { spill(t, p); return; }   // out of inline budget — hand to the bg
+      if (t == bt::suffix_value)
+      { --budget; if (e.sal.release_one(p)) e.sal.free(p, sv_leaf::total_bytes(e, p)); return; }
+      if (!is_routing(t)) return;
+      if (!release_one(e, t, p)) return;          // still shared (another snapshot pins it)
+      --budget;
+      if (t == bt::full)
+      {
+         full* n = static_cast<full*>(resolve(e, t, p));
+         for (uint32_t b = 0; b < 256; ++b)
+         { const bt ct = n->btype(b); if (ct != bt::null) release_async_(e, ct, n->branch(b), budget, spill); }
+         if (n->has_term()) release_async_(e, bt(n->term_tag), n->term_ptr, budget, spill);
+         e.cl9.free(p);
+      }
+      else if (t == bt::nested_setlist)
+      {
+         nested_setlist* n = static_cast<nested_setlist*>(resolve(e, t, p));
+         for_each_nested_branch_(n, [&](bt ct, uint32_t cp) { release_async_(e, ct, cp, budget, spill); });
+         if (n->has_term() && !n->is_inline(n->nbranch))
+            release_async_(e, n->otype(n->nbranch), n->ext_ptr(n->nbranch), budget, spill);
+         e.cl1.free(p);
+      }
+      else
+      {
+         setlist* n = static_cast<setlist*>(resolve(e, t, p));
+         for (uint32_t i = 0; i < n->nbranch; ++i) release_async_(e, n->btype(i), n->branch(i), budget, spill);
+         if (n->has_term()) release_async_(e, n->term_type(), n->term_branch(), budget, spill);
+         (t == bt::double_setlist || t == bt::big_nested) ? e.cl2.free(p) : e.cl1.free(p);
+      }
+   }
+
+   // ── engine reclaimer (out-of-line: depends on release_async_) ───────────────
+   inline void engine::spill_fn::operator()(bt t, uint32_t p) const noexcept
+   {
+      if (e->_rq.try_push(kv_pack_(t, p))) return;
+      int big = 0x7fffffff;                     // ring full → finish inline (backpressure)
+      release_async_(*e, t, p, big, e->_spill);
+   }
+   inline void engine::release_async(bt t, uint32_t p) noexcept
+   {
+      if (t == bt::null) return;
+      int budget = inline_destroy_budget;
+      release_async_(*this, t, p, budget, _spill);
+   }
+   inline void engine::bg_loop_() noexcept
+   {
+      for (;;)
+      {
+         _bg_inflight.store(1, std::memory_order_release);   // claim BEFORE pop (drain predicate)
+         uint64_t v;
+         if (_rq.try_pop(v))
+         {
+            int big = 0x7fffffff;                            // bg has effectively infinite budget
+            release_async_(*this, bt(uint8_t(v >> 32)), uint32_t(v), big, _spill);
+            _bg_inflight.store(0, std::memory_order_release);
+         }
+         else
+         {
+            _bg_inflight.store(0, std::memory_order_release);
+            if (_bg_stop.load(std::memory_order_acquire)) return;  // stopped AND drained
+            std::this_thread::yield();
+         }
       }
    }
 
@@ -378,12 +705,6 @@ namespace gcart::st
       }
 
      private:
-      static bool pfx_ok(sv pfx, sv key, uint32_t depth) noexcept
-      {
-         return key.size() - depth >= pfx.size() &&
-                (pfx.empty() || std::memcmp(key.data() + depth, pfx.data(), pfx.size()) == 0);
-      }
-
       std::pair<bt, uint32_t> make_sv(sv suffix, sv val)
       {
          return {bt::suffix_value, sv_leaf::make(_e, _ssal, suffix, val)};
@@ -417,6 +738,14 @@ namespace gcart::st
             for (uint32_t b = 0; b < 256; ++b)
             { const bt ct = n->btype(b); if (ct != bt::null) f(br{uint8_t(b), ct, n->branch(b)}); }
          }
+         else if (t == bt::nested_setlist)
+         {
+            // refcount-walk contract only (byte cosmetic — rebuild/reprefix PROMOTE
+            // nested first). Visits external children + inline-setlist grandchildren;
+            // inline leaves are data (not children); the outer term → node_term().
+            const nested_setlist* n = static_cast<const nested_setlist*>(resolve(e, t, p));
+            for_each_nested_branch_(n, [&](bt ct, uint32_t cp) { f(br{0, ct, cp}); });
+         }
          else
          {
             const setlist* n = static_cast<const setlist*>(resolve(e, t, p));
@@ -431,6 +760,12 @@ namespace gcart::st
             const full* n = static_cast<const full*>(resolve(e, t, p));
             if (!n->has_term()) return false; tt = bt(n->term_tag); tp = n->term_ptr; return true;
          }
+         if (t == bt::nested_setlist)
+         {
+            const nested_setlist* n = static_cast<const nested_setlist*>(resolve(e, t, p));
+            if (!n->has_term() || n->is_inline(n->nbranch)) return false;  // no term, or inline term = data
+            tt = n->otype(n->nbranch); tp = n->ext_ptr(n->nbranch); return true;
+         }
          const setlist* n = static_cast<const setlist*>(resolve(e, t, p));
          if (!n->has_term()) return false; tt = n->term_type(); tp = n->term_branch(); return true;
       }
@@ -443,6 +778,9 @@ namespace gcart::st
             const full* n = static_cast<const full*>(resolve(e, t, p));
             ct = n->btype(byte); if (ct == bt::null) return false; cp = n->branch(byte); return true;
          }
+         // nested_setlist children are inline (no slot) — the write path PROMOTES a
+         // nested before editing, so node_child never sees one. Defensive guard.
+         assert(t != bt::nested_setlist && "edit a nested_setlist only after promote_nested");
          const setlist* n = static_cast<const setlist*>(resolve(e, t, p));
          const int idx = n->find_index(byte); if (idx < 0) return false;
          ct = n->btype(uint32_t(idx)); cp = n->branch(uint32_t(idx)); return true;
@@ -450,8 +788,9 @@ namespace gcart::st
       sv node_prefix(bt t, uint32_t p) const
       {
          engine& e = const_cast<engine&>(_e);
-         return t == bt::full ? static_cast<const full*>(resolve(e, t, p))->prefix()
-                              : static_cast<const setlist*>(resolve(e, t, p))->prefix();
+         if (t == bt::full) return static_cast<const full*>(resolve(e, t, p))->prefix();
+         if (t == bt::nested_setlist) return static_cast<const nested_setlist*>(resolve(e, t, p))->prefix();
+         return static_cast<const setlist*>(resolve(e, t, p))->prefix();
       }
       void free_node(bt t, uint32_t p)
       {
@@ -462,15 +801,75 @@ namespace gcart::st
 
       // Build a routing node from a branch list (sorted by byte) + optional term
       // + prefix; pick cl1/cl2/full by size. Branch ptrs are TAKEN (not retained).
+      // may_inline: try a nested_setlist first (inline private small leaf children
+      // into the line). Pass true ONLY where the caller does NOT release the child
+      // set afterward (rebuild-unique free_node / fresh splits) — inlined leaves are
+      // consumed (release_ref'd), which would double-free under a later release_ref(t).
       std::pair<bt, uint32_t> build_node(sv prefix, const br* brs, uint32_t nb,
-                                         bool term, bt tt, uint32_t tp)
+                                         bool term, bt tt, uint32_t tp, bool may_inline = false)
       {
          const uint32_t pl = uint32_t(prefix.size());
+         if (may_inline)
+         {
+            const uint32_t s = pack_nested_leaves(prefix, brs, nb, term, tt, tp);
+            if (s != UINT32_MAX) return {bt::nested_setlist, s};
+         }
          if (setlist::fits(nb, pl, term, 128))
             return {bt::setlist, pack_setlist<128>(_s1, prefix, brs, nb, term, tt, tp)};
          if (setlist::fits(nb, pl, term, 256))
             return {bt::double_setlist, pack_setlist<256>(_s2, prefix, brs, nb, term, tt, tp)};
          return {bt::full, pack_full(prefix, brs, nb, term, tt, tp)};
+      }
+
+      // Try to build a nested_setlist that INLINES private suffix_value leaf
+      // children (a leaf with NO SAL object — value+suffix packed in the line);
+      // non-leaf / shared / oversize children stay external 4-byte ptrs. Returns the
+      // cl1 slot, or UINT32_MAX if it doesn't fit one line or no leaf would inline.
+      // Inlined leaves are release_ref'd (consumed); external children are TAKEN.
+      uint32_t pack_nested_leaves(sv prefix, const br* brs, uint32_t nb, bool term, bt tt, uint32_t tp)
+      {
+         const uint32_t pl    = uint32_t(prefix.size());
+         const uint32_t nslot = nb + (term ? 1u : 0u);
+         uint8_t  inl[257]; uint32_t esize[257]; const char* esrc[257]; uint32_t ninline = 0, tail = 0;
+         auto decide = [&](uint32_t idx, bt tag, uint32_t ptr)
+         {
+            bool        can = (tag == bt::suffix_value) && _e.sal.unique(ptr);
+            uint32_t    sz  = 4;
+            const char* src = nullptr;
+            if (can)
+            {
+               src = static_cast<const char*>(_e.sal.get(ptr));     // resolve the SAL slot ONCE
+               uint16_t v16; std::memcpy(&v16, src, 2);
+               sz = sv_leaf::bytes_for(v16, uint8_t(src[2]));
+               if (sz > 127) { can = false; sz = 4; src = nullptr; }
+            }
+            inl[idx] = can ? 1 : 0; esize[idx] = sz; esrc[idx] = src; ninline += can; tail += sz;
+         };
+         for (uint32_t i = 0; i < nb; ++i) decide(i, brs[i].tag, brs[i].ptr);
+         if (term) decide(nb, tt, tp);
+         const uint32_t head = nested_setlist::hdr + pl + nb + tag3_bytes(nslot) + nslot;
+         if (ninline == 0 || tail > 127 || head + tail > 128) return UINT32_MAX;
+
+         const uint32_t   slot = _s1.alloc();
+         nested_setlist*  n    = static_cast<nested_setlist*>(_e.cl1.get(slot));
+         n->meta    = uint8_t((term ? 0x80 : 0) | (pl & 0x7f));
+         n->nbranch = uint8_t(nb);
+         std::memcpy(n->base() + nested_setlist::hdr, prefix.data(), pl);
+         for (uint32_t i = 0; i < nb; ++i) n->okeys()[i] = brs[i].byte;
+         uint32_t eoff = 0;
+         auto lay = [&](uint32_t idx, bt tag, uint32_t ptr)
+         {
+            eoff += esize[idx];
+            n->ooff()[idx] = uint8_t((inl[idx] ? nested_setlist::inline_flag : 0) | eoff);
+            char* dst = n->base() + 128 - eoff;
+            if (inl[idx])
+            { std::memcpy(dst, esrc[idx], esize[idx]); tag3_set(n->otypes(), idx, bt::suffix_value); release_ref(bt::suffix_value, ptr); }
+            else
+            { std::memcpy(dst, &ptr, 4); tag3_set(n->otypes(), idx, tag); }
+         };
+         for (uint32_t i = 0; i < nb; ++i) lay(i, brs[i].tag, brs[i].ptr);
+         if (term) lay(nb, tt, tp);
+         return slot;
       }
 
       template <uint32_t SB, class Ses>
@@ -537,7 +936,7 @@ namespace gcart::st
             for (uint32_t i = nb; i > pos; --i) scratch[i] = scratch[i - 1];
             scratch[pos] = br{ed.byte, ed.tag, ed.ptr}; ++nb;
          }
-         auto out = build_node(node_prefix(t, p), scratch, nb, new_term, new_tt, new_tp);
+         auto out = build_node(node_prefix(t, p), scratch, nb, new_term, new_tt, new_tp, is_unique);
          if (is_unique)
          {
             // PRIVATE: every child/term is transferred to `out` (no snapshot holds
@@ -588,9 +987,11 @@ namespace gcart::st
             place(es, eval_s); place(ns, val);
             if (nb == 2 && brs[0].byte > brs[1].byte) std::swap(brs[0], brs[1]);
             ++_size;
-            return build_node(sv(es).substr(0, cp), brs, nb, term, tt, tp);
+            return build_node(sv(es).substr(0, cp), brs, nb, term, tt, tp, /*may_inline=*/true);
          }
          // routing node
+         if (t == bt::nested_setlist)  // promote-on-write: every edit path mutates flat nodes only.
+         { auto fl = promote_nested(t, p); return upsert_rec<cow_mode::unique>(fl.first, fl.second, key, depth, val); }
          const sv pfx = node_prefix(t, p);
          const sv ksuf = key.substr(depth);
          const uint32_t cp = lcp(pfx, ksuf);
@@ -606,7 +1007,7 @@ namespace gcart::st
             else { auto nv = make_sv(ksuf.substr(cp + 1), val); brs[nb++] = br{uint8_t(ksuf[cp]), nv.first, nv.second}; }
             if (nb == 2 && brs[0].byte > brs[1].byte) std::swap(brs[0], brs[1]);
             ++_size;
-            return build_node(common, brs, nb, term, tt, tp);
+            return build_node(common, brs, nb, term, tt, tp, /*may_inline=*/true);
          }
          depth += uint32_t(pfx.size());
          // The latch, compile-time: in <unique> read the refcount once — a private
@@ -712,6 +1113,60 @@ namespace gcart::st
          read_branches(out.first, out.second, [&](const br& b) { retain(_e, b.tag, b.ptr); });
          if (term) retain(_e, tt, tp);
          release_ref(t, p);
+         return out;
+      }
+
+      // Un-nest a nested_setlist into a flat structure: each inner setlist becomes
+      // a STANDALONE cl1 setlist, and a flat OUTER setlist points to them. Returns
+      // the flat (tag,ptr). The write path promotes-on-write so every edit path
+      // only ever mutates flat nodes (nested is effectively read-only after create;
+      // re-nesting happens later in build_node). PRIVATE: inner u32 children are
+      // TRANSFERRED to the new setlists, the nested slot is just freed. SHARED: the
+      // new setlists co-reference the children, so retain each then release the old
+      // nested (its ref>1 so it survives for the snapshot).
+      std::pair<bt, uint32_t> promote_nested(bt t, uint32_t p)
+      {
+         const bool       priv  = unique(_e, t, p);
+         nested_setlist*  n     = static_cast<nested_setlist*>(resolve(_e, t, p));
+         const uint32_t   onb   = n->nbranch;
+         const bool       oterm = n->has_term();
+         br       scratch[257]; uint32_t nb = 0;
+         for (uint32_t i = 0; i < onb; ++i)
+         {
+            if (!n->is_inline(i))                            // external → keep the ptr
+            { scratch[nb++] = br{n->okeys()[i], n->otype(i), n->ext_ptr(i)}; continue; }
+            if (n->otype(i) == bt::setlist)                  // inline setlist → standalone cl1 (copy body)
+            {
+               uint32_t s = _s1.alloc();
+               std::memcpy(_e.cl1.get(s), n->entry(i), n->entry_size(i));
+               scratch[nb++] = br{n->okeys()[i], bt::setlist, s};
+            }
+            else                                             // inline suffix_value → fresh SAL leaf (verbatim body copy)
+            {
+               const uint32_t sz = n->entry_size(i);
+               const uint32_t s  = _ssal.alloc(sz);
+               std::memcpy(_e.sal.get(s), n->entry(i), sz);
+               scratch[nb++] = br{n->okeys()[i], bt::suffix_value, s};
+            }
+         }
+         bt tt = bt::null; uint32_t tp = 0;
+         if (oterm)
+         {
+            const uint32_t ti = onb;
+            if (!n->is_inline(ti)) { tt = n->otype(ti); tp = n->ext_ptr(ti); }
+            else { auto lv = make_sv(sv{}, n->in_value(ti)); tt = lv.first; tp = lv.second; }  // inline term → 0-suffix SAL leaf
+         }
+         auto out = build_node(n->prefix(), scratch, nb, oterm, tt, tp);
+         if (priv)
+         {
+            _e.cl1.free(p);  // external ptrs + inline-setlist grandchildren TRANSFERRED; inline data dropped with the slot
+         }
+         else  // shared: the new flat co-references the external/grandchild ptrs → retain, then drop one nested ref
+         {
+            for_each_nested_branch_(n, [&](bt ct, uint32_t cp) { retain(_e, ct, cp); });
+            if (oterm && !n->is_inline(onb)) retain(_e, n->otype(onb), n->ext_ptr(onb));
+            release_ref(t, p);
+         }
          return out;
       }
 

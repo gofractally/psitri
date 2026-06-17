@@ -26,12 +26,11 @@
 #include <sal/block_allocator.hpp>
 
 #include <sal2/config.hpp>
-#include <sal2/freeset.hpp>
 
 namespace sal2
 {
-   // Slots per 32 MB segment, rounded DOWN to a multiple of 64 (the freeset l0
-   // word). cl9's 1152 B slot leaves a small tail; cl1/cl2 divide evenly.
+   // Slots per 32 MB segment, rounded DOWN to a multiple of 64. cl9's 1152 B slot
+   // leaves a small tail; cl1/cl2 divide evenly.
    inline constexpr uint32_t fa_segment_bytes = 32u * 1024 * 1024;
    constexpr uint32_t        slots_per_seg(uint32_t slot_bytes) noexcept
    {
@@ -44,7 +43,6 @@ namespace sal2
      public:
       static constexpr uint32_t slot_bytes = SlotBytes;
       static constexpr uint32_t slots_per_segment = slots_per_seg(SlotBytes);
-      using freeset = seg_freeset_t<slots_per_segment>;
       static_assert(slots_per_segment >= 64 && slots_per_segment % 64 == 0);
 
       struct config
@@ -63,15 +61,14 @@ namespace sal2
          _data = std::make_unique<sal::block_allocator>(
              _cfg.dir / (_cfg.name + ".dat"), fa_segment_bytes /* power-of-2; cl9 wastes a tiny tail */,
              _cfg.max_segments, sal::access_mode::read_write);
-         _free = std::make_unique<sal::block_allocator>(
-             _cfg.dir / (_cfg.name + ".fs"), uint64_t(std::bit_ceil(sizeof(freeset))),
-             _cfg.max_segments, sal::access_mode::read_write);
          _refs = std::make_unique<sal::block_allocator>(
              _cfg.dir / (_cfg.name + ".rc"), std::bit_ceil(uint64_t(slots_per_segment)) /* 1 B/slot, pow2 */,
              _cfg.max_segments, sal::access_mode::read_write);
-         grow_();
+         _seg_alloced = std::make_unique<std::atomic<uint32_t>[]>(_cfg.max_segments);
+         _seg_freed   = std::make_unique<std::atomic<uint32_t>[]>(_cfg.max_segments);
+         _seg_sealed  = std::make_unique<std::atomic<uint8_t>[]>(_cfg.max_segments);
+         _recyc       = std::make_unique<std::atomic<uint64_t>[]>((_cfg.max_segments + 63) / 64);
          _base      = static_cast<std::byte*>(const_cast<void*>(_data->mapped_base()));
-         _free_base = static_cast<std::byte*>(const_cast<void*>(_free->mapped_base()));
          _ref_base  = reinterpret_cast<std::atomic<uint8_t>*>(const_cast<void*>(_refs->mapped_base()));
       }
 
@@ -102,11 +99,22 @@ namespace sal2
          assert(prior >= 1 && "release of a dead slot");
          return prior == 1;
       }
-      // return a slot to its segment's free bitmap (immediate reclaim).
+      // Mark a slot dead (refcount already 0). Per the SAL segment model a freed
+      // slot is NOT reused until the WHOLE segment recycles: when a SEALED (full)
+      // segment crosses >50% free it joins the recyclable bitset, and the next
+      // new-segment request pulls it (writing around the live leftovers) before
+      // growing fresh. The alloc hot path is a pure bump that never consults this,
+      // so the bg release thread's frees never contend with allocations.
       void free(uint32_t i) noexcept
       {
-         const uint32_t s = i / slots_per_segment;
-         freeset_(s).free1(i % slots_per_segment);
+         _freed.fetch_add(1, std::memory_order_relaxed);
+         const uint32_t s     = i / slots_per_segment;
+         // bg writes _seg_freed; foreground writes _seg_alloced — separate arrays
+         // (separate cachelines) so the two never false-share. live = the diff.
+         const uint32_t freed = _seg_freed[s].fetch_add(1, std::memory_order_relaxed) + 1;
+         const uint32_t live  = _seg_alloced[s].load(std::memory_order_acquire) - freed;
+         if (live <= recycle_below && _seg_sealed[s].load(std::memory_order_acquire))
+            _recyc[s >> 6].fetch_or(1ull << (s & 63), std::memory_order_relaxed);
       }
 
       // ── sessions ───────────────────────────────────────────────────────────
@@ -114,45 +122,72 @@ namespace sal2
 
       // ── stats ────────────────────────────────────────────────────────────────
       uint32_t num_segments() const noexcept { return _nseg.load(std::memory_order_acquire); }
-      freeset& freeset_of(uint32_t s) noexcept { return freeset_(s); }
+      // live = bump-allocated minus freed (no freeset; the bump cursor never
+      // returns slots, so a counter pair is exact).
       uint64_t live_slots() noexcept
       {
-         const uint32_t ns = num_segments();
-         uint64_t used = 0;
-         for (uint32_t s = 0; s < ns; ++s) used += slots_per_segment - freeset_(s).free_lines();
-         return used;
+         return _allocated.load(std::memory_order_relaxed) - _freed.load(std::memory_order_relaxed);
       }
       uint64_t live_bytes() noexcept { return live_slots() * uint64_t(SlotBytes); }
 
      private:
       friend class session;
 
-      freeset& freeset_(uint32_t s) noexcept
-      {
-         return *reinterpret_cast<freeset*>(_free_base + size_t(s) * std::bit_ceil(sizeof(freeset)));
-      }
       uint32_t grow_()
       {
          std::lock_guard<std::mutex> g(_grow_mx);
          const uint32_t s = _nseg.load(std::memory_order_relaxed);
          if (s >= _cfg.max_segments) throw std::runtime_error("sal2: fixed_allocator full");
-         _data->alloc(); _free->alloc(); _refs->alloc();
+         _data->alloc(); _refs->alloc();
          _base      = static_cast<std::byte*>(const_cast<void*>(_data->mapped_base()));
-         _free_base = static_cast<std::byte*>(const_cast<void*>(_free->mapped_base()));
          _ref_base  = reinterpret_cast<std::atomic<uint8_t>*>(const_cast<void*>(_refs->mapped_base()));
-         new (&freeset_(s)) freeset();
-         freeset_(s).init(/*all_free=*/true);
+         _seg_alloced[s].store(0, std::memory_order_relaxed);
+         _seg_freed[s].store(0, std::memory_order_relaxed);
+         _seg_sealed[s].store(0, std::memory_order_relaxed);
          _nseg.store(s + 1, std::memory_order_release);
          return s;
       }
 
+      // Pull the lowest-numbered recyclable (>50%-free, sealed) segment, or
+      // UINT32_MAX. Clears its bit + sealed flag (the caller re-fills it).
+      uint32_t take_recyclable_() noexcept
+      {
+         const uint32_t words = (_nseg.load(std::memory_order_acquire) + 63) >> 6;
+         for (uint32_t w = 0; w < words; ++w)
+         {
+            uint64_t m = _recyc[w].load(std::memory_order_relaxed);
+            while (m)
+            {
+               const uint32_t s = w * 64 + uint32_t(std::countr_zero(m));
+               if (_recyc[w].fetch_and(~(1ull << (s & 63)), std::memory_order_acquire) & (1ull << (s & 63)))
+               {
+                  _seg_sealed[s].store(0, std::memory_order_relaxed);
+                  return s;
+               }
+               m = _recyc[w].load(std::memory_order_relaxed);  // lost the race — re-read
+            }
+         }
+         return UINT32_MAX;
+      }
+
+      static constexpr uint32_t recycle_below = slots_per_segment / 2;  // >50% free ⇒ recyclable
+
       config                                _cfg;
-      std::unique_ptr<sal::block_allocator> _data, _free, _refs;
+      std::unique_ptr<sal::block_allocator> _data, _refs;
       std::byte*                            _base = nullptr;
-      std::byte*                            _free_base = nullptr;
       std::atomic<uint8_t>*                 _ref_base = nullptr;
       std::atomic<uint32_t>                 _nseg{0};
       std::mutex                            _grow_mx;
+      // bump-model accounting + recycle (the freeset is no longer the authority;
+      // liveness is the refcount array, ref==0 ⇒ a free slot to write around).
+      // alloc-side and free-side counters live on separate cachelines so the
+      // foreground (alloc) and the bg release thread (free) never false-share.
+      alignas(64) std::atomic<uint64_t>                _allocated{0};  // foreground
+      alignas(64) std::atomic<uint64_t>                _freed{0};      // bg release thread
+      std::unique_ptr<std::atomic<uint32_t>[]>         _seg_alloced; // foreground: allocs / segment
+      std::unique_ptr<std::atomic<uint32_t>[]>         _seg_freed;   // bg: frees / segment
+      std::unique_ptr<std::atomic<uint8_t>[]>          _seg_sealed;  // 1 = full/retired
+      std::unique_ptr<std::atomic<uint64_t>[]>         _recyc;       // bitset of recyclable segments
    };
 
    // One writer's bump cursor within an active segment (spec req 4/5/7).
@@ -163,13 +198,22 @@ namespace sal2
       session(const session&)            = delete;
       session& operator=(const session&) = delete;
 
-      // Allocate one slot (global index), ref stamped to 1.
+      // Allocate one slot (global index), ref stamped to 1. Forward BUMP within
+      // the active segment: a FRESH segment is a pure cursor bump; a RECYCLED
+      // segment write-arounds by skipping live (ref!=0) leftovers. Either way no
+      // freeset CAS, and freed slots are reused only via whole-segment recycle.
       uint32_t alloc()
       {
-         if (_seg != UINT32_MAX)
+         if (_fresh)
          {
-            const uint32_t local = _a->freeset_(_seg).alloc1(_cursor);
-            if (local != UINT32_MAX) { _cursor = local + 1; return finish_(local); }
+            if (_pos < slots_per_segment) return finish_(_pos++);
+            return alloc_slow_();
+         }
+         const std::atomic<uint8_t>* refs = _a->_ref_base + size_t(_seg) * slots_per_segment;
+         while (_pos < slots_per_segment)
+         {
+            if (refs[_pos].load(std::memory_order_relaxed) == 0) return finish_(_pos++);  // dead → write around
+            ++_pos;                                                                       // skip live leftover
          }
          return alloc_slow_();
       }
@@ -178,29 +222,36 @@ namespace sal2
       friend class fixed_allocator<SlotBytes>;
       explicit session(fixed_allocator* a) noexcept : _a(a) {}
 
+      // Active segment exhausted → seal it (now eligible for recycle), then pull a
+      // recyclable (>50%-free) segment and write around its leftovers; only if
+      // none is available do we grow a fresh segment.
       uint32_t alloc_slow_()
       {
-         // adopt the lowest segment with a free slot, else grow a fresh one.
-         const uint32_t ns = _a->num_segments();
-         for (uint32_t s = (_seg + 1 < ns ? _seg + 1 : 0), seen = 0; seen < ns; ++seen, s = (s + 1 < ns ? s + 1 : 0))
+         if (_seg != UINT32_MAX)
          {
-            if (_a->freeset_(s).free_lines() == 0) continue;
-            const uint32_t local = _a->freeset_(s).alloc1(0);
-            if (local != UINT32_MAX) { _seg = s; _cursor = local + 1; return finish_(local); }
+            _a->_seg_sealed[_seg].store(1, std::memory_order_release);
+            // catch a segment that went >50% free while still active.
+            const uint32_t live = _a->_seg_alloced[_seg].load(std::memory_order_relaxed) -
+                                  _a->_seg_freed[_seg].load(std::memory_order_acquire);
+            if (live <= recycle_below)
+               _a->_recyc[_seg >> 6].fetch_or(1ull << (_seg & 63), std::memory_order_relaxed);
          }
-         const uint32_t s     = _a->grow_();
-         const uint32_t local = _a->freeset_(s).alloc1(0);
-         _seg = s; _cursor = local + 1;
-         return finish_(local);
+         const uint32_t r = _a->take_recyclable_();
+         if (r != UINT32_MAX) { _seg = r; _pos = 0; _fresh = false; }
+         else                 { _seg = _a->grow_(); _pos = 0; _fresh = true; }
+         return alloc();
       }
-      uint32_t finish_(uint32_t local)
+      uint32_t finish_(uint32_t local) noexcept
       {
          const uint32_t g = _seg * slots_per_segment + local;
          _a->_ref_base[g].store(1, std::memory_order_relaxed);
+         _a->_seg_alloced[_seg].fetch_add(1, std::memory_order_release);
+         _a->_allocated.fetch_add(1, std::memory_order_relaxed);
          return g;
       }
       fixed_allocator* _a;
-      uint32_t         _seg    = UINT32_MAX;
-      uint32_t         _cursor = 0;
+      uint32_t         _seg   = UINT32_MAX;
+      uint32_t         _pos   = slots_per_segment;  // forces a fresh segment on first alloc
+      bool             _fresh = true;
    };
 }  // namespace sal2

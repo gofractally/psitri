@@ -50,6 +50,8 @@ namespace gcart::st::kv
       uint32_t ptr() const noexcept { return _p; }
       engine*  eng() const noexcept { return _e; }
       void give() noexcept { _t = bt::null; }   // relinquish without releasing
+      // the pin OWNS its release. (A/B: SYNC release to isolate the bump allocator
+      // from the async bg cascade.)
       void reset() noexcept { if (_e && _t != bt::null) release_subtree(*_e, _t, _p); _t = bt::null; }
 
      private:
@@ -149,11 +151,14 @@ namespace gcart::st::kv
          if (!_work[i]) _work[i] = std::make_unique<tree>(_e);
          return *_work[i];
       }
+      // settled once the engine's background cascade has caught up.
       uint64_t live_bytes() noexcept { return _e.live_bytes(); }
+      void     drain() noexcept { _e.drain(); }   // measurement barrier
 
      private:
       explicit database(std::filesystem::path dir) : _e(std::move(dir))
       { for (auto& r : _roots) r.store(null_root, std::memory_order_relaxed); }
+
       engine                                  _e;
       std::array<std::atomic<uint64_t>, 64>   _roots;
       std::array<std::unique_ptr<tree>, 64>   _work{};
@@ -171,7 +176,9 @@ namespace gcart::st::kv
    {
       if (_done) return;
       // publish the new working root atomically, then drop the snapshot pin on
-      // the old committed root (freed unless a reader still holds it).
+      // the old committed root. _snap.reset() routes through the engine's
+      // background reclaimer (the cascade runs off the writer's critical path);
+      // the smart_ptr owns its own release.
       _db->root_slot(_slot).store(pack(_t->root_tag(), _t->root_ptr()), std::memory_order_release);
       _snap.reset();
       _done = true;

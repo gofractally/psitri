@@ -101,13 +101,34 @@ touches **no** refcount at all (the design's whole point), because there isn't o
   synced via the slab data) + tolerates stale death (safe).
 
 ### GC-2 — engine COW path: birth-latch + death stamps (the core)
-- Replace rcart's refcount-unique check with the **`template<cow_mode{shared,
-  unique}>` birth-latch** (§5.2): descent reads node birth; `birth==V` ⟹ unique
-  (mutate in place), `birth<V` ⟹ shared (clone, recurse `<shared>`, never check
-  again). Public `upsert`/`remove` default `<shared>`.
-- On supersession stamp `death_ver[husk]=V` (SHALLOW husks on the path; DEEP for
-  dropped subtrees). **Remove all `retain`/`release_one`/`release_subtree` traffic
-  from the COW path** — the dead are stamped, the living are untouched.
+**Status (2026-06-17): GC-2a/b/c DONE (the birth-latch), GC-2d NEXT (death+GC).**
+- GC-2a/b — **birth (u32) in all 5 node layouts** (commits 5fa7986, bf118a6):
+  setlist / nested_setlist / full headers (cl1/cl2 @ +4, full @ +8;
+  double_setlist+big_nested inherit), and a body PREFIX on standalone sv_leaf /
+  big_leaf (inline-in-nested leaves are birth-FREE — they share the nested node's
+  header birth; `leaf_*_body` standalone readers skip the prefix). Direct aligned
+  u32 access (slot base is grain-aligned), not memcpy.
+- GC-2c — **birth-latch drives the COW decision** (commit 425145e): the 3 routing
+  latch sites (upsert/remove/promote_nested) + 2 inline-eligibility checks now test
+  `node_birth==_V` instead of refcount==1; `birth==V`⟹in place, `birth<V`⟹clone.
+  `tree::_V` (write version) is stamped at EVERY node creation (make_sv, pack_*,
+  reprefix clone, de-inline). spec_kv assigns each txn a fresh version from a
+  **monotonic counter persisted in roots.dat slot 64** (births never collide across
+  reopen). This is the validated HYBRID — latch is pure version-liveness, reclaim
+  still refcount. Gate met: spec-tree oracle 833637/0 (in-place); spec-kv 417730/0
+  incl. concurrent 2.6M reads / 0 rfail (the clone-path / snapshot-isolation gate).
+- gcart is now **single-root** (commit c48d020): the multi-root `_extra`
+  std::vector + open_root were rcart-fork dead weight + a heap-rule violation;
+  removed (delta_art needs multi-root only on W, gcart is always B; shim uses one
+  root). adb::kv_engine<gcart::kv::engine> still holds (kv_transaction, not
+  multi_root); delta_art::tiered_kv<start_ver, gcart> compiles.
+- **GC-2d (NEXT) — remove refcount, switch reclaim to version-liveness:** on
+  supersession stamp `death_ver[husk]=V` (SHALLOW husks on the path; DEEP for
+  dropped subtrees) instead of release_ref/release_husk/release_subtree; **remove
+  all retain/release** from the COW + snapshot paths; move the engine sal2→sal2gc
+  (death-based allocators). Needs GC-3 (held-version watermark) to keep the
+  concurrent test green (reclaim must not free a held snapshot's version), so
+  GC-2d+GC-3+GC-4(minimal) land together.
 - Abort = nodes born at the unpublished V are unreachable → free immediately.
 - **Gate:** oracle (vs std::map) 0 fails incl. churn + drain; **snapshot isolation**
   test (reader holding root@V sees exactly keys ≤ V under a concurrent writer);

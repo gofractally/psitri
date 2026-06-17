@@ -1,0 +1,20 @@
+---
+BasedOnStyle: Chromium
+BreakBeforeBraces: Allman
+ColumnLimit: '100'
+IndentWidth: '3'
+NamespaceIndentation: All
+ReflowComments: false
+AlignConsecutiveDeclarations: true
+AlignConsecutiveAssignments: true
+
+# Comment formatting
+SpacesBeforeTrailingComments: 2
+AlignTrailingComments: true
+SpacesInLineCommentPrefix:
+  Minimum: 1
+  Maximum: 1
+CommentPragmas: '^ IWYU pragma:'
+FixNamespaceComments: true
+JavaScriptQuotes: Leave
+JavaScriptWrapImports: true

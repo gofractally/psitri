@@ -20,7 +20,7 @@ using Clock = std::chrono::steady_clock;
 static std::string mk(uint64_t i, char suf)
 {
    uint64_t h = (i + 0x9E3779B97F4A7C15ull) * 0xC2B2AE3D27D4EB4Full;  // spread the base
-   char b[8];
+   char     b[8];
    std::memcpy(b, &h, 7);  // 7-byte base
    b[7] = suf;             // divergent last byte
    return std::string(b, 8);
@@ -43,7 +43,11 @@ int main(int argc, char** argv)
       {
          auto           tx  = ws->start_transaction(0);
          const uint64_t end = std::min(pairs, i + 1000);
-         for (; i < end; ++i) { tx.upsert(mk(i, 'a'), val); tx.upsert(mk(i, 'b'), val); }
+         for (; i < end; ++i)
+         {
+            tx.upsert(mk(i, 'a'), val);
+            tx.upsert(mk(i, 'b'), val);
+         }
          tx.commit();
       }
    }
@@ -52,27 +56,30 @@ int main(int argc, char** argv)
    // keys are 8 bytes, values 8 bytes, gcart length fields slen:u8 + vlen:u16 = 3.
    const double actbpk = double(db->live_bytes()) / double(nkeys);
    const double minbpk = 8.0 + 8.0 + 3.0;  // 19 B/key flat-store baseline
-   printf("inserted %llu keys (8B key, 8B val), actual=%.1f B/key  min=%.1f (k+v+3)  ratio=%.2fx  overhead=%.1f B/key\n",
-          (unsigned long long)nkeys, actbpk, minbpk, actbpk / minbpk, actbpk - minbpk);
+   printf(
+       "inserted %llu keys (8B key, 8B val), actual=%.1f B/key  min=%.1f (k+v+3)  ratio=%.2fx  "
+       "overhead=%.1f B/key\n",
+       (unsigned long long)nkeys, actbpk, minbpk, actbpk / minbpk, actbpk - minbpk);
    fflush(stdout);
 
    // timed random point reads
-   auto     rs = db->start_read_session();
-   auto     cur = rs->create_cursor(0);
+   auto     rs   = db->start_read_session();
+   auto     cur  = rs->create_cursor(0);
    uint64_t hits = 0;
-   auto     t0 = Clock::now();
+   auto     t0   = Clock::now();
    for (uint64_t l = 0; l < loops; ++l)
    {
       uint64_t r = 0x12345;
       for (uint64_t k = 0; k < nkeys; ++k)
       {
-         r = r * 6364136223846793005ull + 1442695040888963407ull;
+         r                = r * 6364136223846793005ull + 1442695040888963407ull;
          const uint64_t i = (r >> 17) % pairs;
          const char     s = (r & 1) ? 'a' : 'b';
-         if (cur.get<std::string>(mk(i, s))) ++hits;
+         if (cur.get<std::string>(mk(i, s)))
+            ++hits;
       }
    }
-   const double dt = std::chrono::duration<double>(Clock::now() - t0).count();
+   const double   dt    = std::chrono::duration<double>(Clock::now() - t0).count();
    const uint64_t reads = loops * nkeys;
    printf("reads: %llu in %.3fs = %.0f reads/s, %.1f ns/read (hits=%llu)\n",
           (unsigned long long)reads, dt, double(reads) / dt, dt * 1e9 / double(reads),

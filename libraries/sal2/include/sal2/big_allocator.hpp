@@ -41,43 +41,69 @@ namespace sal2
    {
      public:
       static constexpr uint32_t grain          = Grain;
-      static constexpr uint64_t segment_bytes  = 8u * 1024u * 1024u;          // 8 MB commit unit
+      static constexpr uint64_t segment_bytes  = 8u * 1024u * 1024u;  // 8 MB commit unit
       static constexpr uint32_t grains_per_seg = uint32_t(segment_bytes / Grain);
-      static constexpr uint32_t max_bucket     = 8192;                        // free-list size classes
-      static constexpr uint32_t hdr_bytes      = 8;                           // [u32 ngrains | u32 ref]
+      static constexpr uint32_t max_bucket     = 8192;  // free-list size classes
+      static constexpr uint32_t hdr_bytes      = 8;     // [u32 ngrains | u32 ref]
       static constexpr uint32_t null_grain     = UINT32_MAX;
       static_assert(Grain >= hdr_bytes, "grain must hold the inline header");
       static_assert((segment_bytes % Grain) == 0, "segment must be a whole number of grains");
 
-      struct config { std::filesystem::path dir; std::string name; uint32_t max_segments = 4096; };
+      struct config
+      {
+         std::filesystem::path dir;
+         std::string           name;
+         uint32_t              max_segments = 4096;
+      };
 
       explicit big_allocator(config cfg) : _cfg(std::move(cfg))
       {
          std::filesystem::create_directories(_cfg.dir);
-         _data = std::make_unique<sal::block_allocator>(
-             _cfg.dir / (_cfg.name + ".big"), segment_bytes, _cfg.max_segments, sal::access_mode::read_write);
-         _base = static_cast<std::byte*>(const_cast<void*>(_data->mapped_base()));  // reservation base (fixed)
-         for (auto& h : _flist) h.store(null_grain, std::memory_order_relaxed);
+         _data = std::make_unique<sal::block_allocator>(_cfg.dir / (_cfg.name + ".big"),
+                                                        segment_bytes, _cfg.max_segments,
+                                                        sal::access_mode::read_write);
+         _base = static_cast<std::byte*>(
+             const_cast<void*>(_data->mapped_base()));  // reservation base (fixed)
+         for (auto& h : _flist)
+            h.store(null_grain, std::memory_order_relaxed);
       }
 
       // inline block header at the block's first grain.
-      struct hdr { uint32_t ngrains; std::atomic<uint32_t> ref; };
+      struct hdr
+      {
+         uint32_t              ngrains;
+         std::atomic<uint32_t> ref;
+      };
 
-      hdr*       hdr_at(uint32_t g) noexcept { return reinterpret_cast<hdr*>(_base + size_t(g) * Grain); }
-      const hdr* hdr_at(uint32_t g) const noexcept { return reinterpret_cast<const hdr*>(_base + size_t(g) * Grain); }
-      void*       get(uint32_t g) noexcept { return _base + size_t(g) * Grain + hdr_bytes; }        // body
+      hdr* hdr_at(uint32_t g) noexcept { return reinterpret_cast<hdr*>(_base + size_t(g) * Grain); }
+      const hdr* hdr_at(uint32_t g) const noexcept
+      {
+         return reinterpret_cast<const hdr*>(_base + size_t(g) * Grain);
+      }
+      void* get(uint32_t g) noexcept { return _base + size_t(g) * Grain + hdr_bytes; }  // body
       const void* get(uint32_t g) const noexcept { return _base + size_t(g) * Grain + hdr_bytes; }
 
-      static uint32_t grains_for(uint32_t body_bytes) noexcept { return (hdr_bytes + body_bytes + Grain - 1) / Grain; }
+      static uint32_t grains_for(uint32_t body_bytes) noexcept
+      {
+         return (hdr_bytes + body_bytes + Grain - 1) / Grain;
+      }
 
-      uint32_t ref(uint32_t g) const noexcept { return hdr_at(g)->ref.load(std::memory_order_relaxed); }
-      bool     unique(uint32_t g) const noexcept { return ref(g) == 1; }
-      void     retain(uint32_t g) { hdr_at(g)->ref.fetch_add(1, std::memory_order_relaxed); }
+      uint32_t ref(uint32_t g) const noexcept
+      {
+         return hdr_at(g)->ref.load(std::memory_order_relaxed);
+      }
+      bool unique(uint32_t g) const noexcept { return ref(g) == 1; }
+      void retain(uint32_t g) { hdr_at(g)->ref.fetch_add(1, std::memory_order_relaxed); }
       [[nodiscard]] bool try_retain(uint32_t g) noexcept
       {
-         auto& r = hdr_at(g)->ref; auto c = r.load(std::memory_order_acquire);
-         do { if (c == 0) return false; }
-         while (!r.compare_exchange_weak(c, c + 1, std::memory_order_acq_rel, std::memory_order_acquire));
+         auto& r = hdr_at(g)->ref;
+         auto  c = r.load(std::memory_order_acquire);
+         do
+         {
+            if (c == 0)
+               return false;
+         } while (!r.compare_exchange_weak(c, c + 1, std::memory_order_acq_rel,
+                                           std::memory_order_acquire));
          return true;
       }
       [[nodiscard]] bool release_one(uint32_t g) noexcept
@@ -90,9 +116,9 @@ namespace sal2
       // allocate a body of `body_bytes` (ref stamped 1). LOCKED — big allocs are rare.
       uint32_t alloc(uint32_t body_bytes)
       {
-         const uint32_t ng = grains_for(body_bytes);
+         const uint32_t              ng = grains_for(body_bytes);
          std::lock_guard<std::mutex> lk(_mx);
-         uint32_t g;
+         uint32_t                    g;
          if (ng < max_bucket && _flist[ng].load(std::memory_order_relaxed) != null_grain)
          {  // size-class free-list hit: reuse a returned block of exactly ng grains
             g = _flist[ng].load(std::memory_order_relaxed);
@@ -106,7 +132,7 @@ namespace sal2
             g = _tail;
             _tail += ng;
          }
-         hdr* h = hdr_at(g);
+         hdr* h     = hdr_at(g);
          h->ngrains = ng;
          h->ref.store(1, std::memory_order_relaxed);
          _live_grains += ng;
@@ -118,7 +144,7 @@ namespace sal2
       {
          assert(hdr_at(g)->ref.load(std::memory_order_relaxed) == 0 &&
                 "big free() of an object whose ref != 0 — route the drop through release");
-         const uint32_t ng = hdr_at(g)->ngrains;
+         const uint32_t              ng = hdr_at(g)->ngrains;
          std::lock_guard<std::mutex> lk(_mx);
          _live_grains -= ng;
          if (ng < max_bucket)
@@ -130,7 +156,11 @@ namespace sal2
          // ng >= max_bucket: oversized — not pooled (rare); its grains stay in-region.
       }
 
-      uint64_t live_bytes() noexcept { std::lock_guard<std::mutex> lk(_mx); return uint64_t(_live_grains) * Grain; }
+      uint64_t live_bytes() noexcept
+      {
+         std::lock_guard<std::mutex> lk(_mx);
+         return uint64_t(_live_grains) * Grain;
+      }
       uint32_t num_segments() const noexcept { return _nseg; }
 
      private:
@@ -138,7 +168,8 @@ namespace sal2
       {
          while (uint64_t(_committed_grains) < need_grains)
          {
-            if (_nseg >= _cfg.max_segments) throw std::runtime_error("sal2: big_allocator full");
+            if (_nseg >= _cfg.max_segments)
+               throw std::runtime_error("sal2: big_allocator full");
             _data->alloc();  // commit the next contiguous segment (MAP_FIXED in the reservation)
             _base = static_cast<std::byte*>(const_cast<void*>(_data->mapped_base()));
             _committed_grains += grains_per_seg;
@@ -148,12 +179,12 @@ namespace sal2
 
       config                                _cfg;
       std::unique_ptr<sal::block_allocator> _data;
-      std::byte*                            _base = nullptr;     // fixed reservation base
+      std::byte*                            _base = nullptr;  // fixed reservation base
       std::mutex                            _mx;
       uint32_t                              _tail             = 0;  // next fresh grain
       uint32_t                              _committed_grains = 0;
       uint32_t                              _nseg             = 0;
       uint64_t                              _live_grains      = 0;
-      std::atomic<uint32_t>                 _flist[max_bucket];     // per-grain-count free-list heads
+      std::atomic<uint32_t>                 _flist[max_bucket];  // per-grain-count free-list heads
    };
 }  // namespace sal2

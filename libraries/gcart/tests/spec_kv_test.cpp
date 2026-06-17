@@ -31,8 +31,10 @@ static_assert(adb::kv_write_session<write_session>,
 static_assert(adb::kv_database<database>, "gcart::kv::database must satisfy adb::kv_database");
 static_assert(adb::root_handle<root_handle>,
               "root_handle must satisfy adb::root_handle (upsert/remove/get/set_root exchange)");
-static_assert(adb::multi_root_transaction<transaction>,
-              "transaction must satisfy adb::multi_root_transaction (primary/open_root)");
+// gcart is single-root by design (no open_root / multi-root) — it is always the
+// delta_art cold base B (only W must be multi-root) and the shim uses one root.
+static_assert(adb::kv_transaction<transaction>,
+              "transaction must satisfy adb::kv_transaction (upsert/remove/get)");
 int main()
 {
    namespace fs = std::filesystem;
@@ -229,88 +231,9 @@ int main()
       }
    }
 
-   // ── multi-root transactions (adb::multi_root_transaction): isolation, abort-all,
-   //    set_root rotation — on a fresh db so it doesn't pollute the oracle ─────────
-   {
-      auto mdir = fs::temp_directory_path() / "sk_mr";
-      fs::remove_all(mdir);
-      auto mdb = database::create(mdir);
-      auto mws = mdb->start_write_session();
-      {
-         auto tx = mws->start_transaction(0);
-         auto h0 = tx.primary();
-         auto h1 = tx.open_root(1);
-         h0.upsert("mr/u", "alice");
-         h1.upsert("mr/o", "order");
-         ++checks;
-         if (h0.get<std::string>("mr/u") != std::string("alice"))
-         {
-            ++fails;
-            std::printf("MR h0 self\n");
-         }
-         ++checks;
-         if (h0.get<std::string>("mr/o").has_value())
-         {
-            ++fails;
-            std::printf("MR isolation\n");
-         }  // root-0 can't see root-1's key
-         tx.commit();
-      }
-      {
-         auto tx = mws->start_transaction(0);
-         auto h0 = tx.primary();
-         auto h1 = tx.open_root(1);
-         h0.upsert("mr/gone", "x");
-         h1.upsert("mr/gone2", "y");
-         tx.abort();
-      }  // all roots roll back
-      {
-         auto tx = mws->start_transaction(0);
-         ++checks;
-         if (tx.get<std::string>("mr/gone").has_value())
-         {
-            ++fails;
-            std::printf("MR abort-all\n");
-         }
-         tx.abort();
-      }
-      {
-         auto tx = mws->start_transaction(0);
-         auto h0 = tx.primary();
-         auto h1 = tx.open_root(1);
-         h1.set_root(h0.set_root({}));  // rotate root0 -> root1
-         ++checks;
-         if (h0.get<std::string>("mr/u").has_value())
-         {
-            ++fails;
-            std::printf("MR rot h0 not empty\n");
-         }
-         ++checks;
-         if (h1.get<std::string>("mr/u") != std::string("alice"))
-         {
-            ++fails;
-            std::printf("MR rot h1 missing\n");
-         }
-         tx.commit();
-      }
-      {
-         auto tx = mws->start_transaction(0);
-         auto h1 = tx.open_root(1);  // persisted after commit
-         ++checks;
-         if (h1.get<std::string>("mr/u") != std::string("alice"))
-         {
-            ++fails;
-            std::printf("MR rot not persisted\n");
-         }
-         ++checks;
-         if (tx.get<std::string>("mr/u").has_value())
-         {
-            ++fails;
-            std::printf("MR root0 not cleared\n");
-         }
-         tx.abort();
-      }
-   }
+   // (gcart is single-root by design — no multi-root open_root section; the
+   //  set_root exchange is exercised via the snapshot/rotation paths below.)
+
    // snapshot isolation: pin a cursor, mutate a key, the cursor still sees old
    {
       auto        rs = db->start_read_session();

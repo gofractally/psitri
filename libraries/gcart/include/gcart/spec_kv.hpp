@@ -14,7 +14,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <vector>
 
 namespace gcart::kv
 {
@@ -851,8 +850,8 @@ namespace gcart::kv
 
    class transaction;
 
-   // ── root_handle: a view onto ONE root's work tree within a multi-root txn.
-   //    primary()/open_root(i) return these; set_root is the owned-tree exchange. ──
+   // ── root_handle: a view onto the transaction's root work tree. primary()
+   //    returns it; set_root is the owned-tree exchange (adb::root_handle). ────────
    class root_handle
    {
      public:
@@ -897,25 +896,18 @@ namespace gcart::kv
       tree*   _w = nullptr;
    };
 
-   // ── transaction: COW over one PRIMARY root (single-root API) + optional extra
-   //    roots opened via open_root (multi-root). All opened roots commit/abort
-   //    together. ─────────────────────────────────────────────────────────────────
+   // ── transaction: COW over ONE root (single-root). gcart is used single-root
+   //    everywhere — the psitrimdbx shim (start_transaction(slot)) and delta_art's
+   //    cold base B (start_transaction(0)); delta_art requires only W to be
+   //    multi-root, and gcart is always B. No extra roots ⟹ no heap. ─────────────
    class transaction
    {
-      struct root_state
-      {
-         uint32_t slot;
-         tree*    work;
-         snap     snapshot;
-      };
-
      public:
       transaction(transaction&& o) noexcept
           : _db(o._db),
             _t(o._t),
             _slot(o._slot),
             _snap(std::move(o._snap)),
-            _extra(std::move(o._extra)),
             _ver(o._ver),
             _done(o._done)
       {
@@ -925,11 +917,9 @@ namespace gcart::kv
       transaction& operator=(const transaction&) = delete;
       ~transaction();
 
-      // multi-root (adb::multi_root_transaction): primary = the root opened at
-      // start_transaction; open_root(i) opens additional roots in this txn.
-      // (bodies out-of-line — they touch database, defined below.)
+      // the single root this transaction COWs (adb::kv_transaction).
+      // (body out-of-line — it touches database, defined below.)
       root_handle primary();
-      root_handle open_root(uint32_t idx);
 
       void insert(key_view k, value_view v) { _t->upsert(k, v); }
       void upsert(key_view k, value_view v) { _t->upsert(k, v); }
@@ -958,13 +948,12 @@ namespace gcart::kv
      private:
       friend class write_session;
       transaction(database* db, tree* t, uint32_t slot);
-      database*               _db   = nullptr;
-      tree*                   _t    = nullptr;
-      uint32_t                _slot = 0;
-      snap                    _snap;
-      std::vector<root_state> _extra;  // roots opened beyond the primary
-      uint32_t                _ver  = 0;  // this txn's commit version (birth of new nodes)
-      bool                    _done = false;
+      database* _db   = nullptr;
+      tree*     _t    = nullptr;
+      uint32_t  _slot = 0;
+      snap      _snap;
+      uint32_t  _ver  = 0;  // this txn's commit version (birth of new nodes)
+      bool      _done = false;
    };
 
    class write_session
@@ -1116,37 +1105,23 @@ namespace gcart::kv
    {
       if (_done)
          return;
-      // publish the new working root atomically, then drop the snapshot pin on
-      // the old committed root. _snap.reset() routes through the engine's
-      // background reclaimer (the cascade runs off the writer's critical path);
-      // the smart_ptr owns its own release.
-      // publish every opened root atomically (each store is atomic; cross-root is
-      // ordered, not atomic — adb §multi-root), then drop the snapshot pins.
+      // publish the new working root atomically, then drop the snapshot pin on the
+      // old committed root. _snap.reset() routes through the engine's background
+      // reclaimer (the cascade runs off the writer's critical path); the smart_ptr
+      // owns its own release.
       _db->root_slot(_slot).store(pack(_t->root_tag(), _t->root_ptr()), std::memory_order_release);
-      for (auto& rs : _extra)
-         _db->root_slot(rs.slot).store(pack(rs.work->root_tag(), rs.work->root_ptr()),
-                                       std::memory_order_release);
       _snap.reset();
-      for (auto& rs : _extra)
-         rs.snapshot.reset();
       _done = true;
    }
    inline void transaction::abort() noexcept
    {
       if (_done)
          return;
-      auto rollback = [&](tree* w, snap& s)
-      {
-         const bt       wt = w->root_tag();
-         const uint32_t wp = w->root_ptr();
-         w->set_root(s.tag(), s.ptr());  // restore committed
-         s.give();                       // the snap pin becomes the live tree's ownership ref
-         release_subtree(_db->eng(), wt,
-                         wp);  // free the discarded work (no-op-safe if ==committed)
-      };
-      rollback(_t, _snap);  // primary
-      for (auto& rs : _extra)
-         rollback(rs.work, rs.snapshot);  // all roots roll back together
+      const bt       wt = _t->root_tag();
+      const uint32_t wp = _t->root_ptr();
+      _t->set_root(_snap.tag(), _snap.ptr());  // restore committed
+      _snap.give();                            // the snap pin becomes the live tree's ownership ref
+      release_subtree(_db->eng(), wt, wp);     // free the discarded work (no-op-safe if ==committed)
       _done = true;
    }
 
@@ -1154,21 +1129,6 @@ namespace gcart::kv
    {
       return root_handle(&_db->eng(), _t);
    }
-   inline root_handle transaction::open_root(uint32_t idx)
-   {
-      if (idx == _slot)
-         return root_handle(&_db->eng(), _t);
-      for (auto& rs : _extra)
-         if (rs.slot == idx)
-            return root_handle(&_db->eng(), rs.work);
-      tree& w = _db->work_tree(idx);
-      snap  s = snap::acquire(_db->eng(), _db->root_slot(idx));
-      w.set_root(s.tag(), s.ptr());
-      w.set_write_version(_ver);  // share the txn's version across all opened roots
-      _extra.push_back(root_state{idx, &w, std::move(s)});
-      return root_handle(&_db->eng(), &w);
-   }
-
    inline transaction write_session::start_transaction(uint32_t idx)
    {
       return transaction(_db, &_db->work_tree(idx), idx);

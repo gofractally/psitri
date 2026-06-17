@@ -99,11 +99,21 @@ namespace sal2
                                            std::memory_order_acquire));
          return true;
       }
+      // Last ref drops to the DYING sentinel (not 0): the slot is being torn down
+      // (the releaser still reads `bytes` from its content) and must NOT be reused
+      // until free() sets ref=0. Write-around reuses only ref==0. CAS so there is
+      // no transient ref==0 window before the sentinel. See fixed_allocator.
       [[nodiscard]] bool release_one(uint32_t i) noexcept
       {
-         const uint8_t prior = _ref_base[i].fetch_sub(1, std::memory_order_acq_rel);
-         assert(prior >= 1 && "release of a dead object");
-         return prior == 1;
+         auto&   r = _ref_base[i];
+         uint8_t c = r.load(std::memory_order_acquire);
+         for (;;)
+         {
+            assert(c >= 1 && c != dying_ref && "release of a dead/dying object");
+            const uint8_t nv = (c == 1) ? dying_ref : uint8_t(c - 1);
+            if (r.compare_exchange_weak(c, nv, std::memory_order_acq_rel, std::memory_order_acquire))
+               return c == 1;
+         }
       }
       // Mark an object dead (refcount already 0). bg writes _seg_freed, foreground
       // writes _seg_alloced (separate arrays = separate cachelines, no false
@@ -111,9 +121,10 @@ namespace sal2
       // set. The alloc hot path never reads this, so frees don't contend with it.
       void free(uint32_t i, uint32_t bytes) noexcept
       {
-         // ACCOUNTING only — `bytes` was read by the releaser BEFORE its release_one
-         // (the slot may already be reused by a concurrent writer). See
-         // fixed_allocator::free. Hence NO read of the slot/ref here.
+         // Publish REUSABLE (ref dying→0) with RELEASE so the write-around alloc's
+         // ACQUIRE load of ref==0 orders the releaser's content reads (done before
+         // free()) ahead of any reuse-write. See fixed_allocator::free.
+         _ref_base[i].store(0, std::memory_order_release);
          const uint32_t n = grains_for(bytes);
          _freed_grains.fetch_add(n, std::memory_order_relaxed);
          const uint32_t s     = i / slots_per_segment;

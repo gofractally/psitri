@@ -1707,10 +1707,10 @@ namespace gcart::st
          e.cl1.free(p);
    }
    // Copy a routing node's refcountable children + external term into caller-owned
-   // locals. CRITICAL for concurrent reclaim: the caller reads the node's content
-   // via this BEFORE its release_one()→0, so a writer's write-around (which reuses a
-   // ref==0 slot, acquire-ordered) can never overwrite the slot while we still read
-   // it. Inline nested data rides with the slot (not a child).
+   // locals. The caller invokes this only AFTER its release_one() has put the slot
+   // in the DYING sentinel state: dying slots are not reuse-eligible (write-around
+   // takes only ref==0), so the content read here cannot race a writer's reuse.
+   // Inline nested data rides with the slot (not a child).
    inline void gather_children_(engine&   e,
                                 bt        t,
                                 uint32_t  p,
@@ -1766,18 +1766,19 @@ namespace gcart::st
    }
 
    // ── free reclamation (snapshots / readers; no write sessions needed) ───────
-   // Reads the node's content (total_bytes / children) BEFORE release_one() so a
-   // concurrent writer's slot reuse is safe (see gather_children_ / the allocator
-   // acquire-load). free()/free_node_ are accounting-only — a reused slot is fine.
+   // release_one() drops the last ref to the DYING sentinel (not 0), so the slot's
+   // content stays readable AFTER the decrement — a concurrent writer's write-around
+   // reuses only ref==0 (free()'d) slots, never a dying one. Hence we read children
+   // AFTER release_one and ONLY when we actually own the kill: a still-shared node
+   // (the common COW case) returns immediately without touching its content.
    inline void release_subtree(engine& e, bt t, uint32_t p)
    {
       if (t == bt::null)
          return;
       if (t == bt::suffix_value)
       {
-         const uint32_t tb = sv_leaf::total_bytes(e, p);
          if (e.sal.release_one(p))
-            e.sal.free(p, tb);
+            e.sal.free(p, sv_leaf::total_bytes(e, p));  // dying → content still readable
          return;
       }
       if (t == bt::big_suffix_value)
@@ -1788,14 +1789,14 @@ namespace gcart::st
       }
       if (!is_routing(t))
          return;
+      if (!release_one(e, t, p))
+         return;  // still shared (another snapshot pins it) — never read its content
       br       kids[257];
       uint32_t nb;
       bt       tt;
       uint32_t tp;
       bool     term;
-      gather_children_(e, t, p, kids, nb, tt, tp, term);  // read content BEFORE releasing
-      if (!release_one(e, t, p))
-         return;  // still shared (another snapshot pins it)
+      gather_children_(e, t, p, kids, nb, tt, tp, term);  // p is dying: read race-free
       for (uint32_t i = 0; i < nb; ++i)
          release_subtree(e, kids[i].tag, kids[i].ptr);
       if (term)
@@ -1826,9 +1827,8 @@ namespace gcart::st
       if (t == bt::suffix_value)
       {
          --budget;
-         const uint32_t tb = sv_leaf::total_bytes(e, p);
          if (e.sal.release_one(p))
-            e.sal.free(p, tb);
+            e.sal.free(p, sv_leaf::total_bytes(e, p));  // dying → content still readable
          return;
       }
       if (t == bt::big_suffix_value)
@@ -1840,15 +1840,15 @@ namespace gcart::st
       }
       if (!is_routing(t))
          return;
+      if (!release_one(e, t, p))
+         return;  // still shared (another snapshot pins it) — never read its content
+      --budget;
       br       kids[257];
       uint32_t nb;
       bt       tt;
       uint32_t tp;
       bool     term;
-      gather_children_(e, t, p, kids, nb, tt, tp, term);  // read content BEFORE releasing
-      if (!release_one(e, t, p))
-         return;  // still shared (another snapshot pins it)
-      --budget;
+      gather_children_(e, t, p, kids, nb, tt, tp, term);  // p is dying: read race-free
       for (uint32_t i = 0; i < nb; ++i)
          release_async_(e, kids[i].tag, kids[i].ptr, budget, spill);
       if (term)
@@ -1964,15 +1964,19 @@ namespace gcart::st
             return {bt::suffix_value, sv_leaf::make(_e, _ssal, suffix, val)};
          return {bt::big_suffix_value, big_leaf::make(_e, suffix, val)};
       }
+      // WRITER-ONLY COW reclaim (work tree husks). Single-threaded with the writer's
+      // alloc, and a release cascade never allocates, so no concurrent slot reuse can
+      // race with reading a node's children — unlike the reader path (release_subtree)
+      // this needs NO gather-before-release, keeping the COW write path fast. Readers
+      // never call this; they release via snap → release_subtree.
       void release_ref(bt t, uint32_t p)
       {
          if (t == bt::null)
             return;
          if (t == bt::suffix_value)
          {
-            const uint32_t tb = sv_leaf::total_bytes(_e, p);
             if (_e.sal.release_one(p))
-               _e.sal.free(p, tb);
+               _e.sal.free(p, sv_leaf::total_bytes(_e, p));
             return;
          }
          if (t == bt::big_suffix_value)
@@ -1983,18 +1987,12 @@ namespace gcart::st
          }
          if (!is_routing(t))
             return;
-         // read content BEFORE release_one (concurrent-reclaim safety; see release_subtree)
-         br       kids[257];
-         uint32_t nb;
-         bt       tt;
-         uint32_t tp;
-         bool     term;
-         gather_children_(_e, t, p, kids, nb, tt, tp, term);
          if (!release_one(_e, t, p))
             return;  // still shared (snapshot)
-         for (uint32_t i = 0; i < nb; ++i)
-            release_ref(kids[i].tag, kids[i].ptr);
-         if (term)
+         read_branches(t, p, [&](const br& b) { release_ref(b.tag, b.ptr); });
+         bt       tt;
+         uint32_t tp;
+         if (node_term(t, p, tt, tp))
             release_ref(tt, tp);
          free_node(t, p);
       }

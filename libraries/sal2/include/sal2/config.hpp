@@ -58,4 +58,11 @@ namespace sal2
    inline constexpr uint32_t max_read_sessions = 64;
    inline constexpr uint8_t  ref_ceiling       = 254;
    inline constexpr uint8_t  writer_clone_at   = uint8_t(ref_ceiling - max_read_sessions);  // 190
+   // release_one() drops the LAST ref to this DYING sentinel (not 0): the slot is
+   // being torn down (its content still read by the releaser to recurse children)
+   // and must NOT be reusable yet. free() then sets it to 0 = reusable. The
+   // write-around alloc reuses ONLY ref==0, so it never grabs a dying slot mid-
+   // teardown (the reader-vs-writer reclaim race) — and the release path needs no
+   // gather-before-release. 255 ≥ ref_ceiling so try_retain/retain already reject it.
+   inline constexpr uint8_t  dying_ref         = 255;
 }  // namespace sal2

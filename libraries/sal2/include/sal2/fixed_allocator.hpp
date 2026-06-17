@@ -107,12 +107,23 @@ namespace sal2
                                            std::memory_order_acquire));
          return true;
       }
-      // returns true iff this drops the slot to free; the caller then free()s it.
+      // Drop one ref. Returns true iff this was the LAST ref — in which case the
+      // slot is left in the DYING sentinel (not 0): the caller then reads its
+      // content to recurse children and finally free()s it (which sets ref=0 =
+      // reusable). The write-around alloc reuses ONLY ref==0, so a dying slot is
+      // never grabbed mid-teardown (the reader-vs-writer reclaim race). CAS (not
+      // fetch_sub) so there is no transient ref==0 window before the sentinel.
       [[nodiscard]] bool release_one(uint32_t i) noexcept
       {
-         const uint8_t prior = _ref_base[i].fetch_sub(1, std::memory_order_acq_rel);
-         assert(prior >= 1 && "release of a dead slot");
-         return prior == 1;
+         auto&   r = _ref_base[i];
+         uint8_t c = r.load(std::memory_order_acquire);
+         for (;;)
+         {
+            assert(c >= 1 && c != dying_ref && "release of a dead/dying slot");
+            const uint8_t nv = (c == 1) ? dying_ref : uint8_t(c - 1);
+            if (r.compare_exchange_weak(c, nv, std::memory_order_acq_rel, std::memory_order_acquire))
+               return c == 1;
+         }
       }
       // Mark a slot dead (refcount already 0). Per the SAL segment model a freed
       // slot is NOT reused until the WHOLE segment recycles: when a SEALED (full)
@@ -122,11 +133,12 @@ namespace sal2
       // so the bg release thread's frees never contend with allocations.
       void free(uint32_t i) noexcept
       {
-         // free() does ACCOUNTING only — it must NOT read/write the slot's content
-         // (a concurrent writer may already have reused this slot: the releaser ran
-         // release_one()→0, the writer's write-around saw ref==0 and re-allocated it
-         // BEFORE this free() accounting runs). The releaser read everything it needs
-         // (children, total_bytes) BEFORE its release_one, so reuse is safe.
+         // Publish the slot as REUSABLE (ref dying→0) with RELEASE: the write-around
+         // alloc's ACQUIRE load of ref==0 then happens-after this, ordering the
+         // releaser's content reads (done before free()) ahead of any reuse-write.
+         // Until this store the slot is the dying sentinel (write-around skips it),
+         // so the teardown reads it race-free.
+         _ref_base[i].store(0, std::memory_order_release);
          _freed.fetch_add(1, std::memory_order_relaxed);
          const uint32_t s = i / slots_per_segment;
          // bg writes _seg_freed; foreground writes _seg_alloced — separate arrays

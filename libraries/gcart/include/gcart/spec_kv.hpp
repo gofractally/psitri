@@ -11,6 +11,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace gcart::st::kv
 {
@@ -39,6 +40,9 @@ namespace gcart::st::kv
             release_subtree(e, t, p);                           // root moved — undo, retry
          }
       }
+      // ADOPT an existing owned (tag,ptr) WITHOUT retaining — the caller transfers a
+      // ref it already holds (the set_root exchange: a work tree's root → a snapshot).
+      static snap adopt(engine& e, bt t, uint32_t p) noexcept { return snap(&e, t, p); }
       snap(const snap& o) : _e(o._e), _t(o._t), _p(o._p) { if (_e && _t != bt::null) retain(*_e, _t, _p); }
       snap& operator=(const snap& o)
       { if (this != &o) { reset(); _e = o._e; _t = o._t; _p = o._p; if (_e && _t != bt::null) retain(*_e, _t, _p); } return *this; }
@@ -177,19 +181,79 @@ namespace gcart::st::kv
       cursor snapshot_cursor() const { return cursor(_s); }   // copies the pin (retains)
       explicit operator bool() const noexcept { return _s.eng() != nullptr; }
 
+      // point read of the frozen snapshot (used by the snapshot-isolation battery)
+      template <class S = std::string>
+      std::optional<S> get(key_view k) const
+      {
+         if (!_s.eng() || _s.tag() == bt::null) return std::nullopt;
+         std::string out;
+         if (!find_in(*_s.eng(), _s.tag(), _s.ptr(), k, out)) return std::nullopt;
+         return S(out.data(), out.size());
+      }
+      // root-exchange primitives (set_root): the snapshot IS the owned tree.
+      bt        tag() const noexcept { return _s.tag(); }
+      uint32_t  ptr() const noexcept { return _s.ptr(); }
+      void      give() noexcept { _s.give(); }   // relinquish the ref (it moved into a work tree)
+      static snapshot adopt(engine& e, bt t, uint32_t p) { return snapshot(snap::adopt(e, t, p)); }
+
      private:
       snap _s;
    };
 
-   // ── transaction: COW snapshot over one root ────────────────────────────────
-   class transaction
+   class transaction;
+
+   // ── root_handle: a view onto ONE root's work tree within a multi-root txn.
+   //    primary()/open_root(i) return these; set_root is the owned-tree exchange. ──
+   class root_handle
    {
      public:
+      root_handle() = default;
+      root_handle(engine* e, tree* w) : _e(e), _w(w) {}
+      void insert(key_view k, value_view v) { _w->upsert(k, v); }
+      void upsert(key_view k, value_view v) { _w->upsert(k, v); }
+      int  remove(key_view k) { return _w->remove(k); }
+      template <class S = std::string>
+      std::optional<S> get(key_view k) const
+      { std::string out; if (!_w->find(k, out)) return std::nullopt; return S(out.data(), out.size()); }
+      template <class F>
+      bool get(key_view k, F&& f) const
+      { std::string out; if (!_w->find(k, out)) return false; f(value_view(out.data(), out.size())); return true; }
+
+      // EXCHANGE: adopt `incoming`'s root into this work tree (transferring its ref),
+      // and return the displaced root as an owned snapshot. set_root({}) clears this
+      // root and hands back its old contents; the rotation composes from this.
+      snapshot set_root(snapshot incoming)
+      {
+         const bt dt = _w->root_tag(); const uint32_t dp = _w->root_ptr();   // displaced
+         _w->set_root(incoming.tag(), incoming.ptr());                        // adopt incoming's root
+         incoming.give();                                                     // its ref moved into _w
+         return snapshot::adopt(*_e, dt, dp);                                 // own the displaced
+      }
+
+     private:
+      engine* _e = nullptr;
+      tree*   _w = nullptr;
+   };
+
+   // ── transaction: COW over one PRIMARY root (single-root API) + optional extra
+   //    roots opened via open_root (multi-root). All opened roots commit/abort
+   //    together. ─────────────────────────────────────────────────────────────────
+   class transaction
+   {
+      struct root_state { uint32_t slot; tree* work; snap snapshot; };
+     public:
       transaction(transaction&& o) noexcept
-          : _db(o._db), _t(o._t), _slot(o._slot), _snap(std::move(o._snap)), _done(o._done) { o._db = nullptr; }
+          : _db(o._db), _t(o._t), _slot(o._slot), _snap(std::move(o._snap)),
+            _extra(std::move(o._extra)), _done(o._done) { o._db = nullptr; }
       transaction(const transaction&)            = delete;
       transaction& operator=(const transaction&) = delete;
       ~transaction();
+
+      // multi-root (adb::multi_root_transaction): primary = the root opened at
+      // start_transaction; open_root(i) opens additional roots in this txn.
+      // (bodies out-of-line — they touch database, defined below.)
+      root_handle primary();
+      root_handle open_root(uint32_t idx);
 
       void insert(key_view k, value_view v) { _t->upsert(k, v); }
       void upsert(key_view k, value_view v) { _t->upsert(k, v); }
@@ -216,11 +280,12 @@ namespace gcart::st::kv
      private:
       friend class write_session;
       transaction(database* db, tree* t, uint32_t slot);
-      database* _db = nullptr;
-      tree*     _t  = nullptr;
-      uint32_t  _slot = 0;
-      snap      _snap;
-      bool      _done = false;
+      database*               _db = nullptr;
+      tree*                   _t  = nullptr;
+      uint32_t                _slot = 0;
+      snap                    _snap;
+      std::vector<root_state> _extra;   // roots opened beyond the primary
+      bool                    _done = false;
    };
 
    class write_session
@@ -289,18 +354,40 @@ namespace gcart::st::kv
       // the old committed root. _snap.reset() routes through the engine's
       // background reclaimer (the cascade runs off the writer's critical path);
       // the smart_ptr owns its own release.
+      // publish every opened root atomically (each store is atomic; cross-root is
+      // ordered, not atomic — adb §multi-root), then drop the snapshot pins.
       _db->root_slot(_slot).store(pack(_t->root_tag(), _t->root_ptr()), std::memory_order_release);
+      for (auto& rs : _extra)
+         _db->root_slot(rs.slot).store(pack(rs.work->root_tag(), rs.work->root_ptr()), std::memory_order_release);
       _snap.reset();
+      for (auto& rs : _extra) rs.snapshot.reset();
       _done = true;
    }
    inline void transaction::abort() noexcept
    {
       if (_done) return;
-      const bt wt = _t->root_tag(); const uint32_t wp = _t->root_ptr();
-      _t->set_root(_snap.tag(), _snap.ptr());   // restore committed
-      _snap.give();                              // the snap pin becomes the live tree's ownership ref
-      release_subtree(_db->eng(), wt, wp);       // free the discarded work (balances give; no-op-safe if ==committed)
+      auto rollback = [&](tree* w, snap& s)
+      {
+         const bt wt = w->root_tag(); const uint32_t wp = w->root_ptr();
+         w->set_root(s.tag(), s.ptr());           // restore committed
+         s.give();                                 // the snap pin becomes the live tree's ownership ref
+         release_subtree(_db->eng(), wt, wp);      // free the discarded work (no-op-safe if ==committed)
+      };
+      rollback(_t, _snap);                          // primary
+      for (auto& rs : _extra) rollback(rs.work, rs.snapshot);  // all roots roll back together
       _done = true;
+   }
+
+   inline root_handle transaction::primary() { return root_handle(&_db->eng(), _t); }
+   inline root_handle transaction::open_root(uint32_t idx)
+   {
+      if (idx == _slot) return root_handle(&_db->eng(), _t);
+      for (auto& rs : _extra) if (rs.slot == idx) return root_handle(&_db->eng(), rs.work);
+      tree& w = _db->work_tree(idx);
+      snap  s = snap::acquire(_db->eng(), _db->root_slot(idx));
+      w.set_root(s.tag(), s.ptr());
+      _extra.push_back(root_state{idx, &w, std::move(s)});
+      return root_handle(&_db->eng(), &w);
    }
 
    inline transaction write_session::start_transaction(uint32_t idx)

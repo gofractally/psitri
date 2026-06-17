@@ -17,6 +17,12 @@ if(BUILD_TESTS)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME gcart-tree-tests COMMAND gcart-tree-tests)
 
+    add_executable(gcart-spec-tests tests/spec_tree_test.cpp)
+    target_link_libraries(gcart-spec-tests PRIVATE gcart)
+    set_target_properties(gcart-spec-tests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME gcart-spec-tests COMMAND gcart-spec-tests)
+
     add_executable(gcart-kv-tests tests/kv_test.cpp)
     target_link_libraries(gcart-kv-tests PRIVATE gcart)
     set_target_properties(gcart-kv-tests PROPERTIES

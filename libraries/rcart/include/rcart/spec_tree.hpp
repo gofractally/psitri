@@ -701,7 +701,13 @@ namespace rcart
          if (t == bt::full)
          {
             const full* n = static_cast<const full*>(node);
-            if (!pfx_ok_(n->prefix(), key, depth))
+            // Prefetch the offset cacheline for the SPECULATIVE routing byte
+            // (key[depth] — correct when prefixless, the common case) BEFORE the
+            // header read, so the header's cold miss overlaps it (§7). Header NOT
+            // prefetched — it IS the overlap window. Cold-scale win only.
+            if (depth < key.size())
+               prefetch(n->base() + full::branches_off + (uint32_t(uint8_t(key[depth])) << 2));
+            if (!pfx_ok_(n->prefix(), key, depth))  // header cold miss — overlaps the prefetch
                return false;
             depth += n->prefixlen();
             if (depth == key.size())
@@ -710,18 +716,15 @@ namespace rcart
                   return false;
                t = bt(n->term_tag);
                p = n->term_ptr;
-               prefetch(resolve(e, t, p));
                continue;
             }
             const uint8_t byte = uint8_t(key[depth]);
-            prefetch(n->branches() + byte);  // offset cacheline before the type header
-            const bt ct = n->btype(byte);
+            const bt      ct   = n->btype(byte);
             if (ct == bt::null)
                return false;
             t = ct;
             p = n->branch(byte);
             ++depth;
-            prefetch(resolve(e, t, p));
             continue;
          }
          if (t == bt::nested_setlist)
@@ -743,7 +746,6 @@ namespace rcart
                }
                t = nn->otype(ti);
                p = nn->ext_ptr(ti);
-               prefetch(resolve(e, t, p));
                continue;
             }
             const int oi = nn->find_index(uint8_t(key[depth]));
@@ -775,7 +777,6 @@ namespace rcart
                      return false;
                   t = in->term_type();
                   p = in->term_branch();
-                  prefetch(resolve(e, t, p));
                   continue;
                }
                const int ii = in->find_index(uint8_t(key[depth]));
@@ -784,13 +785,11 @@ namespace rcart
                t = in->btype(uint32_t(ii));
                p = in->branch(uint32_t(ii));
                ++depth;
-               prefetch(resolve(e, t, p));
                continue;
             }
             t = nn->otype(ui);
             p = nn->ext_ptr(ui);
             ++depth;  // external child
-            prefetch(resolve(e, t, p));
             continue;
          }
          const setlist* n = static_cast<const setlist*>(node);
@@ -803,7 +802,6 @@ namespace rcart
                return false;
             t = n->term_type();
             p = n->term_branch();
-            prefetch(resolve(e, t, p));
             continue;
          }
          const int idx = n->find_index(uint8_t(key[depth]));
@@ -812,7 +810,6 @@ namespace rcart
          t = n->btype(uint32_t(idx));
          p = n->branch(uint32_t(idx));
          ++depth;
-         prefetch(resolve(e, t, p));
          continue;
       }
    }
@@ -960,6 +957,11 @@ namespace rcart
          ov.assign(v.data(), v.size());
          return true;
       }
+      // full: prefetch the offset CL for the speculative routing byte (target[depth]
+      // — correct when prefixless) BEFORE reading the prefix/header (overlap, §7).
+      if (t == bt::full && depth < target.size())
+         prefetch(static_cast<const char*>(node) + full::branches_off +
+                  (uint32_t(uint8_t(target[depth])) << 2));
       const sv P = (t == bt::full)             ? static_cast<const full*>(node)->prefix()
                    : (t == bt::nested_setlist) ? static_cast<const nested_setlist*>(node)->prefix()
                                                : static_cast<const setlist*>(node)->prefix();
@@ -1224,6 +1226,11 @@ namespace rcart
          ov.assign(v.data(), v.size());
          return true;
       }
+      // full: prefetch the offset CL for the speculative routing byte (target[depth]
+      // — correct when prefixless) BEFORE reading the prefix/header (overlap, §7).
+      if (t == bt::full && depth < target.size())
+         prefetch(static_cast<const char*>(node) + full::branches_off +
+                  (uint32_t(uint8_t(target[depth])) << 2));
       const sv P = (t == bt::full)             ? static_cast<const full*>(node)->prefix()
                    : (t == bt::nested_setlist) ? static_cast<const nested_setlist*>(node)->prefix()
                                                : static_cast<const setlist*>(node)->prefix();
@@ -1529,6 +1536,11 @@ namespace rcart
          out.emplace_back(std::move(fk), std::string(v.data(), v.size()));
          return;
       }
+      // full: prefetch the offset CL for the speculative routing byte (target[depth]
+      // — correct when prefixless) BEFORE reading the prefix/header (overlap, §7).
+      if (t == bt::full && depth < target.size())
+         prefetch(static_cast<const char*>(node) + full::branches_off +
+                  (uint32_t(uint8_t(target[depth])) << 2));
       const sv P = (t == bt::full)             ? static_cast<const full*>(node)->prefix()
                    : (t == bt::nested_setlist) ? static_cast<const nested_setlist*>(node)->prefix()
                                                : static_cast<const setlist*>(node)->prefix();
@@ -2507,6 +2519,11 @@ namespace rcart
             auto fl = promote_nested(t, p);
             return upsert_rec<cow_mode::unique>(fl.first, fl.second, key, depth, val);
          }
+         // full: prefetch the offset CL for the speculative routing byte before
+         // node_prefix touches the header (cold-miss overlap window, §7).
+         if (t == bt::full && depth < key.size())
+            prefetch(static_cast<const char*>(resolve(_e, t, p)) + full::branches_off +
+                     (uint32_t(uint8_t(key[depth])) << 2));
          const sv       pfx  = node_prefix(t, p);
          const sv       ksuf = key.substr(depth);
          const uint32_t cp   = lcp(pfx, ksuf);
@@ -2783,6 +2800,11 @@ namespace rcart
             auto fl = promote_nested(t, p);
             return remove_rec<cow_mode::unique>(fl.first, fl.second, key, depth);
          }
+         // full: prefetch the offset CL for the speculative routing byte before
+         // node_prefix touches the header (cold-miss overlap window, §7).
+         if (t == bt::full && depth < key.size())
+            prefetch(static_cast<const char*>(resolve(_e, t, p)) + full::branches_off +
+                     (uint32_t(uint8_t(key[depth])) << 2));
          depth += uint32_t(node_prefix(t, p).size());  // prefix matched (pre-check); consume it
          if constexpr (M == cow_mode::unique)
             if (unique(_e, t, p))

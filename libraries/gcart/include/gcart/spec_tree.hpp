@@ -177,7 +177,9 @@ namespace gcart
           : cl1({.dir = dir, .name = "cl1", .max_segments = seg_cap("GCART_CL1_SEGS", 4096)}),
             cl2({.dir = dir, .name = "cl2", .max_segments = seg_cap("GCART_CL2_SEGS", 2048)}),
             cl9({.dir = dir, .name = "cl9", .max_segments = seg_cap("GCART_CL9_SEGS", 2048)}),
-            sal({.dir = dir, .name = "sal", .max_segments = seg_cap("GCART_SAL_SEGS", 16384)}),
+            // movable grain index is u64 now (CB-backed), so the cap is the segment
+            // count, not the old 2^32-grain (128 GB) ceiling: 131072·8MB = 1 TB default.
+            sal({.dir = dir, .name = "sal", .max_segments = seg_cap("GCART_SAL_SEGS", 131072)}),
             big({.dir = dir, .name = "big", .max_segments = seg_cap("GCART_BIG_SEGS", 8192)})
       { /* A/B: bg release thread disabled (sync release) */
       }

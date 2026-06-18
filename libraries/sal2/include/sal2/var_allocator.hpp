@@ -31,10 +31,15 @@
 
 namespace sal2
 {
-   template <uint32_t Grain>
+   // SlotIdx = the GLOBAL grain-index type (seg*slots_per_segment + local). Default
+   // u32 (rcart's direct-grain pointer = the slot, ≤128 GB). movable_region uses
+   // u64 so the data cap is the segment cap, not the 2^32-grain ceiling — the CB's
+   // 44-bit offset holds it (the fix for the 128 GB Silkworm wall).
+   template <uint32_t Grain, class SlotIdx = uint32_t>
    class var_allocator
    {
      public:
+      using slot_t                                = SlotIdx;
       static constexpr uint32_t grain             = Grain;
       static constexpr uint32_t slots_per_segment = 64u * 64u * 64u;  // grains / segment
       static constexpr uint64_t segment_bytes     = uint64_t(slots_per_segment) * Grain;
@@ -97,16 +102,16 @@ namespace sal2
          }
       }
 
-      void*           get(uint32_t slot) noexcept { return _base + size_t(slot) * Grain; }
-      const void*     get(uint32_t slot) const noexcept { return _base + size_t(slot) * Grain; }
+      void*           get(SlotIdx slot) noexcept { return _base + size_t(slot) * Grain; }
+      const void*     get(SlotIdx slot) const noexcept { return _base + size_t(slot) * Grain; }
       static uint32_t grains_for(uint32_t bytes) noexcept { return (bytes + Grain - 1) / Grain; }
 
-      uint8_t ref(uint32_t i) const noexcept
+      uint8_t ref(SlotIdx i) const noexcept
       {
          return _ref_base[i].load(std::memory_order_relaxed);
       }
-      bool unique(uint32_t i) const noexcept { return ref(i) == 1; }
-      void retain(uint32_t i)
+      bool unique(SlotIdx i) const noexcept { return ref(i) == 1; }
+      void retain(SlotIdx i)
       {
          auto& r = _ref_base[i];
          auto  c = r.load(std::memory_order_relaxed);
@@ -116,7 +121,7 @@ namespace sal2
                throw std::runtime_error("sal2: var_allocator refcount overflow");
          } while (!r.compare_exchange_weak(c, uint8_t(c + 1), std::memory_order_relaxed));
       }
-      [[nodiscard]] bool try_retain(uint32_t i) noexcept
+      [[nodiscard]] bool try_retain(SlotIdx i) noexcept
       {
          auto& r = _ref_base[i];
          auto  c = r.load(std::memory_order_acquire);
@@ -132,7 +137,7 @@ namespace sal2
       // (the releaser still reads `bytes` from its content) and must NOT be reused
       // until free() sets ref=0. Write-around reuses only ref==0. CAS so there is
       // no transient ref==0 window before the sentinel. See fixed_allocator.
-      [[nodiscard]] bool release_one(uint32_t i) noexcept
+      [[nodiscard]] bool release_one(SlotIdx i) noexcept
       {
          auto&   r = _ref_base[i];
          uint8_t c = r.load(std::memory_order_acquire);
@@ -148,7 +153,7 @@ namespace sal2
       // writes _seg_alloced (separate arrays = separate cachelines, no false
       // sharing); a sealed segment crossing >50% free joins its class's recyclable
       // set. The alloc hot path never reads this, so frees don't contend with it.
-      void free(uint32_t i, uint32_t bytes) noexcept
+      void free(SlotIdx i, uint32_t bytes) noexcept
       {
          // Publish REUSABLE (ref dying→0) with RELEASE so the write-around alloc's
          // ACQUIRE load of ref==0 orders the releaser's content reads (done before
@@ -156,7 +161,7 @@ namespace sal2
          _ref_base[i].store(0, std::memory_order_release);
          const uint32_t n = grains_for(bytes);
          _freed_grains.fetch_add(n, std::memory_order_relaxed);
-         const uint32_t s     = i / slots_per_segment;
+         const uint32_t s     = uint32_t(i / slots_per_segment);
          const uint32_t freed = _seg_freed[s].fetch_add(n, std::memory_order_relaxed) + n;
          const uint32_t live  = _seg_alloced[s].load(std::memory_order_acquire) - freed;
          if (live <= recycle_below && _seg_sealed[s].load(std::memory_order_acquire))
@@ -243,15 +248,15 @@ namespace sal2
 
    // One writer's per-size-class bump cursors. Each grain-count has its own active
    // segment, so a segment is never mixed-size and the recycle walk is exact.
-   template <uint32_t Grain>
-   class var_allocator<Grain>::session
+   template <uint32_t Grain, class SlotIdx>
+   class var_allocator<Grain, SlotIdx>::session
    {
      public:
       session(const session&)            = delete;
       session& operator=(const session&) = delete;
 
       // allocate an object of `bytes` (≤ max_object_bytes); ref stamped to 1.
-      uint32_t alloc(uint32_t bytes)
+      SlotIdx alloc(uint32_t bytes)
       {
          const uint32_t g = grains_for(bytes);
          assert(g >= 1 && g <= max_run);
@@ -259,7 +264,7 @@ namespace sal2
       }
 
      private:
-      friend class var_allocator<Grain>;
+      friend class var_allocator<Grain, SlotIdx>;
       explicit session(var_allocator* a) noexcept : _a(a) {}
 
       struct cursor
@@ -273,7 +278,7 @@ namespace sal2
       // Forward bump within class g's active segment: a FRESH segment is a pure
       // cursor bump by g; a RECYCLED one write-arounds by stepping over live
       // (ref!=0) slots. Every slot is exactly g grains, so ref==0 == free slot.
-      uint32_t alloc_g_(uint32_t g)
+      SlotIdx alloc_g_(uint32_t g)
       {
          cursor& c = _cls[g];
          if (c.active)
@@ -308,7 +313,7 @@ namespace sal2
       }
       // class g's segment is full → seal it (eligible for recycle), pull a
       // recyclable g-class segment (write around its leftovers) else grow fresh.
-      uint32_t alloc_slow_(uint32_t g)
+      SlotIdx alloc_slow_(uint32_t g)
       {
          cursor& c = _cls[g];
          if (c.active)
@@ -335,9 +340,9 @@ namespace sal2
          c.active = true;
          return alloc_g_(g);
       }
-      uint32_t finish_(uint32_t seg, uint32_t local, uint32_t g) noexcept
+      SlotIdx finish_(uint32_t seg, uint32_t local, uint32_t g) noexcept
       {
-         const uint32_t slot = seg * slots_per_segment + local;
+         const SlotIdx slot = SlotIdx(seg) * slots_per_segment + local;  // SlotIdx: no u32 overflow
          _a->_ref_base[slot].store(1, std::memory_order_relaxed);
          _a->_seg_alloced[seg].fetch_add(g, std::memory_order_release);
          _a->_allocated_grains.fetch_add(g, std::memory_order_relaxed);

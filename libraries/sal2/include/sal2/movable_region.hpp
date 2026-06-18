@@ -31,7 +31,9 @@ namespace sal2
    class movable_region
    {
      public:
-      using arena_t = var_allocator<Grain>;
+      // u64 grain index: the data cap is the segment cap, not 2^32 grains (128 GB).
+      // The CB's 44-bit offset holds it. This is what lifts the Silkworm wall.
+      using arena_t = var_allocator<Grain, uint64_t>;
       static constexpr uint32_t grain            = Grain;
       static constexpr uint32_t max_object_bytes = arena_t::max_object_bytes;
 
@@ -53,11 +55,11 @@ namespace sal2
       // ── resolve: ptr_address → object bytes (THE indirection) ────────────────
       void* get(ptr_address pa) noexcept
       {
-         return _arena.get(uint32_t(_cb.cb_at(pa)->offset()));
+         return _arena.get(_cb.cb_at(pa)->offset());  // offset = u64 grain index
       }
       const void* get(ptr_address pa) const noexcept
       {
-         return _arena.get(uint32_t(_cb.cb_at(pa)->offset()));
+         return _arena.get(_cb.cb_at(pa)->offset());
       }
 
       // ── liveness = the control block's refcount (v1) ─────────────────────────
@@ -76,8 +78,7 @@ namespace sal2
       // is the object body size the caller allocated (== what alloc saw).
       void free(ptr_address pa, uint32_t bytes) noexcept
       {
-         const uint32_t g = uint32_t(_cb.cb_at(pa)->offset());
-         _arena.free(g, bytes);  // clears arena occupancy + segment accounting
+         _arena.free(_cb.cb_at(pa)->offset(), bytes);  // u64 grain index; clears occupancy + accounting
          _cb.free(pa);
       }
 
@@ -108,7 +109,7 @@ namespace sal2
       // allocate an object of `bytes` (≤ max_object_bytes); CB ref stamped to 1.
       ptr_address alloc(uint32_t bytes)
       {
-         const uint32_t  g  = _as.alloc(bytes);  // grain slot (arena occupancy = 1)
+         const uint64_t    g  = _as.alloc(bytes);  // u64 grain slot (arena occupancy = 1)
          const ptr_address pa = _r->_cb.alloc(cb_zone::movable, g);
          return pa;
       }

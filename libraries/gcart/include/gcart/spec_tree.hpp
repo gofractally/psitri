@@ -14,9 +14,9 @@
 #pragma once
 #include <gcart/branch_tag.hpp>  // branch_type, tag3_get/set, tag3_bytes
 #include <ucc/lower_bound.hpp>   // ucc::lower_bound_padded (vectorized in-node scan)
-#include <sal2/big_allocator.hpp>
+#include <sal2/big_region.hpp>
 #include <sal2/fixed_allocator.hpp>
-#include <sal2/var_allocator.hpp>
+#include <sal2/movable_region.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -153,11 +153,11 @@ namespace gcart
       sal2::fixed_allocator<128>  cl1;  // setlist / nested_setlist
       sal2::fixed_allocator<256>  cl2;  // double_setlist / big_nested
       sal2::fixed_allocator<1152> cl9;  // full / node256
-      sal2::var_allocator<32>     sal;  // suffix_value leaves (≤2KB)
-      sal2::big_allocator<64>     big;  // big_suffix_value leaves (>2KB, BIG region)
+      sal2::movable_region<32>    sal;  // suffix_value leaves (≤2KB) — CB-indexed, relocatable
+      sal2::big_region<64>        big;  // big_suffix_value leaves (>2KB) — CB-indexed, zone=big
 
-      // values whose sv_leaf body exceeds the SAL var-allocator's object cap go BIG.
-      static constexpr uint32_t sal_max_body = sal2::var_allocator<32>::max_object_bytes;
+      // values whose sv_leaf body exceeds the SAL movable-region object cap go BIG.
+      static constexpr uint32_t sal_max_body = sal2::movable_region<32>::max_object_bytes;
 
       // Per-region segment cap = max addressable size before the u32 slot index
       // wraps (each region's branch pointer is a 4-byte intra-region index). A
@@ -242,7 +242,7 @@ namespace gcart
       // used for inline packing; standalone storage prepends birth_bytes.
       static constexpr uint32_t birth_bytes = 4;
       static uint32_t bytes_for(uint32_t vlen, uint32_t slen) noexcept { return 3 + vlen + slen; }
-      static uint32_t make(engine& e, sal2::var_allocator<32>::session& ses, sv suffix, sv value)
+      static uint32_t make(engine& e, sal2::movable_region<32>::session& ses, sv suffix, sv value)
       {
          const uint32_t vl = uint32_t(value.size()), sl = uint32_t(suffix.size());
          const uint32_t slot = ses.alloc(birth_bytes + bytes_for(vl, sl));
@@ -2978,7 +2978,7 @@ namespace gcart
       sal2::fixed_allocator<128>::session  _s1;
       sal2::fixed_allocator<256>::session  _s2;
       sal2::fixed_allocator<1152>::session _s9;
-      sal2::var_allocator<32>::session     _ssal;
+      sal2::movable_region<32>::session    _ssal;
       bt                                   _rt   = bt::null;
       uint32_t                             _rp   = 0;
       uint64_t                             _size = 0;

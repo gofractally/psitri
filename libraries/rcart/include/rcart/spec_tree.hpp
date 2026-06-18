@@ -680,7 +680,9 @@ namespace rcart
    // Read-path find from a (tag,ptr) root — usable by readers/cursors with NO
    // write sessions. Dispatch on the branch tag, PREFETCH the child before the
    // dependent load (full prefetches the offset cacheline before the type hdr).
-   inline bool find_in(engine& e, bt t, uint32_t p, sv key, std::string& out)
+   // out is a VIEW into the value bytes (no copy; caller pins the root). Mirrors
+   // start_ref's view-based read — the hot path never allocates or copies.
+   inline bool find_in(engine& e, bt t, uint32_t p, sv key, sv& out)
    {
       uint32_t depth = 0;
       for (;;)
@@ -692,8 +694,7 @@ namespace rcart
          {
             if (leaf_suffix(e, t, p) == key.substr(depth))
             {
-               sv v = leaf_value(e, t, p);
-               out.assign(v.data(), v.size());
+               out = leaf_value(e, t, p);
                return true;
             }
             return false;
@@ -740,8 +741,7 @@ namespace rcart
                const uint32_t ti = nn->nbranch;
                if (nn->is_inline(ti))  // inline term = the value in the line (0-suffix)
                {
-                  sv v = nn->in_value(ti);
-                  out.assign(v.data(), v.size());
+                  out = nn->in_value(ti);  // view into the line
                   return true;
                }
                t = nn->otype(ti);
@@ -763,7 +763,7 @@ namespace rcart
                   const uint8_t s = uint8_t(q[2]);
                   if (sv{q + 3 + v, s} != key.substr(depth + 1))
                      return false;
-                  out.assign(q + 3, v);
+                  out = sv{q + 3, v};  // view into the line
                   return true;
                }
                const setlist* in = nn->in_setlist(ui);  // inline setlist — route the next byte
@@ -1939,6 +1939,15 @@ namespace rcart
       //    cacheline before reading the 3-bit type header). ────────────────────
       bool find(sv key, std::string& out) const
       {
+         sv v;
+         if (!find_in(const_cast<engine&>(_e), _rt, _rp, key, v))
+            return false;
+         out.assign(v.data(), v.size());  // string-out API: one copy
+         return true;
+      }
+      // view-returning find for the hot read path (no copy; caller pins the root).
+      bool find(sv key, sv& out) const
+      {
          return find_in(const_cast<engine&>(_e), _rt, _rp, key, out);
       }
 
@@ -1971,7 +1980,8 @@ namespace rcart
       // pure no-op: the committed tree is unchanged, nothing to COW).
       int remove(sv key)
       {
-         if (!find_in(_e, _rt, _rp, key, _scan))
+         sv _scanv;  // presence pre-check only — discards the value view
+         if (!find_in(_e, _rt, _rp, key, _scanv))
             return 0;  // absent — no-op, no clone
          auto [t, p] = remove_rec<cow_mode::unique>(_rt, _rp, key, 0);
          _rt         = t;

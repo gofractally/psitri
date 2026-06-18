@@ -34,6 +34,12 @@ if(BUILD_TESTS)
     set_target_properties(gcart-kv-tests PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME gcart-kv-tests COMMAND gcart-kv-tests)
+
+    # A/B perf: gcart (CB-movable leaves) vs rcart (direct-grain leaves), spec engine.
+    add_executable(gcart-spec-bench tests/spec_bench.cpp)
+    target_link_libraries(gcart-spec-bench PRIVATE gcart rcart)
+    set_target_properties(gcart-spec-bench PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endif()
 
 if(BUILD_BENCHMARKS)

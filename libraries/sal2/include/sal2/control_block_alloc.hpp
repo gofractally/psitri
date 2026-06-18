@@ -4,17 +4,15 @@
 // object's ptr_address is its INDEX here. This is the indirection the movable
 // (.segs) and BIG (.big) regions share: a parent branch stores a 4-byte
 // ptr_address, the leaf store keeps the bytes, and the CB binds the two via
-// {zone, offset} — so the compactor can relocate the bytes (cas_move rewrites
-// the CB's offset) while the parent's ptr_address never changes.
+// {zone, offset} — so the compactor relocates the bytes (cas_move rewrites the
+// CB's offset) while the parent's ptr_address never changes.
 //
-// alloc(zone, offset) claims a CB (free-list LIFO, else bump) and returns its
-// ptr_address; free(pa) recycles it. The CB array is grown by 8 MB segments via
-// sal::block_allocator (PROT_NONE reserve + MAP_FIXED commit → cb_at(pa) is a
-// stable pointer; only the bytes the CB *points at* relocate). alloc/free are
-// mutex-guarded (correctness-first; CB churn is one op per leaf birth/death, and
-// release-to-zero can come from any thread) — a lock-free free list is a later
-// optimization. Liveness is the CB's own `ref` (refcount v1); death_ver[] is
-// added with the version-GC swap.
+// LOCK-FREE hot path (no-heap/hot-path rule): the .ctrl base is a stable
+// PROT_NONE reservation (MAP_FIXED commits, never moves), so alloc reads it
+// without a lock — claim a free CB via a tagged Treiber free list (ABA-safe) or
+// an atomic bump; free pushes to the same list. Only segment GROWTH takes a mutex
+// (rare). Liveness is the CB's own `ref` (refcount v1); death_ver[] is added with
+// the version-GC swap.
 #pragma once
 #include <atomic>
 #include <cstdint>
@@ -52,88 +50,108 @@ namespace sal2
          _data = std::make_unique<sal::block_allocator>(_cfg.dir / (_cfg.name + ".ctrl"),
                                                         segment_bytes, _cfg.max_segments,
                                                         sal::access_mode::read_write);
-         _base = static_cast<control_block*>(const_cast<void*>(_data->mapped_base()));
+         _base = static_cast<control_block*>(const_cast<void*>(_data->mapped_base()));  // STABLE
+         _free_head.store(pack_(0, null_pa), std::memory_order_relaxed);
          adopt_existing_();
       }
 
       // reopen: the .ctrl bytes (CBs + their {zone,offset,ref}) survive a clean
       // close, so every old ptr_address still resolves. Resume the bump cursor at
       // the end of the committed region; the free list starts empty (old freed CBs
-      // aren't re-pooled — a later GC/recovery pass can, §10). ref/offset are read
-      // back as-is on a clean reopen; a crash needs the §5.6 rebuild (later).
+      // aren't re-pooled — a later GC/recovery pass can, §10).
       void adopt_existing_() noexcept
       {
          const uint32_t existing = uint32_t(_data->mapped_blocks());
          if (existing == 0)
             return;
          _data->resize(existing);
-         _base          = static_cast<control_block*>(const_cast<void*>(_data->mapped_base()));
-         _nseg          = existing;
-         _committed_cbs = existing * cbs_per_seg;
-         _bump          = _committed_cbs;  // append after committed (free holes not re-pooled)
+         _base = static_cast<control_block*>(const_cast<void*>(_data->mapped_base()));
+         _nseg.store(existing, std::memory_order_relaxed);
+         _committed_cbs.store(existing * cbs_per_seg, std::memory_order_relaxed);
+         _bump.store(existing * cbs_per_seg, std::memory_order_relaxed);  // append after committed
       }
 
       control_block*       cb_at(ptr_address pa) noexcept { return _base + pa; }
       const control_block* cb_at(ptr_address pa) const noexcept { return _base + pa; }
 
-      // Claim a CB for a new object at (zone, offset). LOCKED.
+      // Claim a CB for a new object at (zone, offset). Lock-free (grow is locked).
       ptr_address alloc(cb_zone zone, uint64_t offset)
       {
-         std::lock_guard<std::mutex> lk(_mx);
-         ptr_address                 pa;
-         if (_free_head != null_pa)
-         {  // free-list LIFO: a freed CB is {ref=0, offset=next-free ptr_address}
-            pa         = _free_head;
-            _free_head = ptr_address(_base[pa].load(std::memory_order_relaxed).offset);
-         }
-         else
+         // 1) tagged Treiber pop — reuse a freed CB (ABA-safe via the tag).
+         uint64_t head = _free_head.load(std::memory_order_acquire);
+         while (idx_(head) != null_pa)
          {
-            ensure_committed_(uint64_t(_bump) + 1);
-            pa = _bump++;
+            const ptr_address idx  = idx_(head);
+            const uint32_t    next = uint32_t(_base[idx].load(std::memory_order_relaxed).offset);
+            const uint64_t    nh   = pack_(tag_(head) + 1, next);
+            if (_free_head.compare_exchange_weak(head, nh, std::memory_order_acq_rel,
+                                                 std::memory_order_acquire))
+            {
+               _base[idx].reset(zone, offset, 1);
+               _live.fetch_add(1, std::memory_order_relaxed);
+               return idx;
+            }
          }
-         _base[pa].reset(zone, offset, /*ref=*/1);
-         ++_live;
+         // 2) bump a fresh CB (atomic; grow the .ctrl reservation if needed).
+         const ptr_address pa = _bump.fetch_add(1, std::memory_order_relaxed);
+         if (pa >= _committed_cbs.load(std::memory_order_acquire))
+            grow_to_(pa);
+         _base[pa].reset(zone, offset, 1);
+         _live.fetch_add(1, std::memory_order_relaxed);
          return pa;
       }
 
-      // Recycle a CB (its object is gone). LOCKED. ref=0 marks it dead (so a stray
-      // try_retain/retain rejects it) and `offset` holds the next free ptr_address.
+      // Recycle a CB (its object is gone). Lock-free Treiber push. ref=0 marks it
+      // dead (a stray try_retain/retain rejects it); `offset` holds the next index.
       void free(ptr_address pa) noexcept
       {
-         std::lock_guard<std::mutex> lk(_mx);
-         control_block::control_block_data d;  // ref=0 (free marker), offset=next
-         d.set_ref(0).set_offset(_free_head);
-         _base[pa].store(d, std::memory_order_release);
-         _free_head = pa;
-         --_live;
+         uint64_t                          head = _free_head.load(std::memory_order_relaxed);
+         control_block::control_block_data d;  // ref=0 (free marker)
+         for (;;)
+         {
+            d.set_ref(0).set_offset(idx_(head));  // next = current head index
+            _base[pa].store(d, std::memory_order_release);
+            const uint64_t nh = pack_(tag_(head) + 1, pa);
+            if (_free_head.compare_exchange_weak(head, nh, std::memory_order_acq_rel,
+                                                 std::memory_order_relaxed))
+               break;
+         }
+         _live.fetch_sub(1, std::memory_order_relaxed);
       }
 
-      uint64_t live_count() const noexcept { return _live; }
-      uint32_t num_segments() const noexcept { return _nseg; }
+      uint64_t live_count() const noexcept { return _live.load(std::memory_order_relaxed); }
+      uint32_t num_segments() const noexcept { return _nseg.load(std::memory_order_relaxed); }
 
      private:
-      void ensure_committed_(uint64_t need)  // caller holds _mx
+      static constexpr uint64_t pack_(uint32_t tag, ptr_address idx) noexcept
       {
-         while (uint64_t(_committed_cbs) < need)
+         return (uint64_t(tag) << 32) | idx;
+      }
+      static constexpr ptr_address idx_(uint64_t h) noexcept { return ptr_address(h); }
+      static constexpr uint32_t    tag_(uint64_t h) noexcept { return uint32_t(h >> 32); }
+
+      void grow_to_(ptr_address pa)  // commit segments until pa is in-bounds (rare)
+      {
+         std::lock_guard<std::mutex> lk(_grow_mx);
+         while (pa >= _committed_cbs.load(std::memory_order_relaxed))
          {
-            if (_nseg >= _cfg.max_segments)
+            if (_nseg.load(std::memory_order_relaxed) >= _cfg.max_segments)
                throw std::runtime_error("sal2: control_block_alloc full (ptr_address space)");
             _data->alloc();  // commit the next contiguous segment (MAP_FIXED in the reservation)
-            _base = static_cast<control_block*>(const_cast<void*>(_data->mapped_base()));
-            _committed_cbs += cbs_per_seg;
-            ++_nseg;
+            _committed_cbs.fetch_add(cbs_per_seg, std::memory_order_release);
+            _nseg.fetch_add(1, std::memory_order_relaxed);
          }
       }
 
       config                                _cfg;
       std::unique_ptr<sal::block_allocator> _data;
-      control_block*                        _base          = nullptr;  // fixed reservation base
-      std::mutex                            _mx;
-      ptr_address                           _bump          = 0;        // next fresh CB index
-      ptr_address                           _free_head     = null_pa;  // LIFO free list head
-      uint32_t                              _committed_cbs = 0;
-      uint32_t                              _nseg          = 0;
-      uint64_t                              _live          = 0;
+      control_block*                        _base = nullptr;  // STABLE reservation base
+      std::mutex                            _grow_mx;         // segment growth only
+      std::atomic<uint32_t>                 _bump{0};         // next fresh CB index
+      std::atomic<uint64_t>                 _free_head{0};    // tagged Treiber head (tag<<32 | idx)
+      std::atomic<uint32_t>                 _committed_cbs{0};
+      std::atomic<uint32_t>                 _nseg{0};
+      std::atomic<uint64_t>                 _live{0};
    };
 
 }  // namespace sal2

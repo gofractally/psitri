@@ -238,11 +238,13 @@ namespace rcart::kv
          _kv   = false;
          return true;
       }
-      bool upper_bound(key_view k)  // smallest key > k
+      bool upper_bound(key_view k)  // smallest key > k = lower_bound(k ++ '\0')
       {
-         std::string t(k);
-         t.push_back('\0');
-         return lower_bound(t);
+         char           buf[sizeof(_kb)];  // adb keys are bounded by the key buffer; no alloc
+         const uint32_t n = uint32_t(k.size() < sizeof(buf) ? k.size() : sizeof(buf) - 1);
+         std::memcpy(buf, k.data(), n);
+         buf[n] = '\0';
+         return lower_bound(key_view(buf, n + 1));
       }
       bool prev()
       {
@@ -626,6 +628,11 @@ namespace rcart::kv
                set_leaf_ext_(t, node);
                return true;
             }
+            // full: prefetch the offset CL for the speculative routing byte
+            // (target[depth]) before node_prefix_ reads the header (overlap, §7).
+            if (t == bt::full && depth < target.size())
+               prefetch(static_cast<const char*>(node) + full::branches_off +
+                        (uint32_t(uint8_t(target[depth])) << 2));
             const sv P = node_prefix_(t, node);
             const uint32_t rem = uint32_t(target.size()) - depth;
             const uint32_t pl  = uint32_t(P.size());

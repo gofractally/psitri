@@ -81,8 +81,8 @@ namespace sal2
       };
       static_assert(sizeof(control_block_data) == 8, "control_block_data must be 8 bytes");
 
-      // offset:44 grains ⇒ the sentinel that marks a FREE (unclaimed) CB slot.
-      static constexpr uint64_t free_offset  = (1ull << 44) - 1;
+      // A FREE/dead CB has ref==0 (retain/try_retain reject it); the CB allocator's
+      // free list stashes its next-free ptr_address in `offset` while ref==0.
       static constexpr uint64_t max_ref_count = (1ull << 16) - cb_max_threads;
 
       // ── reads ──────────────────────────────────────────────────────────────
@@ -96,7 +96,7 @@ namespace sal2
       uint64_t offset() const noexcept { return load(std::memory_order_acquire).offset; }
       bool     active() const noexcept { return load().active; }
       bool     pending_cache() const noexcept { return load().pending_cache; }
-      bool     is_free() const noexcept { return load().offset == free_offset; }
+      bool     is_free() const noexcept { return load().ref == 0; }  // ref==0 ⇒ dead/free
 
       // ── writes ─────────────────────────────────────────────────────────────
       void store(control_block_data v, std::memory_order o = std::memory_order_relaxed) noexcept
@@ -111,14 +111,6 @@ namespace sal2
          d.set_zone(z).set_offset(off).set_ref(ref);
          store(d, o);
       }
-      // Mark the slot free (recycled by the CB allocator's free list).
-      void mark_free(std::memory_order o = std::memory_order_release) noexcept
-      {
-         control_block_data d;
-         d.set_offset(free_offset);
-         store(d, o);
-      }
-
       // ── refcount (v1 liveness; identical contract to sal) ────────────────────
       control_block_data retain()
       {
@@ -164,7 +156,6 @@ namespace sal2
       // ptr_address held by every parent branch.
       bool cas_move(uint64_t expected_off, uint64_t desired_off) noexcept
       {
-         assert(desired_off != free_offset);
          uint64_t           expect = _data.load(std::memory_order_relaxed);
          control_block_data prior;
          do

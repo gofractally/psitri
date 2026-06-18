@@ -28,4 +28,10 @@ if(BUILD_TESTS)
     set_target_properties(sal2-va-tests PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME sal2-va-tests COMMAND sal2-va-tests)
+
+    add_executable(sal2-cb-tests tests/control_block_test.cpp)
+    target_link_libraries(sal2-cb-tests PRIVATE sal2)
+    set_target_properties(sal2-cb-tests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME sal2-cb-tests COMMAND sal2-cb-tests)
 endif()

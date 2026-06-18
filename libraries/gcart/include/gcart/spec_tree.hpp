@@ -792,7 +792,16 @@ namespace gcart
          if (t == bt::full)
          {
             const full* n = static_cast<const full*>(node);
-            if (!pfx_ok_(n->prefix(), key, depth))
+            // Prefetch the offset cacheline for the SPECULATIVE routing byte
+            // (key[depth] — correct when this full has no prefix, the common case)
+            // BEFORE touching the header/type cacheline, so the header's COLD MISS
+            // (pfx_ok_ / btype below) overlaps this branch-ptr prefetch (Dan §7).
+            // The header is NOT prefetched — it IS the overlap window. A prefix
+            // makes this mispredict (a wasted prefetch, never wrong). Pays only on
+            // COLD runs at scale; invisible in L2/L3-resident benches.
+            if (depth < key.size())
+               prefetch(n->base() + full::branches_off + (uint32_t(uint8_t(key[depth])) << 2));
+            if (!pfx_ok_(n->prefix(), key, depth))  // header cold miss — overlaps the prefetch
                return false;
             depth += n->prefixlen();
             if (depth == key.size())
@@ -801,18 +810,15 @@ namespace gcart
                   return false;
                t = bt(n->term_tag);
                p = n->term_ptr;
-               prefetch(resolve(e, t, p));
                continue;
             }
             const uint8_t byte = uint8_t(key[depth]);
-            prefetch(n->branches() + byte);  // offset cacheline before the type header
-            const bt ct = n->btype(byte);
+            const bt      ct   = n->btype(byte);
             if (ct == bt::null)
                return false;
             t = ct;
-            p = n->branch(byte);
+            p = n->branch(byte);  // prefetched (no-prefix) → hit; mispredicted → miss
             ++depth;
-            prefetch(resolve(e, t, p));
             continue;
          }
          if (t == bt::nested_setlist)
@@ -834,7 +840,6 @@ namespace gcart
                }
                t = nn->otype(ti);
                p = nn->ext_ptr(ti);
-               prefetch(resolve(e, t, p));
                continue;
             }
             const int oi = nn->find_index(uint8_t(key[depth]));
@@ -866,7 +871,6 @@ namespace gcart
                      return false;
                   t = in->term_type();
                   p = in->term_branch();
-                  prefetch(resolve(e, t, p));
                   continue;
                }
                const int ii = in->find_index(uint8_t(key[depth]));
@@ -875,13 +879,11 @@ namespace gcart
                t = in->btype(uint32_t(ii));
                p = in->branch(uint32_t(ii));
                ++depth;
-               prefetch(resolve(e, t, p));
                continue;
             }
             t = nn->otype(ui);
             p = nn->ext_ptr(ui);
             ++depth;  // external child
-            prefetch(resolve(e, t, p));
             continue;
          }
          const setlist* n = static_cast<const setlist*>(node);
@@ -894,7 +896,6 @@ namespace gcart
                return false;
             t = n->term_type();
             p = n->term_branch();
-            prefetch(resolve(e, t, p));
             continue;
          }
          const int idx = n->find_index(uint8_t(key[depth]));
@@ -903,7 +904,6 @@ namespace gcart
          t = n->btype(uint32_t(idx));
          p = n->branch(uint32_t(idx));
          ++depth;
-         prefetch(resolve(e, t, p));
          continue;
       }
    }
@@ -2259,18 +2259,20 @@ namespace gcart
             return {bt::setlist, pack_setlist<128>(_s1, prefix, brs, nb, term, tt, tp)};
          if (setlist::fits(nb, pl, term, 256))
             return {bt::double_setlist, pack_setlist<256>(_s2, prefix, brs, nb, term, tt, tp)};
-         // A full node's prefix slot is only full::max_prefix (24) bytes, but a
-         // long shared prefix can precede a high-fanout point (e.g. Silkworm
-         // storage: dbi + 32B account hash, then a 256-way slot fan-out). Split
-         // the prefix: a wrapper holds the HEAD and routes ONE byte to a full
-         // that holds the TAIL (≤24) + the fan-out. (setlist/double already
-         // account for the prefix in their fits() check, so only full overflows.)
+         // A full node's prefix slot is only full::max_prefix bytes, but a long
+         // shared prefix can precede a high-fanout point (Silkworm storage: dbi +
+         // 32B account hash, then a 256-way fan-out). Split: a wrapper holds the
+         // HEAD and routes ONE byte to a full that holds the TAIL (≤max_prefix) +
+         // the fan-out. Full nodes USUALLY have no prefix (a dense fan-out's
+         // children diverge), so the descent prefetches the child full's offset
+         // cacheline on key[depth] speculatively — correct in the common no-prefix
+         // case, a harmless mispredict (wasted prefetch, never wrong) when prefixed.
          if (pl > full::max_prefix)
          {
             const uint32_t h   = pl - full::max_prefix - 1;  // head len; 1 byte links to the full
             const uint8_t  sep = uint8_t(prefix[h]);
             const uint32_t fs =
-                pack_full(prefix.substr(h + 1), brs, nb, term, tt, tp);  // tail = 24
+                pack_full(prefix.substr(h + 1), brs, nb, term, tt, tp);  // tail ≤ max_prefix
             br link{sep, bt::full, fs};
             return build_node(prefix.substr(0, h), &link, 1, false, bt::null, 0,
                               false);  // wrapper (recurses if head>127)

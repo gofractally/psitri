@@ -13,13 +13,15 @@ static double nsop(clk::time_point a, clk::time_point b, size_t n){ return doubl
 static long rss_mb(){ struct rusage r; getrusage(RUSAGE_SELF,&r); return r.ru_maxrss/1048576; }
 
 template<class Engine, class Tree>
-void run(const char* name, const char* dir, size_t N){
+void run(const char* name, const char* dir, size_t N, bool seq){
    std::filesystem::remove_all(dir);
    Engine e{std::filesystem::path(dir)};
    Tree t(e);
    std::mt19937_64 r(12345);
    std::vector<uint64_t> ks(N);
-   for(auto&k:ks) k=r();
+   // seq=true → dense sequential keys (256-way FULL nodes on the low bytes,
+   // the full-node-prefetch path); false → random (sparse, mostly setlists).
+   for(size_t i=0;i<N;i++) ks[i] = seq ? __builtin_bswap64(uint64_t(i)) : r();
    char kb[16], vb[100]; for(int i=0;i<100;i++) vb[i]='v';
    auto a=clk::now();
    for(size_t i=0;i<N;i++){ std::memcpy(kb,&ks[i],8); std::memcpy(kb+8,&ks[i],8);
@@ -30,12 +32,12 @@ void run(const char* name, const char* dir, size_t N){
    for(size_t i=0;i<N;i++){ std::memcpy(kb,&ks[i],8); std::memcpy(kb+8,&ks[i],8);
       if(t.find(std::string_view(kb,16), out)) hit++; }
    auto d=clk::now();
-   std::printf("%-7s N=%zu  insert=%6.1f ns/op  find=%6.1f ns/op  hits=%zu  rss=%ldMB\n",
-      name, N, nsop(a,b,N), nsop(c,d,N), hit, rss_mb());
+   std::printf("%-7s %-4s N=%zu  insert=%6.1f ns/op  find=%6.1f ns/op  hits=%zu  rss=%ldMB\n",
+      name, seq?"seq":"rand", N, nsop(a,b,N), nsop(c,d,N), hit, rss_mb());
 }
 int main(int argc, char**argv){
    size_t N = argc>1? std::strtoull(argv[1],0,10):1000000;
-   run<gcart::engine, gcart::tree>("gcart", "/tmp/sb_gcart", N);
-   run<rcart::engine, rcart::tree>("rcart", "/tmp/sb_rcart", N);
+   run<gcart::engine, gcart::tree>("gcart", "/tmp/sb_gcart", N, false);
+   run<rcart::engine, rcart::tree>("rcart", "/tmp/sb_rcart", N, false);
    return 0;
 }

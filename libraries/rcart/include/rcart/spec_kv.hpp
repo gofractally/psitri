@@ -238,13 +238,13 @@ namespace rcart::kv
          _kv   = false;
          return true;
       }
-      bool upper_bound(key_view k)  // smallest key > k = lower_bound(k ++ '\0')
+      bool upper_bound(key_view k)  // smallest key STRICTLY > k — no copy, no '\0' synth
       {
-         char           buf[sizeof(_kb)];  // adb keys are bounded by the key buffer; no alloc
-         const uint32_t n = uint32_t(k.size() < sizeof(buf) ? k.size() : sizeof(buf) - 1);
-         std::memcpy(buf, k.data(), n);
-         buf[n] = '\0';
-         return lower_bound(key_view(buf, n + 1));
+         if (!lower_bound(k))   // smallest key >= k (k stays a VIEW)
+            return false;
+         if (key() == k)        // landed exactly on k → the answer is the next key
+            return next();
+         return true;           // landed strictly > k already
       }
       bool prev()
       {

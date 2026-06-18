@@ -73,25 +73,42 @@ frees the *same* nodes and faces the *same* recycle threshold; if anything its
 deferred reclaim holds garbage a touch longer. Liveness is a speed axis, not a
 capacity axis (plan §7').
 
+## ROOT CAUSE — the designed movable region was never built
+
+Both symptoms (128 GB cap + 37–48% recycle backlog) are ONE gap: `sal2`'s
+`var_allocator` shipped as a plain **direct-addressed bump allocator** — the
+branch pointer (`ptr_address`) IS a global 32-byte-grain index
+(`addr = base + slot·Grain`, var_allocator.hpp:16-17,100) — instead of the
+**control-block / relocatable movable region** `sal2_design.md §4.3` specifies.
+There is **no `sal2/control_block.hpp`**; nothing references relocation / `.segs`
+/ `zone` / `offset`. The designed CB is `{ ref:16, active, pending_cache,
+zone:2, offset:44 }` → **u32 ptr_address = 4 B objects (control blocks)**, each
+**`offset:44` × 32 B grain = 512 TB/zone**, **relocated by CAS-rewriting only
+`offset`** (so the compactor reclaims by moving live objects), leaves in `.segs`.
+
+Consequence of the direct-addressed shortcut:
+- `ptr_address` conflated with grain index ⇒ cap = 2^32 *grains* × 32 B = **128 GB**
+  (not 2^32 *objects* × 512 TB). 1.545 B live objects × ~2.8 grains ≈ the whole
+  index ⇒ crash.
+- no indirection ⇒ **non-relocatable** ⇒ no compaction ⇒ can only whole-segment
+  recycle at >50% free ⇒ the 37–48% stuck backlog.
+
+The designed SAL would not have crashed: 1.5 B objects << 4 B CB budget, ~128 GB
+data << 512 TB.
+
 ## TODO (the levers, in priority order)
 
-1. **Recycle / compaction (reclaims the 37–48% backlog).** Lower the recycle
-   threshold and/or compact (relocate live objects to densify) instead of
-   only whole-segment recycle at >50% free — those segments are stuck at ~40%
-   free. Buys ~1.6× headroom. Ties to the movable-region compactor
-   (sal2_design §6.2).
-2. **Density (cut object count + per-object overhead).** gcart/rcart store each
-   leaf as its OWN var_allocator<32> slot in sal.dat (one object per leaf, ~89 B
-   incl. rounding); sal_art_ref page-PACKS leaves (leaf_page) and is ~2× denser.
-   cl1 routing alone is 97 GB / 508 M live nodes. Page-packing leaves + denser
-   routing is the structural lever (and shrinks the live object count that
-   presses on the grain index).
-3. **Wider grain index (the hard ceiling).** u32 grains × 32 B = 128 GB SAL is
-   too small for archive ETH (needs 3 B+ objects at 8 M). A u40/u48 grain index
-   (or larger grain) raises the cap — necessary for 8 M regardless of (1)/(2).
-4. **Memory-recovery bar for gcart.** gcart's version-liveness GC must reclaim
-   *at least as well as* rcart's refcount here (same recycle backlog, no worse
-   high-water) — it does not need to *beat* it (that's levers 1–3), just match.
+1. **Build the movable region the design already specifies (§4.3).** CB
+   indirection (`ptr_address` → control_block → `zone`+`offset`) + relocation +
+   the compactor reclaiming by moving live objects. This is the capacity fix
+   (128 GB → 512 TB, 4 B objects) AND the compaction fix (kills the recycle
+   backlog) in one. Supersedes the band-aids below.
+2. **Density (independent win).** gcart/rcart store each leaf as its OWN movable
+   slot (~89 B incl. rounding); sal_art_ref page-PACKS leaves (leaf_page) and is
+   ~2× denser. cl1 routing alone is 97 GB / 508 M live nodes. Fewer/denser
+   objects shrink the load on the movable region regardless of (1).
+3. **Memory-recovery bar for gcart.** gcart's version-liveness GC must reclaim
+   *at least as well as* rcart's refcount here — match, not beat (capacity is (1)).
 
 Native 8M baseline (the yardstick): 14881s, 68 G RSS, 134 G disk
 (`~/eth-bench/lmdbx_8m_baseline.tsv`). Tiered milestones:

@@ -44,10 +44,18 @@ namespace sal2
          uint32_t              max_segments = 65536;
       };
 
+      // The CB's offset is 44 bits; a grain index must fit it. Max grain index =
+      // max_segments · slots_per_segment, so cap max_segments so it can never
+      // silently truncate (review finding #8).
+      static constexpr uint64_t max_segments_cap = (1ull << 44) / arena_t::slots_per_segment;
+
       explicit movable_region(config cfg)
           : _arena({.dir = cfg.dir, .name = cfg.name, .max_segments = cfg.max_segments}),
             _cb({.dir = cfg.dir, .name = cfg.name + "c", .max_segments = 4096})
       {
+         if (cfg.max_segments > max_segments_cap)
+            throw std::runtime_error(
+                "sal2: movable_region max_segments exceeds the 44-bit CB offset reach");
       }
 
       static uint32_t grains_for(uint32_t bytes) noexcept { return arena_t::grains_for(bytes); }

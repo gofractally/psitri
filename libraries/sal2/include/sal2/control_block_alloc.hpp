@@ -82,7 +82,10 @@ namespace sal2
          while (idx_(head) != null_pa)
          {
             const ptr_address idx  = idx_(head);
-            const uint32_t    next = uint32_t(_base[idx].load(std::memory_order_relaxed).offset);
+            // acquire: order the freer's release store of this CB's next-pointer
+            // (free() below) before we read it — even though the head's acquire
+            // load already covers it, this removes all doubt on the pop path.
+            const uint32_t    next = uint32_t(_base[idx].load(std::memory_order_acquire).offset);
             const uint64_t    nh   = pack_(tag_(head) + 1, next);
             if (_free_head.compare_exchange_weak(head, nh, std::memory_order_acq_rel,
                                                  std::memory_order_acquire))
@@ -105,7 +108,7 @@ namespace sal2
       // dead (a stray try_retain/retain rejects it); `offset` holds the next index.
       void free(ptr_address pa) noexcept
       {
-         uint64_t                          head = _free_head.load(std::memory_order_relaxed);
+         uint64_t                          head = _free_head.load(std::memory_order_acquire);
          control_block::control_block_data d;  // ref=0 (free marker)
          for (;;)
          {

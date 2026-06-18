@@ -57,7 +57,13 @@ namespace sal2
       }
       void free(ptr_address pa) noexcept
       {
-         _arena.free(uint32_t(_cb.cb_at(pa)->offset()));  // big_allocator reads its own ngrains
+         // The CB is the engine-facing liveness; big_allocator's inline ref is
+         // OCCUPANCY (alloc stamps 1, never retained by big_region). Retire it
+         // through big's own release_one (1->0) so its free() ref==0 invariant
+         // holds, then reclaim the bytes + the CB.
+         const uint32_t g = uint32_t(_cb.cb_at(pa)->offset());
+         if (_arena.release_one(g))  // occupancy 1 -> 0 (always true here)
+            _arena.free(g);          // big_allocator reads its own ngrains
          _cb.free(pa);
       }
 

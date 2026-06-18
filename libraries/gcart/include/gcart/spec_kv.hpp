@@ -145,7 +145,7 @@ namespace gcart::kv
       {
          if (!_s.eng() || _s.tag() == bt::null)
             return std::nullopt;
-         std::string out;
+         std::string_view out;  // view into the value (snapshot pins it); construct once
          if (!find_in(*_s.eng(), _s.tag(), _s.ptr(), k, out))
             return std::nullopt;
          return S(out.data(), out.size());
@@ -155,7 +155,7 @@ namespace gcart::kv
       {
          if (!_s.eng() || _s.tag() == bt::null)
             return false;
-         std::string out;
+         std::string_view out;  // zero-copy: hand the value view straight to f
          if (!find_in(*_s.eng(), _s.tag(), _s.ptr(), k, out))
             return false;
          f(value_view(out.data(), out.size()));
@@ -833,7 +833,7 @@ namespace gcart::kv
       {
          if (!_s.eng() || _s.tag() == bt::null)
             return std::nullopt;
-         std::string out;
+         std::string_view out;  // view into the value (snapshot pins it); construct once
          if (!find_in(*_s.eng(), _s.tag(), _s.ptr(), k, out))
             return std::nullopt;
          return S(out.data(), out.size());
@@ -864,18 +864,18 @@ namespace gcart::kv
       template <class S = std::string>
       std::optional<S> get(key_view k) const
       {
-         std::string out;
-         if (!_w->find(k, out))
+         sv v;  // view into the value (work root pins it); construct once
+         if (!_w->find(k, v))
             return std::nullopt;
-         return S(out.data(), out.size());
+         return S(v.data(), v.size());
       }
       template <class F>
       bool get(key_view k, F&& f) const
       {
-         std::string out;
-         if (!_w->find(k, out))
+         sv v;  // zero-copy: hand the value view straight to f
+         if (!_w->find(k, v))
             return false;
-         f(value_view(out.data(), out.size()));
+         f(value_view(v.data(), v.size()));
          return true;
       }
 
@@ -927,19 +927,19 @@ namespace gcart::kv
       template <class S = std::string>
       std::optional<S> get(key_view k) const
       {
-         std::string out;
-         if (!_t->find(k, out))
+         sv v;  // view into the value (txn work root pins it); construct once
+         if (!_t->find(k, v))
             return std::nullopt;
-         return S(out.data(), out.size());
+         return S(v.data(), v.size());
       }
       // lambda form (adb::kv_transaction): invoke f(value) on a hit, return found.
       template <class F>
       bool get(key_view k, F&& f) const
       {
-         std::string out;
-         if (!_t->find(k, out))
+         sv v;  // zero-copy: hand the value view straight to f
+         if (!_t->find(k, v))
             return false;
-         f(value_view(out.data(), out.size()));
+         f(value_view(v.data(), v.size()));
          return true;
       }
       void commit();

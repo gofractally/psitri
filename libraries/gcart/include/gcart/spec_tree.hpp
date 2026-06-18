@@ -1052,6 +1052,11 @@ namespace gcart
          ov.assign(v.data(), v.size());
          return true;
       }
+      // full: prefetch the offset CL for the speculative routing byte (target[depth]
+      // — correct when prefixless) BEFORE reading the prefix/header (overlap, §7).
+      if (t == bt::full && depth < target.size())
+         prefetch(static_cast<const char*>(node) + full::branches_off +
+                  (uint32_t(uint8_t(target[depth])) << 2));
       const sv P = (t == bt::full)             ? static_cast<const full*>(node)->prefix()
                    : (t == bt::nested_setlist) ? static_cast<const nested_setlist*>(node)->prefix()
                                                : static_cast<const setlist*>(node)->prefix();
@@ -1316,6 +1321,11 @@ namespace gcart
          ov.assign(v.data(), v.size());
          return true;
       }
+      // full: prefetch the offset CL for the speculative routing byte (target[depth]
+      // — correct when prefixless) BEFORE reading the prefix/header (overlap, §7).
+      if (t == bt::full && depth < target.size())
+         prefetch(static_cast<const char*>(node) + full::branches_off +
+                  (uint32_t(uint8_t(target[depth])) << 2));
       const sv P = (t == bt::full)             ? static_cast<const full*>(node)->prefix()
                    : (t == bt::nested_setlist) ? static_cast<const nested_setlist*>(node)->prefix()
                                                : static_cast<const setlist*>(node)->prefix();
@@ -1621,6 +1631,11 @@ namespace gcart
          out.emplace_back(std::move(fk), std::string(v.data(), v.size()));
          return;
       }
+      // full: prefetch the offset CL for the speculative routing byte (target[depth]
+      // — correct when prefixless) BEFORE reading the prefix/header (overlap, §7).
+      if (t == bt::full && depth < target.size())
+         prefetch(static_cast<const char*>(node) + full::branches_off +
+                  (uint32_t(uint8_t(target[depth])) << 2));
       const sv P = (t == bt::full)             ? static_cast<const full*>(node)->prefix()
                    : (t == bt::nested_setlist) ? static_cast<const nested_setlist*>(node)->prefix()
                                                : static_cast<const setlist*>(node)->prefix();
@@ -2619,6 +2634,12 @@ namespace gcart
             auto fl = promote_nested(t, p);
             return upsert_rec<cow_mode::unique>(fl.first, fl.second, key, depth, val);
          }
+         // full node: prefetch the offset cacheline for the SPECULATIVE routing byte
+         // (key[depth] — correct when prefixless, the common case) BEFORE node_prefix
+         // touches the header cacheline, so the header's cold miss overlaps it (§7).
+         if (t == bt::full && depth < key.size())
+            prefetch(static_cast<const char*>(resolve(_e, t, p)) + full::branches_off +
+                     (uint32_t(uint8_t(key[depth])) << 2));
          const sv       pfx  = node_prefix(t, p);
          const sv       ksuf = key.substr(depth);
          const uint32_t cp   = lcp(pfx, ksuf);
@@ -2902,6 +2923,11 @@ namespace gcart
             auto fl = promote_nested(t, p);
             return remove_rec<cow_mode::unique>(fl.first, fl.second, key, depth);
          }
+         // full: prefetch the offset CL for the speculative routing byte before
+         // node_prefix touches the header (the cold-miss overlap window, §7).
+         if (t == bt::full && depth < key.size())
+            prefetch(static_cast<const char*>(resolve(_e, t, p)) + full::branches_off +
+                     (uint32_t(uint8_t(key[depth])) << 2));
          depth += uint32_t(node_prefix(t, p).size());  // prefix matched (pre-check); consume it
          if constexpr (M == cow_mode::unique)
             if (node_birth(_e, t, p) == _V)  // born this txn ⟹ private, edit in place

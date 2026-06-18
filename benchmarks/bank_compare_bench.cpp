@@ -19,6 +19,7 @@
 #include <start_ref/kv.hpp>       // start_ref::kv (hot, standalone)
 #include <gcart/kv.hpp>           // gcart::legacy::kv (sal2, lock-free MVCC reads)
 #include <gcart/spec_kv.hpp>      // gcart::kv (spec node taxonomy, 3 regions)
+#include <rcart/spec_kv.hpp>      // rcart::kv (SAME taxonomy, direct-grain leaves = baseline)
 
 #include <atomic>
 #include <chrono>
@@ -283,6 +284,12 @@ int main(int argc, char** argv)
       std::filesystem::remove_all(base + "/gcart_spec");
       auto db = gcart::kv::database::create(base + "/gcart_spec");
       rows.push_back(run_bank("gcart_spec", db, p, base + "/gcart_spec"));
+   }
+   {  // rcart = SAME spec node taxonomy, DIRECT-grain leaves (refcount baseline).
+      // Apples-to-apples vs gcart_spec isolates the control-block leaf cost.
+      std::filesystem::remove_all(base + "/rcart_spec");
+      auto db = rcart::kv::database::create(base + "/rcart_spec");
+      rows.push_back(run_bank("rcart_spec", db, p, base + "/rcart_spec"));
    }
 
    printf("\n%-20s %12s %12s %14s %12s %14s %9s %9s  %s\n", "engine", "load/s", "wtx/s",

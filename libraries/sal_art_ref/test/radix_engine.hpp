@@ -580,16 +580,22 @@ namespace sal_art_ref::radix
       }
 
       // ── ordered queries (this is a SORTED container, not a hash map) ────────────
-      // lower_bound: smallest key >= `key`; upper_bound: smallest key strictly > `key`.
-      // On a hit, out_key holds the matched key (materialized) and out_val views its
-      // value in node memory (valid like find()'s result). Returns false if none.
+      // lower_bound: smallest key >= `key`; upper_bound (mathematical floor): the
+      // LARGEST key v <= `key` (the dual of lower_bound). On a hit, out_key holds
+      // the matched key (materialized) and out_val views its value in node memory
+      // (valid like find()'s result). Returns false if none.
       bool lower_bound(key_view key, std::string& out_key, value_view& out_val)
       {
          return ordered_seek(key, false, out_key, out_val);
       }
       bool upper_bound(key_view key, std::string& out_key, value_view& out_val)
-      {
-         return ordered_seek(key, true, out_key, out_val);
+      {  // floor via the cursor (now floor); reference path — not perf-critical
+         cursor c(this);
+         if (!c.upper_bound(key))
+            return false;
+         out_key.assign(c.key().data(), c.key().size());
+         out_val = c._val;
+         return true;
       }
       // Visit every (key, value) in ascending key order: cb(key_view, value_view).
       template <class Cb>
@@ -3507,7 +3513,15 @@ namespace sal_art_ref::radix
             return _valid;
          }
          bool lower_bound(key_view k) { position(as_bytes(k), false); return _valid; }  // first key >= k
-         bool upper_bound(key_view k) { position(as_bytes(k), true); return _valid; }   // first key  > k
+         bool upper_bound(key_view k)  // mathematical floor: largest key v <= k (dual of lower_bound)
+         {
+            if (lower_bound(k))
+            {
+               if (key() == k) return true;
+               return prev();
+            }
+            return seek_last();
+         }
          bool find(key_view k)                                                          // exact lookup
          {
             position(as_bytes(k), false);

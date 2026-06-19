@@ -24,7 +24,11 @@ namespace sal2
    inline constexpr uint32_t disk_page_bytes = SAL2_DISK_PAGE_BYTES;
 
    inline constexpr uint32_t lines_per_segment = segment_bytes / line_bytes;
-   inline constexpr uint32_t pages_per_segment = segment_bytes / disk_page_bytes;
+   // NB: `pages_per_segment` is intentionally NOT defined here. The copied SAL 1.0
+   // subsystem (sal2/alloc/config.hpp) declares sal2::pages_per_segment too; gcart
+   // pulls in BOTH this FIX config (routing) and that alloc config (leaf) in one TU,
+   // so a second sal2::pages_per_segment would be a redefinition. This one was unused
+   // (no reference anywhere in the FIX allocator), so it is dropped — behavior-neutral.
    inline constexpr uint32_t lines_per_page    = disk_page_bytes / line_bytes;
 
    static_assert((line_bytes & (line_bytes - 1)) == 0, "grain is a power of 2");

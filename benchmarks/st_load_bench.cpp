@@ -2,7 +2,7 @@
 // values, batched transactions — the bank LOAD phase in isolation so `sample`
 // attributes time to the spec engine alone (not the 6 other bank engines).
 //   st-load-bench [keys=2000000] [batch=1000] [dir=/tmp/st_load]
-#include <gcart/spec_kv.hpp>
+#include <gcart/kv.hpp>
 
 #include <chrono>
 #include <cstdio>

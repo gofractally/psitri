@@ -89,9 +89,14 @@ namespace mock
       tree        get_root(uint32_t) { return {}; }
       owned_tree  snapshot(uint32_t) { return {}; }
    };
+   struct read_session
+   {
+      cursor create_cursor(uint32_t) { return {}; }  // the read-path requirement (kv_read_session)
+   };
    struct database
    {
       std::shared_ptr<write_session> start_write_session() { return {}; }
+      std::shared_ptr<read_session>  start_read_session() { return {}; }
    };
 
    struct ref

@@ -425,15 +425,21 @@ namespace psitri
       auto read_lock = _node.session()->lock();
       return lower_bound_impl(key);
    }
+   // Mathematical upper bound: the LARGEST key v <= key (the supremum of
+   // {v : v <= key}; the dual of lower_bound = smallest v >= key). Built from the
+   // no-lock *_impl primitives under one read lock (the session lock is not reentrant).
    inline bool cursor::upper_bound(key_view key) noexcept
    {
       auto op_scope = record_operation(sal::mapped_memory::session_operation::cursor_upper_bound);
       auto read_lock = _node.session()->lock();
-      if (!lower_bound_impl(key))
-         return false;  // at end — nothing >= key
-      if (this->key() == key)
-         return next_impl();  // skip exact match; true=found next, false=at end
-      return true;       // already positioned past key
+      if (lower_bound_impl(key))      // smallest v >= key
+      {
+         if (this->key() == key)
+            return true;              // key present → it is its own floor
+         return prev_impl();          // landed strictly > key → predecessor = largest v < key
+      }
+      seek_end();                     // nothing >= key → every key < key
+      return prev_impl();             // → the last key is the floor (seek_end+prev = seek_last)
    }
    inline bool cursor::lower_bound_impl(key_view key) noexcept
    {

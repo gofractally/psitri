@@ -7,12 +7,26 @@
 //   FixedAllocator<256>  = cl2  (double_setlist / big_nested)
 //   FixedAllocator<1152> = cl9  (full / node256)
 //
-// 32 MB segments (block_allocator-backed, grown on demand); per-segment
-// seg_freeset = one bit per slot (free=1), lock-free O(1) find-first-free;
-// per-slot refcount (Dan: refcount liveness, `created`/birth dropped — denser).
-// A write session owns an active segment and bump-claims forward; a freed slot
-// returns to the bitmap immediately; a segment is re-offered once its free count
-// crosses the reuse threshold. Slot index is GLOBAL: addr = base + slot·SlotBytes.
+// ALLOCATION AUTHORITY = the freeset (start_ref::arena's model — arena.hpp:5).
+// Each segment owns one IN-MEMORY seg_freeset (1 bit per fixed slot, free=1):
+// find-first-free-at-or-after a floor, first-fit-forward. The bump position is
+// ONLY a next-scan HINT for where that scan starts; freed slots inside the
+// current word are refilled (recycled) BEFORE the scan advances — that "stay in
+// the word until 100% used" behaviour falls out of the bitmap, it is not coded.
+// This REVERTS the prior pure-bump deviation (which grew fresh segments past
+// freed slots — the measured rcart bulk-load deficit vs start_ref).
+//
+// The freeset is DERIVED, NEVER SYNCED (arena.hpp:5): in-memory only, rebuilt
+// on reopen from ref>0 — no .fs file (that avoids sal2's prior sub-page .fs
+// EINVAL). Per-slot refcount = liveness (Dan: `created`/birth dropped, denser).
+// A write session owns an active segment, scans the freeset forward from the
+// txn floor, and caches at/after-floor frees in a per-session hot-hole stack
+// (start_ref::session::_fcache); cold (behind-floor) frees go to the freeset and
+// wait for the cursor/low_water to revisit. Slot index is GLOBAL: addr = base +
+// slot·SlotBytes. SAFETY: a freeset bit is set free ONLY when the slot is truly
+// free (ref hit 0 / released = no reader); find-first-free returns only free
+// bits, so it never hands out a slot a reader holds (same invariant as
+// start_ref). The _floor split is hot/cold locality, NOT safety.
 #pragma once
 #include <atomic>
 #include <bit>
@@ -26,6 +40,7 @@
 #include <sal/block_allocator.hpp>
 
 #include <sal2/config.hpp>
+#include <sal2/freeset.hpp>
 
 namespace sal2
 {
@@ -44,6 +59,10 @@ namespace sal2
       static constexpr uint32_t slot_bytes        = SlotBytes;
       static constexpr uint32_t slots_per_segment = slots_per_seg(SlotBytes);
       static_assert(slots_per_segment >= 64 && slots_per_segment % 64 == 0);
+
+      // One freeset per segment: 1 bit per FIXED SLOT (single-size slab ⇒ 1 unit ==
+      // 1 slot; NOT line-granular). Authority for who is free. In-memory only.
+      using freeset_t = seg_freeset_t<slots_per_segment>;
 
       struct config
       {
@@ -70,7 +89,11 @@ namespace sal2
          _seg_freed   = std::make_unique<std::atomic<uint32_t>[]>(_cfg.max_segments);
          _seg_sealed  = std::make_unique<std::atomic<uint8_t>[]>(_cfg.max_segments);
          _recyc       = std::make_unique<std::atomic<uint64_t>[]>((_cfg.max_segments + 63) / 64);
-         _base        = static_cast<std::byte*>(const_cast<void*>(_data->mapped_base()));
+         // Freeset is in-memory + derived, NEVER on disk (arena.hpp:5): one slot per
+         // segment in this array of unique_ptrs (heap so 32 KB/segment stays off the
+         // class footprint and is allocated only for segments that exist).
+         _freeset = std::make_unique<std::unique_ptr<freeset_t>[]>(_cfg.max_segments);
+         _base    = static_cast<std::byte*>(const_cast<void*>(_data->mapped_base()));
          _ref_base =
              reinterpret_cast<std::atomic<uint8_t>*>(const_cast<void*>(_refs->mapped_base()));
          adopt_existing_();
@@ -79,15 +102,15 @@ namespace sal2
       // ── reopen recovery ───────────────────────────────────────────────────────
       // The block_allocator already remmaps the .dat (data) + .rc (refcounts) files
       // on construction, so a clean reopen's slot contents AND per-slot refcounts
-      // survive for free. What's lost is the in-memory view: the segment count and
-      // the bump/recycle accounting. Restore it: tell the block_allocators they
-      // already hold `existing` blocks (so the next alloc() appends, never
-      // overwrites), set _nseg, then SCAN the preserved refcounts to rebuild each
-      // segment's live count. Sealed existing segments that are >50% dead rejoin the
-      // recyclable set, so their dead slots are written around (space reclaimed)
-      // while live slots (ref!=0) are stepped over — no data loss. This is the
-      // "rebuild by scan" path; it is cheap at the small DB sizes where reopen
-      // happens (e.g. Silkworm's schema-init close+reopen).
+      // survive for free. What's lost is the in-memory view: the segment count, the
+      // bump/recycle accounting, and the (derived, never-synced) freeset. Restore
+      // it: tell the block_allocators they already hold `existing` blocks (so the
+      // next alloc() appends, never overwrites), set _nseg, then SCAN the preserved
+      // refcounts to rebuild each segment's live count AND its freeset (free bit =
+      // ref==0). Sealed existing segments that are >50% dead rejoin the recyclable
+      // set, so their dead slots are written around (space reclaimed) while live
+      // slots (ref!=0) are stepped over — no data loss. This is the "rebuild by
+      // scan" path; cheap at the small DB sizes where reopen happens.
       void adopt_existing_() noexcept
       {
          const uint32_t existing = uint32_t(_data->mapped_blocks());
@@ -101,6 +124,9 @@ namespace sal2
          uint64_t total_live = 0;
          for (uint32_t s = 0; s < existing; ++s)
          {
+            _freeset[s]   = std::make_unique<freeset_t>();
+            freeset_t& fs = *_freeset[s];
+            fs.init(/*all_free=*/false);  // start fully USED; mark free what is ref==0
             uint32_t       live = 0;
             const uint32_t base = s * slots_per_segment;
             for (uint32_t k = 0; k < slots_per_segment; ++k)
@@ -108,6 +134,8 @@ namespace sal2
                const uint8_t r = _ref_base[base + k].load(std::memory_order_relaxed);
                if (r != 0 && r != dying_ref)
                   ++live;
+               else
+                  fs.free1(k);  // ref 0 (or dying) ⇒ a free slot the freeset may hand out
             }
             _seg_alloced[s].store(live, std::memory_order_relaxed);
             _seg_freed[s].store(0, std::memory_order_relaxed);
@@ -154,10 +182,11 @@ namespace sal2
       }
       // Drop one ref. Returns true iff this was the LAST ref — in which case the
       // slot is left in the DYING sentinel (not 0): the caller then reads its
-      // content to recurse children and finally free()s it (which sets ref=0 =
-      // reusable). The write-around alloc reuses ONLY ref==0, so a dying slot is
-      // never grabbed mid-teardown (the reader-vs-writer reclaim race). CAS (not
-      // fetch_sub) so there is no transient ref==0 window before the sentinel.
+      // content to recurse children and finally free()s it (which marks the freeset
+      // bit free = reusable). find-first-free skips the dying slot (its freeset bit
+      // is still 0/used until free() runs), so it is never grabbed mid-teardown (the
+      // reader-vs-writer reclaim race). CAS (not fetch_sub) so there is no transient
+      // ref==0 window before the sentinel.
       [[nodiscard]] bool release_one(uint32_t i) noexcept
       {
          auto&   r = _ref_base[i];
@@ -170,22 +199,21 @@ namespace sal2
                return c == 1;
          }
       }
-      // Mark a slot dead (refcount already 0). Per the SAL segment model a freed
-      // slot is NOT reused until the WHOLE segment recycles: when a SEALED (full)
-      // segment crosses >50% free it joins the recyclable bitset, and the next
-      // new-segment request pulls it (writing around the live leftovers) before
-      // growing fresh. The alloc hot path is a pure bump that never consults this,
-      // so the bg release thread's frees never contend with allocations.
+      // Free a slot whose refcount already hit 0 (dying sentinel). Sets the freeset
+      // bit FREE (the authority) — find-first-free may now hand it out. SAFETY: this
+      // runs only after release_one returned the last-ref; no reader holds it. The
+      // store(0) publishes "reusable" with RELEASE so a reader's content reads (done
+      // before release_one) are ordered ahead of any reuse-overwrite; the freeset's
+      // own free1/alloc1 carry the matching release/acquire on l0.
       void free(uint32_t i) noexcept
       {
-         // Publish the slot as REUSABLE (ref dying→0) with RELEASE: the write-around
-         // alloc's ACQUIRE load of ref==0 then happens-after this, ordering the
-         // releaser's content reads (done before free()) ahead of any reuse-write.
-         // Until this store the slot is the dying sentinel (write-around skips it),
-         // so the teardown reads it race-free.
          _ref_base[i].store(0, std::memory_order_release);
          _freed.fetch_add(1, std::memory_order_relaxed);
-         const uint32_t s = i / slots_per_segment;
+         const uint32_t s     = i / slots_per_segment;
+         const uint32_t local = i % slots_per_segment;
+         // Authority: return the bit to the segment's freeset. low_water inside
+         // free1 lets the owning session's next scan revisit this hole (recycle).
+         _freeset[s]->free1(local);
          // bg writes _seg_freed; foreground writes _seg_alloced — separate arrays
          // (separate cachelines) so the two never false-share. live = the diff.
          const uint32_t freed = _seg_freed[s].fetch_add(1, std::memory_order_relaxed) + 1;
@@ -199,8 +227,8 @@ namespace sal2
 
       // ── stats ────────────────────────────────────────────────────────────────
       uint32_t num_segments() const noexcept { return _nseg.load(std::memory_order_acquire); }
-      // live = bump-allocated minus freed (no freeset; the bump cursor never
-      // returns slots, so a counter pair is exact).
+      // live = allocated minus freed (the counter pair is exact; the freeset is the
+      // placement authority but the counters are the cheap census).
       uint64_t live_slots() noexcept
       {
          return _allocated.load(std::memory_order_relaxed) - _freed.load(std::memory_order_relaxed);
@@ -224,6 +252,9 @@ namespace sal2
          _seg_alloced[s].store(0, std::memory_order_relaxed);
          _seg_freed[s].store(0, std::memory_order_relaxed);
          _seg_sealed[s].store(0, std::memory_order_relaxed);
+         // Fresh segment: every slot free (the freeset is init all-free).
+         _freeset[s] = std::make_unique<freeset_t>();
+         _freeset[s]->init(/*all_free=*/true);
          _nseg.store(s + 1, std::memory_order_release);
          return s;
       }
@@ -251,6 +282,8 @@ namespace sal2
          return UINT32_MAX;
       }
 
+      freeset_t& freeset_(uint32_t s) noexcept { return *_freeset[s]; }
+
       static constexpr uint32_t recycle_below = slots_per_segment / 2;  // >50% free ⇒ recyclable
 
       config                                _cfg;
@@ -259,8 +292,10 @@ namespace sal2
       std::atomic<uint8_t>*                 _ref_base = nullptr;
       std::atomic<uint32_t>                 _nseg{0};
       std::mutex                            _grow_mx;
-      // bump-model accounting + recycle (the freeset is no longer the authority;
-      // liveness is the refcount array, ref==0 ⇒ a free slot to write around).
+      // ALLOCATION AUTHORITY: one in-memory freeset per segment (derived, never
+      // synced). The counters below are the cheap live census — the freeset's l0
+      // bitmap is the placement truth.
+      std::unique_ptr<std::unique_ptr<freeset_t>[]> _freeset;
       // alloc-side and free-side counters live on separate cachelines so the
       // foreground (alloc) and the bg release thread (free) never false-share.
       alignas(64) std::atomic<uint64_t> _allocated{0};        // foreground
@@ -271,83 +306,171 @@ namespace sal2
       std::unique_ptr<std::atomic<uint64_t>[]> _recyc;        // bitset of recyclable segments
    };
 
-   // One writer's bump cursor within an active segment (spec req 4/5/7).
+   // One writer's freeset cursor within an active segment (start_ref::session).
    template <uint32_t SlotBytes>
    class fixed_allocator<SlotBytes>::session
    {
      public:
       session(const session&)            = delete;
       session& operator=(const session&) = delete;
+      ~session() { flush_fcache_(); }
 
-      // Allocate one slot (global index), ref stamped to 1. Forward BUMP within
-      // the active segment: a FRESH segment is a pure cursor bump; a RECYCLED
-      // segment write-arounds by skipping live (ref!=0) leftovers. Either way no
-      // freeset CAS, and freed slots are reused only via whole-segment recycle.
+      // Mark the transaction boundary (start_ref::session::start_transaction):
+      // _floor = _cursor = the current frontier. Frees AT/AFTER the floor this txn
+      // recycle hot through _fcache (their pages are dirty anyway); frees BEHIND it
+      // go to the freeset and wait for the cursor/segment to revisit. begin_txn must
+      // be called at write-transaction start (the engine forwards it to cl1/cl2/cl9).
+      void begin_txn() noexcept
+      {
+         flush_fcache_();  // leftovers from the prior txn → freeset (cold now)
+         _floor = _frontier;
+      }
+
+      // Allocate one slot (global index), ref stamped to 1. start_ref's model:
+      //  1. pop the per-session hot-hole cache (at/after-floor freed this txn) —
+      //     its page is already dirty, so reuse is free and skips the freeset.
+      //  2. else find-first-free in the active segment's freeset, scanning from the
+      //     cursor hint (>= floor); low_water pulls the scan back to a behind-cursor
+      //     hole, so freed slots in the current word REFILL before the cursor
+      //     advances (the recycle — the bump never returns slots, the freeset does).
       uint32_t alloc()
       {
-         if (_fresh)
+         if (_fcache_n)
+            return finish_(_fcache[--_fcache_n]);
+         if (_seg != UINT32_MAX)
          {
-            if (_pos < slots_per_segment)
-               return finish_(_pos++);
-            return alloc_slow_();
-         }
-         const std::atomic<uint8_t>* refs = _a->_ref_base + size_t(_seg) * slots_per_segment;
-         while (_pos < slots_per_segment)
-         {
-            // ACQUIRE: seeing ref==0 must happen-after the releaser's release_one
-            // (release-store of 0), so the releaser's reads of the slot's content
-            // (done BEFORE its release_one) are ordered before we reuse+overwrite it.
-            if (refs[_pos].load(std::memory_order_acquire) == 0)
-               return finish_(_pos++);  // dead → write around
-            ++_pos;                     // skip live leftover
+            const uint32_t g = alloc_from_seg_();
+            if (g != UINT32_MAX)
+               return finish_(g);
          }
          return alloc_slow_();
+      }
+
+      // Hot-hole free: a slot freed AT/AFTER this txn's floor (its page is already
+      // dirty) is cached for free reuse this txn; below-floor (cold) frees go to the
+      // allocator's freeset directly. The engine may route the foreground COW reclaim
+      // here; the allocator's free() is the always-correct any-thread authority path.
+      void free(uint32_t i) noexcept
+      {
+         if (i >= _floor && _fcache_n < fcache_cap)
+         {
+            // born this txn / page dirty: stamp ref reusable + cache the index.
+            _a->_ref_base[i].store(0, std::memory_order_release);
+            _a->_freed.fetch_add(1, std::memory_order_relaxed);
+            const uint32_t s = i / slots_per_segment;
+            const uint32_t freed = _a->_seg_freed[s].fetch_add(1, std::memory_order_relaxed) + 1;
+            const uint32_t live  = _a->_seg_alloced[s].load(std::memory_order_acquire) - freed;
+            if (live <= recycle_below && _a->_seg_sealed[s].load(std::memory_order_acquire))
+               _a->_recyc[s >> 6].fetch_or(1ull << (s & 63), std::memory_order_relaxed);
+            _fcache[_fcache_n++] = i;
+            return;
+         }
+         _a->free(i);  // cold or cache full → freeset authority
       }
 
      private:
       friend class fixed_allocator<SlotBytes>;
       explicit session(fixed_allocator* a) noexcept : _a(a) {}
 
-      // Active segment exhausted → seal it (now eligible for recycle), then pull a
-      // recyclable (>50%-free) segment and write around its leftovers; only if
-      // none is available do we grow a fresh segment.
+      // find-first-free in the active segment from the cursor hint, refilling holes
+      // behind the cursor via low_water (exact first-fit, bump-like cost). Returns a
+      // GLOBAL slot index, or UINT32_MAX if the segment can't satisfy at/after floor.
+      uint32_t alloc_from_seg_() noexcept
+      {
+         const uint32_t seg_base = _seg * slots_per_segment;
+         freeset_t&     fs       = _a->freeset_(_seg);
+         uint32_t local_floor = _floor > seg_base ? (_floor - seg_base) : 0u;
+         if (local_floor >= slots_per_segment)
+            return UINT32_MAX;  // floor past this segment → force a switch
+         const uint32_t cur_local = _cursor > seg_base ? (_cursor - seg_base) : 0u;
+         // low_water exchange: a hole freed behind the cursor announces itself, so
+         // the scan starts at min(cursor, low_water) but never before the floor.
+         const uint32_t lw   = fs.low_water.exchange(UINT32_MAX, std::memory_order_relaxed);
+         uint32_t       from = cur_local < lw ? cur_local : lw;
+         if (from < local_floor)
+            from = local_floor;
+         const uint32_t local = fs.alloc1(from);
+         if (local == UINT32_MAX)
+            return UINT32_MAX;
+         // Put the low_water mark back if it pointed at a still-unconsumed hole
+         // at/after the floor below where we landed (the next alloc revisits it).
+         if (lw != UINT32_MAX && lw >= local_floor && local > lw)
+         {
+            auto cur = fs.low_water.load(std::memory_order_relaxed);
+            while (lw < cur && !fs.low_water.compare_exchange_weak(cur, lw,
+                                                                   std::memory_order_relaxed))
+               ;
+         }
+         _cursor = seg_base + local + 1;  // hint: next scan starts just past here
+         return seg_base + local;
+      }
+
+      // Active segment can't satisfy at/after the floor → seal it (eligible for
+      // recycle), pull a recyclable (>50%-free) segment whose freeset still has
+      // free bits, else grow fresh. Then retry the freeset scan.
       uint32_t alloc_slow_()
       {
          if (_seg != UINT32_MAX)
          {
             _a->_seg_sealed[_seg].store(1, std::memory_order_release);
-            // catch a segment that went >50% free while still active.
             const uint32_t live = _a->_seg_alloced[_seg].load(std::memory_order_relaxed) -
                                   _a->_seg_freed[_seg].load(std::memory_order_acquire);
             if (live <= recycle_below)
                _a->_recyc[_seg >> 6].fetch_or(1ull << (_seg & 63), std::memory_order_relaxed);
          }
-         const uint32_t r = _a->take_recyclable_();
-         if (r != UINT32_MAX)
+         for (;;)
          {
-            _seg   = r;
-            _pos   = 0;
-            _fresh = false;
+            const uint32_t r = _a->take_recyclable_();
+            if (r != UINT32_MAX)
+               _seg = r;
+            else
+               _seg = _a->grow_();
+            const uint32_t seg_base = _seg * slots_per_segment;
+            // Switching segments RESETS the floor + cursor to the new segment's base
+            // (start_ref::alloc_slow_): the floor is the first-fit scan start WITHIN
+            // the active segment, not a monotonic global — a recycled low-numbered
+            // segment must be scannable from its base or its freed slots never reuse.
+            _floor  = seg_base;
+            _cursor = seg_base;
+            const uint32_t g = alloc_from_seg_();
+            if (g != UINT32_MAX)
+               return finish_(g);
+            // Recycled segment had no free bit at/after floor — seal + try again.
+            _a->_seg_sealed[_seg].store(1, std::memory_order_release);
          }
-         else
-         {
-            _seg   = _a->grow_();
-            _pos   = 0;
-            _fresh = true;
-         }
-         return alloc();
       }
-      uint32_t finish_(uint32_t local) noexcept
+
+      uint32_t finish_(uint32_t g) noexcept
       {
-         const uint32_t g = _seg * slots_per_segment + local;
+         const uint32_t s = g / slots_per_segment;
          _a->_ref_base[g].store(1, std::memory_order_relaxed);
-         _a->_seg_alloced[_seg].fetch_add(1, std::memory_order_release);
+         _a->_seg_alloced[s].fetch_add(1, std::memory_order_release);
          _a->_allocated.fetch_add(1, std::memory_order_relaxed);
+         if (g + 1 > _frontier)
+            _frontier = g + 1;
          return g;
       }
+
+      void flush_fcache_() noexcept
+      {
+         // Leftover at/after-floor holes return to the freeset authority (cold for
+         // the next txn — start_ref::flush_fcache_). The ref store(0) + counters
+         // already happened in free(); only the freeset bit is outstanding.
+         while (_fcache_n)
+         {
+            const uint32_t i = _fcache[--_fcache_n];
+            _a->_freeset[i / slots_per_segment]->free1(i % slots_per_segment);
+         }
+      }
+
+      static constexpr uint32_t fcache_cap = 256;  // hot-hole stack depth (start_ref §7)
+
       fixed_allocator* _a;
-      uint32_t         _seg   = UINT32_MAX;
-      uint32_t         _pos   = slots_per_segment;  // forces a fresh segment on first alloc
-      bool             _fresh = true;
+      uint32_t         _seg      = UINT32_MAX;            // current active segment
+      uint32_t         _floor    = 0;                     // txn start (global slot)
+      uint32_t         _cursor   = 0;                     // next-scan hint (global slot)
+      uint32_t         _frontier = 0;                     // one past the highest alloc seen
+      uint32_t         _fcache_n = 0;                     // hot-hole stack depth
+      uint32_t         _fcache[fcache_cap];               // freed slots at/after floor this txn
    };
 }  // namespace sal2

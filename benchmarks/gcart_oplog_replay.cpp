@@ -1,115 +1,45 @@
-// gcart_oplog_replay — replay a captured Silkworm engine op-stream through
-// gcart's adb-conforming kv API. This IS "running Silkworm via the adb API":
-// the stream is the exact upsert/remove/get/lower_bound/commit sequence the
-// MDBX shim emitted while Silkworm synced mainnet (single keyspace; the dbi is
-// folded into the key bytes). If gcart replays it faithfully (read-own-writes
-// oracle + a final full-scan vs the truth map) it is a drop-in for that engine.
+// gcart_oplog_replay — replay a captured Silkworm op-stream through the gcart
+// engine (gcart::kv) and VALIDATE its reads against the recorded results. This is
+// the read+write validation of gcart on the real mainnet-sync stream (the MDBX
+// shim's capture). Every 'G' op carries Silkworm's observed result
+// (found-byte + fnv value-hash); we do tx->get (read-own-writes over the open
+// txn) and count divergences. 'L' (lower_bound) records are skipped faithfully
+// (the spec cursor has no forward/range surface yet — that's the remaining gap).
 //
-//   gcart-oplog-replay <oplog.bin> <dir> [verify=0] [report_every_commits=1]
+//   gcart-oplog-replay <oplog.bin> <dir> [report_every_commits=0] [verify_sample=0]
 //
-// Record stream: 'C' commit | 'U' u32 klen key u32 vlen val | 'R' u32 klen key
-//   | 'G' u32 klen key u8 found u64 fnv | 'L' u32 klen key u8 found u32 rklen
-//   rkey u64 fnv.  (matches benchmarks/oplog_replay.cpp / the shim capture.)
+// These captures turned out to be write-only (no 'G'/'L' read records), so the
+// recorded-read oracle has nothing to check. With verify_sample=N (>0) we DERIVE
+// a read+write validation instead: track the final value of every Nth key (by
+// hash) through the U/R stream, then point-read each back through a read cursor at
+// the end and compare — validating the read path against the write history on the
+// real mainnet stream, including large (BIG) values.
+//
+// Stream: 'C' | 'U' u32 klen key u32 vlen val | 'R' u32 klen key
+//   | 'G' u32 klen key u8 found u64 fnv | 'L' u32 klen key u8 found u32 rklen rkey u64 fnv
 #include <gcart/kv.hpp>
-#include <gcart/tree.hpp>
 
-#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
-#include <map>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace fs = std::filesystem;
 using Clock  = std::chrono::steady_clock;
 
-// ── memory breakdown (GCART_STATS=1): where do the bytes go vs the payload ────
-struct mem_stats
-{
-   uint64_t n_leaf = 0, n_setlist = 0, n_node256 = 0, n_chunk = 0, keys = 0;
-   uint64_t ln_leaf = 0, ln_setlist = 0, ln_node256 = 0, ln_chunk = 0;  // lines (×128B)
-   uint64_t pay_leaf = 0, pay_setlist = 0, pay_node256 = 0, pay_chunk = 0;  // useful bytes
-   uint64_t leaf_lines_hist[10] = {0};
-   uint64_t setlist_n_sum = 0, node256_n_sum = 0;  // child counts (fill factor)
-   uint64_t setlist_n_hist[10] = {0};              // 0,1,2,..,8,9+ children
-   uint64_t setlist_has_term = 0;
-};
-static void walk_stats(sal2::arena& a, gcart::legacy::nptr n, mem_stats& s)
-{
-   using namespace gcart::legacy;
-   if (n == null_ptr) return;
-   void* p = a.get(n);
-   if (is_leaf(p))
-   {
-      auto* lf = static_cast<leaf*>(p);
-      ++s.n_leaf; ++s.keys; s.ln_leaf += lf->nlines;
-      s.pay_leaf += leaf::hdr + lf->klen + (lf->is_large() ? uint32_t(sizeof(nptr)) : lf->vlen);
-      s.leaf_lines_hist[std::min<uint32_t>(lf->nlines, 9)]++;
-      if (lf->is_large())
-         for (nptr c = lf->chunk_head(); c != null_ptr;)
-         { auto* vc = static_cast<value_chunk*>(a.get(c)); ++s.n_chunk; s.ln_chunk += vc->nlines; s.pay_chunk += value_chunk::hdr + vc->len; c = vc->next; }
-      return;
-   }
-   if (type_of(p) == uint8_t(ntype::setlist))
-   {
-      auto* st = static_cast<setlist*>(p);
-      ++s.n_setlist; s.ln_setlist += st->h.nlines; s.setlist_n_sum += st->h.n;
-      s.setlist_n_hist[std::min<uint32_t>(st->h.n, 9)]++;
-      if (st->h.term != null_ptr) ++s.setlist_has_term;
-      s.pay_setlist += sizeof(inner_hdr) + st->h.n + st->h.n * sizeof(nptr) + st->h.plen;
-      for (uint32_t i = 0; i < st->h.n; ++i) walk_stats(a, st->children()[i], s);
-      if (st->h.term != null_ptr) walk_stats(a, st->h.term, s);
-   }
-   else
-   {
-      auto* nd = static_cast<node256*>(p);
-      ++s.n_node256; s.ln_node256 += nd->h.nlines; s.node256_n_sum += nd->h.n16;
-      s.pay_node256 += node256::fixed + nd->h.plen;
-      const nptr* c = nd->children();
-      for (uint32_t b = 0; b < 256; ++b) if (c[b] != null_ptr) walk_stats(a, c[b], s);
-      if (nd->h.term != null_ptr) walk_stats(a, nd->h.term, s);
-   }
-}
-static void report_stats(sal2::arena& a, gcart::legacy::nptr root)
-{
-   mem_stats s;
-   walk_stats(a, root, s);
-   const double L = 128.0;
-   auto line = [&](const char* nm, uint64_t cnt, uint64_t ln, uint64_t pay, uint64_t nsum, uint64_t cap)
-   {
-      const double alloc = ln * L;
-      std::printf("  %-9s cnt=%-10llu lines=%-11llu alloc=%7.0fMB payload=%7.0fMB util=%4.0f%%%s\n",
-                  nm, (unsigned long long)cnt, (unsigned long long)ln, alloc / 1e6, pay / 1e6,
-                  alloc > 0 ? 100.0 * pay / alloc : 0.0,
-                  cnt ? (std::string("  avg_children=") + std::to_string(double(nsum) / cnt)).c_str() : "");
-      (void)cap;
-   };
-   const uint64_t tot_ln = s.ln_leaf + s.ln_setlist + s.ln_node256 + s.ln_chunk;
-   std::printf("\n[mem] keys=%llu  total alloc=%.0fMB  bytes/key=%.0f\n",
-               (unsigned long long)s.keys, tot_ln * L / 1e6, s.keys ? tot_ln * L / s.keys : 0.0);
-   line("leaf", s.n_leaf, s.ln_leaf, s.pay_leaf, 0, 0);
-   line("setlist", s.n_setlist, s.ln_setlist, s.pay_setlist, s.setlist_n_sum, 0);
-   line("node256", s.n_node256, s.ln_node256, s.pay_node256, s.node256_n_sum, 0);
-   line("chunk", s.n_chunk, s.ln_chunk, s.pay_chunk, 0, 0);
-   std::printf("  setlist children histogram (0,1,2..8,9+): ");
-   for (int i = 0; i <= 9; ++i) std::printf("%llu ", (unsigned long long)s.setlist_n_hist[i]);
-   std::printf("\n  setlists with a term: %llu (%.0f%%)\n", (unsigned long long)s.setlist_has_term,
-               s.n_setlist ? 100.0 * s.setlist_has_term / s.n_setlist : 0.0);
-   std::printf("  leaf lines histogram (1..9+): ");
-   for (int i = 1; i <= 9; ++i) std::printf("%llu ", (unsigned long long)s.leaf_lines_hist[i]);
-   std::printf("\n  share of alloc: leaf=%.0f%% setlist=%.0f%% node256=%.0f%% chunk=%.0f%%\n",
-               100.0 * s.ln_leaf / tot_ln, 100.0 * s.ln_setlist / tot_ln,
-               100.0 * s.ln_node256 / tot_ln, 100.0 * s.ln_chunk / tot_ln);
-}
-
 static uint64_t fnv_(std::string_view v) noexcept  // matches the shim's oplog_fnv_
 {
    uint64_t h = 1469598103934665603ull;
-   for (unsigned char c : v) { h ^= c; h *= 1099511628211ull; }
+   for (unsigned char c : v)
+   {
+      h ^= c;
+      h *= 1099511628211ull;
+   }
    return h;
 }
 
@@ -117,33 +47,36 @@ int main(int argc, char** argv)
 {
    if (argc < 3)
    {
-      std::fprintf(stderr, "usage: gcart-oplog-replay <oplog.bin> <dir> [verify=0] [report_every=1]\n");
+      std::fprintf(stderr, "usage: gcart-oplog-replay <oplog.bin> <dir> [report_every=0]\n");
       return 2;
    }
-   const std::string oplog = argv[1];
-   const std::string dir   = argv[2];
-   const bool        verify = argc > 3 && std::atoi(argv[3]) != 0;
-   const uint64_t    report_every = argc > 4 ? strtoull(argv[4], nullptr, 10) : 1;
+   const std::string oplog        = argv[1];
+   const std::string dir          = argv[2];
+   const uint64_t    report_every = argc > 3 ? strtoull(argv[3], nullptr, 10) : 0;
+   const uint64_t    verify_sample =
+       argc > 4 ? strtoull(argv[4], nullptr, 10) : 0;              // 0=off; else keep 1-in-N keys
+   const bool skip_removes = argc > 5 && std::atoi(argv[5]) != 0;  // replay U-only subset (diag)
+   std::unordered_map<std::string, std::string> truth;  // sampled key -> final value (verify mode)
 
    std::FILE* f = std::fopen(oplog.c_str(), "rb");
-   if (!f) { std::perror("fopen"); return 2; }
+   if (!f)
+   {
+      std::perror("fopen");
+      return 2;
+   }
    fs::remove_all(dir);
 
-   auto db = gcart::legacy::kv::database::create(dir);
+   auto db = gcart::kv::database::create(dir);
    auto ws = db->start_write_session();
 
-   std::map<std::string, std::string> truth;  // oracle (only if verify)
-   std::vector<char>                  key, val, rkey;
-   uint64_t commits = 0, ups = 0, rems = 0, gets = 0, lbs = 0;
-   uint64_t g_div = 0, oversized = 0;
-   const uint32_t cap_lines = sal2::max_alloc_lines;  // gcart node ceiling (large-value gap)
-
-   auto rd  = [&](void* p, size_t n) { return std::fread(p, 1, n, f) == n; };
-   auto t0  = Clock::now();
+   std::vector<char> key, val, rkey;
+   uint64_t          commits = 0, ups = 0, rems = 0, gets = 0, lbs = 0, g_div = 0;
+   auto              rd = [&](void* p, size_t n) { return std::fread(p, 1, n, f) == n; };
    auto secs = [](auto a, auto b) { return std::chrono::duration<double>(b - a).count(); };
 
-   std::optional<gcart::legacy::kv::transaction> tx;
+   std::optional<gcart::kv::transaction> tx;
    tx.emplace(ws->start_transaction(0));
+   const auto t0 = Clock::now();
 
    int c;
    while ((c = std::fgetc(f)) != EOF)
@@ -155,10 +88,10 @@ int main(int argc, char** argv)
          ++commits;
          if (report_every && commits % report_every == 0)
          {
-            const double mb = db->store().live_bytes() / 1048576.0;
-            std::printf("  [commit %llu] U=%llu R=%llu live=%.0fMB segs=%u %.1fs\n",
+            std::printf("  [commit %llu] U=%llu R=%llu G=%llu div=%llu live=%.0fMB %.1fs\n",
                         (unsigned long long)commits, (unsigned long long)ups,
-                        (unsigned long long)rems, mb, db->store().num_segments(),
+                        (unsigned long long)rems, (unsigned long long)gets,
+                        (unsigned long long)g_div, db->live_bytes() / 1048576.0,
                         secs(t0, Clock::now()));
             std::fflush(stdout);
          }
@@ -166,87 +99,107 @@ int main(int argc, char** argv)
          continue;
       }
       uint32_t kl = 0;
-      if (!rd(&kl, 4)) break;
+      if (!rd(&kl, 4))
+         break;
       key.resize(kl);
-      if (kl && !rd(key.data(), kl)) break;
+      if (kl && !rd(key.data(), kl))
+         break;
 
       if (c == 'U')
       {
          uint32_t vl = 0;
-         if (!rd(&vl, 4)) break;
+         if (!rd(&vl, 4))
+            break;
          val.resize(vl);
-         if (vl && !rd(val.data(), vl)) break;
+         if (vl && !rd(val.data(), vl))
+            break;
          std::string_view kv(key.data(), kl), vv(val.data(), vl);
-         if (gcart::legacy::leaf::alloc_size(kv, vv) > cap_lines)
-            ++oversized;  // large value — now stored via the value_chunk chain
          tx->upsert(kv, vv);
-         if (verify) truth[std::string(kv)] = std::string(vv);
+         if (verify_sample && (fnv_(kv) % verify_sample) == 0)
+            truth[std::string(kv)] = std::string(vv);
          ++ups;
       }
       else if (c == 'R')
       {
          std::string_view kv(key.data(), kl);
-         tx->remove(kv);
-         if (verify) truth.erase(std::string(kv));
+         if (!skip_removes)
+         {
+            tx->remove(kv);
+            if (verify_sample && (fnv_(kv) % verify_sample) == 0)
+               truth.erase(std::string(kv));
+         }
          ++rems;
       }
       else if (c == 'G')
-      {  // read-own-writes oracle: gcart's working-txn get vs the recorded result
-         uint8_t fb = 0; uint64_t fnv = 0;
-         if (!rd(&fb, 1) || !rd(&fnv, 8)) break;
-         std::string_view kv(key.data(), kl);
-         auto got = tx->get<std::string>(kv);
-         const bool gf = got.has_value();
-         if (gf != (fb != 0) || (gf && fnv_(*got) != fnv)) ++g_div;
+      {  // read-own-writes oracle: spec get vs Silkworm's recorded result
+         uint8_t  fb  = 0;
+         uint64_t fnv = 0;
+         if (!rd(&fb, 1) || !rd(&fnv, 8))
+            break;
+         auto       got = tx->get<std::string>(std::string_view(key.data(), kl));
+         const bool gf  = got.has_value();
+         if (gf != (fb != 0) || (gf && fnv_(*got) != fnv))
+            ++g_div;
          ++gets;
       }
       else if (c == 'L')
-      {  // lower_bound record (read-own-writes merge over the open txn is a TODO);
-         // count it and skip the payload faithfully.
-         uint8_t fb = 0; uint32_t rkl = 0; uint64_t fnv = 0;
-         if (!rd(&fb, 1) || !rd(&rkl, 4)) break;
-         if (rkl) { rkey.resize(rkl); if (!rd(rkey.data(), rkl)) break; }
-         if (!rd(&fnv, 8)) break;
+      {  // range read — spec cursor has no forward surface yet; skip payload faithfully
+         uint8_t  fb  = 0;
+         uint32_t rkl = 0;
+         uint64_t fnv = 0;
+         if (!rd(&fb, 1) || !rd(&rkl, 4))
+            break;
+         if (rkl)
+         {
+            rkey.resize(rkl);
+            if (!rd(rkey.data(), rkl))
+               break;
+         }
+         if (!rd(&fnv, 8))
+            break;
          ++lbs;
       }
-      else break;
+      else
+         break;
    }
-   if (tx) tx->commit();  // the capture can end mid-txn; persist the trailing ops
+   if (tx)
+      tx->commit();
    std::fclose(f);
 
    const double dt = secs(t0, Clock::now());
-   const double mb = db->store().live_bytes() / 1048576.0;
-   std::printf("\n[replay] commits=%llu U=%llu R=%llu G=%llu L=%llu oversized(skipped)=%llu  %.1fs\n",
+   std::printf("\n[spec-replay] commits=%llu U=%llu R=%llu G=%llu L=%llu  %.1fs  (%.0f ups/s)\n",
                (unsigned long long)commits, (unsigned long long)ups, (unsigned long long)rems,
-               (unsigned long long)gets, (unsigned long long)lbs, (unsigned long long)oversized, dt);
-   std::printf("[replay] get-divergences=%llu  live=%.0fMB segs=%u  (%.0f ups/s)\n",
-               (unsigned long long)g_div, mb, db->store().num_segments(),
-               dt > 0 ? ups / dt : 0.0);
-
-   if (std::getenv("GCART_STATS"))
-      report_stats(db->store(), db->store().get_root(0));
-
+               (unsigned long long)gets, (unsigned long long)lbs, dt, dt > 0 ? ups / dt : 0.0);
+   std::printf("[spec-replay] get-divergences=%llu / %llu gets   live=%.0fMB\n",
+               (unsigned long long)g_div, (unsigned long long)gets, db->live_bytes() / 1048576.0);
    int rc = (g_div == 0) ? 0 : 1;
-   if (verify)
+
+   // derived read+write validation: point-read every sampled key vs its truth value
+   if (verify_sample)
    {
-      // full ordered scan must equal the truth map exactly (order + values).
-      auto     rs  = db->start_read_session();
-      auto     cur = rs->create_cursor(0);
-      uint64_t n = 0, bad = 0;
-      auto     it = truth.begin();
-      for (bool ok = cur.seek_begin(); ok; ok = cur.next(), ++it, ++n)
+      auto     rs      = db->start_read_session();
+      auto     cur     = rs->create_cursor(0);
+      uint64_t checked = 0, bad = 0, big = 0;
+      for (auto& [k, v] : truth)
       {
-         if (it == truth.end() || std::string(cur.key()) != it->first ||
-             *cur.template value<std::string>() != it->second)
-         { if (++bad <= 5) std::fprintf(stderr, "  scan mismatch at %llu\n", (unsigned long long)n); }
+         auto got = cur.get<std::string>(k);
+         if (!got || *got != v)
+         {
+            if (++bad <= 5)
+               std::fprintf(stderr, "  verify mismatch key.len=%zu val.len=%zu got=%s\n", k.size(),
+                            v.size(), got ? "diff" : "(none)");
+         }
+         if (v.size() > 2045)
+            ++big;  // landed in the BIG region
+         ++checked;
       }
-      const bool len_ok = (n == truth.size() && it == truth.end());
-      std::printf("[verify] scanned=%llu truth=%zu mismatches=%llu length=%s\n",
-                  (unsigned long long)n, truth.size(), (unsigned long long)bad,
-                  len_ok ? "OK" : "MISMATCH");
-      const double bpk = n ? db->store().live_bytes() / double(n) : 0.0;
-      std::printf("[verify] live keys=%llu  bytes/key=%.0f\n", (unsigned long long)n, bpk);
-      if (bad || !len_ok) rc = 1;
+      std::printf(
+          "[spec-verify] sample=1/%llu  checked=%llu  mismatches=%llu  (big-value keys "
+          "verified=%llu)\n",
+          (unsigned long long)verify_sample, (unsigned long long)checked, (unsigned long long)bad,
+          (unsigned long long)big);
+      if (bad)
+         rc = 1;
    }
    std::printf("RESULT: %s\n", rc == 0 ? "PASS" : "FAIL");
    return rc;

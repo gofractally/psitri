@@ -121,11 +121,11 @@ TEST_CASE("tree_handle: primary handle basic CRUD", "[tree_handle]")
       CHECK(c.key() == "key_b");
    }
 
-   SECTION("upper_bound positions past exact match")
+   SECTION("upper_bound (floor) on a present key returns that key")
    {
-      auto c = h.upper_bound("key_b");
+      auto c = h.upper_bound("key_b");  // floor: largest <= key_b = key_b
       REQUIRE(!c.is_end());
-      CHECK(c.key() == "key_c");
+      CHECK(c.key() == "key_b");
    }
 
    tx.commit();
@@ -649,17 +649,18 @@ TEST_CASE("tree_handle: lower/upper bound edge cases", "[tree_handle]")
       CHECK(c.is_end());
    }
 
-   SECTION("upper_bound on last key")
+   SECTION("upper_bound (floor) on last key returns it")
    {
-      auto c = h.upper_bound("cherry");
-      CHECK(c.is_end());
+      auto c = h.upper_bound("cherry");  // floor: largest <= cherry = cherry (last)
+      REQUIRE(!c.is_end());
+      CHECK(c.key() == "cherry");
    }
 
-   SECTION("upper_bound between keys")
+   SECTION("upper_bound (floor) between keys returns the one below")
    {
-      auto c = h.upper_bound("b");
+      auto c = h.upper_bound("b");  // floor: apple < "b" < banana → apple
       REQUIRE(!c.is_end());
-      CHECK(c.key() == "banana");
+      CHECK(c.key() == "apple");
    }
 
    tx.abort();
@@ -934,9 +935,9 @@ TEST_CASE("multi-root: read operations via tree_handle", "[tree_handle][multi_ro
       REQUIRE(!lb.is_end());
       CHECK(lb.key() == "banana");
 
-      auto ub = r3.upper_bound("banana");
+      auto ub = r3.upper_bound("banana");  // floor: largest <= banana = banana
       REQUIRE(!ub.is_end());
-      CHECK(ub.key() == "cherry");
+      CHECK(ub.key() == "banana");
 
       auto rc = r3.snapshot_cursor();
       rc.seek_begin();

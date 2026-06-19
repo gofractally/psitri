@@ -1133,11 +1133,19 @@ TEST_CASE("merge_cursor upper_bound", "[dwal]")
 
    psitri::dwal::merge_cursor cur(&rw, nullptr, std::nullopt);
 
-   cur.upper_bound("a");
+   cur.upper_bound("a");  // floor: largest <= "a" = "a" (present)
+   CHECK(cur.key() == "a");
+
+   cur.upper_bound("b");  // floor: a < "b" < c → "a"
+   CHECK(cur.key() == "a");
+
+   cur.upper_bound("c");  // floor: largest <= "c" = "c" (present)
    CHECK(cur.key() == "c");
 
-   cur.upper_bound("c");
-   CHECK(cur.is_end());
+   cur.upper_bound("d");  // floor: largest <= "d" = "c"
+   CHECK(cur.key() == "c");
+
+   CHECK(!cur.upper_bound("0"));  // nothing <= "0" → no floor
 }
 
 TEST_CASE("merge_cursor seek exact", "[dwal]")
@@ -3409,17 +3417,18 @@ TEST_CASE("merge_cursor upper_bound with RO and Tri layers", "[dwal]")
 
    psitri::dwal::merge_cursor mc(nullptr, &ro, std::move(cur));
 
-   // upper_bound("a") — should skip past "a" in Tri.
-   mc.upper_bound("a");
+   // upper_bound (floor) = largest live key <= arg, merged over Tri (a,c) + RO (b).
+   mc.upper_bound("a");   // floor: "a" present (Tri)
+   CHECK(mc.key() == "a");
+
+   mc.upper_bound("b");   // floor: "b" present (RO)
    CHECK(mc.key() == "b");
 
-   // upper_bound("b") — should skip past "b" in RO.
-   mc.upper_bound("b");
-   CHECK(mc.key() == "c");
+   mc.upper_bound("bb");  // floor: b < "bb" < c → "b"
+   CHECK(mc.key() == "b");
 
-   // upper_bound("c") — past everything.
-   mc.upper_bound("c");
-   CHECK(mc.is_end());
+   mc.upper_bound("c");   // floor: "c" present (Tri)
+   CHECK(mc.key() == "c");
 }
 
 TEST_CASE("merge_cursor next when already at end", "[dwal]")

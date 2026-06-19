@@ -97,30 +97,19 @@ namespace psitri::dwal
       return advance_forward();
    }
 
+   // Mathematical upper bound: the LARGEST live key v <= key (the floor; the dual
+   // of lower_bound). Built from this cursor's own merge-aware lower_bound/prev/
+   // seek_last so the 3-way dedup + tombstone logic is reused, not re-derived.
    template <class Engine>
    bool basic_merge_cursor<Engine>::upper_bound(std::string_view key)
    {
-      if (_rw)
+      if (lower_bound(key))          // smallest live v >= key
       {
-         _rw_it  = _rw->map.upper_bound(key);
-         _rw_end = _rw->map.end();
+         if (_current_key == key)    // key present (live) → it is its own floor
+            return true;
+         return prev();              // landed strictly > key → predecessor = largest v < key
       }
-      if (_ro)
-      {
-         _ro_it  = _ro->map.upper_bound(key);
-         _ro_end = _ro->map.end();
-      }
-      if (_tri)
-      {
-         _tri->lower_bound(key);
-         // Skip past exact match to simulate upper_bound.
-         if (!_tri->is_end() && _tri->key() == key)
-            _tri->next();
-      }
-
-      _at_end  = false;
-      _at_rend = false;
-      return advance_forward();
+      return seek_last();            // no live key >= key → the last key is the floor
    }
 
 	   template <class Engine>

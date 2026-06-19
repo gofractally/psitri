@@ -4884,6 +4884,30 @@ namespace detail  // implementation types & node helpers — not part of the pub
          else
             return std::forward<VF>(vf).make();
       }
+      // GATHER protocol (raw_vals): the value source emits its bytes DIRECTLY
+      // into the leaf's value region — no intermediate contiguous view, no
+      // pre-built envelope, one copy at the single materialization point. A
+      // plain T source (bytes_value) is a view; any other source exposes
+      // size()/write(dst). Sources are view-like, so reading size then bytes
+      // (two reads) is fine — callers pass `val` by const-ref here.
+      template <class VF>
+      static size_t vf_emit_size_(const VF& vf) noexcept
+         requires raw_vals
+      {
+         if constexpr (std::is_same_v<std::remove_cvref_t<VF>, T>)
+            return vf.v.size();
+         else
+            return vf.size();
+      }
+      template <class VF>
+      static void vf_emit_(const VF& vf, char* dst) noexcept
+         requires raw_vals
+      {
+         if constexpr (std::is_same_v<std::remove_cvref_t<VF>, T>)
+            std::memcpy(dst, vf.v.data(), vf.v.size());
+         else
+            vf.write(dst);
+      }
 
       static packed_ptr pack_inline(const T& v) noexcept
       {
@@ -4930,12 +4954,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
          if constexpr (raw_vals)
          {
-            const std::string_view b  = vf_make(std::forward<VF>(val)).v;
-            K                      kt = K::value_ptr;  // leaf_alloc_ may pick value_large
-            char* p = leaf_alloc_(leaf_size(suf.size(), b.size()), kt);
+            const size_t sz = vf_emit_size_(val);  // gather: source emits in place
+            K            kt = K::value_ptr;         // leaf_alloc_ may pick value_large
+            char* p = leaf_alloc_(leaf_size(suf.size(), sz), kt);
             leaf_set_hdr(p, uint16_t(suf.size()), 0);
-            leaf_set_vlen(p, uint32_t(b.size()));
-            std::memcpy(p + leaf_value_off(), b.data(), b.size());
+            leaf_set_vlen(p, uint32_t(sz));
+            vf_emit_(val, p + leaf_value_off());
             std::memcpy(leaf_str(p), suf.data(), suf.size());
             return pack_(p, kt);
          }
@@ -4954,12 +4978,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
       {
          if constexpr (raw_vals)
          {
-            const std::string_view b  = vf_make(std::forward<VF>(val)).v;
-            K                      kt = K::value_ptr;
-            char* p = leaf_alloc_(leaf_size(pfx.size() + suf.size(), b.size()), kt);
+            const size_t sz = vf_emit_size_(val);  // gather: source emits in place
+            K            kt = K::value_ptr;
+            char* p = leaf_alloc_(leaf_size(pfx.size() + suf.size(), sz), kt);
             leaf_set_hdr(p, uint16_t(suf.size()), uint16_t(LEAF_FULL | pfx.size()));
-            leaf_set_vlen(p, uint32_t(b.size()));
-            std::memcpy(p + leaf_value_off(), b.data(), b.size());
+            leaf_set_vlen(p, uint32_t(sz));
+            vf_emit_(val, p + leaf_value_off());
             std::memcpy(leaf_str(p), pfx.data(), pfx.size());
             std::memcpy(leaf_str(p) + pfx.size(), suf.data(), suf.size());
             return pack_(p, kt);
@@ -4999,7 +5023,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          const std::string_view pfx = key.substr(0, depth);
          size_t                 vsz = sizeof(T);
          if constexpr (raw_vals)
-            vsz = vf_peek_(val).size();
+            vsz = vf_emit_size_(val);
          if (depth < 0x8000 && nblocks_(leaf_size(pfx.size() + suf.size(), vsz)) ==
                                    nblocks_(leaf_size(suf.size(), vsz)))
             return make_leaf_full(pfx, suf, std::forward<VF>(val));
@@ -5969,11 +5993,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   char* tl = static_cast<char*>(deref_(rh->term));
                   if constexpr (raw_vals)
                   {  // same-size: bytes in place; else rebuild the term leaf
-                     const std::string_view nb = vf_peek_(val);
-                     if (nb.size() == leaf_vlen(tl))
+                     const size_t sz = vf_emit_size_(val);
+                     if (sz == leaf_vlen(tl))
                      {
                         vh_leaf_dies_(tl);  // old bytes clobbered in place
-                        std::memcpy(tl + leaf_value_off(), nb.data(), nb.size());
+                        vf_emit_(val, tl + leaf_value_off());
                      }
                      else
                      {
@@ -6016,11 +6040,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
             {
                if constexpr (raw_vals)
                {
-                  const std::string_view nb = vf_peek_(val);
-                  if (nb.size() == leaf_vlen(L))
+                  const size_t sz = vf_emit_size_(val);
+                  if (sz == leaf_vlen(L))
                   {  // same size: overwrite in the owned line — no externalize (Dan)
                      vh_leaf_dies_(L);
-                     std::memcpy(L + leaf_value_off(), nb.data(), nb.size());
+                     vf_emit_(val, L + leaf_value_off());
                   }
                   else
                   {  // size changed: no longer fits this slot — externalize, then rebuild
@@ -6079,11 +6103,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
             {
                if constexpr (raw_vals)
                {
-                  const std::string_view nb = vf_peek_(val);
-                  if (nb.size() == leaf_vlen(L))
+                  const size_t sz = vf_emit_size_(val);
+                  if (sz == leaf_vlen(L))
                   {
                      vh_leaf_dies_(L);  // old bytes clobbered in place
-                     std::memcpy(L + leaf_value_off(), nb.data(), nb.size());
+                     vf_emit_(val, L + leaf_value_off());
                   }
                   else
                   {  // size changed: rebuild the leaf verbatim around new bytes
@@ -7621,9 +7645,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
          rel_budget_ = 64;  // per-op inline release budget
          static_assert(cow_enabled, "allocator has no refcount hooks");
          static_assert(std::is_trivially_copyable_v<T>, "COW memcpy-clones leaf values");
-         // privatize is FUSED into insert_'s descent (clone-if-shared per hop)
-         T tmp(std::forward<V>(v));
-         return insert_<true>(k, std::move(tmp));
+         // privatize is FUSED into insert_'s descent (clone-if-shared per hop).
+         // The value SOURCE (a plain T, or a VF that gathers into the leaf) is
+         // forwarded straight through — it materializes exactly once at the leaf,
+         // never as an intermediate T here.
+         return insert_<true>(k, std::forward<V>(v));
       }
       // NOTE: remove()'s fusion paths free child nodes unconditionally; callers
       // must not hold snapshots across cow_remove. Fusion-under-sharing is

@@ -10,7 +10,7 @@ Now I'll produce the plan.
 
 # Implementation plan: `nested_setlist` in `gcart::st`
 
-All line numbers are against the live `spec_tree.hpp` I just read. The design model is settled by the live dispatch tables and the spec, and they agree: **`nested_setlist` is a standalone, refcounted, 128‑byte cl1 slot** (groups A #1–#6 already route it to cl1; `resolve`/`unique`/`retain`/`release_one` all treat it like a cl1 node). The `node.hpp:37` comment ("inlined in this node's tail-heap") describes the *inner* layout, not how the *outer* node is allocated — the outer IS a cl1 slot whose tail-heap holds the inner setlists. There is no contradiction once you read "inlined in tail-heap" as "the inner sub-setlists live in the same 128B line," which is exactly the §7 NestedSetlistNode. **Proceed with the standalone-cl1 model.**
+All line numbers are against the live `tree.hpp` I just read. The design model is settled by the live dispatch tables and the spec, and they agree: **`nested_setlist` is a standalone, refcounted, 128‑byte cl1 slot** (groups A #1–#6 already route it to cl1; `resolve`/`unique`/`retain`/`release_one` all treat it like a cl1 node). The `node.hpp:37` comment ("inlined in this node's tail-heap") describes the *inner* layout, not how the *outer* node is allocated — the outer IS a cl1 slot whose tail-heap holds the inner setlists. There is no contradiction once you read "inlined in tail-heap" as "the inner sub-setlists live in the same 128B line," which is exactly the §7 NestedSetlistNode. **Proceed with the standalone-cl1 model.**
 
 The single most important invariant: a `nested_setlist` is **fully self-contained in one 128B line**. Outer "branch pointers" are u8 byte-offsets *within the line*; only the inner setlists' u32 branch entries are real cross-region pointers. This is what makes COW a single memcpy and release a single `cl1.free`.
 
@@ -134,17 +134,17 @@ Add a `t == bt::nested_setlist` arm to each. Ordered so the engine stays compila
 
 **Read decoders (Stage 2):**
 
-1. **`find_in`** — `spec_tree.hpp:413` (before `const setlist* n = ...`). Add:
+1. **`find_in`** — `tree.hpp:413` (before `const setlist* n = ...`). Add:
    ```cpp
    if (t == bt::nested_setlist) { /* outer prefix → outer key → inner setlist → inner key → child; see body below */ }
    ```
-2. **`node_prefix`** — `spec_tree.hpp:626-627`. Add a nested arm returning the OUTER prefix:
+2. **`node_prefix`** — `tree.hpp:626-627`. Add a nested arm returning the OUTER prefix:
    ```cpp
    if (t == bt::nested_setlist) return static_cast<const nested_setlist*>(resolve(e,t,p))->prefix();
    ```
-3. **`node_child`** — `spec_tree.hpp:619` (before the `setlist` cast). Add nested: find outer index; if absent return false; the child is the **inner setlist as a pointer** — but inner has no slot. **Resolution:** `node_child` on a nested returns false-equivalent for the write path because nested children aren't independent (the write path promotes nested before editing — Stage 4). So in the write path, nested never reaches `node_child` un-promoted. For SAFETY add an arm that promotes-or-asserts. Concretely the write path calls `node_child` only inside `edit_node`, and Stage 3/4 intercept nested *before* `node_child`. So this arm is `assert(false)` / unreachable, but add it defensively returning the inner's first-real-child is wrong — leave it `return false;` with a comment, since promotion guarantees non-arrival.
-4. **`node_term`** — `spec_tree.hpp:607` (before `setlist` cast). Add nested arm reading the outer term inner.
-5. **`read_branches`** — `spec_tree.hpp:595` (the `else`). Add nested arm BEFORE the setlist else. This is the **most important** one (drives release + retain + rebuild flatten). It must enumerate **each inner setlist's real u32 children**, NOT the outer offsets. See body in Stage 5.
+3. **`node_child`** — `tree.hpp:619` (before the `setlist` cast). Add nested: find outer index; if absent return false; the child is the **inner setlist as a pointer** — but inner has no slot. **Resolution:** `node_child` on a nested returns false-equivalent for the write path because nested children aren't independent (the write path promotes nested before editing — Stage 4). So in the write path, nested never reaches `node_child` un-promoted. For SAFETY add an arm that promotes-or-asserts. Concretely the write path calls `node_child` only inside `edit_node`, and Stage 3/4 intercept nested *before* `node_child`. So this arm is `assert(false)` / unreachable, but add it defensively returning the inner's first-real-child is wrong — leave it `return false;` with a comment, since promotion guarantees non-arrival.
+4. **`node_term`** — `tree.hpp:607` (before `setlist` cast). Add nested arm reading the outer term inner.
+5. **`read_branches`** — `tree.hpp:595` (the `else`). Add nested arm BEFORE the setlist else. This is the **most important** one (drives release + retain + rebuild flatten). It must enumerate **each inner setlist's real u32 children**, NOT the outer offsets. See body in Stage 5.
 
 **Region/free selectors — VERIFY (already correct, no edit needed):**
 
@@ -156,17 +156,17 @@ Add a `t == bt::nested_setlist` arm to each. Ordered so the engine stays compila
 
 **Release/COW (Stage 5):**
 
-11. **`release_subtree`** — `spec_tree.hpp:442` (`else`). Add nested arm: walk inner u32 children, then `cl1.free(p)`.
-12. **`release_async_`** — `spec_tree.hpp:479` (`else`). Mirror #11 with budget.
-13. **`release_ref`** (tree method) — `spec_tree.hpp:576-579`. Uses `read_branches`/`node_term`/`free_node`; once #5 + #4 handle nested, this works unchanged. **No edit** (relies on #5/#4).
-14. **`reprefix` drop==0** — `spec_tree.hpp:872` (`else`). Already memcpies 128B and preserves `out={t,s}` ✓. Its retain loop at line 875 uses `read_branches` → fixed by #5. **No edit** beyond #5.
+11. **`release_subtree`** — `tree.hpp:442` (`else`). Add nested arm: walk inner u32 children, then `cl1.free(p)`.
+12. **`release_async_`** — `tree.hpp:479` (`else`). Mirror #11 with budget.
+13. **`release_ref`** (tree method) — `tree.hpp:576-579`. Uses `read_branches`/`node_term`/`free_node`; once #5 + #4 handle nested, this works unchanged. **No edit** (relies on #5/#4).
+14. **`reprefix` drop==0** — `tree.hpp:872` (`else`). Already memcpies 128B and preserves `out={t,s}` ✓. Its retain loop at line 875 uses `read_branches` → fixed by #5. **No edit** beyond #5.
 
 **Construction (Stage 4):**
 
-15. **`build_node`** — `spec_tree.hpp:638`. Add the nested-create clause (Stage 4).
-16. **`edit_node`** — `spec_tree.hpp:817-830`. Add a `wt == bt::nested_setlist` arm (Stage 3/4).
+15. **`build_node`** — `tree.hpp:638`. Add the nested-create clause (Stage 4).
+16. **`edit_node`** — `tree.hpp:817-830`. Add a `wt == bt::nested_setlist` arm (Stage 3/4).
 
-**spec_kv.hpp:** no edits — the root tag is carried opaquely through `pack/rtag/rptr` and every helper it calls (try_retain/retain/release_subtree/find_in) is fixed above. (Confirmed in maps #30–#34.)
+**kv.hpp:** no edits — the root tag is carried opaquely through `pack/rtag/rptr` and every helper it calls (try_retain/retain/release_subtree/find_in) is fixed above. (Confirmed in maps #30–#34.)
 
 ---
 
@@ -380,4 +380,4 @@ Each stage is independently revertible; nested is inert (Stages A–C) until cre
 
 ---
 
-Files to edit (both absolute): `/Users/dlarimer/gofractally/psitri/libraries/gcart/include/gcart/spec_tree.hpp` (all of Stages 1–6); `/Users/dlarimer/gofractally/psitri/libraries/gcart/include/gcart/spec_kv.hpp` (NO edits — root tag is opaque). Validation binaries: `gcart-spec-tests` (oracle vs std::map, 200k mixed keys, must print `0 fails`) and `gcart-spec-kv-tests`. The single hardest, defer-and-measure decision is the **create heuristic in `try_pack_nested`** (Stage D) — ship the layout/decode/COW/release/promote machinery green-and-inert first (Stages A–C), then turn on create behind a `sal::env` knob and confirm 0-fails + bytes/key improvement before defaulting it on.
+Files to edit (both absolute): `/Users/dlarimer/gofractally/psitri/libraries/gcart/include/gcart/tree.hpp` (all of Stages 1–6); `/Users/dlarimer/gofractally/psitri/libraries/gcart/include/gcart/kv.hpp` (NO edits — root tag is opaque). Validation binaries: `gcart-spec-tests` (oracle vs std::map, 200k mixed keys, must print `0 fails`) and `gcart-spec-kv-tests`. The single hardest, defer-and-measure decision is the **create heuristic in `try_pack_nested`** (Stage D) — ship the layout/decode/COW/release/promote machinery green-and-inert first (Stages A–C), then turn on create behind a `sal::env` knob and confirm 0-fails + bytes/key improvement before defaulting it on.

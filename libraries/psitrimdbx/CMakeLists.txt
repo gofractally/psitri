@@ -15,16 +15,18 @@ target_include_directories(psitrimdbx
         ${CMAKE_SOURCE_DIR}/libraries/sal_art_ref/test
 )
 
-target_link_libraries(psitrimdbx PUBLIC psitri delta_art start_ver start_ref sal_art_ref gcart)
+target_link_libraries(psitrimdbx PUBLIC psitri delta_art start_ver start_ref sal_art_ref gcart rcart)
 target_compile_features(psitrimdbx PUBLIC cxx_std_20)
 
 # Backend selection (default: delta_art tiered). The shim source picks the engine
 # from a PSITRIMDBX_BACKEND_* macro; this maps a friendly string option to it so an
 # embedder (Silkworm: -DPSITRIMDBX_BACKEND=gcart) can choose without editing source.
 set(PSITRIMDBX_BACKEND "delta_art" CACHE STRING
-    "psitrimdbx storage backend: delta_art|delta_gcart|start_ver|start_ref|gcart|sal_art_ref|psitri")
+    "psitrimdbx storage backend: delta_art|delta_gcart|start_ver|start_ref|gcart|rcart|sal_art_ref|psitri")
 if(PSITRIMDBX_BACKEND STREQUAL "gcart")
     target_compile_definitions(psitrimdbx PUBLIC PSITRIMDBX_BACKEND_GCART=1)
+elseif(PSITRIMDBX_BACKEND STREQUAL "rcart")
+    target_compile_definitions(psitrimdbx PUBLIC PSITRIMDBX_BACKEND_RCART=1)
 elseif(PSITRIMDBX_BACKEND STREQUAL "delta_gcart")
     target_compile_definitions(psitrimdbx PUBLIC PSITRIMDBX_BACKEND_DELTA_GCART=1)
 elseif(PSITRIMDBX_BACKEND STREQUAL "start_ver")

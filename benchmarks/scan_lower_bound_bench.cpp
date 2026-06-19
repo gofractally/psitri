@@ -5,7 +5,7 @@
 //   scan-lower-bound-bench [keys=2000000] [probes=1000000] [range_len=50] [engine]
 //      engine: start_ver | start_ref | sal_art_ref | gcart | gcart_spec | all
 #include <gcart/kv.hpp>
-#include <gcart/spec_kv.hpp>
+#include <gcart/kv.hpp>
 #include <heart_kv.hpp>  // sal_art_ref::kv
 #include <start_ref/kv.hpp>
 #include <start_ver/kv.hpp>
@@ -159,7 +159,7 @@ int main(int argc, char** argv)
    {
       auto d = base / "gcart";
       fs::remove_all(d);
-      rows.push_back(run("gcart", gcart::legacy::kv::database::create(d), keys, probes, rlen));
+      rows.push_back(run("gcart", gcart::kv::database::create(d), keys, probes, rlen));
    }
    if (want("gcart_spec"))
    {

@@ -16,6 +16,7 @@
 #include "heart_kv.hpp"  // heart's native psitri-shaped API (sal_art_ref::kv::database)
 
 #include <adb/concepts.hpp>  // the shape, as concepts — every engine must pass
+#include <adb/testing/kv_conformance.hpp>  // shared bounds conformance (one check, all engines)
 #include <start_ref/kv.hpp>        // part's native psitri-shaped API (start_ref::kv::database)
 
 #include <psitri/cursor.hpp>
@@ -25,7 +26,6 @@
 
 #include <start_ver/kv.hpp>  // the 4th engine: vpart must pass standalone (Dan)
 #include <gcart/kv.hpp>      // the 5th engine: gcart (sal2 GC-ART)
-#include <gcart/spec_kv.hpp> // the 6th engine: gcart (spec engine)
 
 // The harness shape is compiler-enforced (SPEC §12.3): a drift in any engine
 // fails HERE, by name, before a single test runs.
@@ -33,9 +33,8 @@ static_assert(adb::kv_database<sal_art_ref::kv::database>);
 static_assert(adb::kv_database<start_ref::kv::database>);
 static_assert(adb::kv_database<psitri::database>);
 static_assert(adb::kv_database<start_ver::kv::database>);
-static_assert(adb::kv_database<gcart::legacy::kv::database>);
-static_assert(adb::kv_database<gcart::kv::database>);  // spec engine: cursor + get_root enforced here
-// the spec engine's snapshot cursor is fully mergeable (delta_art tier-capable).
+static_assert(adb::kv_database<gcart::kv::database>);  // gcart: cursor + get_root enforced here
+// gcart's snapshot cursor is fully mergeable (delta_art tier-capable).
 static_assert(adb::mergeable_cursor<decltype(std::declval<gcart::kv::write_session>().get_root(0).snapshot_cursor())>);
 static_assert(adb::shared_snapshot<decltype(std::declval<gcart::kv::write_session>().get_root(0))>);
 
@@ -43,17 +42,15 @@ static_assert(adb::shared_snapshot<decltype(std::declval<gcart::kv::write_sessio
 // Every engine the MDBX shim / delta_art tier can bind to must expose the five
 // role types AND open(path, sal::open_mode). Asserting it HERE is why the gap is
 // a named compile error, not a Silkworm link failure. (sal_art_ref::kv + psitri
-// are excluded: they are bound as a dwal cold-base / legacy direct, not via a
+// are excluded: they are bound as a dwal cold-base / native direct, not via a
 // kv::engine bundle.)
 static_assert(adb::kv_engine<start_ref::kv::engine>);
 static_assert(adb::kv_engine<start_ver::kv::engine>);
-static_assert(adb::kv_engine<gcart::legacy::kv::engine>);
-static_assert(adb::kv_engine<gcart::kv::engine>);  // spec engine: bundle enforced here
+static_assert(adb::kv_engine<gcart::kv::engine>);  // gcart: bundle enforced here
 
 static_assert(adb::openable_database<start_ref::kv::database, sal::open_mode>);
 static_assert(adb::openable_database<start_ver::kv::database, sal::open_mode>);
-static_assert(adb::openable_database<gcart::legacy::kv::database, sal::open_mode>);
-static_assert(adb::openable_database<gcart::kv::database, sal::open_mode>);  // the gap gcart had
+static_assert(adb::openable_database<gcart::kv::database, sal::open_mode>);
 
 namespace
 {
@@ -520,6 +517,10 @@ namespace
          ok(it == oracle.lower_bound(hi));  // oracle's matching range exhausted at hi too
       }
 
+      // ── Ordered-bounds conformance (lower_bound = ceiling, upper_bound = floor),
+      //    the shared adb::testing check instantiated against THIS engine's cursor.
+      adb::testing::check_bounds(ses->get_root(0).snapshot_cursor(), oracle, ok);
+
       // ── Phase 2: update every key with a new value (upsert overwrite)
       {
          std::vector<std::pair<std::string, std::string>> upd;
@@ -936,9 +937,10 @@ int main()
             guarded("start_ref", [&] { return run<start_ref::kv::database>("start_ref", tmp("kvcompat_start_ref")); });
    bool v = !want("start_ver") ||
             guarded("start_ver", [&] { return run<start_ver::kv::database>("start_ver", tmp("kvcompat_start_ver")); });
-   bool g = !want("gcart") ||
-            guarded("gcart", [&] { return run<gcart::legacy::kv::database>("gcart", tmp("kvcompat_gcart")); });
    perf_report();
+   // gcart is single-root by design, so it does not run the multi-root run<> battery;
+   // its full behavioral conformance lives in gcart-kv-tests (the shared adb checks),
+   // and its reopen is gated below.
 
    // ── recovery conformance: clean close + reopen, required for every engine ──
    std::printf("\n== recovery (clean close + reopen) ==\n");
@@ -947,17 +949,10 @@ int main()
    rc &= guarded("rec:psitri",      [&] { return recover<psitri::database>("psitri", tmp("kvrec_psitri")); });
    rc &= guarded("rec:start_ref",   [&] { return recover<start_ref::kv::database>("start_ref", tmp("kvrec_sref")); });
    rc &= guarded("rec:start_ver",   [&] { return recover<start_ver::kv::database>("start_ver", tmp("kvrec_sver")); });
-   rc &= guarded("rec:gcart",       [&] { return recover<gcart::kv::database>("gcart(spec)", tmp("kvrec_gcart")); });
-   // gcart_legacy (V1) is the DEPRECATED engine (demoted in the gcart flatten); it
-   // uses sal2::arena, which has no reopen recovery yet. Report its status so the
-   // gap is visible, but don't gate the suite on the retiring engine.
-   const bool rc_legacy =
-       guarded("rec:gcart_legacy", [&] { return recover<gcart::legacy::kv::database>("gcart_legacy", tmp("kvrec_gcartv1")); });
-   std::printf("  (gcart_legacy recovery %s — deprecated engine, not gated)\n",
-               rc_legacy ? "PASS" : "FAIL(known gap)");
+   rc &= guarded("rec:gcart",       [&] { return recover<gcart::kv::database>("gcart", tmp("kvrec_gcart")); });
 
-   std::printf("RESULT: sal_art_ref %s, psitri %s, start_ref %s, start_ver %s, gcart %s, recovery %s\n",
+   std::printf("RESULT: sal_art_ref %s, psitri %s, start_ref %s, start_ver %s, recovery %s\n",
                h ? "PASS" : "FAIL", p ? "PASS" : "FAIL", a ? "PASS" : "FAIL", v ? "PASS" : "FAIL",
-               g ? "PASS" : "FAIL", rc ? "PASS" : "FAIL");
-   return (h && p && a && v && g && rc) ? 0 : 1;
+               rc ? "PASS" : "FAIL");
+   return (h && p && a && v && rc) ? 0 : 1;
 }

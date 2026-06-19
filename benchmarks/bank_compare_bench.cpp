@@ -17,9 +17,8 @@
 #include <heart_kv.hpp>           // sal_art_ref::kv (standalone)
 #include <start_ver/kv.hpp>       // start_ver::kv (hot, standalone)
 #include <start_ref/kv.hpp>       // start_ref::kv (hot, standalone)
-#include <gcart/kv.hpp>           // gcart::legacy::kv (sal2, lock-free MVCC reads)
-#include <gcart/spec_kv.hpp>      // gcart::kv (spec node taxonomy, 3 regions)
-#include <rcart/spec_kv.hpp>      // rcart::kv (SAME taxonomy, direct-grain leaves = baseline)
+#include <gcart/kv.hpp>      // gcart::kv (sal2 GC-ART: 3-region node taxonomy, CB-movable leaves)
+#include <rcart/kv.hpp>      // rcart::kv (SAME taxonomy, direct-grain leaves = baseline)
 
 #include <atomic>
 #include <chrono>
@@ -229,6 +228,13 @@ int main(int argc, char** argv)
 
    std::vector<row> rows;
 
+   // BANK_PLAIN_ONLY=1 → skip the tiered (delta_art) + start_* engines and run only
+   // the plain comparison set (sal_art_ref / gcart / rcart). The tiered engines rotate
+   // W∪B per commit, which is pathological at small batch sizes (batch=1) and not the
+   // subject of a leaf-engine batch sweep. sync_mode defaults to none for all engines.
+   const bool plain_only = std::getenv("BANK_PLAIN_ONLY") != nullptr;
+
+   if (!plain_only)
    {  // delta_art<start_ver, sal_art_ref>
       std::filesystem::remove_all(base + "/tiered");
       std::filesystem::create_directories(base + "/tiered");
@@ -240,6 +246,7 @@ int main(int argc, char** argv)
       auto db = TK::database::open(base + "/tiered", sal::open_mode::create_or_open, cfg);
       rows.push_back(run_bank("delta_art(sv→sar)", db, p, base + "/tiered"));
    }
+   if (!plain_only)
    {  // delta_art<start_ver, gcart> — the tiered config under test (gcart COLD base)
       std::filesystem::remove_all(base + "/tiered_gcart");
       std::filesystem::create_directories(base + "/tiered_gcart");
@@ -251,6 +258,7 @@ int main(int argc, char** argv)
       auto db = TKG::database::open(base + "/tiered_gcart", sal::open_mode::create_or_open, cfg);
       rows.push_back(run_bank("delta_art(sv→gcart)", db, p, base + "/tiered_gcart"));
    }
+   if (!plain_only)
    {  // delta_art<start_ref, sal_art_ref>
       std::filesystem::remove_all(base + "/tiered_ref");
       std::filesystem::create_directories(base + "/tiered_ref");
@@ -260,12 +268,12 @@ int main(int argc, char** argv)
       auto db = TKR::database::open(base + "/tiered_ref", sal::open_mode::create_or_open, cfg);
       rows.push_back(run_bank("delta_art(sr→sar)", db, p, base + "/tiered_ref"));
    }
-   {  // start_ver standalone
+   {  // start_ver standalone (hazard-pointer root — included in the small-batch compare)
       std::filesystem::remove_all(base + "/start_ver");
       auto db = start_ver::kv::database::create(base + "/start_ver");
       rows.push_back(run_bank("start_ver", db, p, base + "/start_ver"));
    }
-   {  // start_ref standalone
+   {  // start_ref standalone (hazard-pointer root — included in the small-batch compare)
       std::filesystem::remove_all(base + "/start_ref");
       auto db = start_ref::kv::database::create(base + "/start_ref");
       rows.push_back(run_bank("start_ref", db, p, base + "/start_ref"));
@@ -275,21 +283,16 @@ int main(int argc, char** argv)
       auto db = sal_art_ref::kv::database::create(base + "/sal_art_ref");
       rows.push_back(run_bank("sal_art_ref", db, p, base + "/sal_art_ref"));
    }
-   {  // gcart standalone (sal2, lock-free MVCC reads)
+   {  // gcart (sal2 GC-ART: 3-region node taxonomy, FIX routing + SAL suffix_value, CB-movable)
       std::filesystem::remove_all(base + "/gcart");
-      auto db = gcart::legacy::kv::database::create(base + "/gcart");
+      auto db = gcart::kv::database::create(base + "/gcart");
       rows.push_back(run_bank("gcart", db, p, base + "/gcart"));
    }
-   {  // gcart SPEC engine (3-region node taxonomy: FIX routing + SAL suffix_value)
-      std::filesystem::remove_all(base + "/gcart_spec");
-      auto db = gcart::kv::database::create(base + "/gcart_spec");
-      rows.push_back(run_bank("gcart_spec", db, p, base + "/gcart_spec"));
-   }
-   {  // rcart = SAME spec node taxonomy, DIRECT-grain leaves (refcount baseline).
-      // Apples-to-apples vs gcart_spec isolates the control-block leaf cost.
-      std::filesystem::remove_all(base + "/rcart_spec");
-      auto db = rcart::kv::database::create(base + "/rcart_spec");
-      rows.push_back(run_bank("rcart_spec", db, p, base + "/rcart_spec"));
+   {  // rcart = SAME node taxonomy, DIRECT-grain leaves (refcount baseline).
+      // Apples-to-apples vs gcart isolates the control-block leaf cost.
+      std::filesystem::remove_all(base + "/rcart");
+      auto db = rcart::kv::database::create(base + "/rcart");
+      rows.push_back(run_bank("rcart", db, p, base + "/rcart"));
    }
 
    printf("\n%-20s %12s %12s %14s %12s %14s %9s %9s  %s\n", "engine", "load/s", "wtx/s",

@@ -13,6 +13,7 @@
 // inline byte strings (<= 126 B): COW clones are memcpys and every value byte
 // lives in the arena.
 #pragma once
+#include <cassert>
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -137,14 +138,35 @@ namespace start_ref::kv
    {
       return s.substr(2);
    }
-   inline value_view env_raw_(value_view v)  // [0][bytes], thread_local scratch
+   // TAGGED value-source: the engine's gather protocol (size()/write()) emits
+   // [u16 tag][payload] DIRECTLY into the leaf's value region — upsert builds
+   // nothing, one copy, heap-free at every size, no thread_local. This replaces
+   // the old env_raw_ pre-built envelope.
+   struct tagged_val
    {
-      thread_local std::string buf;
-      buf.resize(2 + v.size());
-      buf[0] = buf[1] = 0;
-      std::memcpy(buf.data() + 2, v.data(), v.size());
-      return {buf.data(), buf.size()};
-   }
+      uint16_t   tag;
+      value_view payload;
+      size_t     size() const noexcept { return 2 + payload.size(); }
+      void       write(char* d) const noexcept
+      {
+         std::memcpy(d, &tag, 2);
+         std::memcpy(d + 2, payload.data(), payload.size());
+      }
+      // DEAD for raw_vals: a raw value never inline-packs and never lands in a
+      // POD bucket, so these never RUN — they exist only to compile the VF
+      // protocol's if-constexpr-discarded branches. NEVER return a real value.
+      template <class A>
+      void construct(A&, bval*) const
+      {
+         assert(false);
+         __builtin_unreachable();
+      }
+      bval make() const
+      {
+         assert(false);
+         __builtin_unreachable();
+      }
+   };
    template <class S>
    S slot_decode(value_view slot)
    {
@@ -237,13 +259,17 @@ namespace start_ref::kv
 
       bool seek_begin() { _rend = false; _it = _view.begin(); return _it != _view.end(); }
       bool lower_bound(key_view k) { _rend = false; _it = _view.lower_bound(k); return _it != _view.end(); }
+      // Mathematical upper bound: the LARGEST key v <= k (floor; the dual of
+      // lower_bound = smallest v >= k). prev()/seek_last() are O(n) on start_ref.
       bool upper_bound(key_view k)
       {
-         _rend = false;
-         _it = _view.lower_bound(k);
-         if (_it != _view.end() && (*_it).first == k)
-            ++_it;
-         return _it != _view.end();
+         if (lower_bound(k))  // smallest v >= k
+         {
+            if (key() == k)   // k present → its own floor
+               return true;
+            return prev();    // landed strictly > k → predecessor = largest v < k
+         }
+         return seek_last();  // no key >= k → last key is the floor
       }
       void find(key_view k)
       {
@@ -996,11 +1022,21 @@ namespace start_ref::kv
 
    inline void transaction::upsert(key_view k, value_view v)
    {
-      const value_view env = env_raw_(v);  // [0][bytes]
       if constexpr (engine_t::cb_create)
+      {
+         // gated page engine (PART_CBUCKET=1): the page path doesn't take a
+         // value-source; build the [0][bytes] envelope in a CALLER-LOCAL (never
+         // thread_local) buffer just for this gated arm.
+         std::string env;
+         env.resize(2 + v.size());
+         env[0] = env[1] = 0;
+         std::memcpy(env.data() + 2, v.data(), v.size());
          _ws->tree_for(_roots[0].index).pg_upsert(k, env);  // bytes straight to the page
+      }
       else
-         _ws->tree_for(_roots[0].index).cow_insert(k, bval{env});  // view in; the leaf copies once
+      {  // [0][bytes] gathered straight into the leaf — one copy, no envelope.
+         _ws->tree_for(_roots[0].index).cow_insert(k, tagged_val{kRawType, v});
+      }
    }
    template <class T>
       requires storable<std::remove_cvref_t<T>>
@@ -1008,15 +1044,23 @@ namespace start_ref::kv
    {
       using U                     = std::remove_cvref_t<T>;
       const typename U::t_pod pod = std::move(v).take_pod();  // custody -> db
-      char                    buf[2 + sizeof(pod)];
-      const uint16_t          id = U::type_id;
-      std::memcpy(buf, &id, 2);
-      std::memcpy(buf + 2, &pod, sizeof(pod));
-      const value_view env(buf, sizeof(buf));
       if constexpr (engine_t::cb_create)
-         _ws->tree_for(_roots[0].index).pg_upsert(k, env);
+      {  // gated page engine: build the [type_id][pod] envelope in a CALLER-LOCAL buffer.
+         char           buf[2 + sizeof(pod)];
+         const uint16_t id = U::type_id;
+         std::memcpy(buf, &id, 2);
+         std::memcpy(buf + 2, &pod, sizeof(pod));
+         _ws->tree_for(_roots[0].index).pg_upsert(k, value_view(buf, sizeof(buf)));
+      }
       else
-         _ws->tree_for(_roots[0].index).cow_insert(k, bval{env});
+      {
+         // [type_id][pod] gathered straight into the leaf. cow_insert copies the
+         // pod synchronously (descends + materializes before returning) — the pod
+         // local outlives the call, so a view over it is safe.
+         _ws->tree_for(_roots[0].index)
+             .cow_insert(k, tagged_val{U::type_id, value_view(reinterpret_cast<const char*>(&pod),
+                                                              sizeof(pod))});
+      }
    }
    inline any_value transaction::get_any(key_view k) const
    {
@@ -1176,7 +1220,7 @@ namespace start_ref::kv
 
    inline void tree_handle::upsert(key_view k, value_view v)
    {
-      _tx->tree_(_ri).cow_insert(k, bval{env_raw_(v)});
+      _tx->tree_(_ri).cow_insert(k, tagged_val{kRawType, v});
    }
    inline int tree_handle::remove(key_view k)
    {

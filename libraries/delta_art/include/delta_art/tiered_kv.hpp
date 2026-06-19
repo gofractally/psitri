@@ -159,16 +159,20 @@ namespace delta_art
             _b.lower_bound(k);
             return settle_fwd_();
          }
+         // Mathematical upper bound: the LARGEST live key v <= k (the floor; the dual
+         // of lower_bound). Reuses the merge-aware lower_bound/prev/seek_last so the
+         // W∪B(∪M) dedup + direction handling is not re-derived here.
          bool upper_bound(key_view k)
          {
             if (!_w)
-               return _b.upper_bound(k);
-            _dir_fwd_ = true;
-            _w->upper_bound(k);
-            if (_m)
-               _m->upper_bound(k);
-            _b.upper_bound(k);
-            return settle_fwd_();
+               return _b.upper_bound(k);  // base passthrough (the base leg is floor too)
+            if (lower_bound(k))           // smallest live v >= k
+            {
+               if (key() == k)            // k present (live) → it is its own floor
+                  return true;
+               return prev();             // landed strictly > k → predecessor = largest v < k
+            }
+            return seek_last();           // no live key >= k → the last key is the floor
          }
          bool next()
          {
@@ -434,8 +438,10 @@ namespace delta_art
          // key). fwd: smallest key > cur; bwd: largest key < cur.
          template <class C>
          static void reseek_fwd_(C& c, key_view cur)
-         {
-            c.upper_bound(cur);
+         {  // smallest key > cur (strictly greater): lower_bound then skip an exact
+            // match. (A leg's upper_bound is now the floor, so it can't be used here.)
+            if (c.lower_bound(cur) && c.key() == cur)
+               c.next();
          }
          template <class C>
          static void reseek_bwd_(C& c, key_view cur)

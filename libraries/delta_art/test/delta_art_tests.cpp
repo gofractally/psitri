@@ -4,6 +4,7 @@
 // the floor SURVIVE), both views, and kv_engine conformance (cursors incl.).
 #include <catch2/catch_test_macros.hpp>
 
+#include <adb/testing/kv_conformance.hpp>  // shared bounds conformance (one check, all engines)
 #include <delta_art/tiered_kv.hpp>
 
 #include <heart_dwal_engine.hpp>  // sal_art_ref::radix::dwal_engine (concept-checked)
@@ -338,12 +339,16 @@ TEST_CASE("delta_art: bidirectional merge cursor handles direction changes acros
       REQUIRE(cur.prev());
       REQUIRE(std::string(cur.key()) == "k0099");
    }
-   SECTION("upper_bound(K) then prev() round-trips (forward->backward)")
+   SECTION("ordered bounds (lower_bound ceiling, upper_bound floor) vs oracle")
    {
-      REQUIRE(cur.upper_bound("k0099"));  // first > k0099 == k0100
-      REQUIRE(std::string(cur.key()) == "k0100");
-      REQUIRE(cur.prev());
-      REQUIRE(std::string(cur.key()) == "k0099");
+      // The SHARED adb conformance, instantiated on the tiered W u B cursor — the same
+      // bounds check every engine runs (defined once in adb::testing), not a
+      // delta_art-specific copy. Its floor (upper_bound) is lower_bound+prev, so it
+      // also exercises forward-op-then-prev across the hot/cold tier boundary.
+      long bound_fails = 0;
+      adb::testing::check_bounds(rs->create_cursor(0), oracle,
+                                 [&](bool c) { if (!c) ++bound_fails; });
+      REQUIRE(bound_fails == 0);
    }
 }
 

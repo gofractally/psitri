@@ -58,20 +58,13 @@ target_compile_options(st-inline-read-bench PRIVATE -O3 -DNDEBUG)
 set_target_properties(st-inline-read-bench PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
-# gcart oplog replay: drive a captured Silkworm op-stream through gcart's adb API.
+# gcart oplog replay: read+write VALIDATION of gcart::kv on a captured Silkworm
+# op-stream (reads cross-checked against Silkworm's recorded results).
 add_executable(gcart-oplog-replay gcart_oplog_replay.cpp)
 target_link_libraries(gcart-oplog-replay PRIVATE gcart)
 target_compile_definitions(gcart-oplog-replay PRIVATE XXH_INLINE_ALL)
 target_compile_options(gcart-oplog-replay PRIVATE -O3 -DNDEBUG)
 set_target_properties(gcart-oplog-replay PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-
-# gcart SPEC oplog replay: read+write VALIDATION of gcart::kv on the Silkworm capture.
-add_executable(gcart-spec-oplog-replay gcart_spec_oplog_replay.cpp)
-target_link_libraries(gcart-spec-oplog-replay PRIVATE gcart)
-target_compile_definitions(gcart-spec-oplog-replay PRIVATE XXH_INLINE_ALL)
-target_compile_options(gcart-spec-oplog-replay PRIVATE -O3 -DNDEBUG)
-set_target_properties(gcart-spec-oplog-replay PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 # oplog comparison: replay one captured Silkworm op-stream through each adb engine.

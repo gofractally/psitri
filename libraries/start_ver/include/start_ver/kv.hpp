@@ -15,6 +15,7 @@
 //   • a background drain frees every chain whose death version is <= the
 //     floor (the oldest pinned version; everything, when nothing is pinned).
 #pragma once
+#include <cassert>
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -119,15 +120,35 @@ namespace start_ver::kv
    {
       return s.substr(2);
    }
-   // Raw-bytes envelope, built in thread_local arena scratch (grows once).
-   inline value_view env_raw_(value_view v)
+   // TAGGED value-source: the engine's gather protocol (size()/write()) emits
+   // [u16 tag][payload] DIRECTLY into the leaf's value region — upsert builds
+   // nothing, one copy, heap-free at every size, no thread_local. This replaces
+   // the old env_raw_ pre-built envelope.
+   struct tagged_val
    {
-      thread_local std::string buf;
-      buf.resize(2 + v.size());
-      buf[0] = buf[1] = 0;
-      std::memcpy(buf.data() + 2, v.data(), v.size());
-      return {buf.data(), buf.size()};
-   }
+      uint16_t   tag;
+      value_view payload;
+      size_t     size() const noexcept { return 2 + payload.size(); }
+      void       write(char* d) const noexcept
+      {
+         std::memcpy(d, &tag, 2);
+         std::memcpy(d + 2, payload.data(), payload.size());
+      }
+      // DEAD for raw_vals: a raw value never inline-packs and never lands in a
+      // POD bucket, so these never RUN — they exist only to compile the VF
+      // protocol's if-constexpr-discarded branches. NEVER return a real value.
+      template <class A>
+      void construct(A&, bval*) const
+      {
+         assert(false);
+         __builtin_unreachable();
+      }
+      bval make() const
+      {
+         assert(false);
+         __builtin_unreachable();
+      }
+   };
    template <class S>
    S slot_decode(value_view slot)
    {
@@ -276,13 +297,17 @@ namespace start_ver::kv
          _it   = _view.lower_bound(k);
          return !is_end();
       }
+      // Mathematical upper bound: the LARGEST key v <= k (floor; the dual of
+      // lower_bound = smallest v >= k).
       bool upper_bound(key_view k)
       {
-         _rend = false;
-         _it   = _view.lower_bound(k);
-         if (_it != _view.end() && (*_it).first == k)
-            ++_it;
-         return !is_end();
+         if (lower_bound(k))  // smallest v >= k
+         {
+            if (key() == k)   // k present → its own floor
+               return true;
+            return prev();    // landed strictly > k → predecessor = largest v < k
+         }
+         return seek_last();  // no key >= k → last key is the floor
       }
       bool find(key_view k)
       {
@@ -1268,19 +1293,21 @@ namespace start_ver::kv
 
    inline void transaction::upsert(key_view k, value_view v)
    {
-      _ws->_t.cow_insert(k, bval{env_raw_(v)});  // [0][bytes]; the leaf copies once
+      // [0][bytes] gathered straight into the leaf — one copy, no envelope.
+      _ws->_t.cow_insert(k, tagged_val{kRawType, v});
    }
    template <class T>
       requires storable<std::remove_cvref_t<T>>
    inline void transaction::upsert(key_view k, T&& v)
    {
-      using U                = std::remove_cvref_t<T>;
+      using U                     = std::remove_cvref_t<T>;
       const typename U::t_pod pod = std::move(v).take_pod();  // custody -> db
-      char                    buf[2 + sizeof(pod)];
-      const uint16_t          id = U::type_id;
-      std::memcpy(buf, &id, 2);
-      std::memcpy(buf + 2, &pod, sizeof(pod));
-      _ws->_t.cow_insert(k, bval{value_view(buf, sizeof(buf))});
+      // [type_id][pod] gathered straight into the leaf. cow_insert copies the
+      // pod synchronously (descends + materializes before returning) — the pod
+      // local outlives the call, so a view over it is safe.
+      _ws->_t.cow_insert(
+          k, tagged_val{U::type_id,
+                        value_view(reinterpret_cast<const char*>(&pod), sizeof(pod))});
    }
    inline any_value transaction::get_any(key_view k) const
    {
@@ -1375,7 +1402,7 @@ namespace start_ver::kv
 
    inline void tree_handle::upsert(key_view k, value_view v)
    {
-      _tx->tree_(_ri).cow_insert(k, bval{env_raw_(v)});
+      _tx->tree_(_ri).cow_insert(k, tagged_val{kRawType, v});
    }
    inline int tree_handle::remove(key_view k)
    {

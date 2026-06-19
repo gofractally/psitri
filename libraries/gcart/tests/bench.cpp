@@ -1,57 +1,43 @@
+// A/B: gcart (CB-movable leaves) vs rcart (direct-grain leaves), spec engine.
 #include <gcart/tree.hpp>
+#include <rcart/tree.hpp>
 #include <chrono>
 #include <cstdio>
 #include <random>
 #include <string>
 #include <vector>
+#include <filesystem>
 #include <sys/resource.h>
-using Clock = std::chrono::steady_clock;
-static double nsop(Clock::time_point a, Clock::time_point b, size_t n)
-{ return double(std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count()) / double(n); }
-static long rss_mb() { struct rusage r; getrusage(RUSAGE_SELF, &r); return r.ru_maxrss / 1048576; }
+using clk = std::chrono::steady_clock;
+static double nsop(clk::time_point a, clk::time_point b, size_t n){ return double(std::chrono::duration_cast<std::chrono::nanoseconds>(b-a).count())/double(n); }
+static long rss_mb(){ struct rusage r; getrusage(RUSAGE_SELF,&r); return r.ru_maxrss/1048576; }
 
-int main(int argc, char** argv)
-{
-   const size_t N    = argc > 1 ? std::strtoull(argv[1], 0, 10) : 1000000;
-   const int    mode = argc > 2 ? atoi(argv[2]) : 1;  // 0=dict-ish,1=random,2=seq
-   namespace fs = std::filesystem;
-   const fs::path dir = fs::temp_directory_path() / "gcart_bench";
-   fs::remove_all(dir);
-
-   std::vector<std::string> keys;
-   keys.reserve(N);
-   std::mt19937 r(99);
-   for (size_t i = 0; i < N; ++i)
-   {
-      char b[40];
-      if (mode == 0) { static const char* p[]={"user:","user:profile:","acct:bal:","session:tok:"}; std::string s=p[r()%4]; std::snprintf(b,sizeof b,"%u",unsigned(r())); keys.push_back(s+b); }
-      else if (mode == 2) { std::snprintf(b,sizeof b,"key%012zu",i); keys.push_back(b); }
-      else { int n=4+int(r()%20); std::string s; for(int j=0;j<n;++j) s.push_back(char('a'+r()%26)); keys.push_back(std::move(s)); }
-   }
-
-   sal2::arena a(sal2::arena_config{.dir = dir});
-   gcart::legacy::tree t(a);
-   const std::string val = "value-payload-100b........................................................................xx";
-
-   auto t0 = Clock::now();
-   for (auto& k : keys) t.upsert(k, val);
-   auto t1 = Clock::now();
-   // get hits (shuffled order to defeat any locality from insert order)
-   std::vector<uint32_t> idx(N); for (size_t i=0;i<N;++i) idx[i]=uint32_t(i);
-   std::shuffle(idx.begin(), idx.end(), r);
-   volatile uint64_t sink = 0;
-   auto t2 = Clock::now();
-   for (uint32_t i : idx) { const gcart::legacy::leaf* lf = t.find(keys[i]); sink += lf ? lf->vlen : 0; }
-   auto t3 = Clock::now();
-   // get misses
-   size_t misses = 0;
-   auto t4 = Clock::now();
-   for (size_t i = 0; i < N; ++i) { std::string m = keys[i] + "\x01zz"; if (!t.find(m)) ++misses; }
-   auto t5 = Clock::now();
-
-   const uint64_t live = a.live_bytes();
-   std::printf("gcart mode=%d N=%zu  insert=%.1f ns  hit=%.1f ns  miss=%.1f ns  live=%.1f MB  bytes/key=%.1f  rss=%ld MB  (sink=%llu miss=%zu)\n",
-               mode, N, nsop(t0,t1,N), nsop(t2,t3,N), nsop(t4,t5,N),
-               live/1048576.0, double(live)/N, rss_mb(), (unsigned long long)sink, misses);
+template<class Engine, class Tree>
+void run(const char* name, const char* dir, size_t N, bool seq){
+   std::filesystem::remove_all(dir);
+   Engine e{std::filesystem::path(dir)};
+   Tree t(e);
+   std::mt19937_64 r(12345);
+   std::vector<uint64_t> ks(N);
+   // seq=true → dense sequential keys (256-way FULL nodes on the low bytes,
+   // the full-node-prefetch path); false → random (sparse, mostly setlists).
+   for(size_t i=0;i<N;i++) ks[i] = seq ? __builtin_bswap64(uint64_t(i)) : r();
+   char kb[16], vb[100]; for(int i=0;i<100;i++) vb[i]='v';
+   auto a=clk::now();
+   for(size_t i=0;i<N;i++){ std::memcpy(kb,&ks[i],8); std::memcpy(kb+8,&ks[i],8);
+      t.upsert(std::string_view(kb,16), std::string_view(vb,100)); }
+   auto b=clk::now();
+   std::string out; size_t hit=0;
+   auto c=clk::now();
+   for(size_t i=0;i<N;i++){ std::memcpy(kb,&ks[i],8); std::memcpy(kb+8,&ks[i],8);
+      if(t.find(std::string_view(kb,16), out)) hit++; }
+   auto d=clk::now();
+   std::printf("%-7s %-4s N=%zu  insert=%6.1f ns/op  find=%6.1f ns/op  hits=%zu  rss=%ldMB\n",
+      name, seq?"seq":"rand", N, nsop(a,b,N), nsop(c,d,N), hit, rss_mb());
+}
+int main(int argc, char**argv){
+   size_t N = argc>1? std::strtoull(argv[1],0,10):1000000;
+   run<gcart::engine, gcart::tree>("gcart", "/tmp/sb_gcart", N, false);
+   run<rcart::engine, rcart::tree>("rcart", "/tmp/sb_rcart", N, false);
    return 0;
 }

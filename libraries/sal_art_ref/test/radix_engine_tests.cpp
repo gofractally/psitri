@@ -429,13 +429,15 @@ TEST_CASE("radix_engine: ordered container — in-order, lower_bound, upper_boun
             REQUIRE(ck == oi->first);
             REQUIRE(std::string(cv) == oi->second);
          }
-         got = t.upper_bound(q, ck, cv);
-         oi  = oracle.upper_bound(q);
-         REQUIRE(got == (oi != oracle.end()));
+         got      = t.upper_bound(q, ck, cv);  // floor: largest key <= q
+         auto gt  = oracle.upper_bound(q);     // first > q
+         bool ofl = (gt != oracle.begin());    // a key <= q exists
+         auto fi  = ofl ? std::prev(gt) : oracle.end();
+         REQUIRE(got == ofl);
          if (got)
          {
-            REQUIRE(ck == oi->first);
-            REQUIRE(std::string(cv) == oi->second);
+            REQUIRE(ck == fi->first);
+            REQUIRE(std::string(cv) == fi->second);
          }
       };
       for (auto& [k, v] : oracle)

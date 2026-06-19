@@ -5,7 +5,7 @@
 // 2 lines). Times random point reads so we can see whether eliminating the SAL
 // cacheline makes inline reads FASTER (as it should) — Dan's question.
 //   st-inline-read-bench [pairs=2000000] [readloops=4] [dir=/tmp/st_inl]
-#include <gcart/spec_kv.hpp>
+#include <gcart/kv.hpp>
 
 #include <chrono>
 #include <cstdio>

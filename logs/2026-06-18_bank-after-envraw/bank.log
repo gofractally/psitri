@@ -1,0 +1,105 @@
+bank compare: 1000000 accts x 1000000, 5000000 transfers, batch 1000, 4 readers
+
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/tiered/delta/meta.part[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=295072[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4718936064, size=295072[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/tiered/delta/large/meta.part[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=2101408[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4761190400, size=2101408[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/tiered/base/ptrs/header.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4310237184, size=4224[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/tiered/base/iref/header.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4310253568, size=4224[0m
+allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (7449 GB) — capping[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/tiered/base/header[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/tiered/base/roots[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/tiered/base/session_ops.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=93650944[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=5300174848, size=93650944[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4310269952, size=32768[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4310302720, size=32768[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/tiered_gcart/delta/meta.part[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=295072[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4718936064, size=295072[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/tiered_gcart/delta/large/meta.part[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=2101408[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4761190400, size=2101408[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/tiered_gcart/base/roots.dat[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4096[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4310237184, size=4096[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/tiered_ref/delta/meta.part[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=295072[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4718936064, size=295072[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/tiered_ref/delta/large/meta.part[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4198560[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4761190400, size=4198560[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/tiered_ref/base/ptrs/header.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4310237184, size=4224[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/tiered_ref/base/iref/header.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4310253568, size=4224[0m
+allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (7449 GB) — capping[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/tiered_ref/base/header[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/tiered_ref/base/roots[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/tiered_ref/base/session_ops.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=93650944[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=5302272000, size=93650944[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4310269952, size=32768[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4310302720, size=32768[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/start_ver/meta.part[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=295072[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4718936064, size=295072[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/start_ver/large/meta.part[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=2101408[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4761190400, size=2101408[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/start_ref/meta.part[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=295072[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4718936064, size=295072[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/start_ref/large/meta.part[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4198560[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4761190400, size=4198560[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/sal_art_ref/ptrs/header.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4310237184, size=4224[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/sal_art_ref/iref/header.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4310253568, size=4224[0m
+allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (7449 GB) — capping[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/sal_art_ref/header[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/sal_art_ref/roots[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/sal_art_ref/session_ops.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=93650944[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=5517623296, size=93650944[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4310269952, size=32768[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4310302720, size=32768[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/gcart/roots.dat[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4096[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4310237184, size=4096[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /tmp/bank_cmp_after/rcart/roots.dat[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4096[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4310237184, size=4096[0m
+
+engine                     load/s        wtx/s      rd/s(+wr)   wtx/s(+rd)     rd/s(solo)  live(MB)  disk(MB)  balance
+delta_art(sv→sar)        880290        98672       51783764        84151       54625335         0       675  PASS
+delta_art(sv→gcart)      1001169       102822       52664255        85104       58343726         0       293  PASS
+delta_art(sr→sar)       2296042       537913       45352242       607463       50125756         0       839  PASS
+start_ver                10546780      2318935       52094151      1974415       61299807         0       293  PASS
+start_ref                 6789548       923555       50238472       581577       58336127         0       457  PASS
+sal_art_ref               3131296       563034       15964944       480808       28105106         0       542  PASS
+gcart                     2802180       990175       32279139       474818       41385647        39       162  PASS
+rcart                     2841988      1154369       51982454       608973       63503371        39       154  PASS

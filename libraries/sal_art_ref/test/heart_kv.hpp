@@ -139,7 +139,7 @@ namespace sal_art_ref::kv
 
       bool seek_begin() { return _c.seek_begin(); }
       bool lower_bound(key_view k) { return _c.lower_bound(k); }
-      void upper_bound(key_view k) { _c.upper_bound(k); }
+      bool upper_bound(key_view k) { return _c.upper_bound(k); }  // floor: largest v <= k
       void find(key_view k) { _c.find(k); }
       bool next() { return _c.next(); }
       bool is_end() const { return _c.is_end(); }

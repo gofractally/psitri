@@ -1,6 +1,6 @@
 add_library(delta_art INTERFACE)
 target_include_directories(delta_art INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(delta_art INTERFACE sal)
+target_link_libraries(delta_art INTERFACE sal adb)
 
 if(BUILD_TESTS)
     find_package(Catch2 3 QUIET)

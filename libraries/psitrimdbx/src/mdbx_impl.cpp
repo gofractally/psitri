@@ -51,10 +51,14 @@
 #if !defined(PSITRIMDBX_BACKEND_DELTA_GCART)
 #define PSITRIMDBX_BACKEND_DELTA_GCART 0
 #endif
+//   PSITRIMDBX_BACKEND_RCART         — rcart refcount baseline DIRECT (sal2 FIX/SAL/BIG, refcount + hazard readers, compact reclaim)
+#if !defined(PSITRIMDBX_BACKEND_RCART)
+#define PSITRIMDBX_BACKEND_RCART 0
+#endif
 #if !PSITRIMDBX_BACKEND_TIERED_PSITRI && !PSITRIMDBX_BACKEND_PSITRI && \
     !PSITRIMDBX_BACKEND_START_VER && !PSITRIMDBX_BACKEND_SAL_ART_REF && \
     !PSITRIMDBX_BACKEND_START_REF && !PSITRIMDBX_BACKEND_GCART && \
-    !PSITRIMDBX_BACKEND_DELTA_GCART
+    !PSITRIMDBX_BACKEND_DELTA_GCART && !PSITRIMDBX_BACKEND_RCART
 #define PSITRIMDBX_BACKEND_DELTA_ART 1
 #else
 #define PSITRIMDBX_BACKEND_DELTA_ART 0
@@ -71,7 +75,10 @@
 #include <start_ref/kv.hpp>  // start_ref::kv::engine (part-family ART, refcount liveness)
 #endif
 #if PSITRIMDBX_BACKEND_GCART || PSITRIMDBX_BACKEND_DELTA_GCART
-#include <gcart/spec_kv.hpp>  // gcart::kv::engine (spec engine: 3-region FIX/SAL/BIG)
+#include <gcart/kv.hpp>  // gcart::kv::engine (spec engine: 3-region FIX/SAL/BIG)
+#endif
+#if PSITRIMDBX_BACKEND_RCART
+#include <rcart/kv.hpp>  // rcart::kv::engine (refcount baseline: FIX/SAL/BIG + hazard readers)
 #endif
 #if PSITRIMDBX_USES_TIERED
 #include <delta_art/tiered_kv.hpp>
@@ -201,6 +208,8 @@ using TK         = start_ver::kv::engine;  // start_ver alone — no cold base /
 using TK         = start_ref::kv::engine;  // start_ref alone — part-family ART, refcount liveness
 #elif PSITRIMDBX_BACKEND_GCART
 using TK         = gcart::kv::engine;  // gcart spec engine DIRECT — 3-region FIX/SAL/BIG, refcount
+#elif PSITRIMDBX_BACKEND_RCART
+using TK         = rcart::kv::engine;  // rcart refcount baseline DIRECT — FIX/SAL/BIG + hazard readers
 #elif PSITRIMDBX_BACKEND_DELTA_GCART
 using TK         = delta_art::tiered_kv<start_ver::kv::engine,
                                         gcart::kv::engine>;  // start_ver hot delta -> gcart cold base
@@ -256,8 +265,8 @@ static constexpr size_t   mdbx_namespace_prefix_size = 1;
 // are rejected with MDBX_BAD_VALSIZE (native MDBX's oversize error). 0.5 MB
 // covers Ethereum (bytecode caps at 24 KB/EIP-170); a 16 KB grain would lift it
 // to 1 MB if ever needed.
-#if PSITRIMDBX_BACKEND_GCART
-// gcart's BIG region is an 8 MB-segment heap; a value rides one contiguous
+#if PSITRIMDBX_BACKEND_GCART || PSITRIMDBX_BACKEND_RCART
+// gcart/rcart BIG region is an 8 MB-segment heap; a value rides one contiguous
 // big_leaf, so the per-value cap is ~a segment (keep a margin for the inline
 // header + key suffix). Comfortably covers Ethereum's 24 KB bytecode and the
 // 1 MB conformance case.
@@ -846,11 +855,22 @@ class mdbx_view_cursor
       o_valid_ = o_it_ != ws_->end();
       return settle_fwd_();
    }
+   // MDBX_SET_UPPERBOUND: position at the first key STRICTLY > key. The engine
+   // cursor's upper_bound is now the mathematical floor (largest <= k), so the
+   // strictly-greater seek on that leg is lower_bound + skip-an-exact-match. ws_
+   // is a std::map, whose upper_bound is already first-strictly-greater (correct).
+   bool cur_strict_gt_(std::string_view key)
+   {
+      bool ok = cur_->lower_bound(key);
+      if (ok && cur_->key() == key)
+         ok = cur_->next();
+      return ok;
+   }
    bool upper_bound(std::string_view key)
    {
       if (!has_overlay())
-         return cur_->upper_bound(key);
-      b_more_  = cur_->upper_bound(key);
+         return cur_strict_gt_(key);
+      b_more_  = cur_strict_gt_(key);
       o_it_    = ws_->upper_bound(std::string(key));
       o_valid_ = o_it_ != ws_->end();
       return settle_fwd_();
@@ -2651,6 +2671,10 @@ int mdbx_env_open(MDBX_env* env, const char* pathname,
 #elif PSITRIMDBX_BACKEND_GCART
       // gcart spec engine standalone: node-level COW + refcount; same 2-arg open shape.
       // Segment caps come from the GCART_*_SEGS env knobs (Silkworm-scale defaults).
+      env->db = be_db::open(env->path, open_mode);
+#elif PSITRIMDBX_BACKEND_RCART
+      // rcart refcount-baseline standalone: node-level COW + refcount + hazard readers;
+      // same 2-arg open shape. Segment caps from the RCART_*_SEGS env knobs.
       env->db = be_db::open(env->path, open_mode);
 #elif PSITRIMDBX_BACKEND_PSITRI
       // legacy psitri direct: config is sal::runtime_config (no tiered knobs).

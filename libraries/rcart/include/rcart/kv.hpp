@@ -53,7 +53,13 @@ namespace rcart::kv
    {
      public:
       snap() = default;
-      static snap acquire(rcart::engine& e, std::atomic<uint64_t>& slot)
+      // `ses` is the holder's OWN leaf session (a work tree's, the database drain's,
+      // or the engine admin session) — BORROWED. The REFCOUNT-snap path (try_retain /
+      // release_subtree of a root that may be a bare leaf) routes its suffix_value arm
+      // through this session. A snap lives within one thread's use of its holder, so
+      // the borrowed session is single-thread-correct.
+      static snap acquire(rcart::engine& e, std::atomic<uint64_t>& slot,
+                          sal2::allocator_session* ses)
       {
          for (;;)
          {
@@ -61,17 +67,20 @@ namespace rcart::kv
             const bt       t = rtag(r);
             const uint32_t p = rptr(r);
             if (t == bt::null)
-               return snap(&e, bt::null, 0);
-            if (!try_retain(e, t, p))
+               return snap(&e, bt::null, 0, ses);
+            if (!try_retain(e, *ses, t, p))
                continue;  // lost race with a freeing writer
             if (r == slot.load(std::memory_order_acquire))
-               return snap(&e, t, p);
-            release_subtree(e, t, p);  // root moved — undo, retry
+               return snap(&e, t, p, ses);
+            release_subtree(e, *ses, t, p);  // root moved — undo, retry
          }
       }
       // ADOPT an existing owned (tag,ptr) WITHOUT retaining — the caller transfers a
       // ref it already holds (the set_root exchange: a work tree's root → a snapshot).
-      static snap adopt(rcart::engine& e, bt t, uint32_t p) noexcept { return snap(&e, t, p); }
+      static snap adopt(rcart::engine& e, bt t, uint32_t p, sal2::allocator_session* ses) noexcept
+      {
+         return snap(&e, t, p, ses);
+      }
       // HAZARD-PIN publish (the hot reader cursor — start_ref's reader model). rcart
       // STAYS a refcount engine, but the READER does NOT bump the root-line refcount:
       // it publishes the live packed root into its OWN hazard slot with the start_ref
@@ -83,14 +92,14 @@ namespace rcart::kv
       // (snap::reset under _hp) just CLEARS the slot — readers never touch a node
       // refcount or lock; reclamation is the writer's deferred retire/drain.
       static snap publish(rcart::engine& e, std::atomic<uint64_t>& live,
-                          std::atomic<uint64_t>* hp) noexcept
+                          std::atomic<uint64_t>* hp, sal2::allocator_session* ses) noexcept
       {
          for (;;)
          {
             const uint64_t r = live.load(std::memory_order_seq_cst);
             hp->store(r, std::memory_order_seq_cst);          // publish FIRST...
             if (live.load(std::memory_order_seq_cst) == r)    // ...then re-verify
-               return snap(&e, rtag(r), rptr(r), hp);         // r was live after publish
+               return snap(&e, rtag(r), rptr(r), ses, hp);    // r was live after publish
             // root moved between our load and store: retry so we never pin a root that
             // was retired-and-drained before our publish became visible.
          }
@@ -100,26 +109,27 @@ namespace rcart::kv
       // clears a given slot — so a copy DROPS the slot and becomes a bare (tag,ptr) view
       // (the holder's pin still keeps the root alive). In practice hazard snaps are only
       // moved (cursor by value), never copied.
-      snap(const snap& o) : _e(o._e), _t(o._t), _p(o._p)
+      snap(const snap& o) : _e(o._e), _t(o._t), _p(o._p), _ses(o._ses)
       {
          if (_e && _t != bt::null && !o._hp)
-            retain(*_e, _t, _p);
+            retain(*_e, *_ses, _t, _p);
       }
       snap& operator=(const snap& o)
       {
          if (this != &o)
          {
             reset();
-            _e  = o._e;
-            _t  = o._t;
-            _p  = o._p;
-            _hp = nullptr;  // never inherit a hazard slot
+            _e   = o._e;
+            _t   = o._t;
+            _p   = o._p;
+            _ses = o._ses;
+            _hp  = nullptr;  // never inherit a hazard slot
             if (_e && _t != bt::null && !o._hp)
-               retain(*_e, _t, _p);
+               retain(*_e, *_ses, _t, _p);
          }
          return *this;
       }
-      snap(snap&& o) noexcept : _e(o._e), _t(o._t), _p(o._p), _hp(o._hp)
+      snap(snap&& o) noexcept : _e(o._e), _t(o._t), _p(o._p), _ses(o._ses), _hp(o._hp)
       {
          o._t  = bt::null;
          o._hp = nullptr;
@@ -132,6 +142,7 @@ namespace rcart::kv
             _e    = o._e;
             _t    = o._t;
             _p    = o._p;
+            _ses  = o._ses;
             _hp   = o._hp;
             o._t  = bt::null;
             o._hp = nullptr;
@@ -142,11 +153,12 @@ namespace rcart::kv
 
       bt       tag() const noexcept { return _t; }
       uint32_t ptr() const noexcept { return _p; }
-      rcart::engine* eng() const noexcept { return _e; }
+      rcart::engine*           eng() const noexcept { return _e; }
+      sal2::allocator_session* session() const noexcept { return _ses; }  // borrowed
       void     give() noexcept { _t = bt::null; _hp = nullptr; }  // relinquish without releasing
       // HAZARD snap (_hp set): reset just CLEARS the slot (store null_root, seq_cst) —
       //   no node refcount touched; reclamation is the writer's deferred drain.
-      // REFCOUNT snap (no _hp): the pin OWNS its release (release_subtree).
+      // REFCOUNT snap (no _hp): the pin OWNS its release (release_subtree via _ses).
       void reset() noexcept
       {
          if (_hp)
@@ -155,19 +167,21 @@ namespace rcart::kv
             _hp = nullptr;
          }
          else if (_e && _t != bt::null)
-            release_subtree(*_e, _t, _p);
+            release_subtree(*_e, *_ses, _t, _p);
          _t = bt::null;
       }
 
      private:
-      snap(rcart::engine* e, bt t, uint32_t p, std::atomic<uint64_t>* hp = nullptr)
-          : _e(e), _t(t), _p(p), _hp(hp)
+      snap(rcart::engine* e, bt t, uint32_t p, sal2::allocator_session* ses,
+           std::atomic<uint64_t>* hp = nullptr)
+          : _e(e), _t(t), _p(p), _ses(ses), _hp(hp)
       {
       }
-      rcart::engine*         _e = nullptr;
-      bt                     _t = bt::null;
-      uint32_t               _p = 0;
-      std::atomic<uint64_t>* _hp = nullptr;  // reader-cursor HAZARD slot; reset clears it (no refcount)
+      rcart::engine*           _e   = nullptr;
+      bt                       _t   = bt::null;
+      uint32_t                 _p   = 0;
+      sal2::allocator_session* _ses = nullptr;  // BORROWED holder session (refcount-snap path)
+      std::atomic<uint64_t>*   _hp  = nullptr;  // reader-cursor HAZARD slot; reset clears it
    };
 
    class database;
@@ -185,7 +199,19 @@ namespace rcart::kv
    {
      public:
       cursor() = default;
-      explicit cursor(snap s) : _s(std::move(s)) {}
+      // The cursor CO-OWNS its leaf session (an allocator_session_ptr is refcounted):
+      // it borrows-with-retain the holder's session so the session outlives the cursor
+      // even if the read_session/snapshot that created it is destroyed first (the test
+      // pattern `db->start_read_session()->create_cursor(0)` makes the read_session a
+      // temporary). All of a reader thread's cursors drive that one session — no global
+      // map, no lock. _ses caches the raw pointer for the hot read path.
+      explicit cursor(snap s)
+          : _s(std::move(s)),
+            _lses(_s.session() ? sal2::allocator_session_ptr(_s.session(), /*retain=*/true)
+                               : sal2::allocator_session_ptr(nullptr)),
+            _ses(_lses.get())
+      {
+      }
 
       // point get (no positioning) — find_in is a direct descent, no key build.
       template <class S = std::string>
@@ -193,8 +219,9 @@ namespace rcart::kv
       {
          if (!_s.eng() || _s.tag() == bt::null)
             return std::nullopt;
+         auto             lk = ses_().lock();  // pin leaf pages for the descent + value copy
          std::string_view out;  // view into the value (snapshot pins it); construct once
-         if (!find_in(*_s.eng(), _s.tag(), _s.ptr(), k, out))
+         if (!find_in(*_s.eng(), ses_(), _s.tag(), _s.ptr(), k, out))
             return std::nullopt;
          return S(out.data(), out.size());
       }
@@ -203,20 +230,27 @@ namespace rcart::kv
       {
          if (!_s.eng() || _s.tag() == bt::null)
             return false;
+         auto             lk = ses_().lock();  // pin leaf pages across the descent + f(view)
          std::string_view out;  // zero-copy: hand the value view straight to f
-         if (!find_in(*_s.eng(), _s.tag(), _s.ptr(), k, out))
+         if (!find_in(*_s.eng(), ses_(), _s.tag(), _s.ptr(), k, out))
             return false;
          f(value_view(out.data(), out.size()));
          return true;
       }
 
       // ── ordered forward iteration ───────────────────────────────────────────
+      // Positioning transiently resolves leaf bodies (seek_ge_'s suffix compare), so
+      // scope a leaf read_lock across the descent; the frame stack itself stores
+      // routing-node pointers (FIX, address-stable) and the external leaf's ptr_address
+      // (re-resolved under a short lock at value/key time), so no lock is held between
+      // positioning and the value read.
       bool seek_begin()
       {
          if (!root_ok_())
             return false;
-         _n = 0;
-         go_left_(_s.tag(), root_());
+         auto lk = ses_().lock();
+         _n      = 0;
+         go_left_(_s.tag(), root_(), _s.ptr());
          _end  = false;
          _rend = false;
          _kv   = false;
@@ -226,9 +260,10 @@ namespace rcart::kv
       {
          if (!root_ok_())
             return false;
-         _n  = 0;
-         _kv = false;
-         if (seek_ge_(_s.tag(), root_(), k, 0))
+         auto lk = ses_().lock();
+         _n      = 0;
+         _kv     = false;
+         if (seek_ge_(_s.tag(), root_(), _s.ptr(), k, 0))
          {
             _end  = false;
             _rend = false;
@@ -243,7 +278,8 @@ namespace rcart::kv
             return false;
          if (_rend)
             return seek_begin();
-         _kv = false;
+         auto lk = ses_().lock();  // advance_ → go_left_ resolves leaf bodies
+         _kv     = false;
          return advance_();
       }
       bool     is_end() const { return _end; }
@@ -252,7 +288,7 @@ namespace rcart::kv
          if (_end || _rend)
             return {};
          if (!_kv)
-            materialize_key_();
+            materialize_key_();  // re-resolves the external leaf suffix under a short lock
          return key_view(_kb, _klen);
       }
       template <class S = std::string>
@@ -260,7 +296,8 @@ namespace rcart::kv
       {
          if (_end || _rend)
             return std::nullopt;
-         const sv v = cur_value_();
+         auto     lk = ses_().lock();  // EXTERNAL leaf view points into compactor-movable mem
+         const sv v  = cur_value_();
          return S(v.data(), v.size());
       }
       template <class F>
@@ -268,6 +305,7 @@ namespace rcart::kv
       {
          if (_end || _rend)
             return false;
+         auto lk = ses_().lock();  // EXTERNAL leaf view valid only under the lock
          f(cur_value_());
          return true;
       }
@@ -278,8 +316,9 @@ namespace rcart::kv
       {
          if (!root_ok_())
             return false;
-         _n = 0;
-         go_right_(_s.tag(), root_());
+         auto lk = ses_().lock();
+         _n      = 0;
+         go_right_(_s.tag(), root_(), _s.ptr());
          _end  = false;
          _rend = false;
          _kv   = false;
@@ -303,7 +342,8 @@ namespace rcart::kv
             return false;
          if (_end)
             return seek_last();
-         _kv = false;
+         auto lk = ses_().lock();  // retreat_ → go_right_ resolves leaf bodies
+         _kv     = false;
          return retreat_();
       }
       bool is_rend() const { return _rend; }
@@ -318,15 +358,23 @@ namespace rcart::kv
          int         cur;  // -1 = term; else ordered child slot (idx / byte)
       };
 
-      bool        root_ok_() const { return _s.eng() && _s.tag() != bt::null; }
-      const void*  root_() const { return resolve(*_s.eng(), _s.tag(), _s.ptr()); }
+      bool           root_ok_() const { return _s.eng() && _s.tag() != bt::null; }
+      const void*    root_() const { return resolve(*_s.eng(), ses_(), _s.tag(), _s.ptr()); }
       rcart::engine& eng_() const { return *_s.eng(); }
+      // This cursor's leaf session (borrowed-with-retain from its snap). A cursor is
+      // single-thread, so every leaf touch (lock + get_ref) drives this one session.
+      sal2::allocator_session& ses_() const { return *_ses; }
 
-      void set_leaf_ext_(bt t, const void* n)
+      // EXTERNAL leaf: store the (tag, ptr_address) — NOT a resolved pointer. The body
+      // is re-resolved (get_ref, MFU-sampled) under a SHORT lock at value/key time, so
+      // the cursor holds no lock between positioning and the value read (the compactor
+      // stays unblocked). INLINE leaf bodies live in the FIX nested node (address-
+      // stable), so those views are cached directly.
+      void set_leaf_ext_(bt t, uint32_t p)
       {
          _inl = false;
          _lt  = t;
-         _ln  = n;
+         _lp  = p;
       }
       void set_leaf_inl_(sv suf, sv val)
       {
@@ -334,7 +382,9 @@ namespace rcart::kv
          _isuf = suf;
          _ival = val;
       }
-      sv cur_value_() const { return _inl ? _ival : leaf_value_body(_lt, _ln); }
+      // value of the current position; the EXTERNAL case re-resolves via the session
+      // (caller holds a leaf read_lock — the returned view points into leaf memory).
+      sv cur_value_() const { return _inl ? _ival : leaf_value(eng_(), ses_(), _lt, _lp); }
 
       void push_(bt t, const void* node, int cur)
       {
@@ -345,14 +395,17 @@ namespace rcart::kv
       }
 
       // Descend to the LEFTMOST leaf of subtree (t,node), pushing a frame per
-      // routing node (cur = the slot taken: -1 term, else first child).
-      void go_left_(bt t, const void* node)
+      // routing node (cur = the slot taken: -1 term, else first child). `ptr` tracks
+      // the ptr_address that produced `node` (meaningful for an EXTERNAL leaf — stored
+      // as (_lt,_lp) so value/key re-resolve the leaf under a short lock; an inline
+      // setlist body has no ptr).
+      void go_left_(bt t, const void* node, uint32_t ptr)
       {
          for (;;)
          {
             if (is_leaf_tag(t))
             {
-               set_leaf_ext_(t, node);
+               set_leaf_ext_(t, ptr);
                return;
             }
             if (t == bt::full)
@@ -362,7 +415,8 @@ namespace rcart::kv
                {
                   push_(t, node, -1);
                   t    = bt(n->term_tag);
-                  node = resolve(eng_(), t, n->term_ptr);
+                  ptr  = n->term_ptr;
+                  node = resolve(eng_(), ses_(), t, ptr);
                   continue;
                }
                int b = 0;
@@ -370,7 +424,8 @@ namespace rcart::kv
                   ++b;
                push_(t, node, b);
                bt ct = n->btype(b);
-               node  = resolve(eng_(), ct, n->branch(b));
+               ptr   = n->branch(b);
+               node  = resolve(eng_(), ses_(), ct, ptr);
                t     = ct;
                continue;
             }
@@ -387,7 +442,8 @@ namespace rcart::kv
                      return;
                   }
                   bt tt = n->otype(ti);
-                  node  = resolve(eng_(), tt, n->ext_ptr(ti));
+                  ptr   = n->ext_ptr(ti);
+                  node  = resolve(eng_(), ses_(), tt, ptr);
                   t     = tt;
                   continue;
                }
@@ -400,11 +456,12 @@ namespace rcart::kv
                      return;
                   }
                   t    = bt::setlist;
-                  node = n->in_setlist(0);
+                  node = n->in_setlist(0);  // inline routing body (FIX): no ptr
                   continue;
                }
                bt ct = n->otype(0);
-               node  = resolve(eng_(), ct, n->ext_ptr(0));
+               ptr   = n->ext_ptr(0);
+               node  = resolve(eng_(), ses_(), ct, ptr);
                t     = ct;
                continue;
             }
@@ -413,26 +470,28 @@ namespace rcart::kv
             {
                push_(t, node, -1);
                bt tt = n->term_type();
-               node  = resolve(eng_(), tt, n->term_branch());
+               ptr   = n->term_branch();
+               node  = resolve(eng_(), ses_(), tt, ptr);
                t     = tt;
                continue;
             }
             push_(t, node, 0);
             bt ct = n->btype(0);
-            node  = resolve(eng_(), ct, n->branch(0));
+            ptr   = n->branch(0);
+            node  = resolve(eng_(), ses_(), ct, ptr);
             t     = ct;
          }
       }
 
       // Descend to the RIGHTMOST leaf (largest key) — children last, term first
       // (so the rightmost is the last byte-child, or the term iff no children).
-      void go_right_(bt t, const void* node)
+      void go_right_(bt t, const void* node, uint32_t ptr)
       {
          for (;;)
          {
             if (is_leaf_tag(t))
             {
-               set_leaf_ext_(t, node);
+               set_leaf_ext_(t, ptr);
                return;
             }
             if (t == bt::full)
@@ -445,12 +504,14 @@ namespace rcart::kv
                {
                   push_(t, node, -1);
                   t    = bt(n->term_tag);
-                  node = resolve(eng_(), t, n->term_ptr);
+                  ptr  = n->term_ptr;
+                  node = resolve(eng_(), ses_(), t, ptr);
                   continue;
                }
                push_(t, node, b);
                bt ct = n->btype(b);
-               node  = resolve(eng_(), ct, n->branch(b));
+               ptr   = n->branch(b);
+               node  = resolve(eng_(), ses_(), ct, ptr);
                t     = ct;
                continue;
             }
@@ -467,7 +528,8 @@ namespace rcart::kv
                      return;
                   }
                   bt tt = n->otype(ti);
-                  node  = resolve(eng_(), tt, n->ext_ptr(ti));
+                  ptr   = n->ext_ptr(ti);
+                  node  = resolve(eng_(), ses_(), tt, ptr);
                   t     = tt;
                   continue;
                }
@@ -481,11 +543,12 @@ namespace rcart::kv
                      return;
                   }
                   t    = bt::setlist;
-                  node = n->in_setlist(last);
+                  node = n->in_setlist(last);  // inline routing body (FIX): no ptr
                   continue;
                }
                bt ct = n->otype(last);
-               node  = resolve(eng_(), ct, n->ext_ptr(last));
+               ptr   = n->ext_ptr(last);
+               node  = resolve(eng_(), ses_(), ct, ptr);
                t     = ct;
                continue;
             }
@@ -494,14 +557,16 @@ namespace rcart::kv
             {
                push_(t, node, -1);
                bt tt = n->term_type();
-               node  = resolve(eng_(), tt, n->term_branch());
+               ptr   = n->term_branch();
+               node  = resolve(eng_(), ses_(), tt, ptr);
                t     = tt;
                continue;
             }
             const uint32_t last = n->nbranch - 1u;
             push_(t, node, int(last));
             bt ct = n->btype(last);
-            node  = resolve(eng_(), ct, n->branch(last));
+            ptr   = n->branch(last);
+            node  = resolve(eng_(), ses_(), ct, ptr);
             t     = ct;
          }
       }
@@ -547,7 +612,7 @@ namespace rcart::kv
                return false;
             f.cur = b;
             bt ct = n->btype(b);
-            go_left_(ct, resolve(eng_(), ct, n->branch(b)));
+            go_left_(ct, resolve(eng_(), ses_(), ct, n->branch(b)), n->branch(b));
             return true;
          }
          if (f.t == bt::nested_setlist)
@@ -564,11 +629,11 @@ namespace rcart::kv
                   set_leaf_inl_(n->in_suffix(i), n->in_value(i));
                   return true;
                }
-               go_left_(bt::setlist, n->in_setlist(i));
+               go_left_(bt::setlist, n->in_setlist(i), 0);
                return true;
             }
             bt ct = n->otype(i);
-            go_left_(ct, resolve(eng_(), ct, n->ext_ptr(i)));
+            go_left_(ct, resolve(eng_(), ses_(), ct, n->ext_ptr(i)), n->ext_ptr(i));
             return true;
          }
          const setlist* n = static_cast<const setlist*>(f.node);
@@ -577,7 +642,7 @@ namespace rcart::kv
             return false;
          f.cur = int(i);
          bt ct = n->btype(i);
-         go_left_(ct, resolve(eng_(), ct, n->branch(i)));
+         go_left_(ct, resolve(eng_(), ses_(), ct, n->branch(i)), n->branch(i));
          return true;
       }
 
@@ -599,12 +664,12 @@ namespace rcart::kv
                   return false;
                f.cur = -1;
                bt tt = bt(n->term_tag);
-               go_right_(tt, resolve(eng_(), tt, n->term_ptr));
+               go_right_(tt, resolve(eng_(), ses_(), tt, n->term_ptr), n->term_ptr);
                return true;
             }
             f.cur = b;
             bt ct = n->btype(b);
-            go_right_(ct, resolve(eng_(), ct, n->branch(b)));
+            go_right_(ct, resolve(eng_(), ses_(), ct, n->branch(b)), n->branch(b));
             return true;
          }
          if (f.t == bt::nested_setlist)
@@ -624,7 +689,7 @@ namespace rcart::kv
                   return true;
                }
                bt tt = n->otype(ti);
-               go_right_(tt, resolve(eng_(), tt, n->ext_ptr(ti)));
+               go_right_(tt, resolve(eng_(), ses_(), tt, n->ext_ptr(ti)), n->ext_ptr(ti));
                return true;
             }
             const uint32_t i = uint32_t(f.cur) - 1u;
@@ -636,11 +701,11 @@ namespace rcart::kv
                   set_leaf_inl_(n->in_suffix(i), n->in_value(i));
                   return true;
                }
-               go_right_(bt::setlist, n->in_setlist(i));
+               go_right_(bt::setlist, n->in_setlist(i), 0);
                return true;
             }
             bt ct = n->otype(i);
-            go_right_(ct, resolve(eng_(), ct, n->ext_ptr(i)));
+            go_right_(ct, resolve(eng_(), ses_(), ct, n->ext_ptr(i)), n->ext_ptr(i));
             return true;
          }
          const setlist* n = static_cast<const setlist*>(f.node);
@@ -652,20 +717,21 @@ namespace rcart::kv
                return false;
             f.cur = -1;
             bt tt = n->term_type();
-            go_right_(tt, resolve(eng_(), tt, n->term_branch()));
+            go_right_(tt, resolve(eng_(), ses_(), tt, n->term_branch()), n->term_branch());
             return true;
          }
          const uint32_t i = uint32_t(f.cur) - 1u;
          f.cur            = int(i);
          bt ct            = n->btype(i);
-         go_right_(ct, resolve(eng_(), ct, n->branch(i)));
+         go_right_(ct, resolve(eng_(), ses_(), ct, n->branch(i)), n->branch(i));
          return true;
       }
 
       // Directed descent: position at the smallest key >= target, pushing frames.
       // Returns true if such a key exists in this subtree. On a "diverge / target is
-      // a prefix" the whole subtree is > target → its leftmost is the answer.
-      bool seek_ge_(bt t, const void* node, sv target, uint32_t depth)
+      // a prefix" the whole subtree is > target → its leftmost is the answer. `ptr`
+      // tracks the ptr_address that produced `node` (for the EXTERNAL leaf case).
+      bool seek_ge_(bt t, const void* node, uint32_t ptr, sv target, uint32_t depth)
       {
          for (;;)
          {
@@ -676,7 +742,7 @@ namespace rcart::kv
                sv suf = leaf_suffix_body(t, node);
                if (!suffix_ge_(suf, target, depth))
                   return false;
-               set_leaf_ext_(t, node);
+               set_leaf_ext_(t, ptr);
                return true;
             }
             // full: prefetch the offset CL for the speculative routing byte
@@ -695,14 +761,14 @@ namespace rcart::kv
             {
                if (uint8_t(P[i]) > uint8_t(target[depth + i]))
                {
-                  go_left_(t, node);
+                  go_left_(t, node, ptr);
                   return true;
                }
                return false;  // subtree entirely < target
             }
             if (pl >= rem)  // target is a (proper or full) prefix of P → subtree >= target
             {
-               go_left_(t, node);
+               go_left_(t, node, ptr);
                return true;
             }
             depth += pl;  // P matched; descend at target[depth]
@@ -725,7 +791,8 @@ namespace rcart::kv
             if (ct != bt::null)
             {
                push_(t, node, tb);
-               if (seek_ge_(ct, resolve(eng_(), ct, n->branch(tb)), target, depth + 1))
+               if (seek_ge_(ct, resolve(eng_(), ses_(), ct, n->branch(tb)), n->branch(tb), target,
+                            depth + 1))
                   return true;
                --_n;  // matching child had nothing >= target; fall through to next byte
             }
@@ -734,7 +801,7 @@ namespace rcart::kv
                {
                   push_(t, node, b);
                   bt c2 = n->btype(b);
-                  go_left_(c2, resolve(eng_(), c2, n->branch(b)));
+                  go_left_(c2, resolve(eng_(), ses_(), c2, n->branch(b)), n->branch(b));
                   return true;
                }
             return false;
@@ -758,13 +825,14 @@ namespace rcart::kv
                         return true;
                      }
                   }
-                  else if (seek_ge_(bt::setlist, n->in_setlist(ui), target, depth + 1))
+                  else if (seek_ge_(bt::setlist, n->in_setlist(ui), 0, target, depth + 1))
                      return true;
                }
                else
                {
                   bt ct = n->otype(ui);
-                  if (seek_ge_(ct, resolve(eng_(), ct, n->ext_ptr(ui)), target, depth + 1))
+                  if (seek_ge_(ct, resolve(eng_(), ses_(), ct, n->ext_ptr(ui)), n->ext_ptr(ui),
+                               target, depth + 1))
                      return true;
                }
                --_n;
@@ -780,11 +848,11 @@ namespace rcart::kv
                      set_leaf_inl_(n->in_suffix(start), n->in_value(start));
                      return true;
                   }
-                  go_left_(bt::setlist, n->in_setlist(start));
+                  go_left_(bt::setlist, n->in_setlist(start), 0);
                   return true;
                }
                bt ct = n->otype(start);
-               go_left_(ct, resolve(eng_(), ct, n->ext_ptr(start)));
+               go_left_(ct, resolve(eng_(), ses_(), ct, n->ext_ptr(start)), n->ext_ptr(start));
                return true;
             }
             return false;
@@ -797,7 +865,8 @@ namespace rcart::kv
             const uint32_t ui = uint32_t(idx);
             push_(t, node, int(ui));
             bt ct = n->btype(ui);
-            if (seek_ge_(ct, resolve(eng_(), ct, n->branch(ui)), target, depth + 1))
+            if (seek_ge_(ct, resolve(eng_(), ses_(), ct, n->branch(ui)), n->branch(ui), target,
+                         depth + 1))
                return true;
             --_n;
             start = ui + 1;
@@ -806,7 +875,7 @@ namespace rcart::kv
          {
             push_(t, node, int(start));
             bt ct = n->btype(start);
-            go_left_(ct, resolve(eng_(), ct, n->branch(start)));
+            go_left_(ct, resolve(eng_(), ses_(), ct, n->branch(start)), n->branch(start));
             return true;
          }
          return false;
@@ -854,18 +923,26 @@ namespace rcart::kv
             app(_isuf.data(), uint32_t(_isuf.size()));
          else
          {
-            const sv suf = leaf_suffix_body(_lt, _ln);
+            // EXTERNAL leaf suffix: re-resolve via the session (get_ref, MFU-sampled)
+            // under a short lock — the snapshot pin keeps the leaf alive.
+            auto     lk  = ses_().lock();
+            const sv suf = leaf_suffix(eng_(), ses_(), _lt, _lp);
             app(suf.data(), uint32_t(suf.size()));
          }
          _klen = len;
          _kv   = true;
       }
 
-      snap        _s;
+      snap _s;
+      // CO-OWNED leaf session (refcounted): keeps the holder's session alive for the
+      // cursor's whole lifetime. _ses caches the raw pointer (hot path). Declared
+      // before _ses so the ctor's _ses(_lses.get()) init runs after _lses.
+      sal2::allocator_session_ptr _lses{nullptr};
+      sal2::allocator_session*    _ses = nullptr;
       frame       _f[MAXF];
       int         _n  = 0;       // frames in use
       bt          _lt = bt::null;
-      const void* _ln = nullptr;  // current EXTERNAL leaf
+      uint32_t    _lp = 0;        // current EXTERNAL leaf ptr_address (re-resolved under a lock)
       bool        _inl = false;
       sv          _isuf, _ival;   // current INLINE leaf (nested suffix_value)
       bool        _end = true, _rend = true;
@@ -892,16 +969,21 @@ namespace rcart::kv
       {
          if (!_s.eng() || _s.tag() == bt::null)
             return std::nullopt;
+         auto             lk = _s.session()->lock();  // pin leaf pages for the descent + copy
          std::string_view out;  // view into the value (snapshot pins it); construct once
-         if (!find_in(*_s.eng(), _s.tag(), _s.ptr(), k, out))
+         if (!find_in(*_s.eng(), *_s.session(), _s.tag(), _s.ptr(), k, out))
             return std::nullopt;
          return S(out.data(), out.size());
       }
       // root-exchange primitives (set_root): the snapshot IS the owned tree.
-      bt       tag() const noexcept { return _s.tag(); }
-      uint32_t ptr() const noexcept { return _s.ptr(); }
+      bt                       tag() const noexcept { return _s.tag(); }
+      uint32_t                 ptr() const noexcept { return _s.ptr(); }
+      sal2::allocator_session* session() const noexcept { return _s.session(); }
       void     give() noexcept { _s.give(); }  // relinquish the ref (it moved into a work tree)
-      static snapshot adopt(rcart::engine& e, bt t, uint32_t p) { return snapshot(snap::adopt(e, t, p)); }
+      static snapshot adopt(rcart::engine& e, bt t, uint32_t p, sal2::allocator_session* ses)
+      {
+         return snapshot(snap::adopt(e, t, p, ses));
+      }
 
      private:
       snap _s;
@@ -923,18 +1005,18 @@ namespace rcart::kv
       template <class S = std::string>
       std::optional<S> get(key_view k) const
       {
-         sv v;  // view into the value (work root pins it); construct once
-         if (!_w->find(k, v))
+         auto vr = _w->find(k);  // value_ref pins the leaf page across the copy below
+         if (!vr)
             return std::nullopt;
-         return S(v.data(), v.size());
+         return S(vr->data(), vr->size());  // copy out under the embedded read_lock
       }
       template <class F>
       bool get(key_view k, F&& f) const
       {
-         sv v;  // zero-copy: hand the value view straight to f
-         if (!_w->find(k, v))
+         auto vr = _w->find(k);  // value_ref holds the leaf read_lock across f()
+         if (!vr)
             return false;
-         f(value_view(v.data(), v.size()));
+         f(value_view(vr->data(), vr->size()));  // f runs while the page is pinned
          return true;
       }
 
@@ -947,7 +1029,9 @@ namespace rcart::kv
          const uint32_t dp = _w->root_ptr();            // displaced
          _w->set_root(incoming.tag(), incoming.ptr());  // adopt incoming's root
          incoming.give();                               // its ref moved into _w
-         return snapshot::adopt(*_e, dt, dp);           // own the displaced
+         // The displaced snapshot borrows the work tree's leaf session (the displaced
+         // root's leaves were allocated through it; single-thread-owned).
+         return snapshot::adopt(*_e, dt, dp, _w->leaf_session());  // own the displaced
       }
 
      private:
@@ -994,19 +1078,19 @@ namespace rcart::kv
       template <class S = std::string>
       std::optional<S> get(key_view k) const
       {
-         sv v;  // view into the value (txn work root pins it); construct once
-         if (!_t->find(k, v))
+         auto vr = _t->find(k);  // value_ref pins the leaf page across the copy below
+         if (!vr)
             return std::nullopt;
-         return S(v.data(), v.size());
+         return S(vr->data(), vr->size());  // copy out under the embedded read_lock
       }
       // lambda form (adb::kv_transaction): invoke f(value) on a hit, return found.
       template <class F>
       bool get(key_view k, F&& f) const
       {
-         sv v;  // zero-copy: hand the value view straight to f
-         if (!_t->find(k, v))
+         auto vr = _t->find(k);  // value_ref holds the leaf read_lock across f()
+         if (!vr)
             return false;
-         f(value_view(v.data(), v.size()));
+         f(value_view(vr->data(), vr->size()));  // f runs while the page is pinned
          return true;
       }
       void commit();
@@ -1044,8 +1128,9 @@ namespace rcart::kv
       cursor create_cursor(uint32_t idx);
 
      private:
-      database* _db;
-      uint32_t  _hz_slot;  // claimed hazard slot index
+      database*                   _db;
+      sal2::allocator_session_ptr _lses;     // this reader's OWN leaf session (cursors borrow it)
+      uint32_t                    _hz_slot;   // claimed hazard slot index
    };
 
    // ── database ───────────────────────────────────────────────────────────────
@@ -1208,7 +1293,10 @@ namespace rcart::kv
             const uint64_t p = _retired[i];
             if (rtag(p) == bt::null || !root_published(p))
             {
-               release_subtree(_e, rtag(p), rptr(p));  // refcount cascade (drops the old ref)
+               // refcount cascade (drops the old ref). The database-owned _drain_ses is
+               // the leaf session for the suffix_value arm — single-thread-owned (this
+               // runs under a root_mx, the single writer per root).
+               release_subtree(_e, *_drain_ses, rtag(p), rptr(p));
                _retired[i] = _retired.back();
                _retired.pop_back();
             }
@@ -1222,7 +1310,9 @@ namespace rcart::kv
       static constexpr size_t   roots_bytes = max_roots * sizeof(uint64_t);
 
       explicit database(std::filesystem::path dir)
-          : _e(dir), _roots_map(dir / "roots.dat", sal::access_mode::read_write)
+          : _e(dir),
+            _roots_map(dir / "roots.dat", sal::access_mode::read_write),
+            _drain_ses(_e.leaf_create_session())  // database-owned leaf session for the drain
       {
          for (auto& h : _hazard)
             h.store(null_root, std::memory_order_relaxed);
@@ -1237,8 +1327,15 @@ namespace rcart::kv
          }
       }
 
+     public:
+      // The database-owned leaf session used by the deferred-root drain and the
+      // transaction snapshot-acquire path (single-thread-owned per its callers).
+      sal2::allocator_session* drain_session() noexcept { return _drain_ses.get(); }
+
+     private:
       rcart::engine                         _e;
       sal::mapping                          _roots_map;
+      sal2::allocator_session_ptr           _drain_ses;  // declared after _e; dropped before it
       std::array<std::unique_ptr<tree>, 64> _work{};
       // Hazard-slot registry: published reader roots + a word-bitmap claim.
       std::array<std::atomic<uint64_t>, kHazardSlots>      _hazard{};
@@ -1249,7 +1346,10 @@ namespace rcart::kv
 
    // ── bodies ─────────────────────────────────────────────────────────────────
    inline transaction::transaction(database* db, tree* t, uint32_t slot)
-       : _db(db), _t(t), _slot(slot), _snap(snap::acquire(db->eng(), db->root_slot(slot)))
+       : _db(db),
+         _t(t),
+         _slot(slot),
+         _snap(snap::acquire(db->eng(), db->root_slot(slot), t->leaf_session()))
    {
       _t->set_root(_snap.tag(), _snap.ptr());  // working tree starts from the committed root
       _t->begin_txn();  // latch the FIX-allocator txn floor (start_ref::start_transaction)
@@ -1301,8 +1401,9 @@ namespace rcart::kv
          const uint32_t wp = w->root_ptr();
          w->set_root(s.tag(), s.ptr());  // restore committed
          s.give();                       // the snap pin becomes the live tree's ownership ref
-         release_subtree(_db->eng(), wt,
-                         wp);  // free the discarded work (no-op-safe if ==committed)
+         // free the discarded work via the work tree's OWN leaf session (the husk being
+         // freed is the writer's). no-op-safe if ==committed.
+         release_subtree(_db->eng(), *w->leaf_session(), wt, wp);
       };
       rollback(_t, _snap);  // primary
       for (auto& rs : _extra)
@@ -1322,7 +1423,7 @@ namespace rcart::kv
          if (rs.slot == idx)
             return root_handle(&_db->eng(), rs.work);
       tree& w = _db->work_tree(idx);
-      snap  s = snap::acquire(_db->eng(), _db->root_slot(idx));
+      snap  s = snap::acquire(_db->eng(), _db->root_slot(idx), w.leaf_session());
       w.set_root(s.tag(), s.ptr());
       w.begin_txn();  // latch this opened root's FIX-allocator txn floor
       _extra.push_back(root_state{idx, &w, std::move(s)});
@@ -1336,11 +1437,13 @@ namespace rcart::kv
 
    inline snapshot write_session::get_root(uint32_t idx)
    {
-      return snapshot(snap::acquire(_db->eng(), _db->root_slot(idx)));
+      // The owned snapshot borrows the work tree's leaf session for its reads.
+      tree& w = _db->work_tree(idx);
+      return snapshot(snap::acquire(_db->eng(), _db->root_slot(idx), w.leaf_session()));
    }
 
    inline read_session::read_session(database* db)
-       : _db(db), _hz_slot(db->claim_hazard_slot())
+       : _db(db), _lses(db->eng().leaf_create_session()), _hz_slot(db->claim_hazard_slot())
    {
    }
    inline read_session::~read_session() { _db->release_hazard_slot(_hz_slot); }
@@ -1354,7 +1457,10 @@ namespace rcart::kv
       // drains AFTER its seq_cst live-root store, and its drain's seq_cst slot scan
       // (root_published) then sees our slot. The cursor's dtor (snap::reset under _hp)
       // clears the slot — readers never touch a node refcount or lock.
-      return cursor(snap::publish(_db->eng(), _db->root_slot(idx), &_db->hazard_slot(_hz_slot)));
+      // Pass THIS reader's owned leaf session: each cursor borrows-with-retain it
+      // (single-thread-owned). All of a reader's cursors drive that one session.
+      return cursor(snap::publish(_db->eng(), _db->root_slot(idx), &_db->hazard_slot(_hz_slot),
+                                  _lses.get()));
    }
 
    // ── adb engine bundle (adb::kv_engine) ───────────────────────────────────────

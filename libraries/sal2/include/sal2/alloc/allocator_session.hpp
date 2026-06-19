@@ -270,6 +270,15 @@ namespace sal2
          return _ptr_alloc.try_get(adr) != nullptr;
       }
 
+      // READ-ONLY refcount of the control block at `adr` (the engine-side privacy gate:
+      // an object with ref==1 is private — reachable only through the one branch the
+      // caller holds — so it is safe to inline/consume). One relaxed load; touches no
+      // segment data and does NOT mutate the refcount. (rcart's nested-inline gate.)
+      uint32_t ref(ptr_address adr) const noexcept
+      {
+         return uint32_t(const_cast<control_block_alloc&>(_ptr_alloc).get(adr).use_count());
+      }
+
       inline void prefetch(ptr_address adr) const noexcept;
       inline bool is_read_only(ptr_address adr) const noexcept;
 

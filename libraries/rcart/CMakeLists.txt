@@ -27,4 +27,13 @@ if(BUILD_TESTS)
     set_target_properties(rcart-tree-tests PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME rcart-tree-tests COMMAND rcart-tree-tests)
+
+    # nested_setlist byte-identity invariant: a node's bytes are a pure function of
+    # (prefix, entries, term) — identical via the unique in-place edit AND the shared
+    # clone+edit paths (the directly-mutable-nested / kill-promote-on-write property).
+    add_executable(rcart-nested-invariant-tests tests/nested_invariant_test.cpp)
+    target_link_libraries(rcart-nested-invariant-tests PRIVATE rcart)
+    set_target_properties(rcart-nested-invariant-tests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME rcart-nested-invariant-tests COMMAND rcart-nested-invariant-tests)
 endif()

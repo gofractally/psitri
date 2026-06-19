@@ -614,6 +614,11 @@ namespace gcart
       static constexpr uint32_t death_off   = 8;   // Phase B: u32 death (0 = alive)
       static constexpr uint32_t hdr         = 12;  // was 8; +u32 death (version liveness reaper)
       static constexpr uint8_t  inline_flag = 0x80;  // ooff bit7
+      // Max decoded entries an edit/remove scratch must hold: a 128-byte line costs at
+      // least ~3 bytes/entry (1 okey + 1 ooff + 1 tail byte; otypes add 0.375), so it
+      // never holds more than ~40; 64 is a safe cap that keeps the recursive descent's
+      // per-frame nentry[] scratch small (a fat frame overflows the stack on deep keys).
+      static constexpr uint32_t es_cap = 64;
 
       bool     has_term() const noexcept { return meta & 0x80; }
       uint32_t prefixlen() const noexcept { return meta & 0x7f; }
@@ -687,6 +692,32 @@ namespace gcart
       }
    };
    static_assert(sizeof(nested_setlist) == 2);
+
+   // ── nentry: the decoded, PATH-AGNOSTIC entry the canonical packer (lay_nested_into_)
+   //    and the direct-mutable nested editor (nested_edit/nested_remove) both speak.
+   //    A nested_setlist's bytes are a PURE FUNCTION of (prefix, sorted nentry set, term);
+   //    funnelling initial-pack, unique in-place edit, and shared clone+edit ALL through
+   //    lay_nested_into_(nentry*) is what makes the body bytes byte-identical across the
+   //    three paths (killing promote-on-write). gcart's INLINE-SV body is the 3-byte
+   //    form [u16 vlen][u8 slen][value][suffix] (sv_leaf::bytes_for = 3+v+s; NO birth
+   //    prefix — it shares the nested node header's birth), NOT rcart's 4-byte form.
+   //    kind 0 = EXTERNAL  → (otype, ext) is the region-typed 4-byte child ptr.
+   //    kind 1 = inline suffix_value → (otype=suffix_value); body/blen point at the
+   //             gcart sv_leaf inline body bytes ([u16 vlen][u8 slen][value][suffix]).
+   //    kind 2 = inline setlist → (otype=setlist); body/blen point at a TIGHT setlist
+   //             body to memcpy (its u32 grandchildren ride along unchanged).
+   //    For kinds 1/2 `body` points at a stack-scratch copy (re-pack of an existing
+   //    nested) OR a re-resolved/tight-staged body (initial pack) — lay_nested_into_
+   //    ONLY ever memcpy's raw bytes, never refcounts (Phase C: no refcount at all).
+   struct nentry
+   {
+      uint8_t     okey;   // outer byte (sorted; unused for the term entry)
+      uint8_t     kind;   // 0=ext u32 ptr, 1=inline-sv body, 2=inline-setlist body
+      bt          otype;  // resolved branch_type tag of this entry
+      uint32_t    ext;    // kind 0: the external 4-byte region ptr
+      const char* body;   // kind 1/2: bytes to memcpy into the tail-heap
+      uint16_t    blen;   // kind 1/2: byte count of body
+   };
 
    // ── full (cl9, 1152 B): the dense routing node (direct byte index) ─────────
    // [u8 meta(term:1,prefixlen:7)] [u8 term_tag] [u16 nbranch] [u32 term_ptr]
@@ -1552,9 +1583,11 @@ namespace gcart
             cp = n->branch(byte);
             return true;
          }
-         // nested_setlist children are inline (no slot) — the write path PROMOTES a
-         // nested before editing, so node_child never sees one. Defensive guard.
-         assert(t != bt::nested_setlist && "edit a nested_setlist only after promote_nested");
+         // nested_setlist is now DIRECTLY MUTABLE (nested_edit/nested_remove handle it
+         // before any flat node_child call), and on the prefix-split/de-nest fallback
+         // promote_nested converts to a FLAT node first — so node_child never sees a
+         // nested node. The old "only after promote_nested" assert no longer holds (the
+         // contract changed: nested is editable in place), so it is removed.
          const setlist* n   = static_cast<const setlist*>(resolve(e, t, p));
          const int      idx = n->find_index(byte);
          if (idx < 0)
@@ -1645,6 +1678,33 @@ namespace gcart
          return {bt::full, pack_full(prefix, brs, nb, term, tt, tp)};
       }
 
+      // ── gcart inline-suffix_value body builder (the 3-BYTE form) ───────────────
+      // gcart's inline-sv body is [u16 vlen][u8 slen][value][suffix] (sv_leaf::hdr=3,
+      // birth-free — it shares the nested node header's birth). This is DELIBERATELY
+      // NOT rcart's 4-byte [u16 vlen][u16 slen] form: a 4-byte header would shift every
+      // value/suffix offset and corrupt the line (in_value/in_suffix read q+3). The
+      // u8 slen caps an INLINE suffix at 255 bytes — a longer suffix MUST externalize
+      // (make_sv), so sv_body_fits_ enforces BOTH the 127-byte tail cap AND slen<=255.
+      static bool sv_body_fits_(sv suffix, sv value) noexcept
+      {
+         return suffix.size() <= 255 &&
+                size_t(sv_leaf::bytes_for(uint32_t(value.size()), uint32_t(suffix.size()))) <= 127;
+      }
+      // Write the 3-byte inline body into `dst` (no SAL alloc — pure carry-over bytes,
+      // the only make_sv-free way to mint an inline-sv for a direct nested edit). dst
+      // must have room for 3 + value.size() + suffix.size() bytes (<=127; caller buffer
+      // is 127). Returns the total body byte count (== sv_leaf::bytes_for(vlen, slen)).
+      static uint16_t build_sv_body_(char* dst, sv suffix, sv value) noexcept
+      {
+         assert(sv_body_fits_(suffix, value) && "build_sv_body_ overflow — check sv_body_fits_ first");
+         const uint16_t v16 = uint16_t(value.size());
+         std::memcpy(dst, &v16, 2);
+         dst[2] = char(uint8_t(suffix.size()));  // u8 slen (gcart 3-byte form)
+         std::memcpy(dst + 3, value.data(), value.size());
+         std::memcpy(dst + 3 + value.size(), suffix.data(), suffix.size());
+         return uint16_t(3 + value.size() + suffix.size());
+      }
+
       // Copy setlist `c` into `dst` re-packed TIGHT (cap == content) — the inline
       // form for a nested tail (its u32 grandchildren ride along unchanged).
       void copy_setlist_tight(char* dst, const setlist* c)
@@ -1661,6 +1721,131 @@ namespace gcart
             tag3_set(d->types(), i, tag3_get(c->types(), i));
             d->branches()[i] = c->branches()[i];
          }
+      }
+
+      // Externalize an inline-setlist body (raw bytes `body`/`blen`, e.g. a
+      // nested-entry kind2) into a fresh standalone cl1 slot so it can be recursed
+      // into <unique> + re-inlined. PURE COPY — no refcount. The grandchild ptrs are
+      // aliases of the inline-setlist's grandchildren (Phase C: sharing a child down a
+      // clone costs ZERO — the carried ptr is verbatim, the old line's death-stamped
+      // drain balances liveness). The fresh slot is a born-THIS-txn working node about
+      // to be recursed <unique>, so set_birth(_V)/set_death(0) (the recycled slot may
+      // carry a stale death; copy_setlist body never touched birth/death — set them).
+      uint32_t externalize_inline_setlist_(const char* body, uint16_t blen)
+      {
+         const uint32_t s = _s1.alloc();
+         std::memcpy(_e.cl1.get(s), body, blen);
+         setlist* d = static_cast<setlist*>(_e.cl1.get(s));
+         d->set_birth(_V);  // born this txn (working node)
+         d->set_death(0);   // alive (the recycled slot may hold a stale death)
+         return s;
+      }
+
+      // ── THE CANONICAL nested_setlist byte packer ──────────────────────────────
+      // Writes header(meta/nbranch/prefix) + okeys + otypes + ooff + the from-END
+      // tail-heap of a nested_setlist into slot `n` from a decoded nentry set. PURE
+      // BYTES from hdr onward: it NEVER touches birth/death (the caller stamps those)
+      // and has NO refcount/alloc/free side-effects (the consume/transfer bookkeeping
+      // is the CALLER's job). `es[0..ne)` are the entries IN INDEX ORDER (byte-branches
+      // sorted ascending, then — if `term` — the term entry LAST at index ne-1; the
+      // term's okey is unused). Returns false WITHOUT writing a single byte if the line
+      // would overflow (prefix >= inline_flag, tail>127, or head+tail>128), so a
+      // same-slot unique re-pack can fail safely and the caller de-nests from the
+      // still-intact original. This is the one helper that initial-pack, unique in-place
+      // edit, and shared clone+edit ALL funnel through, making a nested line's body
+      // bytes a pure function of (prefix, nentry set, term) — the byte-identity that
+      // keeps find_in/cursor offset math correct across all three paths.
+      bool lay_nested_into_(nested_setlist* n, sv prefix, const nentry* es, uint32_t ne, bool term)
+      {
+         const uint32_t pl    = uint32_t(prefix.size());
+         const uint32_t nbr   = ne - (term ? 1u : 0u);  // byte-branch count
+         const uint32_t nslot = ne;
+         // SIZE CHECK BEFORE WRITING (a half-written slot can't be safely de-nested).
+         // head = hdr + prefix + okeys[nbr] + otypes(3bit×nslot) + ooff[nslot].
+         uint32_t tail = 0;
+         for (uint32_t i = 0; i < ne; ++i)
+            tail += (es[i].kind ? es[i].blen : 4u);
+         const uint32_t head = nested_setlist::hdr + pl + nbr + tag3_bytes(nslot) + nslot;
+         if (pl >= nested_setlist::inline_flag || tail > 127 || head + tail > 128)
+            return false;  // overflow — caller de-nests (the original slot is untouched)
+
+         n->meta    = uint8_t((term ? 0x80 : 0) | (pl & 0x7f));
+         n->nbranch = uint8_t(nbr);
+         std::memcpy(n->base() + nested_setlist::hdr, prefix.data(), pl);
+         for (uint32_t i = 0; i < nbr; ++i)
+            n->okeys()[i] = es[i].okey;
+         // tag3_set is a read-modify-write of a u16, so the otypes array's trailing
+         // UNUSED bits (3*nslot may not be byte-aligned) would otherwise carry whatever
+         // stale garbage the recycled slot held — making the laid bytes depend on slot
+         // history. find_in masks otype to 3 bits so reads are unaffected, but the
+         // byte-IDENTITY invariant (create == unique re-pack == shared clone) requires
+         // deterministic bytes: zero the tag3 region first so a fresh slot and a recycled
+         // one produce the SAME line for the same (prefix, entry set, term).
+         std::memset(n->otypes(), 0, tag3_bytes(nslot));
+         uint32_t eoff = 0;
+         for (uint32_t idx = 0; idx < ne; ++idx)
+         {
+            const nentry&  e   = es[idx];
+            const uint32_t esz = (e.kind ? e.blen : 4u);
+            eoff += esz;
+            n->ooff()[idx] = uint8_t((e.kind ? nested_setlist::inline_flag : 0) | eoff);
+            char* dst      = n->base() + 128 - eoff;
+            if (e.kind)  // inline (kind 1 sv body OR kind 2 setlist body) — raw bytes
+            {
+               std::memcpy(dst, e.body, e.blen);
+               tag3_set(n->otypes(), idx, e.otype);
+            }
+            else  // external: 4-byte region ptr
+            {
+               std::memcpy(dst, &e.ext, 4);
+               tag3_set(n->otypes(), idx, e.otype);
+            }
+         }
+         return true;
+      }
+
+      // Decode a nested_setlist into a PATH-AGNOSTIC nentry set. memcpy's the WHOLE
+      // 128 B node to `scratch128` FIRST (a same-slot unique re-pack rewrites the live
+      // slot, so we must read everything from a private snapshot — the from-END
+      // tail-heap means a new entry's start can overlap an old entry's bytes). Inline
+      // bodies are kept as POINTERS INTO scratch128 (pure carry-over bytes, never
+      // make_sv'd, so birth-free 3-byte gcart bodies); externals keep their u32 ptr.
+      // No refcount, no birth read (the node header birth is read separately).
+      void read_nested_entries_(const nested_setlist* src,
+                                char                  scratch128[128],
+                                nentry                out[],
+                                uint32_t&             ne,
+                                bool&                 term)
+      {
+         std::memcpy(scratch128, src, 128);
+         const nested_setlist* sn = reinterpret_cast<const nested_setlist*>(scratch128);
+         ne                       = 0;
+         term                     = sn->has_term();
+         auto decode_at           = [&](uint32_t i, uint8_t okey)
+         {
+            nentry& o = out[ne++];
+            o.okey    = okey;
+            if (!sn->is_inline(i))
+            {
+               o.kind  = 0;
+               o.otype = sn->otype(i);
+               o.ext   = sn->ext_ptr(i);
+               o.body  = nullptr;
+               o.blen  = 0;
+            }
+            else
+            {
+               o.kind  = (sn->otype(i) == bt::setlist) ? uint8_t(2) : uint8_t(1);
+               o.otype = sn->otype(i);
+               o.ext   = 0;
+               o.body  = sn->entry(i);  // pointer INTO scratch128 (carry-over bytes)
+               o.blen  = uint16_t(sn->entry_size(i));
+            }
+         };
+         for (uint32_t i = 0; i < sn->nbranch; ++i)
+            decode_at(i, sn->okeys()[i]);
+         if (term)
+            decode_at(sn->nbranch, 0);  // term last; okey unused
       }
 
       // Try to build a nested_setlist that INLINES private small children into the
@@ -1734,50 +1919,82 @@ namespace gcart
          if (ninline == 0 || tail > 127 || head + tail > 128)
             return UINT32_MAX;
 
+         // Build the PATH-AGNOSTIC nentry set and STAGE inline bodies into a scratch
+         // (lay_nested_into_ only memcpy's raw bytes — no re-resolve, no tight-pack).
+         // kind1: the inline-sv body is the birth-FREE 3-byte gcart form (skip the
+         //   standalone leaf's [u32 birth] prefix) — copied verbatim. kind2:
+         //   copy_setlist_tight into the scratch so the cap==total tight body is what
+         //   gets laid (byte-identity with the unique/shared edit paths). The CONSUME
+         //   side-effects (free the standalone leaf / free the source setlist / take the
+         //   external) run AFTER the bytes are laid — lay_nested_into_ is pure bytes.
+         // inline bodies sum to <=127 (the tail budget, rejected above), so ONE 128-byte
+         // staging buffer holds every inline body contiguously.
+         char     stage[128];
+         uint32_t soff = 0;
+         nentry   es[257];
+         auto     make_entry = [&](uint32_t idx, uint8_t okey, bt tag, uint32_t ptr)
+         {
+            nentry& o = es[idx];
+            o.okey    = okey;
+            if (kind[idx] == 1)
+            {
+               char* dst = stage + soff;
+               soff += esize[idx];
+               std::memcpy(dst, esrc[idx], esize[idx]);  // esrc points past birth (3-byte body)
+               o.kind  = 1;
+               o.otype = bt::suffix_value;
+               o.ext   = 0;
+               o.body  = dst;
+               o.blen  = uint16_t(esize[idx]);
+            }
+            else if (kind[idx] == 2)
+            {
+               char* dst = stage + soff;
+               soff += esize[idx];
+               copy_setlist_tight(dst, reinterpret_cast<const setlist*>(esrc[idx]));
+               o.kind  = 2;
+               o.otype = bt::setlist;
+               o.ext   = 0;
+               o.body  = dst;
+               o.blen  = uint16_t(esize[idx]);
+            }
+            else
+            {
+               o.kind  = 0;
+               o.otype = tag;
+               o.ext   = ptr;
+               o.body  = nullptr;
+               o.blen  = 0;
+            }
+         };
+         for (uint32_t i = 0; i < nb; ++i)
+            make_entry(i, brs[i].byte, brs[i].tag, brs[i].ptr);
+         if (term)
+            make_entry(nb, 0, tt, tp);
+
          const uint32_t  slot = _s1.alloc();
          nested_setlist* n    = static_cast<nested_setlist*>(_e.cl1.get(slot));
          n->set_birth(_V);  // version liveness: born this txn
          n->set_death(0);   // Phase B: born alive (the recycled slot may hold a stale death)
-         n->meta              = uint8_t((term ? 0x80 : 0) | (pl & 0x7f));
-         n->nbranch           = uint8_t(nb);
-         std::memcpy(n->base() + nested_setlist::hdr, prefix.data(), pl);
-         for (uint32_t i = 0; i < nb; ++i)
-            n->okeys()[i] = brs[i].byte;
-         uint32_t eoff = 0;
-         auto     lay  = [&](uint32_t idx, bt tag, uint32_t ptr)
+         lay_nested_into_(n, prefix, es, nslot, term);  // measured to fit (reject @above)
+
+         // CONSUME side-effects, in pack order (NOT inside lay_nested_into_).
+         auto consume = [&](uint32_t idx, uint32_t ptr)
          {
-            eoff += esize[idx];
-            n->ooff()[idx] = uint8_t((kind[idx] ? nested_setlist::inline_flag : 0) | eoff);
-            char* dst      = n->base() + 128 - eoff;
-            if (kind[idx] == 1)  // inline leaf: copy body, consume the SAL leaf
-            {
-               std::memcpy(dst, esrc[idx], esize[idx]);
-               tag3_set(n->otypes(), idx, bt::suffix_value);
+            if (kind[idx] == 1)
                // born-this-txn (gated above) ⟹ private ⟹ free the standalone leaf now
                // (its body now lives inline in this nested line). NO refcount.
                leaf_free(*_lses, ptr);
-            }
-            else if (
-                kind[idx] ==
-                2)  // inline setlist: tight copy, free the source slot (grandchildren transfer)
-            {
-               copy_setlist_tight(dst, reinterpret_cast<const setlist*>(esrc[idx]));
-               tag3_set(n->otypes(), idx, bt::setlist);
+            else if (kind[idx] == 2)
                // born-this-txn setlist (gated above): SHALLOW free the source line — its
-               // u32 grandchildren transferred (copied tight) into the inline body. NO
-               // refcount; the line just returns to its freeset.
+               // u32 grandchildren transferred (copied tight) into the inline body.
                _e.cl1.free(ptr);
-            }
-            else  // external: 4-byte region ptr, TAKEN
-            {
-               std::memcpy(dst, &ptr, 4);
-               tag3_set(n->otypes(), idx, tag);
-            }
+            // kind 0 external: ptr TAKEN, nothing to consume
          };
          for (uint32_t i = 0; i < nb; ++i)
-            lay(i, brs[i].tag, brs[i].ptr);
+            consume(i, brs[i].ptr);
          if (term)
-            lay(nb, tt, tp);
+            consume(nb, tp);
          return slot;
       }
 
@@ -1967,10 +2184,19 @@ namespace gcart
             return build_node(sv(es).substr(0, cp), brs, nb, term, tt, tp, /*may_inline=*/true);
          }
          // routing node
-         if (t == bt::nested_setlist)  // promote-on-write: every edit path mutates flat nodes only.
+         if (t == bt::nested_setlist)  // DIRECTLY MUTABLE — re-pack in place (no promote)
          {
-            auto fl = promote_nested(t, p);
-            return upsert_rec<cow_mode::unique>(fl.first, fl.second, key, depth, val);
+            // The latch (same as the flat path @below): in <unique> read this node's
+            // BIRTH once — born this txn (birth==_V) ⟹ private, re-pack the SAME slot
+            // <unique>; an earlier-committed (birth<_V), possibly snapshot-pinned one
+            // clones a fresh slot <shared> and recurses children <shared>. In <shared>
+            // there is NO birth read — it is the clone path only. nested_edit consumes
+            // the node prefix INTERNALLY (it needs the entry depth for the prefix-split
+            // fallback), so the latch keys off node_birth, NOT a refcount.
+            if constexpr (M == cow_mode::unique)
+               if (node_birth(_e, t, p) == _V)
+                  return nested_edit<cow_mode::unique>(t, p, key, depth, val);
+            return nested_edit<cow_mode::shared>(t, p, key, depth, val);
          }
          // full node: prefetch the offset cacheline for the SPECULATIVE routing byte
          // (key[depth] — correct when prefixless, the common case) BEFORE node_prefix
@@ -2163,12 +2389,14 @@ namespace gcart
 
       // Un-nest a nested_setlist into a flat structure: each inner setlist becomes
       // a STANDALONE cl1 setlist, and a flat OUTER setlist points to them. Returns
-      // the flat (tag,ptr). The write path promotes-on-write so every edit path
-      // only ever mutates flat nodes (nested is effectively read-only after create;
-      // re-nesting happens later in build_node). PRIVATE: inner u32 children are
-      // TRANSFERRED to the new setlists, the nested slot is just freed. SHARED: the
-      // new setlists co-reference the children, so retain each then release the old
-      // nested (its ref>1 so it survives for the snapshot).
+      // the flat (tag,ptr). FALLBACK-ONLY now: nested is DIRECTLY MUTABLE (nested_edit/
+      // nested_remove re-pack the line in place), so this no longer runs on every edit —
+      // only for (a) nested_edit's PREFIX-SPLIT arm (the key diverges from the node
+      // prefix, a genuine shape change), and (b) nentry_to_flat_ reuses this de-nest
+      // logic on a true 128B emit overflow. Phase C — NO refcount: the new flat `out`
+      // CARRIES the nested's external ptrs + inline-setlist u32 grandchildren and
+      // reconstructs FRESH leaves for the inline suffix_values, so the husk is a SHALLOW
+      // supersession (log_shallow decides inline-vs-drain by birth).
       std::pair<bt, uint32_t> promote_nested(bt t, uint32_t p)
       {
          const bool      priv  = node_birth(_e, t, p) == _V;  // born this txn ⟹ private
@@ -2229,6 +2457,549 @@ namespace gcart
          return out;
       }
 
+      // ── DIRECTLY-MUTABLE nested_setlist edit (kills promote-on-write) ───────────
+      // Re-pack the nested line so the result is BYTE-IDENTICAL (body bytes) to what
+      // pack_nested_leaves would have produced for the same (prefix, entries, term):
+      // both funnel through lay_nested_into_. UNIQUE re-packs the SAME slot (birth
+      // already _V — never re-stamp); SHARED allocs a FRESH cl1 slot (set_birth(_V)/
+      // set_death(0)) and re-packs into it, then log_shallow's the OLD (committed) line
+      // ONCE at emit (the snapshot keeps it; the floor-gated drain cascades its
+      // superseded children later). Only on a genuine 128B overflow does it fall back
+      // to nentry_to_flat_ (the de-nest); a key-prefix DIVERGENCE falls back to
+      // promote_nested + the flat path (the only remaining promote). `depth` is the
+      // depth at node ENTRY (the nested prefix not yet consumed). Phase C — NO refcount:
+      // every rcart retain()/release_ref()/retain_shared_carryovers_ is DELETED. The
+      // <shared> rule (the single most error-prone translation): a replaced/dropped
+      // child is NOT log_deep'd here (the committed old line still points at it for the
+      // snapshot) — only the OLD LINE is log_shallow'd once at emit. <unique> is the
+      // opposite (log_deep the dropped child immediately — the slot is truly private).
+      template <cow_mode CM>
+      std::pair<bt, uint32_t> nested_edit(bt t, uint32_t p, sv key, uint32_t depth, sv val)
+      {
+         const uint32_t  entry_depth = depth;  // for the overflow / prefix-split promote re-run
+         nested_setlist* nn          = static_cast<nested_setlist*>(resolve(_e, t, p));
+         const sv        pfx         = nn->prefix();
+         const sv        ksuf        = key.substr(depth);
+         const uint32_t  cp          = lcp(pfx, ksuf);
+         // PREFIX SPLIT: the node's prefix diverges from the key → it needs a new
+         // parent. A genuine shape change; promote the nested to a flat node and re-run
+         // the edit at the SAME entry depth (the flat node keeps the prefix, upsert_rec
+         // re-consumes it). (The hot case is cp==pfx.size().)
+         if (cp < pfx.size())
+         {
+            auto fl = promote_nested(t, p);
+            return upsert_rec<cow_mode::unique>(fl.first, fl.second, key, entry_depth, val);
+         }
+         depth += uint32_t(pfx.size());
+
+         // Decode the current entries into a path-agnostic set, reading from a PRIVATE
+         // scratch copy so a same-slot rewrite can read while it overwrites (the from-END
+         // tail-heap means a new entry's start can overlap an old entry). es[] is sized
+         // es_cap (64), NOT 257 — this descent recurses once per nested level and a fat
+         // frame would overflow the stack on a deep key.
+         char     scratch128[128];
+         nentry   es[nested_setlist::es_cap];
+         uint32_t ne;
+         bool     term;
+         read_nested_entries_(nn, scratch128, es, ne, term);
+         const uint32_t nbr = ne - (term ? 1u : 0u);
+
+         // staging for any NEW inline-sv body this edit mints (build_sv_body_, the gcart
+         // 3-byte form — pure bytes, never make_sv'd for a carry-over). Alive across emit.
+         char newbody[127];
+         bool inc_size = false;
+         // mint an EXTERNAL leaf into entry idx (value too big to inline). The leaf is
+         // freshly owned (make_sv); on a shared clone it is NOT a carry-over (it never
+         // existed on the old line) so nothing extra is needed — there are no carry-over
+         // retains in gcart at all.
+         auto mint_external = [&](uint32_t idx, sv suffix)
+         {
+            auto mv       = make_sv(suffix, val);
+            es[idx].kind  = 0;
+            es[idx].otype = mv.first;
+            es[idx].ext   = mv.second;
+         };
+
+         if (depth == key.size())  // TERM
+         {
+            if (term)
+            {
+               const uint32_t ti = ne - 1;
+               nentry&        te = es[ti];
+               if (te.kind == 0)  // external term → drop old leaf, REP with inline-sv/ext
+               {
+                  // The old external term is NOT recursed (a term leaf has no child
+                  // recursion), and gcart's OLD nested line is SHALLOW-superseded at emit
+                  // (frees only the line, never cascades) — so the replaced term leaf MUST
+                  // be logged HERE in BOTH modes (log_deep decides inline-vs-drain by
+                  // birth: a committed leaf logs for the floor-gated drain, keeping it
+                  // alive for any snapshot; a born-this-txn one frees inline). gcart's
+                  // shallow-supersession analog of the flat edit_node's unconditional
+                  // log_deep(tt,tp) on a term REPLACE (NOT rcart's "shared defers").
+                  log_deep(te.otype, te.ext);
+                  if (sv_body_fits_(sv{}, val))
+                  {
+                     te.kind  = 1;
+                     te.otype = bt::suffix_value;
+                     te.body  = newbody;
+                     te.blen  = build_sv_body_(newbody, sv{}, val);
+                  }
+                  else
+                     mint_external(ti, sv{});
+               }
+               else  // inline-sv term (data) → REP its body bytes
+               {
+                  if (sv_body_fits_(sv{}, val))
+                  {
+                     te.kind = 1;
+                     te.body = newbody;
+                     te.blen = build_sv_body_(newbody, sv{}, val);
+                  }
+                  else  // grew past inline budget → externalize
+                     mint_external(ti, sv{});
+               }
+            }
+            else  // absent term → append a new inline-sv (0-suffix) term
+            {
+               const uint32_t ti = ne;  // term goes LAST
+               nentry&        te = es[ne++];
+               te.okey           = 0;
+               if (sv_body_fits_(sv{}, val))
+               {
+                  te.kind  = 1;
+                  te.otype = bt::suffix_value;
+                  te.body  = newbody;
+                  te.blen  = build_sv_body_(newbody, sv{}, val);
+               }
+               else
+                  mint_external(ti, sv{});
+               term     = true;
+               inc_size = true;
+            }
+         }
+         else  // BYTE entry
+         {
+            const uint8_t byte = uint8_t(key[depth]);
+            int           pos  = -1;
+            for (uint32_t i = 0; i < nbr; ++i)
+               if (es[i].okey == byte)
+               {
+                  pos = int(i);
+                  break;
+               }
+            if (pos < 0)  // ABSENT → INS a new inline-sv (or external big), sorted
+            {
+               uint32_t ip = 0;
+               while (ip < nbr && es[ip].okey < byte)
+                  ++ip;
+               for (uint32_t i = ne; i > ip; --i)
+                  es[i] = es[i - 1];
+               ++ne;
+               nentry& nE = es[ip];
+               nE.okey    = byte;
+               if (sv_body_fits_(key.substr(depth + 1), val))
+               {
+                  nE.kind  = 1;
+                  nE.otype = bt::suffix_value;
+                  nE.body  = newbody;
+                  nE.blen  = build_sv_body_(newbody, key.substr(depth + 1), val);
+               }
+               else  // value too big to inline → external leaf (freshly owned)
+                  mint_external(ip, key.substr(depth + 1));
+               inc_size = true;
+            }
+            else if (es[uint32_t(pos)].kind == 0)  // PRESENT external → recurse, REP its ptr
+            {
+               nentry& ce = es[uint32_t(pos)];
+               // Recurse <CM> so a COMMITTED child is CLONED (never mutated in place).
+               // The recursion returns the new (tag,ptr); the OLD ptr's supersession is
+               // handled INSIDE the recursion (it log_shallow/log_deep's its own husk by
+               // birth). No retain (gcart sharing is free).
+               auto nc  = upsert_rec<CM>(ce.otype, ce.ext, key, depth + 1, val);
+               ce.otype = nc.first;
+               ce.ext   = nc.second;
+               ce.kind  = 0;
+            }
+            else if (es[uint32_t(pos)].kind == 1)  // PRESENT inline-sv
+            {
+               nentry& ce = es[uint32_t(pos)];
+               // decode its (value,suffix) from the 3-byte scratch body
+               uint16_t v16;
+               std::memcpy(&v16, ce.body, 2);
+               const uint8_t s8   = uint8_t(ce.body[2]);
+               const sv      esuf{ce.body + 3 + v16, s8};
+               if (esuf == key.substr(depth + 1))  // SAME key → REP its value bytes
+               {
+                  if (sv_body_fits_(esuf, val))
+                  {
+                     // esuf views ce.body (scratch128); build into newbody, THEN repoint
+                     // ce.body — read esuf before it is shadowed by the write.
+                     std::string esuf_s(esuf);
+                     uint16_t    bl = build_sv_body_(newbody, esuf_s, val);
+                     ce.body        = newbody;
+                     ce.blen        = bl;
+                  }
+                  else  // grew past inline → externalize
+                     mint_external(uint32_t(pos), std::string(esuf));
+               }
+               else  // DEEPER SPLIT: the two leaves share key[depth] but diverge below
+               {
+                  std::string    esuf_s(esuf);
+                  std::string    eval_s(sv{ce.body + 3, v16});
+                  const sv       nsuf = key.substr(depth + 1);
+                  const uint32_t cp2  = lcp(esuf_s, nsuf);
+                  br             brs[2];
+                  uint32_t       cnb   = 0;
+                  bool           cterm = false;
+                  bt             ctt   = bt::null;
+                  uint32_t       ctp   = 0;
+                  auto           place = [&](const std::string& s, sv v)
+                  {
+                     if (cp2 == s.size())
+                     {
+                        cterm   = true;
+                        auto t2 = make_sv(sv{}, v);
+                        ctt     = t2.first;
+                        ctp     = t2.second;
+                     }
+                     else
+                     {
+                        auto t2    = make_sv(sv(s).substr(cp2 + 1), v);
+                        brs[cnb++] = br{uint8_t(s[cp2]), t2.first, t2.second};
+                     }
+                  };
+                  place(esuf_s, eval_s);
+                  place(std::string(nsuf), val);
+                  if (cnb == 2 && brs[0].byte > brs[1].byte)
+                     std::swap(brs[0], brs[1]);
+                  // The OLD inline-sv body is pure data (no SAL object) — simply replaced;
+                  // nothing to drop. Build the child node FLAT (no inline — its leaves stay
+                  // external so the child is a real setlist), then try to inline it kind2.
+                  auto child = build_node(esuf_s.substr(0, cp2), brs, cnb, cterm, ctt, ctp,
+                                          /*may_inline=*/false);
+                  if (child.first == bt::setlist &&
+                      static_cast<const setlist*>(_e.cl1.get(child.second))->birth() == _V)
+                  {
+                     const setlist* c = static_cast<const setlist*>(_e.cl1.get(child.second));
+                     const uint32_t b = setlist::bytes_for_cap(c->total(), c->prefixlen());
+                     if (b <= 127)
+                     {
+                        char* dst = newbody;  // reuse the stack body buffer
+                        copy_setlist_tight(dst, c);
+                        _e.cl1.free(child.second);  // grandchildren transfer into the line
+                        ce.kind  = 2;
+                        ce.otype = bt::setlist;
+                        ce.body  = dst;
+                        ce.blen  = uint16_t(b);
+                     }
+                     else
+                     {
+                        ce.kind  = 0;
+                        ce.otype = child.first;
+                        ce.ext   = child.second;
+                     }
+                  }
+                  else
+                  {
+                     ce.kind  = 0;
+                     ce.otype = child.first;
+                     ce.ext   = child.second;
+                  }
+                  inc_size = true;
+               }
+            }
+            else  // PRESENT inline-setlist (kind2) → externalize, recurse, keep/re-inline
+            {
+               nentry& ce = es[uint32_t(pos)];
+               // Alloc a standalone cl1 setlist from the inline bytes (pure copy — its u32
+               // grandchildren are aliased/carried, no refcount). Then route the next byte
+               // THROUGH it <unique> (it is a born-this-txn working node). The recursion
+               // clones any committed grandchild it touches (recursing <unique> over a
+               // born-_V node still clones a birth<_V grandchild). gcart sharing is free —
+               // no grandchild retains.
+               uint32_t s  = externalize_inline_setlist_(ce.body, ce.blen);
+               auto     nc = upsert_rec<cow_mode::unique>(bt::setlist, s, key, depth + 1, val);
+               bool     reinlined = false;
+               if (nc.first == bt::setlist &&
+                   static_cast<const setlist*>(_e.cl1.get(nc.second))->birth() == _V)
+               {
+                  const setlist* c = static_cast<const setlist*>(_e.cl1.get(nc.second));
+                  const uint32_t b = setlist::bytes_for_cap(c->total(), c->prefixlen());
+                  if (b <= 127)
+                  {
+                     char* dst = newbody;
+                     copy_setlist_tight(dst, c);
+                     _e.cl1.free(nc.second);
+                     ce.kind   = 2;
+                     ce.otype  = bt::setlist;
+                     ce.body   = dst;
+                     ce.blen   = uint16_t(b);
+                     reinlined = true;
+                  }
+               }
+               if (!reinlined)
+               {
+                  ce.kind  = 0;
+                  ce.otype = nc.first;
+                  ce.ext   = nc.second;
+               }
+            }
+         }
+
+         return emit_nested_<CM>(t, p, pfx, es, ne, term, inc_size);
+      }
+
+      // Build a FLAT routing node (setlist / double / full) from an ALREADY-EDITED
+      // nentry set — the overflow / de-nest path. The recursion + make_sv side-effects
+      // are DONE (the set incorporates them), so we must NOT re-run the edit; we convert
+      // this set into standalone children exactly as promote_nested would, but reading
+      // from the mutated set. kind0 external → keep the ptr (TAKEN). kind2 inline-setlist
+      // → alloc a standalone cl1, memcpy the body, set_birth(_V)/set_death(0) (its u32
+      // grandchildren are carried). kind1 inline-sv → reconstruct (suffix,value) from the
+      // 3-byte body and make_sv (re-adds the [u32 birth] prefix, birth-stamped _V). Then
+      // log_shallow the old husk (a SHALLOW supersession for BOTH paths: its external
+      // ptrs + inline-setlist grandchildren are carried into the standalone children, its
+      // inline-sv data dies with the line). Phase C — NO refcount in either branch.
+      std::pair<bt, uint32_t> nentry_to_flat_(bt       t,
+                                              uint32_t p,
+                                              bool     is_unique,
+                                              sv       pfx,
+                                              const nentry* es,
+                                              uint32_t ne,
+                                              bool     term)
+      {
+         const uint32_t nbr = ne - (term ? 1u : 0u);
+         br             scratch[257];
+         uint32_t       nb = 0;
+         bt             tt = bt::null;
+         uint32_t       tp = 0;
+         auto resolve_entry = [&](const nentry& e, uint8_t& okeyo, bt& tago, uint32_t& ptro)
+         {
+            okeyo = e.okey;
+            if (e.kind == 0)  // external — keep the ptr
+            {
+               tago = e.otype;
+               ptro = e.ext;
+            }
+            else if (e.kind == 2)  // inline setlist → standalone cl1 (copy body, stamp birth)
+            {
+               uint32_t s = _s1.alloc();
+               std::memcpy(_e.cl1.get(s), e.body, e.blen);
+               setlist* d = static_cast<setlist*>(_e.cl1.get(s));
+               d->set_birth(_V);  // born this txn (recycled slot may hold stale death)
+               d->set_death(0);
+               tago = bt::setlist;
+               ptro = s;
+            }
+            else  // inline-sv (3-byte body) → fresh standalone SAL-1.0 leaf
+            {
+               uint16_t v16;
+               std::memcpy(&v16, e.body, 2);
+               const uint8_t s8 = uint8_t(e.body[2]);
+               const sv      val{e.body + 3, v16};
+               const sv      suf{e.body + 3 + v16, s8};
+               auto          mv = make_sv(suf, val);
+               tago             = mv.first;
+               ptro             = mv.second;
+            }
+         };
+         for (uint32_t i = 0; i < nbr; ++i)
+         {
+            br b;
+            resolve_entry(es[i], b.byte, b.tag, b.ptr);
+            scratch[nb++] = b;
+         }
+         if (term)
+         {
+            uint8_t dummy;
+            resolve_entry(es[ne - 1], dummy, tt, tp);
+         }
+         auto out = build_node(pfx, scratch, nb, term, tt, tp, /*may_inline=*/false);
+         (void)is_unique;  // both paths SHALLOW-supersede the husk (children carried)
+         log_shallow(bt::nested_setlist, p);
+         return out;
+      }
+
+      // Re-emit a nested line from a mutated nentry set. UNIQUE re-packs the SAME slot p
+      // (birth already _V — do NOT re-stamp); SHARED allocs a FRESH cl1 (set_birth(_V)/
+      // set_death(0)) and lay's into it, then log_shallow's the OLD line ONCE (the
+      // snapshot keeps it; the floor-gated drain cascades the superseded children later).
+      // On a genuine 128B overflow the ALREADY-EDITED set is built flat (nentry_to_flat_)
+      // — NOT re-run from the original (the recursion side-effects are already done). The
+      // original slot p is intact on overflow (read from scratch128, not p), so the
+      // de-nest is safe. NO retain/carry-over plumbing (gcart sharing is free).
+      template <cow_mode CM>
+      std::pair<bt, uint32_t> emit_nested_(bt       t,
+                                           uint32_t p,
+                                           sv       pfx,
+                                           const nentry* es,
+                                           uint32_t ne,
+                                           bool     term,
+                                           bool     inc_size)
+      {
+         if constexpr (CM == cow_mode::unique)
+         {
+            nested_setlist* n = static_cast<nested_setlist*>(resolve(_e, t, p));
+            if (lay_nested_into_(n, pfx, es, ne, term))  // same-slot re-pack (birth stays _V)
+            {
+               if (inc_size)
+                  ++_size;
+               return {t, p};
+            }
+            auto out = nentry_to_flat_(t, p, /*is_unique=*/true, pfx, es, ne, term);
+            if (inc_size)
+               ++_size;
+            return out;
+         }
+         else
+         {
+            // SHARED: alloc a fresh slot, stamp birth=_V/death=0, re-pack into it, then
+            // log_shallow the OLD (committed) line ONCE — the snapshot keeps the old line's
+            // copy; the floor-gated drain cascades its superseded children later. (Do NOT
+            // log the individual replaced/dropped children — the old line still points at
+            // them for the snapshot.)
+            const uint32_t  s  = _s1.alloc();
+            nested_setlist* ns = static_cast<nested_setlist*>(_e.cl1.get(s));
+            ns->set_birth(_V);  // born this txn (recycled slot may hold a stale death)
+            ns->set_death(0);
+            if (lay_nested_into_(ns, pfx, es, ne, term))
+            {
+               log_shallow(t, p);  // old line dies (committed → drain; born-_V → inline)
+               if (inc_size)
+                  ++_size;
+               return {bt::nested_setlist, s};
+            }
+            // OVERFLOW on the fresh slot: free it, flat-build from the edited set —
+            // nentry_to_flat_ log_shallow's the old line once.
+            _s1.free(s);
+            auto out = nentry_to_flat_(t, p, /*is_unique=*/false, pfx, es, ne, term);
+            if (inc_size)
+               ++_size;
+            return out;
+         }
+      }
+
+      // ── DIRECTLY-MUTABLE nested_setlist remove (mirrors nested_edit) ────────────
+      // Presence is guaranteed by the caller's find_in pre-check. Decode the entries,
+      // drop / REP the matched one, re-emit through emit_nested_ (a remove only ever
+      // SHRINKS the line, so a same-slot UNIQUE re-pack never overflows — the overflow
+      // arm there is dead but harmless). On shrink to zero the husk is log_shallow'd and
+      // {null,0} cascades up. `depth` is at node ENTRY. Phase C — NO refcount: <unique>
+      // log_deep's a dropped external child immediately; <shared> does NOT (the committed
+      // old line still points at it for the snapshot — only emit log_shallow's the line).
+      template <cow_mode CM>
+      std::pair<bt, uint32_t> nested_remove(bt t, uint32_t p, sv key, uint32_t depth)
+      {
+         nested_setlist* nn  = static_cast<nested_setlist*>(resolve(_e, t, p));
+         const sv        pfx = nn->prefix();
+         depth += uint32_t(pfx.size());  // prefix matched (find_in pre-check); consume it
+
+         char     scratch128[128];
+         nentry   es[nested_setlist::es_cap];
+         uint32_t ne;
+         bool     term;
+         read_nested_entries_(nn, scratch128, es, ne, term);
+         const uint32_t nbr = ne - (term ? 1u : 0u);
+
+         char reinline_body[127];  // staging for a re-inlined setlist (≠ scratch128)
+
+         if (depth == key.size())  // remove the TERM
+         {
+            nentry& te = es[ne - 1];  // term is the last entry
+            if (te.kind == 0)
+            {
+               // External term dropped — NOT recursed, and the OLD nested line is
+               // SHALLOW-superseded at emit (never cascades). So log the dropped term
+               // leaf HERE in BOTH modes (log_deep: committed → drain; born-_V → inline).
+               log_deep(te.otype, te.ext);
+            }
+            // inline-sv term → pure data, just dropped
+            --ne;
+            term = false;
+         }
+         else  // remove a byte entry
+         {
+            const uint8_t byte = uint8_t(key[depth]);
+            int           pos  = -1;
+            for (uint32_t i = 0; i < nbr; ++i)
+               if (es[i].okey == byte)
+               {
+                  pos = int(i);
+                  break;
+               }
+            const uint32_t pi = uint32_t(pos);  // find_in guaranteed presence (pos>=0)
+            if (es[pi].kind == 0)  // external child → recurse
+            {
+               auto nc = remove_rec<CM>(es[pi].otype, es[pi].ext, key, depth + 1);
+               if (nc.first == bt::null)  // child subtree vanished → drop this entry
+               {
+                  for (uint32_t i = pi; i + 1 < ne; ++i)
+                     es[i] = es[i + 1];
+                  --ne;
+               }
+               else  // child changed → REP its ptr (the recursion owns the new ptr)
+               {
+                  es[pi].otype = nc.first;
+                  es[pi].ext   = nc.second;
+               }
+            }
+            else if (es[pi].kind == 1)  // inline-sv leaf (the matched key) → DROP (pure data)
+            {
+               for (uint32_t i = pi; i + 1 < ne; ++i)
+                  es[i] = es[i + 1];
+               --ne;
+            }
+            else  // inline-setlist → externalize, recurse <unique>, then DROP-or-REP
+            {
+               uint32_t s  = externalize_inline_setlist_(es[pi].body, es[pi].blen);
+               auto     nc = remove_rec<cow_mode::unique>(bt::setlist, s, key, depth + 1);
+               if (nc.first == bt::null)  // shrank to empty → drop
+               {
+                  for (uint32_t i = pi; i + 1 < ne; ++i)
+                     es[i] = es[i + 1];
+                  --ne;
+               }
+               else  // try to RE-INLINE the surviving setlist, else keep external
+               {
+                  bool reinlined = false;
+                  if (nc.first == bt::setlist &&
+                      static_cast<const setlist*>(_e.cl1.get(nc.second))->birth() == _V)
+                  {
+                     const setlist* c = static_cast<const setlist*>(_e.cl1.get(nc.second));
+                     const uint32_t b = setlist::bytes_for_cap(c->total(), c->prefixlen());
+                     if (b <= 127)
+                     {
+                        // re-inline into a SEPARATE staging buffer (scratch128 still backs
+                        // the OTHER carry-over inline entries — must not stomp it).
+                        char* dst = reinline_body;
+                        copy_setlist_tight(dst, c);
+                        _e.cl1.free(nc.second);
+                        es[pi].kind  = 2;
+                        es[pi].otype = bt::setlist;
+                        es[pi].body  = dst;
+                        es[pi].blen  = uint16_t(b);
+                        reinlined    = true;
+                     }
+                  }
+                  if (!reinlined)
+                  {
+                     es[pi].kind  = 0;
+                     es[pi].otype = nc.first;
+                     es[pi].ext   = nc.second;
+                  }
+               }
+            }
+         }
+
+         if (ne == 0)  // line emptied → free the husk, cascade {null,0} up
+         {
+            log_shallow(bt::nested_setlist, p);  // committed → drain; born-_V → inline
+            return {bt::null, 0};
+         }
+         // remove never grows the line → the same-slot re-pack always fits.
+         return emit_nested_<CM>(t, p, pfx, es, ne, term, /*inc_size=*/false);
+      }
+
       // ── remove path (mirrors upsert_rec/edit_node; presence is guaranteed by
       //    the caller's find_in pre-check, so there is NO not-found branch) ──────
       // Descend to the leaf (consuming the matched prefix), removing it; on the
@@ -2246,10 +3017,16 @@ namespace gcart
             log_deep(t, p);  // removed leaf DROPPED (childless)
             return {bt::null, 0};
          }
-         if (t == bt::nested_setlist)  // promote-on-write, then remove on the flat node
+         if (t == bt::nested_setlist)  // DIRECTLY MUTABLE — re-pack in place (no promote)
          {
-            auto fl = promote_nested(t, p);
-            return remove_rec<cow_mode::unique>(fl.first, fl.second, key, depth);
+            // Same birth==_V latch as the flat remove (@below): born this txn ⟹ private,
+            // re-pack the SAME slot <unique>; an earlier-committed (possibly snapshot-
+            // pinned) one clones a fresh slot <shared> and recurses children <shared>.
+            // nested_remove consumes the node prefix internally.
+            if constexpr (M == cow_mode::unique)
+               if (node_birth(_e, t, p) == _V)
+                  return nested_remove<cow_mode::unique>(t, p, key, depth);
+            return nested_remove<cow_mode::shared>(t, p, key, depth);
          }
          // full: prefetch the offset CL for the speculative routing byte before
          // node_prefix touches the header (the cold-miss overlap window, §7).

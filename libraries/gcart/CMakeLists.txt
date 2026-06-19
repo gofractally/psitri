@@ -32,6 +32,14 @@ if(BUILD_TESTS)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME gcart-big-leaf-tests COMMAND gcart-big-leaf-tests)
 
+    # nested-directly-mutable invariant: create == unique-in-place == shared-clone
+    # produce BYTE-IDENTICAL nested lines (lay_nested_into_), + content/UAF/leak guards.
+    add_executable(gcart-nested-invariant-tests tests/nested_invariant_test.cpp)
+    target_link_libraries(gcart-nested-invariant-tests PRIVATE gcart)
+    set_target_properties(gcart-nested-invariant-tests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME gcart-nested-invariant-tests COMMAND gcart-nested-invariant-tests)
+
     # A/B perf: gcart (CB-movable leaves) vs rcart (direct-grain leaves).
     add_executable(gcart-bench tests/bench.cpp)
     target_link_libraries(gcart-bench PRIVATE gcart rcart)

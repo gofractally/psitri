@@ -2257,9 +2257,17 @@ namespace rcart
          // node mutates in place (children stay <unique>); a shared one clones and
          // its children recurse <shared>. In <shared> there is NO refcount read at
          // all — the instantiation is the clone path only.
+         // Overlap the cold refcount load (.rc array) with the node-body load:
+         // resolve() is pure address arithmetic (base+p*size, no deref), so issue
+         // the body prefetch BEFORE unique() so the body is in flight while the
+         // refcount stalls — edit_node then dereferences it resident (one memory
+         // latency per level, not two). Pure hint; correctness-neutral.
          if constexpr (M == cow_mode::unique)
+         {
+            prefetch(resolve(_e, t, p));
             if (unique(_e, t, p))
                return edit_node<cow_mode::unique>(t, p, key, depth, val);
+         }
          return edit_node<cow_mode::shared>(t, p, key, depth, val);
       }
 
@@ -2998,9 +3006,17 @@ namespace rcart
             prefetch(static_cast<const char*>(resolve(_e, t, p)) + full::branches_off +
                      (uint32_t(uint8_t(key[depth])) << 2));
          depth += uint32_t(node_prefix(t, p).size());  // prefix matched (pre-check); consume it
+         // Overlap the cold refcount load (.rc array) with the node-body load:
+         // resolve() is pure address arithmetic (no deref), so prefetch the body
+         // BEFORE unique() — the body is in flight while the refcount stalls, and
+         // edit_remove dereferences it resident (one memory latency, not two).
+         // Pure hint; correctness-neutral.
          if constexpr (M == cow_mode::unique)
+         {
+            prefetch(resolve(_e, t, p));
             if (unique(_e, t, p))
                return edit_remove<cow_mode::unique>(t, p, key, depth);
+         }
          return edit_remove<cow_mode::shared>(t, p, key, depth);
       }
 

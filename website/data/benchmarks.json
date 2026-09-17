@@ -1221,5 +1221,144 @@
         "chunk_s": 6.69
       }
     ]
+  },
+  "api_bank": {
+    "default_architecture": "x86_64",
+    "interfaces": [
+      {
+        "id": "mdbx",
+        "name": "libmdbx API"
+      },
+      {
+        "id": "rocksdb",
+        "name": "RocksDB API"
+      },
+      {
+        "id": "sqlite",
+        "name": "SQLite API"
+      }
+    ],
+    "metrics": {
+      "write": {
+        "label": "Write-only transfer attempts per second",
+        "short": "write throughput",
+        "unit": "transfers/s",
+        "direction": "higher"
+      },
+      "mixed_write": {
+        "label": "Transfer attempts per second, with one reader",
+        "short": "write throughput with readers",
+        "unit": "transfers/s",
+        "direction": "higher"
+      },
+      "mixed_read": {
+        "label": "Reads per second, with a writer",
+        "short": "read throughput with a writer",
+        "unit": "reads/s",
+        "direction": "higher"
+      },
+      "load": {
+        "label": "Accounts loaded per second",
+        "short": "bulk-load throughput",
+        "unit": "accounts/s",
+        "direction": "higher"
+      },
+      "disk": {
+        "label": "Reported file size after validation",
+        "short": "File size",
+        "unit": "MB",
+        "direction": "lower"
+      }
+    },
+    "platforms": [
+      {
+        "id": "x86_64",
+        "label": "x86 \u00b7 Cloud server",
+        "machine": "AMD EPYC-Turin \u00b7 16 logical CPUs \u00b7 121 GB RAM \u00b7 Linux \u00b7 ext4",
+        "date": "2026-04-06",
+        "revision": "ec383f2b976586d15c8e0000fd1b23614caa9329",
+        "source_directory": "logs/2026-04-06_integration-bank",
+        "workload": "1M accounts \u00b7 1M transfer attempts per phase \u00b7 batch 1 \u00b7 one reader \u00b7 seed 12345 \u00b7 no per-commit sync",
+        "limits": "One retained run per implementation. Throughput includes skipped transfer attempts. These integration configurations are separate from the Small Engine and Large Engine profiles.",
+        "pairs": [
+          {
+            "id": "mdbx",
+            "status": "incomplete",
+            "note": "No validated pair: the native run stopped during the mixed phase; the shim crashed. A new matched run is required.",
+            "evidence": [
+              "integration-bank-mdbx.log",
+              "integration-bank-psitrimdbx.log"
+            ]
+          },
+          {
+            "id": "rocksdb",
+            "status": "passed",
+            "note": "Both implementations passed account count, log count, and balance conservation.",
+            "native": {
+              "name": "RocksDB",
+              "values": {
+                "write": 157588,
+                "mixed_write": 114752,
+                "mixed_read": 289627,
+                "load": 1350387,
+                "disk": 207.0
+              },
+              "source": "rocksdb.log",
+              "evidence": "integration-bank-rocksdb.log"
+            },
+            "shim": {
+              "name": "psitri RocksDB shim",
+              "values": {
+                "write": 369446,
+                "mixed_write": 349623,
+                "mixed_read": 1416652,
+                "load": 2342670,
+                "disk": 601.8
+              },
+              "source": "psitrirocks.log",
+              "evidence": "integration-bank-psitrirocks.log"
+            }
+          },
+          {
+            "id": "sqlite",
+            "status": "failed",
+            "note": "No validated pair: the psitri-backed run passed, but the native SQLite run failed balance conservation. No speedup is reported.",
+            "evidence": [
+              "integration-bank-system-sqlite.log",
+              "integration-bank-psitri-sqlite.log"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "arm64",
+        "label": "ARM \u00b7 Mac",
+        "machine": "Apple Silicon Mac",
+        "date": null,
+        "revision": null,
+        "workload": "A matched same-API series has not been published for this platform.",
+        "limits": "The June native-engine results above measure direct engine calls; they cannot substitute for shim measurements.",
+        "pairs": [
+          {
+            "id": "mdbx",
+            "status": "unavailable",
+            "note": "No validated ARM pair published yet.",
+            "evidence": []
+          },
+          {
+            "id": "rocksdb",
+            "status": "unavailable",
+            "note": "No validated ARM pair published yet.",
+            "evidence": []
+          },
+          {
+            "id": "sqlite",
+            "status": "unavailable",
+            "note": "No validated ARM pair published yet.",
+            "evidence": []
+          }
+        ]
+      }
+    ]
   }
 }

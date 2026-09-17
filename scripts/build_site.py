@@ -14,7 +14,7 @@ from urllib.parse import unquote, urlsplit
 
 import markdown
 
-from benchmark_charts import art_chart, bank_chart
+from benchmark_charts import art_chart, bank_chart, api_chart
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "website"
@@ -26,6 +26,8 @@ EVIDENCE = {
     "scale-1b.log": "logs/2026-06-13_delta_art-1B/run.log",
     "integration-bank-rocksdb.log": "logs/2026-04-06_integration-bank/rocksdb.log",
     "integration-bank-psitrirocks.log": "logs/2026-04-06_integration-bank/psitrirocks.log",
+    "integration-bank-mdbx.log": "logs/2026-04-06_integration-bank/mdbx.log",
+    "integration-bank-psitrimdbx.log": "logs/2026-04-06_integration-bank/psitrimdbx.log",
     "integration-bank-psitri-sqlite.log": "logs/2026-04-06_integration-bank/psitri-sqlite.log",
     "integration-bank-system-sqlite.log": "logs/2026-04-06_integration-bank/system-sqlite.log",
     "integration-bank-machine.json": "logs/2026-04-06_integration-bank/machine.json",
@@ -142,6 +144,7 @@ def build(output: Path) -> None:
     index = (SOURCE / "index.html").read_text()
     data = json.loads((SOURCE / "data/benchmarks.json").read_text())
     index = index.replace("<!-- BANK_CHART -->", bank_chart(data, "home-bank"))
+    index = index.replace("<!-- API_CHART -->", api_chart(data, "home-api", "evidence/"))
     points = [p for p in data["scale"]["points"] if p["keys"] == 10000000 or p["keys"] % 100000000 == 0]
     min_keys, max_keys = points[0]["keys"], points[-1]["keys"]
     max_rss = max(p["rss_gb"] for p in points)
@@ -166,6 +169,7 @@ def build(output: Path) -> None:
         title = text.splitlines()[0].lstrip("# ")
         text = text.replace("<!-- BANK_CHART -->", bank_chart(data, "evidence-bank"))
         text = text.replace("<!-- ART_CHART -->", art_chart(data))
+        text = text.replace("<!-- API_CHART -->", api_chart(data, "evidence-api", "../evidence/"))
         body = markdown.markdown(text, extensions=["fenced_code", "tables", "toc", "sane_lists"])
         (output / "docs" / f"{name}.html").write_text(template(title, body, name, revision))
     (output / "examples").mkdir()

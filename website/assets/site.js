@@ -130,3 +130,25 @@ all("[data-comparison-chart]").forEach((chart) => {
   within("input, button").forEach((control) => { control.disabled = false; });
   render();
 });
+
+all("[data-api-comparison]").forEach((chart) => {
+  const within = (selector) => Array.from(chart.querySelectorAll(selector));
+  let architecture = chart.dataset.defaultArch;
+  let metric = "write";
+  function render() {
+    const selected = new Set(within("[data-api-choice]").filter((c) => c.checked).map((c) => c.value));
+    within("[data-api-platform]").forEach((p) => { p.hidden = p.dataset.apiPlatform !== architecture; });
+    within("[data-api-metric-panel]").forEach((p) => { p.hidden = p.dataset.apiMetricPanel !== metric || selected.size === 0; });
+    within("[data-api-pair]").forEach((p) => { p.hidden = !selected.has(p.dataset.apiPair); });
+    within("[data-api-arch]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.apiArch === architecture)));
+    within("[data-api-metric]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.apiMetric === metric)));
+    chart.querySelector("[data-api-empty]").hidden = selected.size !== 0;
+    const label = within("[data-api-arch]").find((b) => b.dataset.apiArch === architecture).textContent;
+    chart.querySelector("[data-api-status]").textContent = `${label} · ${selected.size} API pair${selected.size === 1 ? "" : "s"} selected`;
+  }
+  within("[data-api-arch]").forEach((b) => b.addEventListener("click", () => { architecture = b.dataset.apiArch; render(); }));
+  within("[data-api-metric]").forEach((b) => b.addEventListener("click", () => { metric = b.dataset.apiMetric; render(); }));
+  within("[data-api-choice]").forEach((c) => c.addEventListener("change", render));
+  within("input, button").forEach((c) => { c.disabled = false; });
+  render();
+});

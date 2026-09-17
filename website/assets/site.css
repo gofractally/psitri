@@ -2402,3 +2402,25 @@ details > a {
 @media (prefers-reduced-motion: reduce) {
   .comparison-chart .bar-fill { transition: none; }
 }
+
+.api-comparison .api-pairs { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 16px; }
+.api-comparison .api-pair { border: 1px solid #d2dbc7; border-radius: 7px; padding: 16px; min-width: 0; }
+.api-comparison .api-pair h4 { margin: 0 0 20px; font-size: 16px; }
+.api-comparison .api-bars { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.api-comparison .api-bar-column { display: flex; flex-direction: column; text-align: center; min-width: 0; font-size: 11px; }
+.api-comparison .api-bar-column strong { font: 12px var(--mono); white-space: nowrap; }
+.api-comparison .api-bar-column > span { min-height: 3em; margin-top: 10px; line-height: 1.5; }
+.api-comparison .api-bar-track { height: 160px; border-bottom: 1px solid #66735c; margin-top: 12px; display: flex; align-items: end; justify-content: center; }
+.api-comparison .api-bar { width: min(65px, 80%); background: #9daa92; border-radius: 3px 3px 0 0; }
+.api-comparison .shim .api-bar { background: #38683e; }
+.api-comparison .api-ratio { font: 12px/1.6 var(--mono); margin: 18px 0 0; }
+.api-comparison .api-pair-note, .api-comparison .api-evidence-links { font-size: 11px; line-height: 1.7; margin: 14px 0 0; }
+.api-comparison .api-unavailable { color: #69745f; font-size: 14px; padding-block: 25px; }
+.api-comparison .api-machine { font-size: 14px; font-weight: 550; }
+.api-comparison [data-api-platform] > h3 { font-size: 21px; margin: 26px 0 8px; }
+@container (max-width: 760px) {
+  .api-comparison .api-pairs { grid-template-columns: 1fr; }
+  .api-comparison .api-bar-track { height: 180px; }
+  .api-comparison .api-bar-column > span { min-height: 0; }
+  .api-comparison .api-unavailable { padding-block: 0; }
+}

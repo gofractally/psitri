@@ -16,6 +16,8 @@
     "psitri-sqlite.log": "c78967a979fc20c9fd3041f1ff692ee5e05050ed441a654b194f9774f4794667",
     "system-sqlite.log": "868ec15c73b5b3617372ed41a7e93dbf6db37b8b865ca783c5fada7133f4f13a",
     "machine.json": "4899f19a8d13479d115aa339651fcd7e4565ad7450de76bbab991b834aa58748",
-    "progress.txt": "728ec9694dcbf7fffe4b379eac99fb0fcfbaccc6fe32690a3471caa734d44405"
+    "progress.txt": "728ec9694dcbf7fffe4b379eac99fb0fcfbaccc6fe32690a3471caa734d44405",
+    "mdbx.log": "f8c927e0b04d8222791738fa64ce322fd2100f30bc10712859975c33912feab6",
+    "psitrimdbx.log": "c922a69dd7312d2a6b603dc7e673bdd94cd329c7d99f9bdcd1f4ea0b01274869"
   }
 }

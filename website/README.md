@@ -21,6 +21,9 @@ For visual review, check desktop and mobile, every benchmark metric, the experim
 toggle (experimental choices stay hidden until enabled), individual engine
 checkboxes (including hiding the baseline), empty/reset
 selections, ART latency bars, the snapshot illustration, example switching/copy, menu, and details.
+Also check the same-API chart's ARM/x86 selector, API pair checkboxes, all metrics,
+empty selections, and unavailable-pair messages. A failed or incomplete pair
+must never produce a ratio or a performance bar. Each API pair has its own scale.
 
 ## Publication boundary
 

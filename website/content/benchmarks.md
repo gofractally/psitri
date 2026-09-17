@@ -68,6 +68,30 @@ Raw outputs: [psitri engines](../evidence/bank_compare.log),
 
 ## Additional benchmark backends
 
+### Keep the API: original libraries and psitri shims
+
+Compare **libmdbx with the psitri MDBX shim**, **RocksDB with the psitri RocksDB
+shim**, and **SQLite with psitri-backed SQLite**. Each API gets a pair of adjacent
+bars, so the comparison includes the cost of keeping that API's workflow.
+Choose the architecture and API pairs to focus the view.
+
+<!-- API_CHART -->
+
+The validated x86 RocksDB pair records **2.34× write-only throughput** and
+**3.05× write throughput with a reader**, with **2.91× reported file size**.
+These ratios describe this run and API integration. Translation overhead and
+the workflows imposed by an existing API can limit the optimization paths
+available through psitri's native interface.
+
+The ARM view has no published same-API pair yet. Native-engine measurements on
+Apple Silicon do not include shim overhead. New comparisons use the same
+[`api-bank-v1` driver](https://github.com/gofractally/psitri/tree/sal2/benchmarks/api_bank)
+on both architectures, retaining every repetition and checking the resulting
+state before admitting either side to the chart. Runs wait for an idle machine
+and execute one benchmark process at a time.
+
+### Common native-engine workload
+
 The [common bank comparison suite](fair-comparison.html) runs the maintained
 Small Engine and Large Engine alongside real MDBX, RocksDB, SQLite, and DuckDB
 with one workload and explicit durability settings. Its validation runs establish

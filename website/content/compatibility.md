@@ -85,9 +85,10 @@ numbers do not include compatibility-layer overhead.
    workloads larger than the intended memory budget.
 
 The [benchmark recorder](benchmarking.html) retains both raw output and structured
-metadata. The [published evidence](benchmarks.html) measures native bank workloads
-against real MDBX. Measure the compatibility layer in your application
-independently.
+metadata. The [paired API charts](benchmarks.html#additional-benchmark-backends)
+compare the original library and psitri shim within each validated platform
+cohort. Native-engine charts measure direct engine calls and exclude translation
+overhead. Measure the compatibility layer in your application independently.
 
 ## Choose an integration path
 

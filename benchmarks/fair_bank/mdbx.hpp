@@ -3,7 +3,11 @@
 #include <mdbx.h>
 namespace fair_bank
 {
+#ifdef FAIR_SHIM
+inline constexpr auto engine_name = "psitrimdbx";
+#else
 inline constexpr auto engine_name = "mdbx";
+#endif
 inline void check(int rc)
 {
    if (rc != MDBX_SUCCESS)
@@ -15,6 +19,9 @@ struct Store
    MDBX_dbi dbi;
    static bool supports(std::string_view level)
    {
+#ifdef FAIR_SHIM
+      return level == "none"; // Admit synchronous tiers only after barrier validation.
+#endif
       if (level == "none" || level == "async")
          return true;
 #ifdef __APPLE__

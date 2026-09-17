@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "workload": "api-bank-v1",
+  "profile": "smoke",
+  "status": "failed",
+  "started_at": "2026-09-17T19:04:47.710964+00:00",
+  "machine_id": "mac-m5-max",
+  "hardware": {
+    "system": "Darwin",
+    "release": "25.3.0",
+    "architecture": "arm64",
+    "model": "Mac17,6",
+    "cpu": "Apple M5 Max",
+    "memory_bytes": "137438953472",
+    "logical_cpus": 18
+  },
+  "config": {
+    "accounts": 128,
+    "transfers": 256,
+    "warmup": 64,
+    "batch": 32,
+    "readers": 2,
+    "reads_per_snapshot": 16,
+    "read_batches": 2,
+    "seed": 12345,
+    "value_bytes": 8,
+    "cache_mib": 64,
+    "map_gib": 64,
+    "durability": "none"
+  },
+  "engines": [
+    "mdbx",
+    "psitrimdbx"
+  ],
+  "repeats": 1,
+  "order_seed": 20260917,
+  "revision": "af22d09fc2ddf8764508fc99a8a85f9a659e090a",
+  "source_status": "M benchmarks/fair_bank/main.cpp\n M benchmarks/fair_bank/mdbx.hpp\n M benchmarks/fair_bank/rocksdb.hpp\n M benchmarks/fair_bank/sqlite.hpp\n M scripts/fair_bank.py\n?? benchmarks/api_bank/CMakeLists.txt\n?? scripts/benchmark_idle.py",
+  "dirty": true,
+  "command": [
+    "scripts/fair_bank.py",
+    "--suite",
+    "api",
+    "--build",
+    "build/api-mdbx",
+    "--machine",
+    "mac-m5-max",
+    "--profile",
+    "smoke",
+    "--engines",
+    "mdbx",
+    "psitrimdbx",
+    "--durability",
+    "none",
+    "--timeout",
+    "60",
+    "--idle-timeout",
+    "180"
+  ],
+  "records": [
+    {
+      "engine": "psitrimdbx",
+      "repetition": 1,
+      "directory": "r1-psitrimdbx",
+      "command": [
+        "/Users/dlarimer/gofractally/psitri/build/api-mdbx/bin/fair-bank-psitrimdbx",
+        "--path",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T190447-fair-bank-smoke-0cc6f146/r1-psitrimdbx/database",
+        "--result",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T190447-fair-bank-smoke-0cc6f146/r1-psitrimdbx/result.json",
+        "--accounts",
+        "128",
+        "--transfers",
+        "256",
+        "--warmup",
+        "64",
+        "--batch",
+        "32",
+        "--readers",
+        "2",
+        "--reads-per-snapshot",
+        "16",
+        "--read-batches",
+        "2",
+        "--seed",
+        "12345",
+        "--value-bytes",
+        "8",
+        "--cache-mib",
+        "64",
+        "--map-gib",
+        "64",
+        "--durability",
+        "none"
+      ],
+      "status": "running",
+      "exit_code": null
+    }
+  ],
+  "dependencies": {
+    "/Users/dlarimer/arbtrie/external/libmdbx/build/libmdbx.dylib": {
+      "resolved_path": "/Users/dlarimer/arbtrie/external/libmdbx/build/libmdbx.dylib",
+      "sha256": "da83151c04dbbbdbf33b50ae3e8226bd424a31176a6b44410d83b2abbc8de7bc",
+      "compiler_and_build_flags": "prebuilt dependency; inspect its separate build provenance"
+    }
+  },
+  "binaries": {
+    "mdbx": {
+      "path": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/bin/fair-bank-mdbx",
+      "sha256": "1ba831ab15c5d77dc1185c08b615fbbe0c5311d84935e7f35ba6fef8e468ebee",
+      "description": {
+        "engine": "mdbx",
+        "version": "v0.14.1-477-g051b7437",
+        "workload": "api-bank-v1",
+        "durability": [
+          "none",
+          "async",
+          "full"
+        ]
+      }
+    },
+    "psitrimdbx": {
+      "path": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/bin/fair-bank-psitrimdbx",
+      "sha256": "70ba53a44010d28ed8f0e97195f9cbb42685970ba8b2bebc74a793b071fd5737",
+      "description": {
+        "engine": "psitrimdbx",
+        "version": "psitrimdbx-0.1",
+        "workload": "api-bank-v1",
+        "durability": [
+          "none"
+        ]
+      }
+    }
+  },
+  "environment": {
+    "SAL_LOG_LEVEL": "ERROR"
+  },
+  "notes": "",
+  "storage": {
+    "df": "Filesystem    512-blocks       Used  Available Capacity  Mounted on\n/dev/disk3s5 15622068800 9907458160 5635218608    64%    /System/Volumes/Data",
+    "total_bytes": 7998499225600,
+    "free_bytes": 2885231927296,
+    "filesystem_fragment_bytes": 4096
+  },
+  "build": {
+    "compiler": "/opt/homebrew/opt/llvm/bin/clang++",
+    "compiler_version": "22.1.2",
+    "build_type": "Release",
+    "native_dependencies": {
+      "psio": "/Users/dlarimer/gofractally/psitri/build/bench-sources/psio",
+      "ucc": "/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc"
+    },
+    "libraries": [
+      "/Users/dlarimer/arbtrie/external/libmdbx/build/libmdbx.dylib"
+    ]
+  },
+  "compiler_version_output": "Homebrew clang version 22.1.2\nTarget: arm64-apple-darwin25.3.0\nThread model: posix\nInstalledDir: /opt/homebrew/Cellar/llvm/22.1.2/bin\nConfiguration file: /opt/homebrew/Cellar/llvm/22.1.2/etc/clang/arm64-apple-darwin25.cfg",
+  "native_dependencies": {
+    "psio": {
+      "path": "/Users/dlarimer/gofractally/psitri/build/bench-sources/psio",
+      "revision": "ff114b6a8c9265e6b5da5ffb85df1617b2b43514",
+      "status": ""
+    },
+    "ucc": {
+      "path": "/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc",
+      "revision": "2c124eba978e7bcf20e252eec7fd5b2ea3635295",
+      "status": ""
+    }
+  },
+  "source_sha256": {
+    "scripts/fair_bank.py": "ebdc2515d4d88a66e2e8687e6333ed4d540f46d2340b553f3bbd8f0a7f7de6f7",
+    "scripts/benchmark.py": "110039b585cc09e9705dfee02364e326e754cc20c567f1567a4eff2e9a565e29",
+    "scripts/benchmark_idle.py": "fceb8cb0cedc153ed307fece6e120a4f2cb09ea1c75002f043a2210e8eeca2f1",
+    "benchmarks/fair_bank/CMakeLists.txt": "7a56689febeb08bc47bb69a29b1ed728cbab5c9f1a5e9759a3193c0f351c6fdf",
+    "benchmarks/fair_bank/README.md": "e56b8f446c0aea2548d259241e4741a33c9ad31c929a676dd3f3d0c5b22e7f6f",
+    "benchmarks/fair_bank/common.hpp": "4e9dbc912cce5fc88e9c8fcd739e676b86fa910e992dd29a6113c2a70d01f533",
+    "benchmarks/fair_bank/duckdb.hpp": "00da5db5a07f33db8020b1b387feb80621ba354c1c8b4d572221c75a3c12c951",
+    "benchmarks/fair_bank/main.cpp": "021a66cc49284d68852333de352a7d97ce3155018e24c364839e2d4b6135baa7",
+    "benchmarks/fair_bank/mdbx.hpp": "0d56517af0daae4e6fbacbced99aa5dd4889e30ab67e217310e9b1b6be17268e",
+    "benchmarks/fair_bank/psitri.hpp": "17b22486765808542988c5d7e0bfe135a69b5cd26abab60bb6de48a5a0e1750e",
+    "benchmarks/fair_bank/rocksdb.hpp": "afc9682fdf9f0e1f6abfaca00e7497ce1e5e8f2d4aa1d074b2bc950a1b183bc9",
+    "benchmarks/fair_bank/sqlite.hpp": "03a44db16d2ace7af04e5a29f65d7ac8496951f11d7fed11ffa30c9e0ac608a2",
+    "benchmarks/api_bank/CMakeLists.txt": "b3c9461542c57f0448c536b84878a9bc82f81e310a1566f52df2f947191913a8"
+  },
+  "error": "Machine did not become idle; no benchmark started",
+  "finished_at": "2026-09-17T19:07:50.194563+00:00"
+}

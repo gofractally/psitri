@@ -22,7 +22,11 @@ using namespace fair_bank;
 namespace
 {
 constexpr uint64_t initial_balance = 1'000'000'000'000ULL;
+#ifdef FAIR_API_PAIR
+constexpr auto workload = "api-bank-v1";
+#else
 constexpr auto workload = "fair-bank-v2";
+#endif
 uint64_t integer(std::string_view text)
 {
    uint64_t n;

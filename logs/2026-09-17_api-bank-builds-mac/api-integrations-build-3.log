@@ -1,0 +1,5 @@
+[1/5] Linking CXX executable bin/fair-bank-psitrirocks
+[2/5] Building CXX object psitri-sqlite/CMakeFiles/psitri-sqlite.dir/src/btree_psitri.cpp.o
+[3/5] Linking CXX static library psitri-sqlite/libpsitri-sqlite.a
+[4/5] Linking CXX executable bin/fair-bank-psitri_sqlite
+[5/5] Linking CXX executable bin/fair-bank-rocksdb

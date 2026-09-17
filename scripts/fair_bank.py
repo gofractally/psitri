@@ -18,9 +18,11 @@ import time
 import uuid
 
 import benchmark
+import benchmark_idle
 
 ROOT = Path(__file__).resolve().parents[1]
 ENGINES = ("small", "large", "mdbx", "rocksdb", "sqlite", "duckdb")
+API_ENGINES = ("mdbx", "psitrimdbx", "rocksdb", "psitrirocks", "sqlite", "psitri_sqlite")
 CHECKS = ("read_your_writes", "rollback", "snapshot", "exact_accounts", "balance", "reopen")
 WORKLOAD = "fair-bank-v2"
 SMOKE = dict(accounts=128, transfers=256, warmup=64, batch=32, readers=2,
@@ -170,6 +172,8 @@ def run(args) -> int:
         "CC", "CXX", "CFLAGS", "CXXFLAGS", "LDFLAGS", "HEART_PINNED_MB", "HEART_READ_CACHE", "HEART_READ_CACHE_SEC") if k in os.environ}
     manifest["environment"]["SAL_LOG_LEVEL"] = "ERROR"  # Forced for every child; errors cannot be suppressed.
     manifest["notes"] = args.notes
+    manifest["isolation"] = dict(machine_lock=True, idle_seconds=10, max_cpu_busy_percent=3,
+                                 idle_timeout_seconds=args.idle_timeout)
     disk = shutil.disk_usage(archive)
     manifest["storage"] = dict(df=benchmark.capture("df", "-P", str(archive)),
                                total_bytes=disk.total, free_bytes=disk.free,
@@ -199,7 +203,7 @@ def run(args) -> int:
             shutil.copyfile(build / name, archive / name)
         diff = subprocess.check_output(["git", "diff", "HEAD", "--binary"], cwd=ROOT)
         (archive / "source.patch").write_bytes(diff)
-        source_files = [ROOT / "scripts/fair_bank.py", ROOT / "scripts/benchmark.py", *sorted((ROOT / "benchmarks/fair_bank").glob("*"))]
+        source_files = [ROOT / "scripts/fair_bank.py", ROOT / "scripts/benchmark.py", ROOT / "scripts/benchmark_idle.py", *sorted((ROOT / "benchmarks/fair_bank").glob("*")), *sorted((ROOT / "benchmarks/api_bank").glob("*"))]
         manifest["source_sha256"] = {str(p.relative_to(ROOT)): digest(p) for p in source_files if p.is_file()}
         # Preserve uncommitted benchmark source too, not merely its hash.
         for path in source_files:
@@ -234,9 +238,17 @@ def run(args) -> int:
                 for key, value in config.items():
                     command.extend(["--" + key.replace("_", "-"), str(value)])
                 record = dict(engine=engine, repetition=repetition + 1, directory=directory.name,
-                              command=command, status="running", exit_code=None)
+                              command=command, status="waiting_for_idle", exit_code=None)
                 manifest["records"].append(record); benchmark.write_json(archive / "manifest.json", manifest)
                 print(f"[{repetition + 1}/{repeats}] {engine}", flush=True)
+                try:
+                    benchmark_idle.wait_idle(directory / "idle.jsonl", timeout=args.idle_timeout)
+                except RuntimeError as error:
+                    record.update(status="not_run", error=str(error))
+                    benchmark.write_json(directory / "run.json", record)
+                    raise
+                record["status"] = "running"
+                benchmark.write_json(archive / "manifest.json", manifest)
                 if digest(Path(command[0])) != manifest["binaries"][engine]["sha256"]:
                     raise ValueError("Benchmark binary changed during the series")
                 code, elapsed = capture_run(command, directory, args.timeout)
@@ -260,7 +272,7 @@ def run(args) -> int:
         summary = summarize(manifest["records"], engines, repeats, args.profile)
         benchmark.write_json(archive / "summary.json", summary)
         manifest["status"] = summary["status"]
-    except (OSError, ValueError, subprocess.SubprocessError, KeyboardInterrupt) as error:
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, KeyboardInterrupt) as error:
         manifest.update(status="failed", error=str(error) or "Interrupted")
         print(f"Comparison failed: {manifest['error']}", file=sys.stderr)
     finally:
@@ -271,15 +283,18 @@ def run(args) -> int:
 
 
 def main():
+    global WORKLOAD
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build", type=Path, default=ROOT / "build/fair")
     parser.add_argument("--output", type=Path, default=ROOT / "logs")
     parser.add_argument("--machine", required=True, help="Stable physical runner identity")
     parser.add_argument("--profile", choices=("smoke", "performance"), default="smoke")
-    parser.add_argument("--engines", nargs="+", choices=ENGINES, default=list(ENGINES))
+    parser.add_argument("--suite", choices=("native", "api"), default="native")
+    parser.add_argument("--engines", nargs="+", choices=tuple(dict.fromkeys(ENGINES + API_ENGINES)))
     parser.add_argument("--repeats", type=int)
     parser.add_argument("--order-seed", type=int, default=20260917)
     parser.add_argument("--timeout", type=float, default=1800)
+    parser.add_argument("--idle-timeout", type=float, default=1800)
     parser.add_argument("--notes", default="")
     parser.add_argument("--keep-databases", action="store_true")
     for key in SMOKE:
@@ -289,9 +304,16 @@ def main():
         else:
             parser.add_argument("--" + key.replace("_", "-"), type=int)
     args = parser.parse_args()
+    if args.suite == "api":
+        WORKLOAD = "api-bank-v1"
+    allowed = API_ENGINES if args.suite == "api" else ENGINES
+    args.engines = args.engines or list(allowed)
+    if any(e not in allowed for e in args.engines):
+        parser.error("Engine is not part of the selected suite")
     try:
-        return run(args)
-    except (ValueError, OSError) as error:
+        with benchmark_idle.exclusive():
+            return run(args)
+    except (ValueError, OSError, RuntimeError) as error:
         parser.error(str(error))
 
 

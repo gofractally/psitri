@@ -1,0 +1,7 @@
+{
+  "compiler": "/opt/homebrew/opt/llvm/bin/clang++",
+  "compiler_version": "22.1.2",
+  "build_type": "Release",
+  "native_dependencies": {"psio": "/Users/dlarimer/gofractally/psitri/build/bench-sources/psio", "ucc": "/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc"},
+  "libraries": ["/Users/dlarimer/arbtrie/external/libmdbx/build/libmdbx.dylib"]
+}

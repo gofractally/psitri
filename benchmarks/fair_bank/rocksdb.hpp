@@ -3,11 +3,22 @@
 #include <rocksdb/cache.h>
 #include <rocksdb/db.h>
 #include <rocksdb/table.h>
+#ifdef FAIR_API_PAIR
+#include <rocksdb/write_batch.h>
+#include <map>
+#else
 #include <rocksdb/utilities/write_batch_with_index.h>
+#endif
+#ifndef FAIR_SHIM
 #include <rocksdb/version.h>
+#endif
 namespace fair_bank
 {
+#ifdef FAIR_SHIM
+inline constexpr auto engine_name = "psitrirocks";
+#else
 inline constexpr auto engine_name = "rocksdb";
+#endif
 inline void check(const rocksdb::Status &status)
 {
    if (!status.ok())
@@ -23,8 +34,12 @@ struct Store
    }
    static std::string version()
    {
+#ifdef FAIR_SHIM
+      return "psitrirocks " FAIR_SHIM_REVISION;
+#else
       return std::to_string(ROCKSDB_MAJOR) + "." + std::to_string(ROCKSDB_MINOR) + "." +
              std::to_string(ROCKSDB_PATCH);
+#endif
    }
    static std::string settings(const Config &c)
    {
@@ -44,7 +59,7 @@ struct Store
       options.max_write_buffer_number = 2;
       rocksdb::BlockBasedTableOptions table;
       table.block_cache = rocksdb::NewLRUCache(c.cache_mib * 1024 * 1024);
-      options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table));
+      options.table_factory = decltype(options.table_factory)(rocksdb::NewBlockBasedTableFactory(table));
       rocksdb::DB *ptr = nullptr;
       check(rocksdb::DB::Open(options, c.path.string(), &ptr));
       db.reset(ptr);
@@ -54,6 +69,25 @@ struct Store
    struct Writer
    {
       Store &store;
+#ifdef FAIR_API_PAIR
+      // Both implementations receive the identical RocksDB API call sequence.
+      // The shim supports WriteBatch; the application supplies read-your-writes.
+      rocksdb::WriteBatch batch{};
+      std::map<std::string, std::string> pending;
+      std::string get(const std::string &key)
+      {
+         if (auto it = pending.find(key); it != pending.end())
+            return it->second;
+         std::string value;
+         check(store.db->Get({}, key, &value));
+         return value;
+      }
+      void put(const std::string &key, const std::string &value)
+      {
+         check(batch.Put(key, value));
+         pending[key] = value;
+      }
+#else
       rocksdb::WriteBatchWithIndex batch{rocksdb::BytewiseComparator(), 0, true};
       std::string get(const std::string &key)
       {
@@ -62,13 +96,18 @@ struct Store
          return value;
       }
       void put(const std::string &key, const std::string &value) { check(batch.Put(key, value)); }
+#endif
    };
    template <class F> void write(F &&fn, bool commit = true)
    {
       Writer writer{*this};
       fn(writer);
       if (commit)
+#ifdef FAIR_API_PAIR
+         check(db->Write(wo, &writer.batch));
+#else
          check(db->Write(wo, writer.batch.GetWriteBatch()));
+#endif
    }
    struct Reader
    {

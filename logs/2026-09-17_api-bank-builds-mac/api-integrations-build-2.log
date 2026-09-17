@@ -1,0 +1,17 @@
+[1/11] Linking CXX static library integrations/psitri/libpsitri.a
+[2/11] Linking CXX static library psitrirocks/libpsitrirocks.a
+[3/11] Linking CXX static library psitri-sqlite/libpsitri-sqlite.a
+[4/11] Building CXX object CMakeFiles/fair-bank-sqlite.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o
+[5/11] Building CXX object CMakeFiles/fair-bank-psitri_sqlite.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o
+[6/11] Linking CXX executable bin/fair-bank-psitri_sqlite
+FAILED: [code=1] bin/fair-bank-psitri_sqlite 
+: && /opt/homebrew/opt/llvm/bin/clang++ -O3 -DNDEBUG -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/fair-bank-psitri_sqlite.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o -o bin/fair-bank-psitri_sqlite  psitri-sqlite/libpsitri-sqlite.a  integrations/psitri/libpsitri.a  integrations/sal/libsal.a && :
+Undefined symbols for architecture arm64:
+  "psitri::basic_database<psitri::std_lock_policy>::open(std::__1::__fs::filesystem::path, sal::open_mode, sal::runtime_config const&, sal::recovery_mode)", referenced from:
+      _sqlite3BtreeOpen in libpsitri-sqlite.a[3](btree_psitri.cpp.o)
+ld: symbol(s) not found for architecture arm64
+clang++: error: linker command failed with exit code 1 (use -v to see invocation)
+[7/11] Building CXX object CMakeFiles/fair-bank-psitrirocks.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o
+[8/11] Linking CXX executable bin/fair-bank-sqlite
+[9/11] Building CXX object CMakeFiles/fair-bank-rocksdb.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o
+ninja: build stopped: subcommand failed.

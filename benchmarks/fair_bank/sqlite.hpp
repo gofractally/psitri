@@ -3,7 +3,11 @@
 #include <sqlite3.h>
 namespace fair_bank
 {
+#ifdef FAIR_SHIM
+inline constexpr auto engine_name = "psitri_sqlite";
+#else
 inline constexpr auto engine_name = "sqlite";
+#endif
 struct Store
 {
    struct Connection
@@ -119,7 +123,11 @@ struct Store
    Connection writer;
    static bool supports(std::string_view level)
    {
+#ifdef FAIR_SHIM
+      return level == "none"; // Synchronous shim policies need independent validation.
+#else
       return level == "none" || level == "fsync" || level == "full";
+#endif
    }
    static std::string version()
    {

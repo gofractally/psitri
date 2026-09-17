@@ -1,0 +1,233 @@
+diff --git a/benchmarks/fair_bank/main.cpp b/benchmarks/fair_bank/main.cpp
+index d8d9fcf..a553b21 100644
+--- a/benchmarks/fair_bank/main.cpp
++++ b/benchmarks/fair_bank/main.cpp
+@@ -22,7 +22,11 @@ using namespace fair_bank;
+ namespace
+ {
+ constexpr uint64_t initial_balance = 1'000'000'000'000ULL;
++#ifdef FAIR_API_PAIR
++constexpr auto workload = "api-bank-v1";
++#else
+ constexpr auto workload = "fair-bank-v2";
++#endif
+ uint64_t integer(std::string_view text)
+ {
+    uint64_t n;
+diff --git a/benchmarks/fair_bank/mdbx.hpp b/benchmarks/fair_bank/mdbx.hpp
+index f8e8708..87b5121 100644
+--- a/benchmarks/fair_bank/mdbx.hpp
++++ b/benchmarks/fair_bank/mdbx.hpp
+@@ -3,7 +3,11 @@
+ #include <mdbx.h>
+ namespace fair_bank
+ {
++#ifdef FAIR_SHIM
++inline constexpr auto engine_name = "psitrimdbx";
++#else
+ inline constexpr auto engine_name = "mdbx";
++#endif
+ inline void check(int rc)
+ {
+    if (rc != MDBX_SUCCESS)
+@@ -15,6 +19,9 @@ struct Store
+    MDBX_dbi dbi;
+    static bool supports(std::string_view level)
+    {
++#ifdef FAIR_SHIM
++      return level == "none"; // Admit synchronous tiers only after barrier validation.
++#endif
+       if (level == "none" || level == "async")
+          return true;
+ #ifdef __APPLE__
+diff --git a/benchmarks/fair_bank/rocksdb.hpp b/benchmarks/fair_bank/rocksdb.hpp
+index b68ff84..3ff872e 100644
+--- a/benchmarks/fair_bank/rocksdb.hpp
++++ b/benchmarks/fair_bank/rocksdb.hpp
+@@ -3,11 +3,22 @@
+ #include <rocksdb/cache.h>
+ #include <rocksdb/db.h>
+ #include <rocksdb/table.h>
++#ifdef FAIR_API_PAIR
++#include <rocksdb/write_batch.h>
++#include <map>
++#else
+ #include <rocksdb/utilities/write_batch_with_index.h>
++#endif
++#ifndef FAIR_SHIM
+ #include <rocksdb/version.h>
++#endif
+ namespace fair_bank
+ {
++#ifdef FAIR_SHIM
++inline constexpr auto engine_name = "psitrirocks";
++#else
+ inline constexpr auto engine_name = "rocksdb";
++#endif
+ inline void check(const rocksdb::Status &status)
+ {
+    if (!status.ok())
+@@ -23,8 +34,12 @@ struct Store
+    }
+    static std::string version()
+    {
++#ifdef FAIR_SHIM
++      return "psitrirocks " FAIR_SHIM_REVISION;
++#else
+       return std::to_string(ROCKSDB_MAJOR) + "." + std::to_string(ROCKSDB_MINOR) + "." +
+              std::to_string(ROCKSDB_PATCH);
++#endif
+    }
+    static std::string settings(const Config &c)
+    {
+@@ -44,7 +59,7 @@ struct Store
+       options.max_write_buffer_number = 2;
+       rocksdb::BlockBasedTableOptions table;
+       table.block_cache = rocksdb::NewLRUCache(c.cache_mib * 1024 * 1024);
+-      options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table));
++      options.table_factory = decltype(options.table_factory)(rocksdb::NewBlockBasedTableFactory(table));
+       rocksdb::DB *ptr = nullptr;
+       check(rocksdb::DB::Open(options, c.path.string(), &ptr));
+       db.reset(ptr);
+@@ -54,6 +69,25 @@ struct Store
+    struct Writer
+    {
+       Store &store;
++#ifdef FAIR_API_PAIR
++      // Both implementations receive the identical RocksDB API call sequence.
++      // The shim supports WriteBatch; the application supplies read-your-writes.
++      rocksdb::WriteBatch batch{};
++      std::map<std::string, std::string> pending;
++      std::string get(const std::string &key)
++      {
++         if (auto it = pending.find(key); it != pending.end())
++            return it->second;
++         std::string value;
++         check(store.db->Get({}, key, &value));
++         return value;
++      }
++      void put(const std::string &key, const std::string &value)
++      {
++         check(batch.Put(key, value));
++         pending[key] = value;
++      }
++#else
+       rocksdb::WriteBatchWithIndex batch{rocksdb::BytewiseComparator(), 0, true};
+       std::string get(const std::string &key)
+       {
+@@ -62,13 +96,18 @@ struct Store
+          return value;
+       }
+       void put(const std::string &key, const std::string &value) { check(batch.Put(key, value)); }
++#endif
+    };
+    template <class F> void write(F &&fn, bool commit = true)
+    {
+       Writer writer{*this};
+       fn(writer);
+       if (commit)
++#ifdef FAIR_API_PAIR
++         check(db->Write(wo, &writer.batch));
++#else
+          check(db->Write(wo, writer.batch.GetWriteBatch()));
++#endif
+    }
+    struct Reader
+    {
+diff --git a/benchmarks/fair_bank/sqlite.hpp b/benchmarks/fair_bank/sqlite.hpp
+index 2ff07c2..8067cac 100644
+--- a/benchmarks/fair_bank/sqlite.hpp
++++ b/benchmarks/fair_bank/sqlite.hpp
+@@ -3,7 +3,11 @@
+ #include <sqlite3.h>
+ namespace fair_bank
+ {
++#ifdef FAIR_SHIM
++inline constexpr auto engine_name = "psitri_sqlite";
++#else
+ inline constexpr auto engine_name = "sqlite";
++#endif
+ struct Store
+ {
+    struct Connection
+diff --git a/scripts/fair_bank.py b/scripts/fair_bank.py
+index 08e9d34..c93ca1a 100644
+--- a/scripts/fair_bank.py
++++ b/scripts/fair_bank.py
+@@ -18,9 +18,11 @@ import time
+ import uuid
+ 
+ import benchmark
++import benchmark_idle
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+ ENGINES = ("small", "large", "mdbx", "rocksdb", "sqlite", "duckdb")
++API_ENGINES = ("mdbx", "psitrimdbx", "rocksdb", "psitrirocks", "sqlite", "psitri_sqlite")
+ CHECKS = ("read_your_writes", "rollback", "snapshot", "exact_accounts", "balance", "reopen")
+ WORKLOAD = "fair-bank-v2"
+ SMOKE = dict(accounts=128, transfers=256, warmup=64, batch=32, readers=2,
+@@ -199,7 +201,7 @@ def run(args) -> int:
+             shutil.copyfile(build / name, archive / name)
+         diff = subprocess.check_output(["git", "diff", "HEAD", "--binary"], cwd=ROOT)
+         (archive / "source.patch").write_bytes(diff)
+-        source_files = [ROOT / "scripts/fair_bank.py", ROOT / "scripts/benchmark.py", *sorted((ROOT / "benchmarks/fair_bank").glob("*"))]
++        source_files = [ROOT / "scripts/fair_bank.py", ROOT / "scripts/benchmark.py", ROOT / "scripts/benchmark_idle.py", *sorted((ROOT / "benchmarks/fair_bank").glob("*")), *sorted((ROOT / "benchmarks/api_bank").glob("*"))]
+         manifest["source_sha256"] = {str(p.relative_to(ROOT)): digest(p) for p in source_files if p.is_file()}
+         # Preserve uncommitted benchmark source too, not merely its hash.
+         for path in source_files:
+@@ -237,6 +239,7 @@ def run(args) -> int:
+                               command=command, status="running", exit_code=None)
+                 manifest["records"].append(record); benchmark.write_json(archive / "manifest.json", manifest)
+                 print(f"[{repetition + 1}/{repeats}] {engine}", flush=True)
++                benchmark_idle.wait_idle(directory / "idle.jsonl", timeout=args.idle_timeout)
+                 if digest(Path(command[0])) != manifest["binaries"][engine]["sha256"]:
+                     raise ValueError("Benchmark binary changed during the series")
+                 code, elapsed = capture_run(command, directory, args.timeout)
+@@ -260,7 +263,7 @@ def run(args) -> int:
+         summary = summarize(manifest["records"], engines, repeats, args.profile)
+         benchmark.write_json(archive / "summary.json", summary)
+         manifest["status"] = summary["status"]
+-    except (OSError, ValueError, subprocess.SubprocessError, KeyboardInterrupt) as error:
++    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, KeyboardInterrupt) as error:
+         manifest.update(status="failed", error=str(error) or "Interrupted")
+         print(f"Comparison failed: {manifest['error']}", file=sys.stderr)
+     finally:
+@@ -271,15 +274,18 @@ def run(args) -> int:
+ 
+ 
+ def main():
++    global WORKLOAD
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("--build", type=Path, default=ROOT / "build/fair")
+     parser.add_argument("--output", type=Path, default=ROOT / "logs")
+     parser.add_argument("--machine", required=True, help="Stable physical runner identity")
+     parser.add_argument("--profile", choices=("smoke", "performance"), default="smoke")
+-    parser.add_argument("--engines", nargs="+", choices=ENGINES, default=list(ENGINES))
++    parser.add_argument("--suite", choices=("native", "api"), default="native")
++    parser.add_argument("--engines", nargs="+", choices=tuple(dict.fromkeys(ENGINES + API_ENGINES)))
+     parser.add_argument("--repeats", type=int)
+     parser.add_argument("--order-seed", type=int, default=20260917)
+     parser.add_argument("--timeout", type=float, default=1800)
++    parser.add_argument("--idle-timeout", type=float, default=1800)
+     parser.add_argument("--notes", default="")
+     parser.add_argument("--keep-databases", action="store_true")
+     for key in SMOKE:
+@@ -289,9 +295,16 @@ def main():
+         else:
+             parser.add_argument("--" + key.replace("_", "-"), type=int)
+     args = parser.parse_args()
++    if args.suite == "api":
++        WORKLOAD = "api-bank-v1"
++    allowed = API_ENGINES if args.suite == "api" else ENGINES
++    args.engines = args.engines or list(allowed)
++    if any(e not in allowed for e in args.engines):
++        parser.error("Engine is not part of the selected suite")
+     try:
+-        return run(args)
+-    except (ValueError, OSError) as error:
++        with benchmark_idle.exclusive():
++            return run(args)
++    except (ValueError, OSError, RuntimeError) as error:
+         parser.error(str(error))
+ 
+ 

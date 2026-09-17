@@ -28,8 +28,7 @@ represent a near-32-MiB chunk. The implemented design uses checked 32-bit length
 for both chunks and logical values. The former 24-bit proposal below explains
 why widening only the original 16-bit field was insufficient.
 
-The current Psibase checkout inspected at
-`/Users/dlarimer/psibase-main-business` defaults `ConfigRow::maxValueSize` to
+The inspected Psibase source checkout defaults `ConfigRow::maxValueSize` to
 `8 << 20`, and `NativeFunctions::verifyConfigRow` allows up to `15 << 20`.
 Triedent already uses a 24-bit object size in `triedent::object_header`;
 `value_node::data_size()` derives the value size after subtracting key and node

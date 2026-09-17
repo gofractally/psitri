@@ -1,0 +1,949 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>psitri — Fast state. Cheap snapshots. Room to grow.</title>
+    <meta
+      name="description"
+      content="A transactional embedded database built around cheap snapshots, composable trees, and one C++ API for in-memory and larger-than-memory storage. Explore the architecture and the benchmark evidence."
+    />
+    <meta name="theme-color" content="#163f35" />
+    <meta property="og:title" content="psitri — Make state your advantage." />
+    <meta
+      property="og:description"
+      content="Cheap snapshots. Trees inside trees. One C++ API, a choice of storage engines. See the design and the evidence."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://gofractally.github.io/psitri/" />
+    <link rel="canonical" href="https://gofractally.github.io/psitri/" />
+    <link rel="icon" href="assets/mark.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="assets/site.css" />
+    <script src="assets/site.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header">
+      <a class="brand" href="./" aria-label="psitri home"
+        ><img src="assets/mark.svg" alt="" width="30" height="30" />psitri<span
+          class="brand-dot"
+          >.</span
+        ></a
+      >
+      <button
+        class="menu-toggle"
+        aria-expanded="false"
+        aria-controls="navigation"
+      >
+        Menu <span aria-hidden="true">＋</span>
+      </button>
+      <nav id="navigation" aria-label="Main navigation">
+        <a href="#architecture">Why psitri</a><a href="#engines">Engines</a
+        ><a href="#benchmarks">Benchmarks</a
+        ><a href="docs/quickstart.html"
+          >Documentation <span aria-hidden="true">↗</span></a
+        >
+      </nav>
+    </header>
+    <main id="main">
+      <section class="hero section-wrap">
+        <div class="hero-copy">
+          <p class="eyebrow">
+            <span class="status-dot"></span> A new foundation for embedded data
+          </p>
+          <h1>Make state<br />your <em>advantage.</em></h1>
+          <p class="hero-intro">
+            Keep a version. Branch a tree. Let readers run.<br
+              class="desktop-break"
+            />
+            psitri makes evolving application state inexpensive—with one C++ API
+            and room to grow beyond RAM.
+          </p>
+          <div class="actions">
+            <a class="button primary" href="docs/quickstart.html"
+              >Start building <span aria-hidden="true">↗</span></a
+            ><a class="text-link" href="#benchmarks"
+              >Explore the evidence <span aria-hidden="true">↓</span></a
+            >
+          </div>
+          <div class="hero-meta">
+            <span>C++23</span><span>Embedded</span
+            ><span>Copy-on-write ART</span>
+          </div>
+        </div>
+        <div
+          class="tree-lab"
+          aria-label="Interactive copy-on-write snapshot illustration"
+        >
+          <div class="lab-top">
+            <span class="eyebrow">A version is a root, not a copy.</span
+            ><span class="live-label">Try it</span>
+          </div>
+          <svg
+            class="tree-diagram"
+            viewBox="0 0 540 345"
+            role="img"
+            aria-labelledby="tree-title tree-desc"
+          >
+            <title id="tree-title">Two roots share an unchanged tree</title>
+            <desc id="tree-desc">
+              A snapshot and the working root share nodes. A write copies the
+              changed path and preserves the old version.
+            </desc>
+            <defs>
+              <pattern
+                id="dots"
+                width="20"
+                height="20"
+                patternUnits="userSpaceOnUse"
+              >
+                <circle cx="1" cy="1" r="1" fill="#d6ddd1" />
+              </pattern>
+            </defs>
+            <rect width="540" height="345" fill="url(#dots)" />
+            <g fill="none" stroke="#a8b9a3" stroke-width="2">
+              <path
+                d="M162 68L265 147M265 147L120 237M265 147L265 237M265 147L415 237"
+              />
+              <path class="working-shared-link" d="M378 68L265 147" />
+              <path
+                d="M120 237L80 302M120 237L159 302M265 237L239 302M265 237L299 302M415 237L388 302M415 237L450 302"
+              />
+            </g>
+            <g class="snapshot-root">
+              <rect
+                x="94"
+                y="30"
+                width="136"
+                height="49"
+                rx="7"
+                fill="#e8def4"
+                stroke="#b8a4ce"
+              />
+              <text x="162" y="51" class="svg-label" text-anchor="middle">
+                SNAPSHOT
+              </text>
+              <text x="162" y="68" class="svg-value" text-anchor="middle">
+                v1 · retained
+              </text>
+            </g>
+            <g>
+              <rect
+                x="310"
+                y="30"
+                width="136"
+                height="49"
+                rx="7"
+                fill="#163f35"
+              />
+              <text x="378" y="51" class="svg-label light" text-anchor="middle">
+                WORKING ROOT
+              </text>
+              <text
+                x="378"
+                y="68"
+                id="root-version"
+                class="svg-value light"
+                text-anchor="middle"
+              >
+                v1 · current
+              </text>
+            </g>
+            <g class="tree-node">
+              <rect x="238" y="125" width="54" height="44" rx="8" />
+              <path d="M251 147h28M265 136v22" />
+            </g>
+            <g class="tree-node">
+              <rect x="92" y="215" width="56" height="44" rx="8" />
+              <path d="M105 237h29M120 226v22" />
+            </g>
+            <g class="tree-node">
+              <rect x="237" y="215" width="56" height="44" rx="8" />
+              <path d="M250 237h29M265 226v22" />
+            </g>
+            <g class="tree-node">
+              <rect x="387" y="215" width="56" height="44" rx="8" />
+              <path d="M400 237h29M415 226v22" />
+            </g>
+            <g class="leaves">
+              <rect x="65" y="287" width="30" height="28" rx="5" />
+              <rect x="144" y="287" width="30" height="28" rx="5" />
+              <rect x="224" y="287" width="30" height="28" rx="5" />
+              <rect x="284" y="287" width="30" height="28" rx="5" />
+              <rect x="373" y="287" width="30" height="28" rx="5" />
+              <rect x="435" y="287" width="30" height="28" rx="5" />
+            </g>
+            <g class="changed-path" opacity="0">
+              <path
+                d="M378 79L365 147L470 222L494 300M365 147L120 215M365 147L265 215M470 222L388 287"
+                fill="none"
+                stroke="#448350"
+                stroke-width="2"
+              />
+              <rect
+                x="338"
+                y="125"
+                width="54"
+                height="44"
+                rx="8"
+                fill="#c6f17b"
+                stroke="#448350"
+              />
+              <path
+                d="M351 147h28M365 136v22"
+                stroke="#163f35"
+                stroke-width="2"
+              />
+              <rect
+                x="446"
+                y="207"
+                width="48"
+                height="35"
+                rx="7"
+                fill="#c6f17b"
+                stroke="#448350"
+              />
+              <text x="470" y="231" text-anchor="middle" class="svg-value">
+                ＋
+              </text>
+              <rect
+                x="479"
+                y="287"
+                width="30"
+                height="28"
+                rx="5"
+                fill="#c6f17b"
+                stroke="#448350"
+              />
+            </g>
+          </svg>
+          <div
+            class="lab-controls"
+            role="group"
+            aria-label="Illustration controls"
+          >
+            <button data-tree="snapshot" aria-pressed="true">01 Snapshot</button
+            ><button data-tree="write" aria-pressed="false">02 Write</button
+            ><button data-tree="restore" aria-pressed="false">
+              03 Restore
+            </button>
+          </div>
+          <p class="lab-caption" id="tree-caption" aria-live="polite">
+            Retain the root. Both versions share the same data.
+          </p>
+        </div>
+      </section>
+
+      <div class="principles section-wrap">
+        <span
+          >Designed for applications<br /><strong
+            >with state worth keeping.</strong
+          ></span
+        ><span>Versioned application state</span><span>Embedded storage</span
+        ><span>Read-heavy services</span><span>In-memory indexes</span>
+      </div>
+
+      <section class="section-wrap section-space" id="architecture">
+        <div class="section-heading">
+          <p class="eyebrow">01 / The architecture is the advantage</p>
+          <h2>More than a<br />faster <code>get()</code>.</h2>
+          <p>
+            A fast lookup is a start. The bigger opportunity is making
+            snapshots, revisions, and structured state cheap enough to use
+            everywhere.
+          </p>
+        </div>
+        <div class="feature-grid">
+          <article class="feature feature-lead">
+            <div class="feature-index">01 <span>Both engines</span></div>
+            <h3>Snapshot now.<br />Keep working.</h3>
+            <p>
+              Retain an owned root instead of duplicating the database. Later
+              writes copy changed paths; the snapshot keeps its original view.
+            </p>
+            <div class="snapshot-strip" aria-hidden="true">
+              <span>v1</span><i></i><span>v2</span><i></i
+              ><span class="current">v3</span><b>shared structure</b>
+            </div>
+            <a
+              class="text-link"
+              href="docs/quickstart.html#read-scan-and-keep-a-snapshot"
+              >Explore owned snapshots ↗</a
+            ><small
+              >Retained versions keep old data alive. Drop them when you are
+              done.</small
+            >
+          </article>
+          <article class="feature">
+            <div class="feature-index">02 <span>Compile-time choice</span></div>
+            <h3>One API.<br />Different physics.</h3>
+            <p>
+              Use fixed addresses for resident data or movable storage for
+              growth beyond memory. Keep the same byte-database contract, with
+              no virtual dispatch.
+            </p>
+            <code class="feature-code">psitri::engine&lt;Engine&gt;</code
+            ><a class="text-link" href="#engines">Meet the engines ↗</a>
+          </article>
+          <article class="feature">
+            <div class="feature-index">03 <span>Big extension</span></div>
+            <h3>Trees are<br />values, too.</h3>
+            <p>
+              Own a table inside another table. Build a manifest of application
+              state, retain a revision, or restore an entire subtree by
+              replacing its root.
+            </p>
+            <div class="nested-code" aria-label="Example tree hierarchy">
+              <span>application</span><span>↳ accounts / …</span
+              ><span>↳ history / revision_42 / …</span>
+            </div>
+          </article>
+          <article class="feature">
+            <div class="feature-index">04 <span>Big native API</span></div>
+            <h3>A transaction<br />inside a transaction.</h3>
+            <p>
+              Native savepoint frames let you try a change and roll back the
+              primary working root. Useful for speculative operations within a
+              larger edit.
+            </p>
+            <small
+              >Current savepoints cover the primary root and newly opened
+              children, not every previously opened subtree editor.</small
+            >
+          </article>
+          <article class="feature">
+            <div class="feature-index">05 <span>Both engines</span></div>
+            <h3>Readers keep<br />their own view.</h3>
+            <p>
+              Readers traverse stable snapshots while the writer creates the
+              next version. No transaction-wide reader lock holds the writer
+              hostage.
+            </p>
+            <small
+              >Use a separate session on each reader thread. Brief publication
+              locks and residency pins still exist.</small
+            >
+          </article>
+          <article class="feature">
+            <div class="feature-index">06 <span>Native architecture</span></div>
+            <h3>Independent roots.<br />Independent work.</h3>
+            <p>
+              The underlying storage layer supports writers on independent root
+              tables. It is the foundation for parallel work on disjoint state.
+            </p>
+            <small
+              >The current portable API requires one serialized writer.
+              Parallel-root integration is still being qualified.</small
+            >
+          </article>
+        </div>
+        <article class="hot-cold">
+          <div>
+            <p class="eyebrow">07 / Big’s optional MFU cache</p>
+            <h3>Keep hot data close.<br />Let cold data live on disk.</h3>
+            <p>
+              Track access frequency, promote hot objects, and group them
+              together in storage. Relocation separates frequently used data
+              from cold data, so a hot object need not keep an entire cold
+              segment resident.
+            </p>
+            <a class="text-link" href="docs/operations.html"
+              >Understand memory and cache budgets ↗</a
+            ><small
+              >Read-driven promotion is opt-in. The pinned-segment budget is not
+              a cap on total process memory.</small
+            >
+          </div>
+          <div
+            class="cache-visual"
+            role="img"
+            aria-label="Frequently accessed objects migrate together into a hot segment; less-used objects remain in cold segments."
+          >
+            <div class="cache-label">
+              <span>ACCESS FREQUENCY</span><span>PHYSICAL LOCALITY</span>
+            </div>
+            <div class="cache-flow">
+              <div class="scatter">
+                <i class="hot"></i><i></i><i></i><i class="hot"></i><i></i
+                ><i class="hot"></i><i></i><i></i><i></i><i class="hot"></i
+                ><i></i><i></i><i class="hot"></i><i></i><i class="hot"></i
+                ><i></i>
+              </div>
+              <span class="flow-arrow" aria-hidden="true">→</span>
+              <div class="segments">
+                <div class="hot-segment">
+                  <i></i><i></i><i></i><i></i><i></i><i></i><b>HOT</b>
+                </div>
+                <div class="cold-segment">
+                  <i></i><i></i><i></i><i></i><i></i><i></i><b>COLD</b>
+                </div>
+              </div>
+            </div>
+            <p>Object-level promotion · background compaction</p>
+          </div>
+        </article>
+      </section>
+
+      <section class="engine-section" id="engines">
+        <div class="section-wrap section-space">
+          <div class="section-heading split">
+            <div>
+              <p class="eyebrow">02 / Choose your operating envelope</p>
+              <h2>Small footprint.<br />Big possibilities.</h2>
+            </div>
+            <p>
+              Two maintained profiles. One source interface. Choose for your
+              working set, then measure with your actual data.
+            </p>
+          </div>
+          <div class="engine-grid">
+            <article class="engine-card">
+              <div class="engine-title">
+                <span class="engine-number">RAM</span
+                ><span class="pill">Resident data</span>
+              </div>
+              <h3>Small</h3>
+              <code>psitri::small_engine</code>
+              <p>
+                A direct-address adaptive radix tree for databases and retained
+                versions that fit in RAM. Skip the movable-object control-block
+                lookup.
+              </p>
+              <ul>
+                <li>Fixed addresses and reference-counted snapshots</li>
+                <li>Competes with specialist in-memory ART libraries</li>
+                <li>Large values and range reads through the shared API</li>
+              </ul>
+              <div class="engine-foot">
+                <strong>Capacity, precisely.</strong>
+                <p>
+                  The historical 32-bit-handle layout addresses a 32 GiB arena.
+                  Today’s five-byte profile defaults to a 32 GiB ordinary arena
+                  and can address just under 512 GiB. Metadata, retained
+                  versions, and allocation overhead consume capacity; large
+                  values have a separate arena.
+                </p>
+              </div>
+            </article>
+            <article class="engine-card big-card">
+              <div class="engine-title">
+                <span class="engine-number">DISK</span
+                ><span class="pill">Growth beyond RAM</span>
+              </div>
+              <h3>Big</h3>
+              <code>psitri::big_engine</code>
+              <p>
+                Movable, reference-counted storage for databases expected to
+                outgrow memory. Designed to keep an active working set while the
+                full database lives on disk.
+              </p>
+              <ul>
+                <li>Segment compaction and optional hot-object promotion</li>
+                <li>
+                  Owned subtrees, retained revisions, and native savepoints
+                </li>
+                <li>Segment-aware large values with range reads</li>
+              </ul>
+              <div class="engine-foot">
+                <strong>The Psibase integration candidate.</strong>
+                <p>
+                  Big is the default public engine. Sustained beyond-RAM
+                  operation and crash/power-loss recovery remain
+                  release-qualification gates. A configured capacity ceiling is
+                  not a demonstrated scale result.
+                </p>
+              </div>
+            </article>
+          </div>
+          <div class="shared-contract">
+            <span class="eyebrow">Shared foundation</span>
+            <p>
+              Byte keys &amp; values <span>·</span> Ordered scans
+              <span>·</span> Commit &amp; abort <span>·</span> Owned snapshots
+              <span>·</span> Range reads
+            </p>
+            <a href="docs/engines.html">Full capability matrix ↗</a>
+          </div>
+          <div class="large-value-note">
+            <strong>Small key. Large value.</strong>
+            <p>
+              Both engines support logical values up to
+              <strong>4 GiB − 1 byte</strong>, with mixed allocation/free tests
+              through <strong>512 MiB</strong>. Read an offset and length; a
+              callback borrows a contiguous range or receives an assembled range
+              across chunk boundaries.
+            </p>
+            <a href="docs/chunked-values.html">See the layout ↗</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="section-wrap section-space" id="compatibility">
+        <div class="section-heading split">
+          <div>
+            <p class="eyebrow">03 / Meet your application where it is</p>
+            <h2>Keep the API.<br />Rethink the engine.</h2>
+          </div>
+          <p>
+            The path to adoption should start with your application and its
+            benchmarks. Compatibility layers let us test psitri behind familiar
+            interfaces—with much less integration work.
+          </p>
+        </div>
+        <div class="compat-layout">
+          <div class="adapter-stack">
+            <div>
+              <span>YOUR APPLICATION</span
+              ><strong>Existing calls. Existing workloads.</strong>
+            </div>
+            <div>
+              <span>COMPATIBILITY LAYER</span
+              ><strong>MDBX <i>/</i> RocksDB <i>/</i> SQLite</strong>
+            </div>
+            <div class="adapter-bottom">
+              <span>PSITRI STORAGE</span
+              ><strong>Versions become part of the foundation.</strong>
+            </div>
+          </div>
+          <div class="compat-copy">
+            <h3>A familiar<br />way in.</h3>
+            <p>
+              The MDBX C/C++ compatibility implementation is in this repository.
+              RocksDB, SQLite, LevelDB, and DuckDB integrations exist in earlier
+              project work and have not yet been migrated to the maintained
+              engine API here.
+            </p>
+            <p>
+              Compatibility means matching the calls and semantics your
+              application uses. It does not mean sharing on-disk formats,
+              supporting every extension, or automatically exposing every native
+              psitri feature.
+            </p>
+            <a class="text-link" href="docs/compatibility.html"
+              >Integration status and evaluation guide ↗</a
+            >
+          </div>
+        </div>
+        <div class="table-heading">
+          <h3>Choose by architecture.</h3>
+          <p>
+            MDBX and RocksDB already do many things well. Here is where the
+            designs differ.
+          </p>
+        </div>
+        <div
+          class="table-scroll"
+          tabindex="0"
+          role="region"
+          aria-label="Architecture comparison, horizontally scrollable"
+        >
+          <table class="comparison">
+            <thead>
+              <tr>
+                <th scope="col">Design choice</th>
+                <th scope="col">psitri</th>
+                <th scope="col">libmdbx</th>
+                <th scope="col">RocksDB</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row">Storage structure</th>
+                <td>Copy-on-write adaptive radix trees</td>
+                <td>Memory-mapped B+ tree</td>
+                <td>Log-structured merge tree</td>
+              </tr>
+              <tr>
+                <th scope="row">Stable reader views</th>
+                <td>Owned tree roots with structural sharing</td>
+                <td>MVCC read transactions</td>
+                <td>Sequence-based snapshots</td>
+              </tr>
+              <tr>
+                <th scope="row">Organizing state</th>
+                <td>
+                  Recursively owned trees as values <small>Big extension</small>
+                </td>
+                <td>Named tables in an environment</td>
+                <td>Column families in a database</td>
+              </tr>
+              <tr>
+                <th scope="row">Reader / writer overlap</th>
+                <td>Snapshot readers alongside a writer</td>
+                <td>Readers and writer do not block each other</td>
+                <td>Concurrent readers and writers</td>
+              </tr>
+              <tr>
+                <th scope="row">Write concurrency</th>
+                <td>
+                  One writer in the portable contract
+                  <small>Independent roots in native storage</small>
+                </td>
+                <td>One write transaction per environment</td>
+                <td>Concurrent writes; transactional APIs available</td>
+              </tr>
+              <tr>
+                <th scope="row">Storage choice</th>
+                <td>Resident or movable engine under one C++ concept</td>
+                <td>A configurable mmap / B+ tree engine</td>
+                <td>A configurable LSM engine and cache hierarchy</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="source-note">
+          Architecture references:
+          <a href="docs/engines.html">psitri engine contract</a>,
+          <a href="https://libmdbx.dqdkfa.ru/doxygen/index.html"
+            >libmdbx documentation</a
+          >,
+          <a href="https://github.com/facebook/rocksdb/wiki/Basic-Operations"
+            >RocksDB operations</a
+          >
+          and
+          <a href="https://github.com/facebook/rocksdb/wiki/Column-Families"
+            >column families</a
+          >. These are design differences, not a universal ranking.
+        </p>
+      </section>
+
+      <section class="benchmark-section" id="benchmarks">
+        <div class="section-wrap section-space">
+          <div class="section-heading split">
+            <div>
+              <p class="eyebrow">
+                04 / The numbers, with the conditions attached
+              </p>
+              <h2>Evidence you<br />can interrogate.</h2>
+            </div>
+            <p>
+              There is no single “fastest database.” Explore archived workloads,
+              including the tradeoffs. Historical results describe the measured
+              revisions—not a guarantee for today’s build.
+            </p>
+          </div>
+          <div class="benchmark-topline">
+            <span class="pill">Archived · 17 Jun 2026</span
+            ><span>Apple M5 Max · 18 cores · Release</span
+            ><a href="data/benchmarks.json" download>Download data ↓</a>
+          </div>
+          <div class="benchmark-panel">
+            <div class="benchmark-title">
+              <div>
+                <p class="eyebrow">
+                  Bank transfer workload / Same workload, native engines
+                </p>
+                <h3>psitri lineages vs. real libmdbx</h3>
+              </div>
+              <label class="research-toggle"
+                ><input type="checkbox" id="show-research" /> Include research
+                engines</label
+              >
+            </div>
+            <div
+              class="metric-tabs"
+              role="group"
+              aria-label="Select benchmark metric"
+            >
+              <button data-metric="write" aria-pressed="true">
+                Write throughput</button
+              ><button data-metric="read" aria-pressed="false">
+                Read throughput</button
+              ><button data-metric="mixed_write" aria-pressed="false">
+                Writes + readers</button
+              ><button data-metric="mixed_read" aria-pressed="false">
+                Reads + writer</button
+              ><button data-metric="load" aria-pressed="false">Bulk load</button
+              ><button data-metric="disk" aria-pressed="false">
+                Disk high-water
+              </button>
+            </div>
+            <div class="chart-caption">
+              <span id="metric-description"
+                >Transfers per second · higher is better</span
+              ><span>Baseline = libmdbx</span>
+            </div>
+            <div id="benchmark-bars" class="benchmark-bars" aria-live="polite">
+              <p>
+                Big lineage: 551,010 transfers/s. Small lineage: 874,524
+                transfers/s. libmdbx: 77,214 transfers/s.
+                <a href="docs/benchmarks.html">All results and methodology →</a>
+              </p>
+            </div>
+            <div class="benchmark-footnote">
+              <strong id="benchmark-insight"
+                >7.14× the write throughput for the Big lineage in this
+                run.</strong
+              >
+              <p id="benchmark-tradeoff">
+                The same run recorded 542 MB disk high-water for Big versus 64
+                MB for MDBX. Explore every metric above.
+              </p>
+            </div>
+          </div>
+          <div class="conditions-grid">
+            <p>
+              <strong>The workload</strong>1 million accounts. 2 million
+              transfers. Batch 1,000. Four reader threads. Hot-account
+              distribution. Balance conservation passed for all engines.
+            </p>
+            <p>
+              <strong>The durability setting</strong>No per-commit fsync. psitri
+              in-memory commits; MDBX <code>WRITEMAP | SAFE_NOSYNC</code>. This
+              is not a synchronous-durability comparison.
+            </p>
+            <p>
+              <strong>The scope</strong>Historical <code>sal_art_ref</code> and
+              <code>start_ref</code> profiles. One archived run; no error bars
+              or exact MDBX revision recorded. Not an API-shim comparison.
+            </p>
+          </div>
+          <a class="text-link" href="docs/benchmarks.html"
+            >Methodology, raw logs, and limitations ↗</a
+          >
+          <div class="evidence-grid">
+            <article class="evidence-card">
+              <p class="eyebrow">Fixed memory / Historical 32-bit handles</p>
+              <h3>Point reads<br />ahead of libart.</h3>
+              <p>
+                The 32 GiB fixed-address design recorded
+                <strong>8–27% lower lookup latency</strong> across four
+                in-memory cases. Inserts were <strong>12–20% slower</strong>.
+              </p>
+              <div
+                class="art-bars"
+                aria-label="Latency relative to libart, lower is better"
+              >
+                <div>
+                  <span>Integer hit</span><i style="--width: 87%"></i
+                  ><b>0.87×</b>
+                </div>
+                <div>
+                  <span>Integer miss</span><i style="--width: 82%"></i
+                  ><b>0.82×</b>
+                </div>
+                <div>
+                  <span>Dictionary hit</span><i style="--width: 92%"></i
+                  ><b>0.92×</b>
+                </div>
+                <div>
+                  <span>Dictionary miss</span><i style="--width: 73%"></i
+                  ><b>0.73×</b>
+                </div>
+              </div>
+              <small
+                >Apple M5 · June 2026 · latency relative to libart. Historical
+                four-byte handles, not the current five-byte default. Raw
+                timings and repeat count were not retained in this
+                record.</small
+              ><a class="text-link" href="docs/benchmarks.html#art-lookups"
+                >See all six cases ↗</a
+              >
+            </article>
+            <article class="evidence-card scale-card">
+              <p class="eyebrow">Research / Tiered engine</p>
+              <h3>A billion keys.<br />An archived milestone.</h3>
+              <div class="scale-stats">
+                <div><strong>1B</strong><span>keys inserted</span></div>
+                <div>
+                  <strong>10.7<span> min</span></strong
+                  ><span>elapsed time</span>
+                </div>
+              </div>
+              <div
+                class="scale-line"
+                role="img"
+                aria-label="Resident memory grew from 2.30 GB at 10 million keys to 58.08 GB at one billion keys."
+              >
+                <svg viewBox="0 0 400 85">
+                  <path
+                    id="scale-curve"
+                    d="M0 80L40 67L80 58L120 49L160 41L200 35L240 32L280 27L320 11L360 4L400 1"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="3"
+                  /></svg
+                ><span>10M keys / 2.30 GB RSS</span
+                ><span>1B keys / 58.08 GB RSS</span>
+              </div>
+              <small
+                >Experimental hot-delta / cold-base engine on a 128 GB M5 Max.
+                This run fit in RAM. It is not proof of sustained beyond-RAM
+                behavior for Big.</small
+              ><a
+                class="text-link"
+                href="docs/benchmarks.html#billion-key-research-run"
+                >Inspect the scale run ↗</a
+              >
+            </article>
+          </div>
+          <div class="retention-note">
+            <span class="archive-icon" aria-hidden="true">↳</span>
+            <div>
+              <h3>A result should outlive the terminal.</h3>
+              <p>
+                Capture commands, revisions, hardware, settings, raw output, and
+                parsed metrics together. Compare compatible runs to catch
+                regressions without confusing a new machine or durability policy
+                with an improvement.
+              </p>
+            </div>
+            <a class="text-link" href="docs/benchmarking.html"
+              >Record your own run ↗</a
+            >
+          </div>
+        </div>
+      </section>
+
+      <section class="section-wrap section-space build-section" id="start">
+        <div>
+          <p class="eyebrow">05 / A small interface for a large idea</p>
+          <h2>Your data.<br />Your engine.</h2>
+          <p>
+            Target a C++23 concept. Select the backend at compile time. Start
+            with the shared API, then use native extensions where your
+            application needs them.
+          </p>
+          <div class="actions">
+            <a class="button primary" href="docs/quickstart.html"
+              >Read the quickstart ↗</a
+            >
+          </div>
+          <p class="build-meta">
+            Linux &amp; macOS · CMake target <code>psitri::api</code>
+          </p>
+        </div>
+        <div class="code-card">
+          <div class="code-toolbar">
+            <div role="group" aria-label="Example engine">
+              <button data-engine="big" aria-pressed="true">Big</button
+              ><button data-engine="small" aria-pressed="false">Small</button>
+            </div>
+            <button id="copy-code" aria-label="Copy C++ example">Copy</button>
+          </div>
+          <pre><code id="example-code">#include &lt;psitri/api.hpp&gt;
+
+using Engine = psitri::big_engine;
+static_assert(psitri::engine&lt;Engine&gt;);
+
+Engine::config cfg;
+cfg.sync_mode = psitri::sync_mode::fsync;
+auto db = Engine::database::open(
+    "accounts", psitri::open_mode::create_only, cfg);
+auto writer = db-&gt;start_write_session();
+{
+    auto tx = writer-&gt;start_transaction(0);
+    tx.upsert("alice", "100");
+    tx.commit();
+}
+auto saved = writer-&gt;get_root(0); // retain a version</code></pre>
+          <div class="code-footer">
+            <span>C++23 / inside your application function</span
+            ><span id="copy-status" aria-live="polite"></span>
+          </div>
+        </div>
+      </section>
+
+      <section class="section-wrap faq-section">
+        <div>
+          <p class="eyebrow">Before you build</p>
+          <h2>Good questions.<br />Direct answers.</h2>
+        </div>
+        <div class="faq-list">
+          <details>
+            <summary>Is psitri ready for production?</summary>
+            <p>
+              The public source interface is defined and both maintained
+              profiles pass the common API tests. Big is the recommended Psibase
+              integration candidate. Crash/power-loss testing, sustained
+              beyond-RAM qualification, and workload-specific validation remain
+              before a broad production recommendation. GC and tiered research
+              configurations stay explicitly experimental.
+            </p>
+            <a href="docs/operations.html">Read the operating contract ↗</a>
+          </details>
+          <details>
+            <summary>Are snapshots really instant?</summary>
+            <p>
+              Keeping a snapshot retains an existing tree root; it does not copy
+              the database. Later writes copy the affected paths. Retaining many
+              changing versions costs storage, and eventually releasing a large
+              unreachable tree can involve substantial reclamation work.
+              In-memory snapshot ownership alone is not a persistent backup.
+            </p>
+          </details>
+          <details>
+            <summary>Is this faster than MDBX or RocksDB?</summary>
+            <p>
+              Some archived workloads show a substantial advantage over MDBX;
+              the same runs expose storage tradeoffs. The in-memory ART results
+              show both wins and slower inserts. We do not have a controlled,
+              current RocksDB comparison in this repository to publish. Ethereum
+              sync through the MDBX abstraction motivated further experiments;
+              these microbenchmarks do not establish an end-to-end sync win.
+            </p>
+          </details>
+          <details>
+            <summary>Can I switch engines without migrating data?</summary>
+            <p>
+              You can target the same source-level concept and choose an engine
+              at compile time. Physical formats differ. Switching backend types
+              or replacing another database requires a deliberate data
+              migration; changing a C++ alias does not convert files.
+            </p>
+          </details>
+          <details>
+            <summary>Can multiple threads write at once?</summary>
+            <p>
+              The underlying SAL architecture supports independent root writers.
+              The maintained portable database API currently requires a single
+              serialized writer, with separate reader sessions on their own
+              threads. The MDBX shim also preserves MDBX’s one-writer semantics.
+              Do not infer concurrent portable writes from the allocator’s
+              capabilities.
+            </p>
+          </details>
+          <details>
+            <summary>How do I evaluate it for my application?</summary>
+            <p>
+              Start with the shared API guide or the compatibility-layer status.
+              Pin revisions, exercise the calls you use, select durability
+              explicitly, and run the same workload with realistic data sizes
+              and snapshot lifetimes. Save results with the benchmark recorder,
+              including failures. Repeated matched runs are more useful than one
+              headline number.
+            </p>
+            <a href="docs/benchmarking.html"
+              >Use the reproducible benchmark workflow ↗</a
+            >
+          </details>
+        </div>
+      </section>
+      <section class="closing section-wrap">
+        <p class="eyebrow">Build on versions. Grow with your data.</p>
+        <h2>State is the foundation.<br />Give it a better one.</h2>
+        <a class="button primary" href="docs/quickstart.html"
+          >Explore the developer guide <span aria-hidden="true">↗</span></a
+        >
+      </section>
+    </main>
+    <footer class="site-footer section-wrap">
+      <a class="brand" href="./"
+        ><img src="assets/mark.svg" alt="" width="26" height="26" />psitri<span
+          class="brand-dot"
+          >.</span
+        ></a
+      ><span>Persistent trees. Practical possibilities.</span>
+      <nav aria-label="Footer">
+        <a href="docs/index.html">API guide</a
+        ><a href="docs/benchmarks.html">Evidence</a
+        ><a href="docs/compatibility.html">Integration status</a
+        ><a href="https://github.com/gofractally/psitri">Repository ↗</a>
+      </nav>
+      <p>
+        Developer preview · Benchmark evidence last curated September 2026.
+        Repository access may be restricted.
+      </p>
+    </footer>
+  </body>
+</html>

@@ -7,3 +7,7 @@ vendor/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
+
+# Python website / benchmark tooling
+__pycache__/
+*.py[cod]

@@ -4,6 +4,17 @@ One directory per run: `YYYY-MM-DD_<what>/` with a `README.md` (conditions:
 cmd, env, git, machine, contention + result) and any verbatim `*.log`. Newest
 first.
 
+For new runs, use [`scripts/benchmark.py`](../scripts/benchmark.py) to retain
+structured revision, hardware, build, durability, and workload metadata with
+stdout/stderr, parsed metrics, and exit status. Each invocation gets a unique
+archive directory, including failures. The `compare` command rejects mismatched
+conditions and flags throughput, latency, or storage regressions. See the
+[recording and comparison guide](../website/content/benchmarking.md).
+
+The marketing site's [curated data](../website/data/benchmarks.json) and
+[methodology](../website/content/benchmarks.md) distinguish historical maintained
+lineages from research results. New runs are not automatically published.
+
 | date | run | headline |
 |---|---|---|
 | 2026-06-17 | [gcart_spec-bank-vs-mdbx](2026-06-17_gcart_spec-bank-vs-mdbx/) | post-dying-sentinel: gcart_spec 4.9x load / 14.7x wtx / 3.5-3.7x reads over REAL libmdbx, ~par live (39 vs 36 MB), 2.4x disk high-water; balance PASS |

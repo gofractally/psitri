@@ -1,0 +1,1224 @@
+{
+  "schema_version": 1,
+  "curated_on": "2026-09-17",
+  "bank": {
+    "id": "2026-06-17-bank",
+    "date": "2026-06-17",
+    "commit": "7a3c8a5",
+    "machine": "Apple M5 Max, 18 cores, macOS Darwin 25.3",
+    "ram_gb": null,
+    "build": "Release, Apple clang, -O3 -DNDEBUG",
+    "mdbx_revision": null,
+    "repeats_recorded": 1,
+    "workload": {
+      "accounts": 1000000,
+      "transfers": 2000000,
+      "batch_size": 1000,
+      "reader_threads": 4,
+      "distribution": "triangular hot-account"
+    },
+    "durability": {
+      "psitri": "in-memory commit; no per-commit fsync",
+      "mdbx": "WRITEMAP | SAFE_NOSYNC; no per-commit fsync"
+    },
+    "source_directory": "logs/2026-06-17_gcart_spec-bank-vs-mdbx",
+    "metrics": {
+      "write": {
+        "label": "Transfers per second",
+        "short": "write throughput",
+        "unit": "transfers/s",
+        "direction": "higher"
+      },
+      "read": {
+        "label": "Reads per second, readers only",
+        "short": "read throughput",
+        "unit": "reads/s",
+        "direction": "higher"
+      },
+      "mixed_write": {
+        "label": "Transfers per second, with four readers",
+        "short": "write throughput with readers",
+        "unit": "transfers/s",
+        "direction": "higher"
+      },
+      "mixed_read": {
+        "label": "Reads per second, with a writer",
+        "short": "read throughput with a writer",
+        "unit": "reads/s",
+        "direction": "higher"
+      },
+      "load": {
+        "label": "Accounts loaded per second",
+        "short": "bulk-load throughput",
+        "unit": "accounts/s",
+        "direction": "higher"
+      },
+      "disk": {
+        "label": "On-disk high-water in MB",
+        "short": "disk high-water",
+        "unit": "MB",
+        "direction": "lower"
+      }
+    },
+    "engines": [
+      {
+        "id": "mdbx",
+        "name": "libmdbx",
+        "detail": "Baseline \u00b7 B+ tree",
+        "status": "baseline",
+        "values": {
+          "load": 588685,
+          "write": 77214,
+          "mixed_read": 10431636,
+          "mixed_write": 67695,
+          "read": 11624799,
+          "live": 36,
+          "disk": 64
+        },
+        "balance": "PASS"
+      },
+      {
+        "id": "sal_art_ref",
+        "name": "Big lineage",
+        "detail": "sal_art_ref \u00b7 historical",
+        "status": "maintained",
+        "values": {
+          "load": 3005255,
+          "write": 551010,
+          "mixed_read": 15233451,
+          "mixed_write": 479190,
+          "read": 22483905,
+          "live": null,
+          "disk": 542
+        },
+        "balance": "PASS"
+      },
+      {
+        "id": "start_ref",
+        "name": "Small lineage",
+        "detail": "start_ref \u00b7 historical",
+        "status": "maintained",
+        "values": {
+          "load": 6747858,
+          "write": 874524,
+          "mixed_read": 46403149,
+          "mixed_write": 520717,
+          "read": 48631120,
+          "live": null,
+          "disk": 457
+        },
+        "balance": "PASS"
+      },
+      {
+        "id": "delta_art(sv\u2192sar)",
+        "name": "Tiered / versioned",
+        "detail": "delta_art \u00b7 research",
+        "status": "research",
+        "values": {
+          "load": 1002327,
+          "write": 97167,
+          "mixed_read": 47025679,
+          "mixed_write": 80570,
+          "read": 45759946,
+          "live": null,
+          "disk": 675
+        },
+        "balance": "PASS"
+      },
+      {
+        "id": "delta_art(sr\u2192sar)",
+        "name": "Tiered / refcounted",
+        "detail": "delta_art \u00b7 research",
+        "status": "research",
+        "values": {
+          "load": 3210994,
+          "write": 464275,
+          "mixed_read": 42691076,
+          "mixed_write": 466937,
+          "read": 45095819,
+          "live": null,
+          "disk": 839
+        },
+        "balance": "PASS"
+      },
+      {
+        "id": "start_ver",
+        "name": "Versioned ART",
+        "detail": "start_ver \u00b7 research",
+        "status": "research",
+        "values": {
+          "load": 10008858,
+          "write": 2268805,
+          "mixed_read": 49750317,
+          "mixed_write": 2085093,
+          "read": 52199001,
+          "live": null,
+          "disk": 293
+        },
+        "balance": "PASS"
+      },
+      {
+        "id": "gcart",
+        "name": "GC ART",
+        "detail": "gcart \u00b7 research",
+        "status": "research",
+        "values": {
+          "load": 3405586,
+          "write": 1143136,
+          "mixed_read": 55639758,
+          "mixed_write": 522395,
+          "read": 63810691,
+          "live": null,
+          "disk": 186
+        },
+        "balance": "PASS"
+      },
+      {
+        "id": "gcart_spec",
+        "name": "GC ART / spec",
+        "detail": "gcart_spec \u00b7 research",
+        "status": "research",
+        "values": {
+          "load": 2869963,
+          "write": 1138597,
+          "mixed_read": 36102343,
+          "mixed_write": 553568,
+          "read": 42982589,
+          "live": 39,
+          "disk": 154
+        },
+        "balance": "PASS"
+      }
+    ]
+  },
+  "art": {
+    "date": "2026-06-11",
+    "profile": "Historical four-byte, 32-bit direct-address handles; 32 GiB arena",
+    "machine": "Apple M5",
+    "source": "libraries/start_ref/STATUS.md",
+    "baseline": "libart",
+    "metric": "latency ratio, lower is better",
+    "raw_timings_retained": false,
+    "repeat_count": null,
+    "ratios": {
+      "u64_hit": 0.87,
+      "u64_miss": 0.82,
+      "dictionary_hit": 0.92,
+      "dictionary_miss": 0.73,
+      "u64_insert": 1.12,
+      "dictionary_insert": 1.2
+    }
+  },
+  "scale": {
+    "date": "2026-06-13",
+    "commit": "dd2967c",
+    "engine": "experimental delta_art / start_ver hot delta / sal_art_ref base",
+    "machine": "Apple M5 Max, 18 cores, 128 GB RAM",
+    "build": "Release, clang -O3 -DNDEBUG -march=native",
+    "elapsed_minutes": 10.7,
+    "beyond_ram": false,
+    "source_directory": "logs/2026-06-13_delta_art-1B",
+    "points": [
+      {
+        "keys": 10000000,
+        "insert_ns": 278,
+        "read_ns": 247,
+        "hit_percent": 100.0,
+        "iteration_ns": 84.5,
+        "file_gb": 2.39,
+        "rss_gb": 2.3,
+        "chunk_s": 2.82
+      },
+      {
+        "keys": 20000000,
+        "insert_ns": 348,
+        "read_ns": 337,
+        "hit_percent": 100.0,
+        "iteration_ns": 84.7,
+        "file_gb": 4.0,
+        "rss_gb": 3.91,
+        "chunk_s": 3.53
+      },
+      {
+        "keys": 30000000,
+        "insert_ns": 353,
+        "read_ns": 432,
+        "hit_percent": 100.0,
+        "iteration_ns": 77.2,
+        "file_gb": 5.57,
+        "rss_gb": 5.48,
+        "chunk_s": 3.58
+      },
+      {
+        "keys": 40000000,
+        "insert_ns": 385,
+        "read_ns": 512,
+        "hit_percent": 100.0,
+        "iteration_ns": 66.4,
+        "file_gb": 5.91,
+        "rss_gb": 5.82,
+        "chunk_s": 3.91
+      },
+      {
+        "keys": 50000000,
+        "insert_ns": 391,
+        "read_ns": 574,
+        "hit_percent": 100.0,
+        "iteration_ns": 57.9,
+        "file_gb": 6.6,
+        "rss_gb": 6.51,
+        "chunk_s": 3.97
+      },
+      {
+        "keys": 60000000,
+        "insert_ns": 372,
+        "read_ns": 567,
+        "hit_percent": 100.0,
+        "iteration_ns": 54.5,
+        "file_gb": 7.13,
+        "rss_gb": 7.04,
+        "chunk_s": 3.78
+      },
+      {
+        "keys": 70000000,
+        "insert_ns": 366,
+        "read_ns": 588,
+        "hit_percent": 100.0,
+        "iteration_ns": 50.7,
+        "file_gb": 7.76,
+        "rss_gb": 7.67,
+        "chunk_s": 3.72
+      },
+      {
+        "keys": 80000000,
+        "insert_ns": 407,
+        "read_ns": 637,
+        "hit_percent": 100.0,
+        "iteration_ns": 46.2,
+        "file_gb": 8.73,
+        "rss_gb": 8.64,
+        "chunk_s": 4.14
+      },
+      {
+        "keys": 90000000,
+        "insert_ns": 544,
+        "read_ns": 670,
+        "hit_percent": 100.0,
+        "iteration_ns": 40.7,
+        "file_gb": 9.89,
+        "rss_gb": 9.8,
+        "chunk_s": 5.51
+      },
+      {
+        "keys": 100000000,
+        "insert_ns": 406,
+        "read_ns": 627,
+        "hit_percent": 100.0,
+        "iteration_ns": 37.0,
+        "file_gb": 11.24,
+        "rss_gb": 11.15,
+        "chunk_s": 4.13
+      },
+      {
+        "keys": 110000000,
+        "insert_ns": 394,
+        "read_ns": 758,
+        "hit_percent": 100.0,
+        "iteration_ns": 35.5,
+        "file_gb": 11.24,
+        "rss_gb": 11.15,
+        "chunk_s": 4.02
+      },
+      {
+        "keys": 120000000,
+        "insert_ns": 421,
+        "read_ns": 727,
+        "hit_percent": 100.0,
+        "iteration_ns": 29.7,
+        "file_gb": 12.95,
+        "rss_gb": 12.87,
+        "chunk_s": 4.28
+      },
+      {
+        "keys": 130000000,
+        "insert_ns": 381,
+        "read_ns": 762,
+        "hit_percent": 100.0,
+        "iteration_ns": 43.3,
+        "file_gb": 13.27,
+        "rss_gb": 13.18,
+        "chunk_s": 3.9
+      },
+      {
+        "keys": 140000000,
+        "insert_ns": 400,
+        "read_ns": 765,
+        "hit_percent": 100.0,
+        "iteration_ns": 40.2,
+        "file_gb": 13.27,
+        "rss_gb": 13.18,
+        "chunk_s": 4.08
+      },
+      {
+        "keys": 150000000,
+        "insert_ns": 430,
+        "read_ns": 796,
+        "hit_percent": 100.0,
+        "iteration_ns": 37.7,
+        "file_gb": 13.42,
+        "rss_gb": 13.33,
+        "chunk_s": 4.38
+      },
+      {
+        "keys": 160000000,
+        "insert_ns": 493,
+        "read_ns": 752,
+        "hit_percent": 100.0,
+        "iteration_ns": 33.8,
+        "file_gb": 14.17,
+        "rss_gb": 14.09,
+        "chunk_s": 5.01
+      },
+      {
+        "keys": 170000000,
+        "insert_ns": 477,
+        "read_ns": 762,
+        "hit_percent": 100.0,
+        "iteration_ns": 29.5,
+        "file_gb": 15.08,
+        "rss_gb": 14.99,
+        "chunk_s": 4.85
+      },
+      {
+        "keys": 180000000,
+        "insert_ns": 386,
+        "read_ns": 770,
+        "hit_percent": 100.0,
+        "iteration_ns": 39.8,
+        "file_gb": 15.08,
+        "rss_gb": 14.99,
+        "chunk_s": 3.95
+      },
+      {
+        "keys": 190000000,
+        "insert_ns": 424,
+        "read_ns": 765,
+        "hit_percent": 100.0,
+        "iteration_ns": 34.9,
+        "file_gb": 16.31,
+        "rss_gb": 16.22,
+        "chunk_s": 4.32
+      },
+      {
+        "keys": 200000000,
+        "insert_ns": 511,
+        "read_ns": 798,
+        "hit_percent": 100.0,
+        "iteration_ns": 28.1,
+        "file_gb": 17.69,
+        "rss_gb": 17.6,
+        "chunk_s": 5.19
+      },
+      {
+        "keys": 210000000,
+        "insert_ns": 407,
+        "read_ns": 787,
+        "hit_percent": 100.0,
+        "iteration_ns": 40.5,
+        "file_gb": 18.5,
+        "rss_gb": 18.41,
+        "chunk_s": 4.15
+      },
+      {
+        "keys": 220000000,
+        "insert_ns": 779,
+        "read_ns": 837,
+        "hit_percent": 100.0,
+        "iteration_ns": 32.3,
+        "file_gb": 19.44,
+        "rss_gb": 19.35,
+        "chunk_s": 7.87
+      },
+      {
+        "keys": 230000000,
+        "insert_ns": 494,
+        "read_ns": 821,
+        "hit_percent": 100.0,
+        "iteration_ns": 40.4,
+        "file_gb": 19.94,
+        "rss_gb": 19.85,
+        "chunk_s": 5.02
+      },
+      {
+        "keys": 240000000,
+        "insert_ns": 422,
+        "read_ns": 826,
+        "hit_percent": 100.0,
+        "iteration_ns": 34.4,
+        "file_gb": 21.07,
+        "rss_gb": 20.98,
+        "chunk_s": 4.3
+      },
+      {
+        "keys": 250000000,
+        "insert_ns": 418,
+        "read_ns": 782,
+        "hit_percent": 100.0,
+        "iteration_ns": 30.6,
+        "file_gb": 21.44,
+        "rss_gb": 21.35,
+        "chunk_s": 4.26
+      },
+      {
+        "keys": 260000000,
+        "insert_ns": 467,
+        "read_ns": 855,
+        "hit_percent": 100.0,
+        "iteration_ns": 27.9,
+        "file_gb": 21.82,
+        "rss_gb": 21.73,
+        "chunk_s": 4.76
+      },
+      {
+        "keys": 270000000,
+        "insert_ns": 445,
+        "read_ns": 810,
+        "hit_percent": 100.0,
+        "iteration_ns": 34.6,
+        "file_gb": 21.82,
+        "rss_gb": 21.73,
+        "chunk_s": 4.54
+      },
+      {
+        "keys": 280000000,
+        "insert_ns": 1089,
+        "read_ns": 980,
+        "hit_percent": 100.0,
+        "iteration_ns": 27.8,
+        "file_gb": 22.29,
+        "rss_gb": 22.2,
+        "chunk_s": 10.99
+      },
+      {
+        "keys": 290000000,
+        "insert_ns": 441,
+        "read_ns": 799,
+        "hit_percent": 100.0,
+        "iteration_ns": 33.9,
+        "file_gb": 22.54,
+        "rss_gb": 22.45,
+        "chunk_s": 4.5
+      },
+      {
+        "keys": 300000000,
+        "insert_ns": 696,
+        "read_ns": 822,
+        "hit_percent": 100.0,
+        "iteration_ns": 26.1,
+        "file_gb": 23.99,
+        "rss_gb": 23.91,
+        "chunk_s": 7.04
+      },
+      {
+        "keys": 310000000,
+        "insert_ns": 630,
+        "read_ns": 827,
+        "hit_percent": 100.0,
+        "iteration_ns": 32.9,
+        "file_gb": 23.99,
+        "rss_gb": 23.91,
+        "chunk_s": 6.39
+      },
+      {
+        "keys": 320000000,
+        "insert_ns": 654,
+        "read_ns": 821,
+        "hit_percent": 100.0,
+        "iteration_ns": 25.7,
+        "file_gb": 23.99,
+        "rss_gb": 23.91,
+        "chunk_s": 6.62
+      },
+      {
+        "keys": 330000000,
+        "insert_ns": 455,
+        "read_ns": 880,
+        "hit_percent": 100.0,
+        "iteration_ns": 33.9,
+        "file_gb": 24.31,
+        "rss_gb": 24.22,
+        "chunk_s": 4.64
+      },
+      {
+        "keys": 340000000,
+        "insert_ns": 695,
+        "read_ns": 842,
+        "hit_percent": 100.0,
+        "iteration_ns": 25.4,
+        "file_gb": 24.71,
+        "rss_gb": 24.63,
+        "chunk_s": 7.03
+      },
+      {
+        "keys": 350000000,
+        "insert_ns": 469,
+        "read_ns": 893,
+        "hit_percent": 100.0,
+        "iteration_ns": 33.3,
+        "file_gb": 25.78,
+        "rss_gb": 25.69,
+        "chunk_s": 4.78
+      },
+      {
+        "keys": 360000000,
+        "insert_ns": 698,
+        "read_ns": 839,
+        "hit_percent": 100.0,
+        "iteration_ns": 24.9,
+        "file_gb": 26.4,
+        "rss_gb": 26.31,
+        "chunk_s": 7.06
+      },
+      {
+        "keys": 370000000,
+        "insert_ns": 458,
+        "read_ns": 742,
+        "hit_percent": 100.0,
+        "iteration_ns": 33.7,
+        "file_gb": 26.4,
+        "rss_gb": 26.31,
+        "chunk_s": 4.66
+      },
+      {
+        "keys": 380000000,
+        "insert_ns": 644,
+        "read_ns": 949,
+        "hit_percent": 100.0,
+        "iteration_ns": 28.3,
+        "file_gb": 28.28,
+        "rss_gb": 28.19,
+        "chunk_s": 6.54
+      },
+      {
+        "keys": 390000000,
+        "insert_ns": 513,
+        "read_ns": 855,
+        "hit_percent": 100.0,
+        "iteration_ns": 30.2,
+        "file_gb": 29.71,
+        "rss_gb": 29.63,
+        "chunk_s": 5.21
+      },
+      {
+        "keys": 400000000,
+        "insert_ns": 495,
+        "read_ns": 887,
+        "hit_percent": 100.0,
+        "iteration_ns": 28.2,
+        "file_gb": 29.71,
+        "rss_gb": 29.63,
+        "chunk_s": 5.04
+      },
+      {
+        "keys": 410000000,
+        "insert_ns": 520,
+        "read_ns": 906,
+        "hit_percent": 100.0,
+        "iteration_ns": 34.5,
+        "file_gb": 31.28,
+        "rss_gb": 31.19,
+        "chunk_s": 5.3
+      },
+      {
+        "keys": 420000000,
+        "insert_ns": 468,
+        "read_ns": 897,
+        "hit_percent": 100.0,
+        "iteration_ns": 28.8,
+        "file_gb": 31.28,
+        "rss_gb": 31.19,
+        "chunk_s": 4.77
+      },
+      {
+        "keys": 430000000,
+        "insert_ns": 664,
+        "read_ns": 1269,
+        "hit_percent": 100.0,
+        "iteration_ns": 25.3,
+        "file_gb": 32.0,
+        "rss_gb": 31.91,
+        "chunk_s": 6.77
+      },
+      {
+        "keys": 440000000,
+        "insert_ns": 465,
+        "read_ns": 990,
+        "hit_percent": 100.0,
+        "iteration_ns": 31.6,
+        "file_gb": 32.18,
+        "rss_gb": 32.1,
+        "chunk_s": 4.76
+      },
+      {
+        "keys": 450000000,
+        "insert_ns": 502,
+        "read_ns": 958,
+        "hit_percent": 100.0,
+        "iteration_ns": 27.3,
+        "file_gb": 32.18,
+        "rss_gb": 32.1,
+        "chunk_s": 5.12
+      },
+      {
+        "keys": 460000000,
+        "insert_ns": 535,
+        "read_ns": 961,
+        "hit_percent": 100.0,
+        "iteration_ns": 30.7,
+        "file_gb": 33.59,
+        "rss_gb": 33.5,
+        "chunk_s": 5.45
+      },
+      {
+        "keys": 470000000,
+        "insert_ns": 472,
+        "read_ns": 1014,
+        "hit_percent": 100.0,
+        "iteration_ns": 28.5,
+        "file_gb": 33.59,
+        "rss_gb": 33.5,
+        "chunk_s": 4.82
+      },
+      {
+        "keys": 480000000,
+        "insert_ns": 575,
+        "read_ns": 1091,
+        "hit_percent": 100.0,
+        "iteration_ns": 23.2,
+        "file_gb": 33.59,
+        "rss_gb": 33.5,
+        "chunk_s": 5.86
+      },
+      {
+        "keys": 490000000,
+        "insert_ns": 533,
+        "read_ns": 1204,
+        "hit_percent": 100.0,
+        "iteration_ns": 31.7,
+        "file_gb": 34.28,
+        "rss_gb": 34.19,
+        "chunk_s": 5.45
+      },
+      {
+        "keys": 500000000,
+        "insert_ns": 535,
+        "read_ns": 995,
+        "hit_percent": 100.0,
+        "iteration_ns": 27.4,
+        "file_gb": 34.28,
+        "rss_gb": 34.19,
+        "chunk_s": 5.46
+      },
+      {
+        "keys": 510000000,
+        "insert_ns": 554,
+        "read_ns": 1090,
+        "hit_percent": 100.0,
+        "iteration_ns": 23.2,
+        "file_gb": 35.34,
+        "rss_gb": 35.25,
+        "chunk_s": 5.65
+      },
+      {
+        "keys": 520000000,
+        "insert_ns": 445,
+        "read_ns": 937,
+        "hit_percent": 100.0,
+        "iteration_ns": 26.5,
+        "file_gb": 35.34,
+        "rss_gb": 35.25,
+        "chunk_s": 4.54
+      },
+      {
+        "keys": 530000000,
+        "insert_ns": 509,
+        "read_ns": 1018,
+        "hit_percent": 100.0,
+        "iteration_ns": 26.3,
+        "file_gb": 35.5,
+        "rss_gb": 35.41,
+        "chunk_s": 5.19
+      },
+      {
+        "keys": 540000000,
+        "insert_ns": 658,
+        "read_ns": 1090,
+        "hit_percent": 100.0,
+        "iteration_ns": 22.6,
+        "file_gb": 35.84,
+        "rss_gb": 35.75,
+        "chunk_s": 6.69
+      },
+      {
+        "keys": 550000000,
+        "insert_ns": 465,
+        "read_ns": 985,
+        "hit_percent": 100.0,
+        "iteration_ns": 29.1,
+        "file_gb": 35.84,
+        "rss_gb": 35.75,
+        "chunk_s": 4.75
+      },
+      {
+        "keys": 560000000,
+        "insert_ns": 608,
+        "read_ns": 1052,
+        "hit_percent": 100.0,
+        "iteration_ns": 22.8,
+        "file_gb": 36.34,
+        "rss_gb": 36.25,
+        "chunk_s": 6.19
+      },
+      {
+        "keys": 570000000,
+        "insert_ns": 451,
+        "read_ns": 989,
+        "hit_percent": 100.0,
+        "iteration_ns": 27.2,
+        "file_gb": 36.34,
+        "rss_gb": 36.25,
+        "chunk_s": 4.61
+      },
+      {
+        "keys": 580000000,
+        "insert_ns": 575,
+        "read_ns": 1104,
+        "hit_percent": 100.0,
+        "iteration_ns": 27.2,
+        "file_gb": 36.34,
+        "rss_gb": 36.25,
+        "chunk_s": 5.87
+      },
+      {
+        "keys": 590000000,
+        "insert_ns": 507,
+        "read_ns": 1169,
+        "hit_percent": 100.0,
+        "iteration_ns": 31.2,
+        "file_gb": 36.34,
+        "rss_gb": 36.25,
+        "chunk_s": 5.19
+      },
+      {
+        "keys": 600000000,
+        "insert_ns": 679,
+        "read_ns": 1024,
+        "hit_percent": 100.0,
+        "iteration_ns": 26.5,
+        "file_gb": 36.34,
+        "rss_gb": 36.25,
+        "chunk_s": 6.9
+      },
+      {
+        "keys": 610000000,
+        "insert_ns": 551,
+        "read_ns": 1007,
+        "hit_percent": 100.0,
+        "iteration_ns": 28.4,
+        "file_gb": 36.93,
+        "rss_gb": 36.85,
+        "chunk_s": 5.62
+      },
+      {
+        "keys": 620000000,
+        "insert_ns": 490,
+        "read_ns": 1000,
+        "hit_percent": 100.0,
+        "iteration_ns": 28.8,
+        "file_gb": 36.93,
+        "rss_gb": 36.85,
+        "chunk_s": 5.0
+      },
+      {
+        "keys": 630000000,
+        "insert_ns": 590,
+        "read_ns": 1014,
+        "hit_percent": 100.0,
+        "iteration_ns": 29.4,
+        "file_gb": 37.4,
+        "rss_gb": 37.31,
+        "chunk_s": 6.0
+      },
+      {
+        "keys": 640000000,
+        "insert_ns": 472,
+        "read_ns": 991,
+        "hit_percent": 100.0,
+        "iteration_ns": 26.7,
+        "file_gb": 37.4,
+        "rss_gb": 37.31,
+        "chunk_s": 4.83
+      },
+      {
+        "keys": 650000000,
+        "insert_ns": 772,
+        "read_ns": 1026,
+        "hit_percent": 100.0,
+        "iteration_ns": 29.3,
+        "file_gb": 37.93,
+        "rss_gb": 37.85,
+        "chunk_s": 7.83
+      },
+      {
+        "keys": 660000000,
+        "insert_ns": 509,
+        "read_ns": 1012,
+        "hit_percent": 100.0,
+        "iteration_ns": 27.0,
+        "file_gb": 37.93,
+        "rss_gb": 37.85,
+        "chunk_s": 5.2
+      },
+      {
+        "keys": 670000000,
+        "insert_ns": 603,
+        "read_ns": 1054,
+        "hit_percent": 100.0,
+        "iteration_ns": 30.1,
+        "file_gb": 38.18,
+        "rss_gb": 38.1,
+        "chunk_s": 6.14
+      },
+      {
+        "keys": 680000000,
+        "insert_ns": 642,
+        "read_ns": 994,
+        "hit_percent": 100.0,
+        "iteration_ns": 26.5,
+        "file_gb": 38.81,
+        "rss_gb": 38.72,
+        "chunk_s": 6.52
+      },
+      {
+        "keys": 690000000,
+        "insert_ns": 734,
+        "read_ns": 953,
+        "hit_percent": 100.0,
+        "iteration_ns": 26.1,
+        "file_gb": 40.03,
+        "rss_gb": 39.94,
+        "chunk_s": 7.44
+      },
+      {
+        "keys": 700000000,
+        "insert_ns": 591,
+        "read_ns": 1047,
+        "hit_percent": 100.0,
+        "iteration_ns": 27.3,
+        "file_gb": 40.09,
+        "rss_gb": 40.0,
+        "chunk_s": 6.02
+      },
+      {
+        "keys": 710000000,
+        "insert_ns": 599,
+        "read_ns": 1134,
+        "hit_percent": 100.0,
+        "iteration_ns": 26.9,
+        "file_gb": 42.22,
+        "rss_gb": 42.13,
+        "chunk_s": 6.11
+      },
+      {
+        "keys": 720000000,
+        "insert_ns": 509,
+        "read_ns": 1132,
+        "hit_percent": 100.0,
+        "iteration_ns": 29.7,
+        "file_gb": 42.22,
+        "rss_gb": 42.13,
+        "chunk_s": 5.21
+      },
+      {
+        "keys": 730000000,
+        "insert_ns": 695,
+        "read_ns": 1065,
+        "hit_percent": 100.0,
+        "iteration_ns": 25.2,
+        "file_gb": 42.75,
+        "rss_gb": 42.66,
+        "chunk_s": 7.06
+      },
+      {
+        "keys": 740000000,
+        "insert_ns": 518,
+        "read_ns": 908,
+        "hit_percent": 100.0,
+        "iteration_ns": 28.0,
+        "file_gb": 42.75,
+        "rss_gb": 42.66,
+        "chunk_s": 5.27
+      },
+      {
+        "keys": 750000000,
+        "insert_ns": 769,
+        "read_ns": 1223,
+        "hit_percent": 100.0,
+        "iteration_ns": 31.9,
+        "file_gb": 43.97,
+        "rss_gb": 43.88,
+        "chunk_s": 7.81
+      },
+      {
+        "keys": 760000000,
+        "insert_ns": 3859,
+        "read_ns": 1094,
+        "hit_percent": 100.0,
+        "iteration_ns": 23.4,
+        "file_gb": 46.11,
+        "rss_gb": 46.02,
+        "chunk_s": 38.7
+      },
+      {
+        "keys": 770000000,
+        "insert_ns": 657,
+        "read_ns": 1005,
+        "hit_percent": 100.0,
+        "iteration_ns": 30.5,
+        "file_gb": 46.3,
+        "rss_gb": 46.21,
+        "chunk_s": 6.67
+      },
+      {
+        "keys": 780000000,
+        "insert_ns": 785,
+        "read_ns": 1084,
+        "hit_percent": 100.0,
+        "iteration_ns": 32.9,
+        "file_gb": 46.3,
+        "rss_gb": 46.21,
+        "chunk_s": 7.96
+      },
+      {
+        "keys": 790000000,
+        "insert_ns": 3466,
+        "read_ns": 1090,
+        "hit_percent": 100.0,
+        "iteration_ns": 25.3,
+        "file_gb": 49.61,
+        "rss_gb": 49.52,
+        "chunk_s": 34.77
+      },
+      {
+        "keys": 800000000,
+        "insert_ns": 688,
+        "read_ns": 1035,
+        "hit_percent": 100.0,
+        "iteration_ns": 29.1,
+        "file_gb": 51.36,
+        "rss_gb": 51.27,
+        "chunk_s": 6.99
+      },
+      {
+        "keys": 810000000,
+        "insert_ns": 656,
+        "read_ns": 1025,
+        "hit_percent": 100.0,
+        "iteration_ns": 30.1,
+        "file_gb": 51.58,
+        "rss_gb": 51.49,
+        "chunk_s": 6.66
+      },
+      {
+        "keys": 820000000,
+        "insert_ns": 1491,
+        "read_ns": 1094,
+        "hit_percent": 100.0,
+        "iteration_ns": 23.5,
+        "file_gb": 51.89,
+        "rss_gb": 51.8,
+        "chunk_s": 15.02
+      },
+      {
+        "keys": 830000000,
+        "insert_ns": 677,
+        "read_ns": 1020,
+        "hit_percent": 100.0,
+        "iteration_ns": 28.8,
+        "file_gb": 52.14,
+        "rss_gb": 52.05,
+        "chunk_s": 6.87
+      },
+      {
+        "keys": 840000000,
+        "insert_ns": 643,
+        "read_ns": 1020,
+        "hit_percent": 100.0,
+        "iteration_ns": 30.3,
+        "file_gb": 52.49,
+        "rss_gb": 52.4,
+        "chunk_s": 6.53
+      },
+      {
+        "keys": 850000000,
+        "insert_ns": 546,
+        "read_ns": 993,
+        "hit_percent": 100.0,
+        "iteration_ns": 24.9,
+        "file_gb": 52.7,
+        "rss_gb": 52.62,
+        "chunk_s": 5.56
+      },
+      {
+        "keys": 860000000,
+        "insert_ns": 768,
+        "read_ns": 1213,
+        "hit_percent": 100.0,
+        "iteration_ns": 30.5,
+        "file_gb": 54.83,
+        "rss_gb": 54.74,
+        "chunk_s": 7.8
+      },
+      {
+        "keys": 870000000,
+        "insert_ns": 757,
+        "read_ns": 1110,
+        "hit_percent": 100.0,
+        "iteration_ns": 22.8,
+        "file_gb": 54.83,
+        "rss_gb": 54.74,
+        "chunk_s": 7.69
+      },
+      {
+        "keys": 880000000,
+        "insert_ns": 641,
+        "read_ns": 1022,
+        "hit_percent": 100.0,
+        "iteration_ns": 26.8,
+        "file_gb": 54.83,
+        "rss_gb": 54.74,
+        "chunk_s": 6.52
+      },
+      {
+        "keys": 890000000,
+        "insert_ns": 639,
+        "read_ns": 1001,
+        "hit_percent": 100.0,
+        "iteration_ns": 32.7,
+        "file_gb": 54.83,
+        "rss_gb": 54.74,
+        "chunk_s": 6.49
+      },
+      {
+        "keys": 900000000,
+        "insert_ns": 690,
+        "read_ns": 1509,
+        "hit_percent": 100.0,
+        "iteration_ns": 34.0,
+        "file_gb": 56.33,
+        "rss_gb": 56.24,
+        "chunk_s": 7.06
+      },
+      {
+        "keys": 910000000,
+        "insert_ns": 723,
+        "read_ns": 1180,
+        "hit_percent": 100.0,
+        "iteration_ns": 20.9,
+        "file_gb": 58.05,
+        "rss_gb": 57.96,
+        "chunk_s": 7.35
+      },
+      {
+        "keys": 920000000,
+        "insert_ns": 489,
+        "read_ns": 1063,
+        "hit_percent": 100.0,
+        "iteration_ns": 25.5,
+        "file_gb": 58.05,
+        "rss_gb": 57.96,
+        "chunk_s": 5.0
+      },
+      {
+        "keys": 930000000,
+        "insert_ns": 756,
+        "read_ns": 1173,
+        "hit_percent": 100.0,
+        "iteration_ns": 24.5,
+        "file_gb": 58.05,
+        "rss_gb": 57.96,
+        "chunk_s": 7.68
+      },
+      {
+        "keys": 940000000,
+        "insert_ns": 563,
+        "read_ns": 1137,
+        "hit_percent": 100.0,
+        "iteration_ns": 26.8,
+        "file_gb": 58.05,
+        "rss_gb": 57.96,
+        "chunk_s": 5.75
+      },
+      {
+        "keys": 950000000,
+        "insert_ns": 961,
+        "read_ns": 1115,
+        "hit_percent": 100.0,
+        "iteration_ns": 24.9,
+        "file_gb": 58.05,
+        "rss_gb": 57.96,
+        "chunk_s": 9.72
+      },
+      {
+        "keys": 960000000,
+        "insert_ns": 705,
+        "read_ns": 1200,
+        "hit_percent": 100.0,
+        "iteration_ns": 27.4,
+        "file_gb": 58.05,
+        "rss_gb": 57.96,
+        "chunk_s": 7.17
+      },
+      {
+        "keys": 970000000,
+        "insert_ns": 989,
+        "read_ns": 1051,
+        "hit_percent": 100.0,
+        "iteration_ns": 23.7,
+        "file_gb": 58.05,
+        "rss_gb": 57.96,
+        "chunk_s": 10.0
+      },
+      {
+        "keys": 980000000,
+        "insert_ns": 579,
+        "read_ns": 1147,
+        "hit_percent": 100.0,
+        "iteration_ns": 27.4,
+        "file_gb": 58.17,
+        "rss_gb": 58.08,
+        "chunk_s": 5.91
+      },
+      {
+        "keys": 990000000,
+        "insert_ns": 773,
+        "read_ns": 1094,
+        "hit_percent": 100.0,
+        "iteration_ns": 21.4,
+        "file_gb": 58.17,
+        "rss_gb": 58.08,
+        "chunk_s": 7.85
+      },
+      {
+        "keys": 1000000000,
+        "insert_ns": 657,
+        "read_ns": 1157,
+        "hit_percent": 100.0,
+        "iteration_ns": 27.9,
+        "file_gb": 58.17,
+        "rss_gb": 58.08,
+        "chunk_s": 6.69
+      }
+    ]
+  }
+}

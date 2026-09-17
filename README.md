@@ -3,6 +3,13 @@
 Persistent, transactional key-value engines, a shared C++ database interface,
 and common behavioral tests and benchmarks.
 
+The [psitri website](https://gofractally.github.io/psitri/) explains the architecture,
+engine choices, compatibility-layer status, and historical benchmark evidence.
+Its [source and deployment guide](website/README.md) live in this repository.
+For new performance measurements, use the [benchmark recorder](scripts/benchmark.py)
+and [comparison workflow](website/content/benchmarking.md) to retain reproducible
+results and detect regressions.
+
 The product goal is a reliable database that scales beyond RAM. Psibase must
 be able to adopt faster implementations through a stable API while preserving
 revision, snapshot, ownership, rollback, and durability semantics. Ethereum

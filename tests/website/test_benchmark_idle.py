@@ -1,5 +1,6 @@
 """A competing runner must never enter the benchmark's measurement window."""
 from pathlib import Path
+import os
 import subprocess
 import sys
 import tempfile
@@ -15,8 +16,9 @@ class IsolationTest(unittest.TestCase):
     def test_other_process_cannot_acquire_machine_lock(self):
         code = "import sys; sys.path.insert(0, sys.argv[1]); import benchmark_idle; "
         code += "\nwith benchmark_idle.exclusive(): print('acquired')"
-        with benchmark_idle.exclusive():
-            result = subprocess.run([sys.executable, "-c", code, str(ROOT / "scripts")], capture_output=True, text=True)
+        with tempfile.TemporaryDirectory() as temp, benchmark_idle.exclusive():
+            result = subprocess.run([sys.executable, "-c", code, str(ROOT / "scripts")],
+                                    env=dict(os.environ, TMPDIR=temp), capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("acquired", result.stdout)
         self.assertIn("machine-wide lock", result.stderr)

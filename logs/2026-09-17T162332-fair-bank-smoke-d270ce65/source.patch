@@ -1,0 +1,147 @@
+diff --git a/benchmarks/CMakeLists.txt b/benchmarks/CMakeLists.txt
+index 471878a..29994e7 100644
+--- a/benchmarks/CMakeLists.txt
++++ b/benchmarks/CMakeLists.txt
+@@ -2,6 +2,11 @@
+ # pipeline benches (delta_art = hot delta over cold base) drive the
+ # start_ver + sal_art_ref instantiation.
+ 
++option(PSITRI_FAIR_BANK "Build the common bank workload against all comparison libraries" OFF)
++if(PSITRI_FAIR_BANK)
++    add_subdirectory(fair_bank)
++endif()
++
+ # delta_art scale bench: start_ver (hot delta) -> sal_art_ref dwal (cold base).
+ # The cold engine is sal_art_ref::radix::dwal_engine (heart_dwal_engine.hpp,
+ # under sal_art_ref/test); it uses psitri's dwal::kv_engine concept.
+diff --git a/scripts/build_site.py b/scripts/build_site.py
+index bb57530..021bbaf 100644
+--- a/scripts/build_site.py
++++ b/scripts/build_site.py
+@@ -17,7 +17,7 @@ import markdown
+ ROOT = Path(__file__).resolve().parents[1]
+ SOURCE = ROOT / "website"
+ API_NAMES = ("README", "quickstart", "reference", "operations", "engines", "conformance", "chunked-values", "range-reads")
+-CONTENT_NAMES = ("compatibility", "benchmarks", "benchmarking")
++CONTENT_NAMES = ("compatibility", "benchmarks", "benchmarking", "fair-comparison")
+ EVIDENCE = {
+     "bank_compare.log": "logs/2026-06-17_gcart_spec-bank-vs-mdbx/bank_compare.log",
+     "mdbx.log": "logs/2026-06-17_gcart_spec-bank-vs-mdbx/mdbx.log",
+@@ -34,7 +34,8 @@ NAV = (("index", "API overview"), ("quickstart", "Quickstart"), ("reference", "A
+        ("operations", "Lifetimes & durability"), ("engines", "Choose an engine"),
+        ("range-reads", "Range reads"), ("chunked-values", "Large values"),
+        ("conformance", "Engine conformance"), ("compatibility", "Compatibility layers"),
+-       ("benchmarks", "Benchmark evidence"), ("benchmarking", "Record & compare runs"))
++       ("benchmarks", "Benchmark evidence"), ("fair-comparison", "Fair library comparisons"),
++       ("benchmarking", "Record & compare runs"))
+ 
+ 
+ def html_name(name: str) -> str:
+diff --git a/website/README.md b/website/README.md
+index 315dba6..a45c7b3 100644
+--- a/website/README.md
++++ b/website/README.md
+@@ -26,7 +26,7 @@ toggle, the snapshot illustration, example switching/copy, menu, and details.
+ 
+ - `website/index.html`, `website/assets`, and curated `website/data`;
+ - the listed API Markdown guides, rendered as public HTML;
+-- the three curated methodology/integration guides in `website/content`;
++- the four curated methodology/integration guides in `website/content`;
+ - `examples/api/basic.cpp` and `examples/api/revisions.cpp`;
+ - the curated native bank and scale logs, integration bank logs with their
+   correctness status and provenance, and a benchmark-only ART measurement excerpt.
+@@ -78,7 +78,9 @@ Claims that must remain explicit until evidence changes:
+   larger psitri disk high-water. Separate RocksDB/SQLite bank records use a
+   different configuration and workload; do not merge them into that chart. The
+   retained system SQLite run failed validation and cannot support a speedup claim.
+-  DuckDB has a TATP driver, without a retained result in the public dataset.
++  The integration suite has a DuckDB TATP driver. The common fair-bank suite also
++  tests native DuckDB with the maintained engines and other competitors; its
++  smoke results are not public performance evidence.
+ 
+ ## Public audience and terminology
+ 
+diff --git a/website/content/benchmarking.md b/website/content/benchmarking.md
+index 7817358..362b39e 100644
+--- a/website/content/benchmarking.md
++++ b/website/content/benchmarking.md
+@@ -4,6 +4,21 @@ Keep each benchmark run in `logs/`. Use `scripts/benchmark.py`, a Python 3.10+ s
+ tool that writes structured metadata beside raw stdout and stderr. Every run
+ gets a unique directory; rerunning never overwrites earlier evidence.
+ 
++## Compare different libraries
++
++Use the [common comparison suite](fair-comparison.html) for a matched bank
++workload across the Small Engine, Large Engine, MDBX, RocksDB, SQLite, and DuckDB.
++It checks exact account state, snapshot isolation, rollback, and clean reopen,
++then retains each process and repetition. Start with:
++
++```sh
++python3 scripts/fair_bank.py --machine my-runner --profile smoke
++```
++
++The build instructions, synchronous and relaxed cohorts, resource accounting,
++and API-wrapper comparison boundaries are in that guide. The recorder below
++remains useful for other workloads and regressions within one configuration.
++
+ ## Record a run
+ 
+ Build the benchmark in Release mode, then run from the repository root:
+diff --git a/website/content/benchmarks.md b/website/content/benchmarks.md
+index 5a09ffa..25d0c98 100644
+--- a/website/content/benchmarks.md
++++ b/website/content/benchmarks.md
+@@ -76,10 +76,15 @@ Raw outputs: [psitri engines](../evidence/bank_compare.log),
+ 
+ ## Additional benchmark backends
+ 
+-The integration benchmark suite also implements **RocksDB and SQLite bank
+-backends**, each with a real-database build and a psitri-backed build. DuckDB
+-has a separate **TATP telecom workload** comparing its native storage with the
+-psitri storage extension.
++The [common bank comparison suite](fair-comparison.html) runs the maintained
++Small Engine and Large Engine alongside real MDBX, RocksDB, SQLite, and DuckDB
++with one workload and explicit durability settings. Its validation runs establish
++that the adapters agree on the resulting state; they are not performance claims.
++
++The separate integration suite runs bank workloads through real and psitri-backed
++RocksDB/SQLite APIs, plus a TATP telecom workload through DuckDB and its psitri
++storage extension. The retained integration records below measure those source
++configurations.
+ 
+ | Interface | Benchmark targets | Retained evidence |
+ |---|---|---|
+diff --git a/website/content/compatibility.md b/website/content/compatibility.md
+index 5b59371..896106f 100644
+--- a/website/content/compatibility.md
++++ b/website/content/compatibility.md
+@@ -30,7 +30,11 @@ SQLite run the bank workload through both their real databases and psitri-backed
+ implementations. DuckDB has a TATP telecom benchmark. See the
+ [backend inventory and retained results](benchmarks.html#additional-benchmark-backends)
+ for source links and correctness status. These adapters do not establish support
+-for the maintained `psitri::engine` contract.
++for the maintained `psitri::engine` contract. The separate
++[common bank comparison](fair-comparison.html) tests the current Small Engine
++and Large Engine against the real MDBX, RocksDB, SQLite, and DuckDB libraries
++using matched application operations. Its native results do not include a
++foreign-API wrapper's overhead.
+ 
+ ## What “near drop-in” does and does not mean
+ 
+diff --git a/website/index.html b/website/index.html
+index 88382a3..1782eaf 100644
+--- a/website/index.html
++++ b/website/index.html
+@@ -517,9 +517,9 @@
+               The MDBX C/C++ compatibility implementation is included. SQLite,
+               RocksDB, LevelDB, and DuckDB have separate integration
+               implementations; versions targeting this repository’s shared
+-              engine API are not available. The separate integration suite
+-              includes bank benchmarks for RocksDB and SQLite, and a TATP
+-              benchmark for DuckDB.
++              engine API are not available. A common bank suite compares the
++              maintained engines with real MDBX, RocksDB, SQLite, and DuckDB.
++              Separate integration workloads exercise the compatible APIs.
+             </p>
+             <p>
+               <strong>Compatibility has a performance cost.</strong> Another API

@@ -1,0 +1,32 @@
+# Explicit dependencies: enabling this suite must never silently omit a competitor.
+find_package(Threads REQUIRED)
+find_package(SQLite3 REQUIRED)
+find_path(FAIR_MDBX_INCLUDE_DIR mdbx.h REQUIRED)
+find_library(FAIR_MDBX_LIBRARY NAMES mdbx REQUIRED)
+find_path(FAIR_ROCKSDB_INCLUDE_DIR rocksdb/db.h REQUIRED)
+find_library(FAIR_ROCKSDB_LIBRARY NAMES rocksdb REQUIRED)
+find_path(FAIR_DUCKDB_INCLUDE_DIR duckdb.h REQUIRED)
+find_library(FAIR_DUCKDB_LIBRARY NAMES duckdb REQUIRED)
+set(FAIR_ROCKSDB_EXTRA_LIBRARIES "" CACHE STRING "Compression/other dependencies of static RocksDB")
+
+foreach(engine small large mdbx rocksdb sqlite duckdb)
+    add_executable(fair-bank-${engine} main.cpp)
+    target_compile_definitions(fair-bank-${engine} PRIVATE FAIR_${engine}=1)
+    target_link_libraries(fair-bank-${engine} PRIVATE Threads::Threads)
+    set_target_properties(fair-bank-${engine} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endforeach()
+target_link_libraries(fair-bank-small PRIVATE psitri::small)
+target_link_libraries(fair-bank-large PRIVATE psitri::big)
+target_include_directories(fair-bank-mdbx PRIVATE "${FAIR_MDBX_INCLUDE_DIR}")
+target_link_libraries(fair-bank-mdbx PRIVATE "${FAIR_MDBX_LIBRARY}")
+target_include_directories(fair-bank-rocksdb PRIVATE "${FAIR_ROCKSDB_INCLUDE_DIR}")
+target_link_libraries(fair-bank-rocksdb PRIVATE "${FAIR_ROCKSDB_LIBRARY}" ${FAIR_ROCKSDB_EXTRA_LIBRARIES})
+target_link_libraries(fair-bank-sqlite PRIVATE SQLite::SQLite3)
+target_include_directories(fair-bank-duckdb PRIVATE "${FAIR_DUCKDB_INCLUDE_DIR}")
+target_link_libraries(fair-bank-duckdb PRIVATE "${FAIR_DUCKDB_LIBRARY}")
+add_custom_target(fair-bank DEPENDS fair-bank-small fair-bank-large fair-bank-mdbx
+    fair-bank-rocksdb fair-bank-sqlite fair-bank-duckdb)
+
+# The runner archives this with compiler commands and content hashes of linked libraries.
+file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/fair-bank-build.json" CONTENT
+"{\n  \"compiler\": \"${CMAKE_CXX_COMPILER}\",\n  \"compiler_version\": \"${CMAKE_CXX_COMPILER_VERSION}\",\n  \"build_type\": \"${CMAKE_BUILD_TYPE}\",\n  \"libraries\": [\"${FAIR_MDBX_LIBRARY}\", \"${FAIR_ROCKSDB_LIBRARY}\", \"${SQLite3_LIBRARY}\", \"${FAIR_DUCKDB_LIBRARY}\"]\n}\n")

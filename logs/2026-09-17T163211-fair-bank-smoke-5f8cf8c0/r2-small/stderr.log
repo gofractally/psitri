@@ -1,0 +1,8 @@
+small psitri API 1
+sync_mode=none; fixed arena; default max_segments=4096; background release enabled
+load
+warmup
+write
+mixed
+read
+close/reopen validation

@@ -1,0 +1,200 @@
+{
+  "engine": "duckdb",
+  "repetition": 3,
+  "directory": "r3-duckdb",
+  "command": [
+    "/Users/dlarimer/gofractally/psitri/build/fair/bin/fair-bank-duckdb",
+    "--path",
+    "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r3-duckdb/database",
+    "--result",
+    "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r3-duckdb/result.json",
+    "--accounts",
+    "257",
+    "--transfers",
+    "1025",
+    "--warmup",
+    "33",
+    "--batch",
+    "13",
+    "--readers",
+    "2",
+    "--reads-per-snapshot",
+    "17",
+    "--read-batches",
+    "3",
+    "--seed",
+    "12345",
+    "--value-bytes",
+    "128",
+    "--cache-mib",
+    "64",
+    "--map-gib",
+    "64",
+    "--durability",
+    "fsync"
+  ],
+  "status": "passed",
+  "exit_code": 0,
+  "elapsed_seconds": 1.5889882499468513,
+  "result": {
+    "schema_version": 1,
+    "workload": "fair-bank-v2",
+    "engine": "duckdb",
+    "version": "v1.5.5",
+    "settings": "persistent database; synchronous WAL commits; platform_sync=fsync; threads=1; memory_limit_mib=64",
+    "status": "passed",
+    "config": {
+      "accounts": 257,
+      "transfers": 1025,
+      "warmup": 33,
+      "batch": 13,
+      "readers": 2,
+      "reads_per_snapshot": 17,
+      "read_batches": 3,
+      "seed": 12345,
+      "value_bytes": 128,
+      "cache_mib": 64,
+      "map_gib": 64,
+      "durability": "fsync"
+    },
+    "validation": {
+      "read_your_writes": true,
+      "rollback": true,
+      "snapshot": true,
+      "exact_accounts": true,
+      "balance": true,
+      "reopen": true,
+      "final_hash": "12130220473362157698"
+    },
+    "counts": {
+      "write_transfers": 1025,
+      "write_commits": 79,
+      "mixed_transfers": 1025,
+      "mixed_commits": 79,
+      "mixed_reads": 21641,
+      "read_only_reads": 102,
+      "reader_checksum": "21743000000000369"
+    },
+    "metrics": [
+      {
+        "engine": "duckdb",
+        "name": "load",
+        "unit": "accounts/s",
+        "direction": "higher",
+        "value": 5827.047736240702
+      },
+      {
+        "engine": "duckdb",
+        "name": "write",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 2691.582404272395
+      },
+      {
+        "engine": "duckdb",
+        "name": "write_batch_p50",
+        "unit": "us",
+        "direction": "lower",
+        "value": 4841.583
+      },
+      {
+        "engine": "duckdb",
+        "name": "write_batch_p99",
+        "unit": "us",
+        "direction": "lower",
+        "value": 5491.958
+      },
+      {
+        "engine": "duckdb",
+        "name": "mixed_write_active",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 969.6040940941651
+      },
+      {
+        "engine": "duckdb",
+        "name": "mixed_write_active_batch_p50",
+        "unit": "us",
+        "direction": "lower",
+        "value": 13262.625
+      },
+      {
+        "engine": "duckdb",
+        "name": "mixed_write_active_batch_p99",
+        "unit": "us",
+        "direction": "lower",
+        "value": 20045.041999999998
+      },
+      {
+        "engine": "duckdb",
+        "name": "mixed_write",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 968.9037048454941
+      },
+      {
+        "engine": "duckdb",
+        "name": "mixed_read",
+        "unit": "reads/s",
+        "direction": "higher",
+        "value": 20456.62934298667
+      },
+      {
+        "engine": "duckdb",
+        "name": "read",
+        "unit": "reads/s",
+        "direction": "higher",
+        "value": 26284.425833467547
+      },
+      {
+        "engine": "duckdb",
+        "name": "disk_before_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 620192
+      },
+      {
+        "engine": "duckdb",
+        "name": "allocated_before_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 675840
+      },
+      {
+        "engine": "duckdb",
+        "name": "close",
+        "unit": "seconds",
+        "direction": "lower",
+        "value": 0.00186175
+      },
+      {
+        "engine": "duckdb",
+        "name": "disk_after_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 798720
+      },
+      {
+        "engine": "duckdb",
+        "name": "allocated_after_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 798720
+      },
+      {
+        "engine": "duckdb",
+        "name": "reopen",
+        "unit": "seconds",
+        "direction": "lower",
+        "value": 0.003227875
+      },
+      {
+        "engine": "duckdb",
+        "name": "peak_rss",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 46727168
+      }
+    ]
+  }
+}

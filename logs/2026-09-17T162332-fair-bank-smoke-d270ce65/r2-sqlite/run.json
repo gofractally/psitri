@@ -1,0 +1,200 @@
+{
+  "engine": "sqlite",
+  "repetition": 2,
+  "directory": "r2-sqlite",
+  "command": [
+    "/Users/dlarimer/gofractally/psitri/build/fair/bin/fair-bank-sqlite",
+    "--path",
+    "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-sqlite/database",
+    "--result",
+    "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-sqlite/result.json",
+    "--accounts",
+    "10000",
+    "--transfers",
+    "10000",
+    "--warmup",
+    "1000",
+    "--batch",
+    "100",
+    "--readers",
+    "2",
+    "--reads-per-snapshot",
+    "100",
+    "--read-batches",
+    "20",
+    "--seed",
+    "12345",
+    "--value-bytes",
+    "64",
+    "--cache-mib",
+    "64",
+    "--map-gib",
+    "64",
+    "--durability",
+    "sync"
+  ],
+  "status": "passed",
+  "exit_code": 0,
+  "elapsed_seconds": 0.34419991698814556,
+  "result": {
+    "schema_version": 1,
+    "workload": "fair-bank-v1",
+    "engine": "sqlite",
+    "version": "3.53.0 2026-04-09 11:41:38 4525003a53a7fc63ca75c59b22c79608659ca12f0131f52c18637f829977f20b",
+    "settings": "journal_mode=WAL; synchronous=FULL; WITHOUT ROWID; mmap_size=0; wal_autocheckpoint=1000; per_connection_cache_mib=64",
+    "status": "passed",
+    "config": {
+      "accounts": 10000,
+      "transfers": 10000,
+      "warmup": 1000,
+      "batch": 100,
+      "readers": 2,
+      "reads_per_snapshot": 100,
+      "read_batches": 20,
+      "seed": 12345,
+      "value_bytes": 64,
+      "cache_mib": 64,
+      "map_gib": 64,
+      "durability": "sync"
+    },
+    "validation": {
+      "read_your_writes": true,
+      "rollback": true,
+      "snapshot": true,
+      "exact_accounts": true,
+      "balance": true,
+      "reopen": true,
+      "final_hash": "13555677736279252071"
+    },
+    "counts": {
+      "write_transfers": 10000,
+      "write_commits": 100,
+      "mixed_transfers": 10000,
+      "mixed_commits": 100,
+      "mixed_reads": 166300,
+      "read_only_reads": 4000,
+      "reader_checksum": "170300000000000116"
+    },
+    "metrics": [
+      {
+        "engine": "sqlite",
+        "name": "load",
+        "unit": "accounts/s",
+        "direction": "higher",
+        "value": 852630.0567783407
+      },
+      {
+        "engine": "sqlite",
+        "name": "write",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 155288.44424769055
+      },
+      {
+        "engine": "sqlite",
+        "name": "write_batch_p50",
+        "unit": "us",
+        "direction": "lower",
+        "value": 588.375
+      },
+      {
+        "engine": "sqlite",
+        "name": "write_batch_p99",
+        "unit": "us",
+        "direction": "lower",
+        "value": 1094.8329999999999
+      },
+      {
+        "engine": "sqlite",
+        "name": "mixed_write_active",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 45844.50149324023
+      },
+      {
+        "engine": "sqlite",
+        "name": "mixed_write_active_batch_p50",
+        "unit": "us",
+        "direction": "lower",
+        "value": 2097.375
+      },
+      {
+        "engine": "sqlite",
+        "name": "mixed_write_active_batch_p99",
+        "unit": "us",
+        "direction": "lower",
+        "value": 3178.375
+      },
+      {
+        "engine": "sqlite",
+        "name": "mixed_write",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 45791.45085060482
+      },
+      {
+        "engine": "sqlite",
+        "name": "mixed_read",
+        "unit": "reads/s",
+        "direction": "higher",
+        "value": 761511.8276455582
+      },
+      {
+        "engine": "sqlite",
+        "name": "read",
+        "unit": "reads/s",
+        "direction": "higher",
+        "value": 1199220.506670664
+      },
+      {
+        "engine": "sqlite",
+        "name": "disk_before_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 35998736
+      },
+      {
+        "engine": "sqlite",
+        "name": "allocated_before_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 35999744
+      },
+      {
+        "engine": "sqlite",
+        "name": "close",
+        "unit": "seconds",
+        "direction": "lower",
+        "value": 0.001824458
+      },
+      {
+        "engine": "sqlite",
+        "name": "disk_after_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 921600
+      },
+      {
+        "engine": "sqlite",
+        "name": "allocated_after_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 921600
+      },
+      {
+        "engine": "sqlite",
+        "name": "reopen",
+        "unit": "seconds",
+        "direction": "lower",
+        "value": 0.000268375
+      },
+      {
+        "engine": "sqlite",
+        "name": "peak_rss",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 7192576
+      }
+    ]
+  }
+}

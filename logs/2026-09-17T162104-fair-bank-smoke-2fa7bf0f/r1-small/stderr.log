@@ -1,0 +1,16 @@
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /Users/dlarimer/gofractally/psitri/logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-small/database/meta.part[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=295072[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4372447232, size=295072[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /Users/dlarimer/gofractally/psitri/logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-small/database/large/meta.part[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4198560[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4829986816, size=4198560[0m
+small psitri API 1
+sync_mode=fsync; fixed arena; default max_segments=4096; background release enabled
+load
+warmup
+write
+mixed
+read
+close/reopen validation
+mapping.cpp:94             (null)     mapping               [33mMapped file: /Users/dlarimer/gofractally/psitri/logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-small/database/meta.part, size=295072, addr=4372447232[0m
+mapping.cpp:94             (null)     mapping               [33mMapped file: /Users/dlarimer/gofractally/psitri/logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-small/database/large/meta.part, size=4198560, addr=4829986816[0m

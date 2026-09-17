@@ -17,7 +17,7 @@ import markdown
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "website"
 API_NAMES = ("README", "quickstart", "reference", "operations", "engines", "conformance", "chunked-values", "range-reads")
-CONTENT_NAMES = ("compatibility", "benchmarks", "benchmarking")
+CONTENT_NAMES = ("compatibility", "benchmarks", "benchmarking", "fair-comparison")
 EVIDENCE = {
     "bank_compare.log": "logs/2026-06-17_gcart_spec-bank-vs-mdbx/bank_compare.log",
     "mdbx.log": "logs/2026-06-17_gcart_spec-bank-vs-mdbx/mdbx.log",
@@ -34,7 +34,8 @@ NAV = (("index", "API overview"), ("quickstart", "Quickstart"), ("reference", "A
        ("operations", "Lifetimes & durability"), ("engines", "Choose an engine"),
        ("range-reads", "Range reads"), ("chunked-values", "Large values"),
        ("conformance", "Engine conformance"), ("compatibility", "Compatibility layers"),
-       ("benchmarks", "Benchmark evidence"), ("benchmarking", "Record & compare runs"))
+       ("benchmarks", "Benchmark evidence"), ("fair-comparison", "Fair library comparisons"),
+       ("benchmarking", "Record & compare runs"))
 
 
 def html_name(name: str) -> str:

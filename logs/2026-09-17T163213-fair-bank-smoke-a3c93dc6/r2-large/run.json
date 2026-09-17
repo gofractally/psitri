@@ -1,0 +1,200 @@
+{
+  "engine": "large",
+  "repetition": 2,
+  "directory": "r2-large",
+  "command": [
+    "/Users/dlarimer/gofractally/psitri/build/fair/bin/fair-bank-large",
+    "--path",
+    "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r2-large/database",
+    "--result",
+    "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r2-large/result.json",
+    "--accounts",
+    "257",
+    "--transfers",
+    "1025",
+    "--warmup",
+    "33",
+    "--batch",
+    "13",
+    "--readers",
+    "2",
+    "--reads-per-snapshot",
+    "17",
+    "--read-batches",
+    "3",
+    "--seed",
+    "12345",
+    "--value-bytes",
+    "128",
+    "--cache-mib",
+    "64",
+    "--map-gib",
+    "64",
+    "--durability",
+    "async"
+  ],
+  "status": "passed",
+  "exit_code": 0,
+  "elapsed_seconds": 0.12419341603526846,
+  "result": {
+    "schema_version": 1,
+    "workload": "fair-bank-v2",
+    "engine": "large",
+    "version": "psitri API 1",
+    "settings": "sync_mode=async; enable_read_cache=false; max_pinned_cache_size_mb=64",
+    "status": "passed",
+    "config": {
+      "accounts": 257,
+      "transfers": 1025,
+      "warmup": 33,
+      "batch": 13,
+      "readers": 2,
+      "reads_per_snapshot": 17,
+      "read_batches": 3,
+      "seed": 12345,
+      "value_bytes": 128,
+      "cache_mib": 64,
+      "map_gib": 64,
+      "durability": "async"
+    },
+    "validation": {
+      "read_your_writes": true,
+      "rollback": true,
+      "snapshot": true,
+      "exact_accounts": true,
+      "balance": true,
+      "reopen": true,
+      "final_hash": "12130220473362157698"
+    },
+    "counts": {
+      "write_transfers": 1025,
+      "write_commits": 79,
+      "mixed_transfers": 1025,
+      "mixed_commits": 79,
+      "mixed_reads": 15589,
+      "read_only_reads": 102,
+      "reader_checksum": "15691000000000510"
+    },
+    "metrics": [
+      {
+        "engine": "large",
+        "name": "load",
+        "unit": "accounts/s",
+        "direction": "higher",
+        "value": 1024071.6611079898
+      },
+      {
+        "engine": "large",
+        "name": "write",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 354094.4371591193
+      },
+      {
+        "engine": "large",
+        "name": "write_batch_p50",
+        "unit": "us",
+        "direction": "lower",
+        "value": 26.125
+      },
+      {
+        "engine": "large",
+        "name": "write_batch_p99",
+        "unit": "us",
+        "direction": "lower",
+        "value": 149.917
+      },
+      {
+        "engine": "large",
+        "name": "mixed_write_active",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 337578.2564033655
+      },
+      {
+        "engine": "large",
+        "name": "mixed_write_active_batch_p50",
+        "unit": "us",
+        "direction": "lower",
+        "value": 30.709
+      },
+      {
+        "engine": "large",
+        "name": "mixed_write_active_batch_p99",
+        "unit": "us",
+        "direction": "lower",
+        "value": 98.083
+      },
+      {
+        "engine": "large",
+        "name": "mixed_write",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 335108.7010892504
+      },
+      {
+        "engine": "large",
+        "name": "mixed_read",
+        "unit": "reads/s",
+        "direction": "higher",
+        "value": 5096594.674419829
+      },
+      {
+        "engine": "large",
+        "name": "read",
+        "unit": "reads/s",
+        "direction": "higher",
+        "value": 3000000
+      },
+      {
+        "engine": "large",
+        "name": "disk_before_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 266739992
+      },
+      {
+        "engine": "large",
+        "name": "allocated_before_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 4096
+      },
+      {
+        "engine": "large",
+        "name": "close",
+        "unit": "seconds",
+        "direction": "lower",
+        "value": 0.027018125
+      },
+      {
+        "engine": "large",
+        "name": "disk_after_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 166076696
+      },
+      {
+        "engine": "large",
+        "name": "allocated_after_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 166088704
+      },
+      {
+        "engine": "large",
+        "name": "reopen",
+        "unit": "seconds",
+        "direction": "lower",
+        "value": 0.007428959
+      },
+      {
+        "engine": "large",
+        "name": "peak_rss",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 337035264
+      }
+    ]
+  }
+}

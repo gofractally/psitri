@@ -1,0 +1,8 @@
+rocksdb 9.9.3
+WAL=true; sync=true; platform_sync=full; compression=none; write_buffer_size=64MiB; max_write_buffer_number=2; block_cache_mib=64
+load
+warmup
+write
+mixed
+read
+close/reopen validation

@@ -35,7 +35,7 @@ namespace sal
       _zone_allocator->mlock_mapped_blocks();
       _zone_free_list->mlock_mapped_blocks();
 
-      SAL_ERROR("free_list.bit blocksize: {}", detail::ptrs_per_zone / 8);
+      sal_debug("free_list.bit blocksize: {}", detail::ptrs_per_zone / 8);
       //   _zone_free_list->reserve(1, true);
       //   _zone_allocator->reserve(1, true);
       ensure_capacity(1);

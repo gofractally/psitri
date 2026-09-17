@@ -1,0 +1,8 @@
+sqlite 3.53.0 2026-04-09 11:41:38 4525003a53a7fc63ca75c59b22c79608659ca12f0131f52c18637f829977f20b
+journal_mode=WAL; synchronous=OFF; fullfsync=OFF; WITHOUT ROWID; mmap_size=0; wal_autocheckpoint=1000; per_connection_cache_mib=64
+load
+warmup
+write
+mixed
+read
+close/reopen validation

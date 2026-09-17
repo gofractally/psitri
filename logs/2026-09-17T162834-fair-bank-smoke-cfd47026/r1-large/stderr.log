@@ -1,0 +1,10 @@
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+large psitri API 1
+sync_mode=full; enable_read_cache=false; max_pinned_cache_size_mb=64
+load
+warmup
+write
+mixed
+read
+close/reopen validation
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m

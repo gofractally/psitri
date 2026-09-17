@@ -1,0 +1,200 @@
+{
+  "engine": "rocksdb",
+  "repetition": 1,
+  "directory": "r1-rocksdb",
+  "command": [
+    "/Users/dlarimer/gofractally/psitri/build/fair/bin/fair-bank-rocksdb",
+    "--path",
+    "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-rocksdb/database",
+    "--result",
+    "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-rocksdb/result.json",
+    "--accounts",
+    "129",
+    "--transfers",
+    "513",
+    "--warmup",
+    "17",
+    "--batch",
+    "1",
+    "--readers",
+    "2",
+    "--reads-per-snapshot",
+    "16",
+    "--read-batches",
+    "2",
+    "--seed",
+    "12345",
+    "--value-bytes",
+    "64",
+    "--cache-mib",
+    "64",
+    "--map-gib",
+    "64",
+    "--durability",
+    "sync"
+  ],
+  "status": "passed",
+  "exit_code": 0,
+  "elapsed_seconds": 4.761055874987505,
+  "result": {
+    "schema_version": 1,
+    "workload": "fair-bank-v1",
+    "engine": "rocksdb",
+    "version": "9.9.3",
+    "settings": "WAL=true; sync=true; compression=none; write_buffer_size=64MiB; max_write_buffer_number=2; block_cache_mib=64",
+    "status": "passed",
+    "config": {
+      "accounts": 129,
+      "transfers": 513,
+      "warmup": 17,
+      "batch": 1,
+      "readers": 2,
+      "reads_per_snapshot": 16,
+      "read_batches": 2,
+      "seed": 12345,
+      "value_bytes": 64,
+      "cache_mib": 64,
+      "map_gib": 64,
+      "durability": "sync"
+    },
+    "validation": {
+      "read_your_writes": true,
+      "rollback": true,
+      "snapshot": true,
+      "exact_accounts": true,
+      "balance": true,
+      "reopen": true,
+      "final_hash": "5123301491621522964"
+    },
+    "counts": {
+      "write_transfers": 513,
+      "write_commits": 513,
+      "mixed_transfers": 513,
+      "mixed_commits": 513,
+      "mixed_reads": 6710496,
+      "read_only_reads": 64,
+      "reader_checksum": "6710560000000001544"
+    },
+    "metrics": [
+      {
+        "engine": "rocksdb",
+        "name": "load",
+        "unit": "accounts/s",
+        "direction": "higher",
+        "value": 243.46867350483228
+      },
+      {
+        "engine": "rocksdb",
+        "name": "write",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 251.84513070878876
+      },
+      {
+        "engine": "rocksdb",
+        "name": "write_batch_p50",
+        "unit": "us",
+        "direction": "lower",
+        "value": 4244.5419999999995
+      },
+      {
+        "engine": "rocksdb",
+        "name": "write_batch_p99",
+        "unit": "us",
+        "direction": "lower",
+        "value": 4489.7080000000005
+      },
+      {
+        "engine": "rocksdb",
+        "name": "mixed_write_active",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 258.7981654941199
+      },
+      {
+        "engine": "rocksdb",
+        "name": "mixed_write_active_batch_p50",
+        "unit": "us",
+        "direction": "lower",
+        "value": 4230.5830000000005
+      },
+      {
+        "engine": "rocksdb",
+        "name": "mixed_write_active_batch_p99",
+        "unit": "us",
+        "direction": "lower",
+        "value": 4682.25
+      },
+      {
+        "engine": "rocksdb",
+        "name": "mixed_write",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 258.7946894217872
+      },
+      {
+        "engine": "rocksdb",
+        "name": "mixed_read",
+        "unit": "reads/s",
+        "direction": "higher",
+        "value": 3385264.5773609066
+      },
+      {
+        "engine": "rocksdb",
+        "name": "read",
+        "unit": "reads/s",
+        "direction": "higher",
+        "value": 1708534.6645665928
+      },
+      {
+        "engine": "rocksdb",
+        "name": "disk_before_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 220552
+      },
+      {
+        "engine": "rocksdb",
+        "name": "allocated_before_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 245760
+      },
+      {
+        "engine": "rocksdb",
+        "name": "close",
+        "unit": "seconds",
+        "direction": "lower",
+        "value": 0.000226917
+      },
+      {
+        "engine": "rocksdb",
+        "name": "disk_after_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 220742
+      },
+      {
+        "engine": "rocksdb",
+        "name": "allocated_after_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 245760
+      },
+      {
+        "engine": "rocksdb",
+        "name": "reopen",
+        "unit": "seconds",
+        "direction": "lower",
+        "value": 0.027265708
+      },
+      {
+        "engine": "rocksdb",
+        "name": "peak_rss",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 8503296
+      }
+    ]
+  }
+}

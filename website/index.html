@@ -58,7 +58,8 @@
             />
             psitri is an embedded, transactional key-value database with cheap
             snapshots, composable trees, and one C++ API for data in RAM and
-            beyond.
+            beyond. Designed for blockchain state and demanding
+            read-modify-write applications.
           </p>
           <div class="actions">
             <a class="button primary" href="docs/quickstart.html"
@@ -240,7 +241,8 @@
           >Designed for applications<br /><strong
             >with state worth keeping.</strong
           ></span
-        ><span>Versioned application state</span><span>Embedded storage</span
+        ><span>Blockchain state</span><span>Versioned application state</span
+        ><span>Embedded storage</span
         ><span>Read-heavy services</span><span>In-memory indexes</span>
       </div>
 
@@ -389,6 +391,62 @@
         </article>
       </section>
 
+      <section class="section-wrap section-space" id="blockchain">
+        <div class="section-heading split">
+          <div>
+            <p class="eyebrow">Built for branching state</p>
+            <h2>Execute ahead.<br />Keep every option.</h2>
+          </div>
+          <p>
+            Blockchain applications need speculative execution, fork switching,
+            and persistent snapshots. psitri makes versions part of the data
+            structure, reducing the undo logs, revision indexes, and replay
+            machinery needed around a store that cannot retain and republish
+            application state as trees.
+          </p>
+        </div>
+        <div class="feature-grid">
+          <article class="feature feature-lead">
+            <div class="feature-index">01 <span>Speculative execution</span></div>
+            <h3>Try the next state.</h3>
+            <p>
+              Work from a retained root. Commit the candidate state when it is
+              accepted, or discard it while the original snapshot stays available
+              to readers. Shared structure keeps unchanged data shared.
+            </p>
+          </article>
+          <article class="feature">
+            <div class="feature-index">02 <span>Fork switching</span></div>
+            <h3>Choose a root.</h3>
+            <p>
+              With the Large Engine, organize a revision's tables beneath one
+              manifest tree. Retain competing versions and publish the chosen
+              manifest without replaying every intervening update.
+            </p>
+          </article>
+          <article class="feature">
+            <div class="feature-index">03 <span>Persistent snapshots</span></div>
+            <h3>Keep the state you need.</h3>
+            <p>
+              The Large Engine stores retained versions as subtrees reachable
+              from a committed root. Reopen and restore them through the native
+              API. Choose
+              durability to match the application's block log, replication,
+              and recovery requirements.
+            </p>
+            <a class="text-link" href="docs/engines.html#model-application-revisions-with-owned-trees"
+              >Build with revisions ↗</a>
+          </article>
+        </div>
+        <p>
+          These capabilities also serve applications with heavy read-modify-write
+          traffic: update state, preserve a consistent view, and keep readers
+          working. The <a href="docs/benchmarks.html">published bank benchmarks</a>
+          show substantial throughput gains in the measured configurations;
+          compare the workload, engine, and durability policy when evaluating yours.
+        </p>
+      </section>
+
       <section class="engine-section" id="engines">
         <div class="section-wrap section-space">
           <div class="section-heading split">
@@ -517,9 +575,9 @@
               The MDBX C/C++ compatibility implementation is included. SQLite,
               RocksDB, LevelDB, and DuckDB have separate integration
               implementations; versions targeting this repository’s shared
-              engine API are not available. The separate integration suite
-              includes bank benchmarks for RocksDB and SQLite, and a TATP
-              benchmark for DuckDB.
+              engine API are not available. A common bank suite compares the
+              maintained engines with real MDBX, RocksDB, SQLite, and DuckDB.
+              Separate integration workloads exercise the compatible APIs.
             </p>
             <p>
               <strong>Compatibility has a performance cost.</strong> Another API

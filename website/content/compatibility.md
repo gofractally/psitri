@@ -30,7 +30,11 @@ SQLite run the bank workload through both their real databases and psitri-backed
 implementations. DuckDB has a TATP telecom benchmark. See the
 [backend inventory and retained results](benchmarks.html#additional-benchmark-backends)
 for source links and correctness status. These adapters do not establish support
-for the maintained `psitri::engine` contract.
+for the maintained `psitri::engine` contract. The separate
+[common bank comparison](fair-comparison.html) tests the current Small Engine
+and Large Engine against the real MDBX, RocksDB, SQLite, and DuckDB libraries
+using matched application operations. Its native results do not include a
+foreign-API wrapper's overhead.
 
 ## What “near drop-in” does and does not mean
 

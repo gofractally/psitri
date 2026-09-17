@@ -1,0 +1,8 @@
+mdbx v0.14.1-477-g051b7437
+WRITEMAP; SYNC_DURABLE; map_gib=64
+load
+warmup
+write
+mixed
+read
+close/reopen validation

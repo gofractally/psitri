@@ -1,0 +1,1 @@
+{"engine":"sqlite","version":"3.53.0 2026-04-09 11:41:38 4525003a53a7fc63ca75c59b22c79608659ca12f0131f52c18637f829977f20b","workload":"fair-bank-v2","durability":["none","fsync","full"]}

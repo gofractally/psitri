@@ -1,0 +1,10 @@
+build _deps/rocksdb-build/CMakeFiles/rocksdb.dir/env/io_posix.cc.o: CXX_COMPILER__rocksdb_unscanned_Release /Users/dlarimer/psitri-merge/build/release/_deps/rocksdb-src/env/io_posix.cc || cmake_object_order_depends_target_rocksdb
+  CONFIG = Release
+  DEFINES = -DHAVE_FULLFSYNC -DOS_MACOSX -DPSITRI_PLATFORM_OPTIMIZATIONS=1 -DROCKSDB_LIB_IO_POSIX -DROCKSDB_NO_DYNAMIC_EXTENSION -DROCKSDB_PLATFORM_POSIX
+  DEP_FILE = _deps/rocksdb-build/CMakeFiles/rocksdb.dir/env/io_posix.cc.o.d
+  FLAGS = -Wno-vla-extension -fdiagnostics-color=always -W -Wextra -Wall -pthread -Wsign-compare -Wshadow -Wno-unused-parameter -Wno-unused-variable -Woverloaded-virtual -Wnon-virtual-dtor -Wno-missing-field-initializers -Wno-strict-aliasing -Wno-invalid-offsetof -fno-omit-frame-pointer -momit-leaf-frame-pointer -march=armv8-a+crc+crypto -Wno-unused-function -O3 -DNDEBUG -fno-rtti -std=c++20 -flto=thin -arch arm64 -fPIC -march=native
+  INCLUDES = -I/Users/dlarimer/psitri-merge/build/release/_deps/rocksdb-src -I/Users/dlarimer/psitri-merge/build/release/_deps/rocksdb-src/include
+  OBJECT_DIR = _deps/rocksdb-build/CMakeFiles/rocksdb.dir
+  OBJECT_FILE_DIR = _deps/rocksdb-build/CMakeFiles/rocksdb.dir/env
+  TARGET_SUPPORT_DIR = _deps/rocksdb-build/CMakeFiles/rocksdb.dir
+

@@ -76,10 +76,15 @@ Raw outputs: [psitri engines](../evidence/bank_compare.log),
 
 ## Additional benchmark backends
 
-The integration benchmark suite also implements **RocksDB and SQLite bank
-backends**, each with a real-database build and a psitri-backed build. DuckDB
-has a separate **TATP telecom workload** comparing its native storage with the
-psitri storage extension.
+The [common bank comparison suite](fair-comparison.html) runs the maintained
+Small Engine and Large Engine alongside real MDBX, RocksDB, SQLite, and DuckDB
+with one workload and explicit durability settings. Its validation runs establish
+that the adapters agree on the resulting state; they are not performance claims.
+
+The separate integration suite runs bank workloads through real and psitri-backed
+RocksDB/SQLite APIs, plus a TATP telecom workload through DuckDB and its psitri
+storage extension. The retained integration records below measure those source
+configurations.
 
 | Interface | Benchmark targets | Retained evidence |
 |---|---|---|

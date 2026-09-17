@@ -1,0 +1,7 @@
+{
+  "compiler": "/opt/homebrew/opt/llvm/bin/clang++",
+  "compiler_version": "22.1.2",
+  "build_type": "Release",
+  "native_dependencies": {"psio": "/Users/dlarimer/gofractally/psio", "ucc": "/Users/dlarimer/gofractally/ucc"},
+  "libraries": ["/Users/dlarimer/arbtrie/external/libmdbx/build/libmdbx.dylib", "/Users/dlarimer/psitri-merge/build/release/_deps/rocksdb-build/librocksdb.a", "/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib", "/Users/dlarimer/gofractally/psitri/build/fair-deps/duckdb/libduckdb.dylib"]
+}

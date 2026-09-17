@@ -4,6 +4,21 @@ Keep each benchmark run in `logs/`. Use `scripts/benchmark.py`, a Python 3.10+ s
 tool that writes structured metadata beside raw stdout and stderr. Every run
 gets a unique directory; rerunning never overwrites earlier evidence.
 
+## Compare different libraries
+
+Use the [common comparison suite](fair-comparison.html) for a matched bank
+workload across the Small Engine, Large Engine, MDBX, RocksDB, SQLite, and DuckDB.
+It checks exact account state, snapshot isolation, rollback, and clean reopen,
+then retains each process and repetition. Start with:
+
+```sh
+python3 scripts/fair_bank.py --machine my-runner --profile smoke
+```
+
+The build instructions, explicit durability tiers and matched cohorts, resource accounting,
+and API-wrapper comparison boundaries are in that guide. The recorder below
+remains useful for other workloads and regressions within one configuration.
+
 ## Record a run
 
 Build the benchmark in Release mode, then run from the repository root:

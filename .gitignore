@@ -11,3 +11,6 @@ cmake_install.cmake
 # Python website / benchmark tooling
 __pycache__/
 *.py[cod]
+
+# Failed/explicitly retained benchmark databases stay local; commit their evidence.
+logs/*-fair-bank-*/r*-*/database/

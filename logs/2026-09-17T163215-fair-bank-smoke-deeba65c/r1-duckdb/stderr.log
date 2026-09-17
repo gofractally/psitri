@@ -1,0 +1,8 @@
+duckdb v1.5.5
+persistent database; synchronous WAL commits; platform_sync=fsync; threads=1; memory_limit_mib=64
+load
+warmup
+write
+mixed
+read
+close/reopen validation

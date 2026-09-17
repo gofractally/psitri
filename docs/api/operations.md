@@ -137,15 +137,20 @@ storage is flushed; it does not by itself prove recovery correctness.
 
 | Policy | Intent |
 |---|---|
-| `none` | No synchronous durability request; suitable for disposable benchmarks |
+| `none` | No per-commit synchronization request; application supplies any required replay/recovery guarantee |
 | `mprotect` | Memory write protection, not a durability guarantee |
 | `msync_async` | Asynchronous flush hint |
 | `msync_sync` | Blocking mapped-page flush |
 | `fsync` | Request filesystem synchronization before returning |
 | `full` | Request the platform's strongest supported device synchronization |
 
-Select policy for the deployment's failure model and storage hardware. There
-is no universal power-loss guarantee across devices. Do not treat `db->sync()`
+Select policy for the deployment's failure model and storage hardware. Blockchain
+applications may reconstruct database state from a replicated, authoritative
+block log and choose to synchronize derived state less frequently. Specify the
+log's durability, replication acknowledgment, and replay window separately.
+Full device synchronization is a policy choice, not a universally preferable
+setting. Compare [matching durability tiers](../../website/content/fair-comparison.md#choose-the-durability-contract).
+There is no universal power-loss guarantee across devices. Do not treat `db->sync()`
 as a portable replacement for configured transaction durability: the Small Engine's
 standalone `sync()` is currently a no-op, so it is not part of the core concept.
 

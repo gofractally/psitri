@@ -1,0 +1,200 @@
+{
+  "engine": "mdbx",
+  "repetition": 1,
+  "directory": "r1-mdbx",
+  "command": [
+    "/Users/dlarimer/gofractally/psitri/build/fair/bin/fair-bank-mdbx",
+    "--path",
+    "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-mdbx/database",
+    "--result",
+    "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-mdbx/result.json",
+    "--accounts",
+    "128",
+    "--transfers",
+    "256",
+    "--warmup",
+    "64",
+    "--batch",
+    "32",
+    "--readers",
+    "2",
+    "--reads-per-snapshot",
+    "16",
+    "--read-batches",
+    "2",
+    "--seed",
+    "12345",
+    "--value-bytes",
+    "8",
+    "--cache-mib",
+    "64",
+    "--map-gib",
+    "64",
+    "--durability",
+    "sync"
+  ],
+  "status": "passed",
+  "exit_code": 0,
+  "elapsed_seconds": 0.010163832979742438,
+  "result": {
+    "schema_version": 1,
+    "workload": "fair-bank-v1",
+    "engine": "mdbx",
+    "version": "v0.14.1-477-g051b7437",
+    "settings": "WRITEMAP; SYNC_DURABLE; map_gib=64",
+    "status": "passed",
+    "config": {
+      "accounts": 128,
+      "transfers": 256,
+      "warmup": 64,
+      "batch": 32,
+      "readers": 2,
+      "reads_per_snapshot": 16,
+      "read_batches": 2,
+      "seed": 12345,
+      "value_bytes": 8,
+      "cache_mib": 64,
+      "map_gib": 64,
+      "durability": "sync"
+    },
+    "validation": {
+      "read_your_writes": true,
+      "rollback": true,
+      "snapshot": true,
+      "exact_accounts": true,
+      "balance": true,
+      "reopen": true,
+      "final_hash": "12150392390243270099"
+    },
+    "counts": {
+      "write_transfers": 256,
+      "write_commits": 8,
+      "mixed_transfers": 256,
+      "mixed_commits": 8,
+      "mixed_reads": 5840,
+      "read_only_reads": 64,
+      "reader_checksum": "5903999999999561"
+    },
+    "metrics": [
+      {
+        "engine": "mdbx",
+        "name": "load",
+        "unit": "accounts/s",
+        "direction": "higher",
+        "value": 508693.4923000497
+      },
+      {
+        "engine": "mdbx",
+        "name": "write",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 433868.1549248272
+      },
+      {
+        "engine": "mdbx",
+        "name": "write_batch_p50",
+        "unit": "us",
+        "direction": "lower",
+        "value": 72.25
+      },
+      {
+        "engine": "mdbx",
+        "name": "write_batch_p99",
+        "unit": "us",
+        "direction": "lower",
+        "value": 91.667
+      },
+      {
+        "engine": "mdbx",
+        "name": "mixed_write_active",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 470624.57027932303
+      },
+      {
+        "engine": "mdbx",
+        "name": "mixed_write_active_batch_p50",
+        "unit": "us",
+        "direction": "lower",
+        "value": 58.833
+      },
+      {
+        "engine": "mdbx",
+        "name": "mixed_write_active_batch_p99",
+        "unit": "us",
+        "direction": "lower",
+        "value": 84.5
+      },
+      {
+        "engine": "mdbx",
+        "name": "mixed_write",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 458165.548098434
+      },
+      {
+        "engine": "mdbx",
+        "name": "mixed_read",
+        "unit": "reads/s",
+        "direction": "higher",
+        "value": 10451901.565995526
+      },
+      {
+        "engine": "mdbx",
+        "name": "read",
+        "unit": "reads/s",
+        "direction": "higher",
+        "value": 2388772.767990445
+      },
+      {
+        "engine": "mdbx",
+        "name": "disk_before_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 1064960
+      },
+      {
+        "engine": "mdbx",
+        "name": "allocated_before_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 1064960
+      },
+      {
+        "engine": "mdbx",
+        "name": "close",
+        "unit": "seconds",
+        "direction": "lower",
+        "value": 0.000113792
+      },
+      {
+        "engine": "mdbx",
+        "name": "disk_after_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 1048576
+      },
+      {
+        "engine": "mdbx",
+        "name": "allocated_after_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 1048576
+      },
+      {
+        "engine": "mdbx",
+        "name": "reopen",
+        "unit": "seconds",
+        "direction": "lower",
+        "value": 0.000240958
+      },
+      {
+        "engine": "mdbx",
+        "name": "peak_rss",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 2310144
+      }
+    ]
+  }
+}

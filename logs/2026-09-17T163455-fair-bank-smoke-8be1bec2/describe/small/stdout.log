@@ -1,0 +1,1 @@
+{"engine":"small","version":"psitri API 1","workload":"fair-bank-v2","durability":["none","async","msync","fsync","full"]}

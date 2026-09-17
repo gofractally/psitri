@@ -1,0 +1,420 @@
+{
+  "status": "passed",
+  "profile": "smoke",
+  "performance_series_complete": false,
+  "all_engines_same_final_hash": true,
+  "metrics": {
+    "small": {
+      "load": {
+        "unit": "accounts/s",
+        "direction": "higher",
+        "median": 168395.83636380316,
+        "minimum": 161339.228597598,
+        "maximum": 169083.61941579965,
+        "samples": [
+          168395.83636380316,
+          161339.228597598,
+          169083.61941579965
+        ]
+      },
+      "write": {
+        "unit": "transfers/s",
+        "direction": "higher",
+        "median": 158774.19505742902,
+        "minimum": 156005.24299376647,
+        "maximum": 175989.5937782442,
+        "samples": [
+          158774.19505742902,
+          156005.24299376647,
+          175989.5937782442
+        ]
+      },
+      "write_batch_p50": {
+        "unit": "us",
+        "direction": "lower",
+        "median": 67.791,
+        "minimum": 60.083,
+        "maximum": 70.416,
+        "samples": [
+          67.791,
+          70.416,
+          60.083
+        ]
+      },
+      "write_batch_p99": {
+        "unit": "us",
+        "direction": "lower",
+        "median": 127.29199999999999,
+        "minimum": 125.625,
+        "maximum": 134.625,
+        "samples": [
+          127.29199999999999,
+          134.625,
+          125.625
+        ]
+      },
+      "mixed_write_active": {
+        "unit": "transfers/s",
+        "direction": "higher",
+        "median": 137256.87121288205,
+        "minimum": 132503.83776359376,
+        "maximum": 141202.38862093343,
+        "samples": [
+          132503.83776359376,
+          137256.87121288205,
+          141202.38862093343
+        ]
+      },
+      "mixed_write_active_batch_p50": {
+        "unit": "us",
+        "direction": "lower",
+        "median": 67.5,
+        "minimum": 66.167,
+        "maximum": 70.458,
+        "samples": [
+          67.5,
+          70.458,
+          66.167
+        ]
+      },
+      "mixed_write_active_batch_p99": {
+        "unit": "us",
+        "direction": "lower",
+        "median": 259.167,
+        "minimum": 193.333,
+        "maximum": 447.625,
+        "samples": [
+          447.625,
+          259.167,
+          193.333
+        ]
+      },
+      "mixed_write": {
+        "unit": "transfers/s",
+        "direction": "higher",
+        "median": 136840.74634144583,
+        "minimum": 132113.16620480764,
+        "maximum": 140791.86841111226,
+        "samples": [
+          132113.16620480764,
+          136840.74634144583,
+          140791.86841111226
+        ]
+      },
+      "mixed_read": {
+        "unit": "reads/s",
+        "direction": "higher",
+        "median": 4812609.45709282,
+        "minimum": 4498255.71436944,
+        "maximum": 4862151.189018496,
+        "samples": [
+          4862151.189018496,
+          4498255.71436944,
+          4812609.45709282
+        ]
+      },
+      "read": {
+        "unit": "reads/s",
+        "direction": "higher",
+        "median": 3335186.2145636464,
+        "minimum": 3118503.1185031184,
+        "maximum": 4636363.636363637,
+        "samples": [
+          3118503.1185031184,
+          3335186.2145636464,
+          4636363.636363637
+        ]
+      },
+      "disk_before_close": {
+        "unit": "bytes",
+        "direction": "lower",
+        "median": 38375744,
+        "minimum": 38375744,
+        "maximum": 38375744,
+        "samples": [
+          38375744,
+          38375744,
+          38375744
+        ]
+      },
+      "allocated_before_close": {
+        "unit": "bytes",
+        "direction": "lower",
+        "median": 1593344,
+        "minimum": 1593344,
+        "maximum": 1593344,
+        "samples": [
+          1593344,
+          1593344,
+          1593344
+        ]
+      },
+      "close": {
+        "unit": "seconds",
+        "direction": "lower",
+        "median": 0.012668709,
+        "minimum": 0.012381375,
+        "maximum": 0.012907542,
+        "samples": [
+          0.012907542,
+          0.012381375,
+          0.012668709
+        ]
+      },
+      "disk_after_close": {
+        "unit": "bytes",
+        "direction": "lower",
+        "median": 38375744,
+        "minimum": 38375744,
+        "maximum": 38375744,
+        "samples": [
+          38375744,
+          38375744,
+          38375744
+        ]
+      },
+      "allocated_after_close": {
+        "unit": "bytes",
+        "direction": "lower",
+        "median": 6123520,
+        "minimum": 6123520,
+        "maximum": 6123520,
+        "samples": [
+          6123520,
+          6123520,
+          6123520
+        ]
+      },
+      "reopen": {
+        "unit": "seconds",
+        "direction": "lower",
+        "median": 0.001252125,
+        "minimum": 0.001252083,
+        "maximum": 0.001405834,
+        "samples": [
+          0.001252125,
+          0.001405834,
+          0.001252083
+        ]
+      },
+      "peak_rss": {
+        "unit": "bytes",
+        "direction": "lower",
+        "median": 4554752,
+        "minimum": 4554752,
+        "maximum": 4620288,
+        "samples": [
+          4620288,
+          4554752,
+          4554752
+        ]
+      }
+    },
+    "large": {
+      "load": {
+        "unit": "accounts/s",
+        "direction": "higher",
+        "median": 1019335.6470004957,
+        "minimum": 559811.624477491,
+        "maximum": 1098290.5982905983,
+        "samples": [
+          1098290.5982905983,
+          559811.624477491,
+          1019335.6470004957
+        ]
+      },
+      "write": {
+        "unit": "transfers/s",
+        "direction": "higher",
+        "median": 392475.9488824008,
+        "minimum": 366491.45395562274,
+        "maximum": 402717.41927676665,
+        "samples": [
+          392475.9488824008,
+          366491.45395562274,
+          402717.41927676665
+        ]
+      },
+      "write_batch_p50": {
+        "unit": "us",
+        "direction": "lower",
+        "median": 25.166,
+        "minimum": 24.75,
+        "maximum": 27,
+        "samples": [
+          24.75,
+          27,
+          25.166
+        ]
+      },
+      "write_batch_p99": {
+        "unit": "us",
+        "direction": "lower",
+        "median": 71.45800000000001,
+        "minimum": 64.708,
+        "maximum": 87.5,
+        "samples": [
+          64.708,
+          71.45800000000001,
+          87.5
+        ]
+      },
+      "mixed_write_active": {
+        "unit": "transfers/s",
+        "direction": "higher",
+        "median": 324465.45503351965,
+        "minimum": 323999.61562582187,
+        "maximum": 357703.71662886057,
+        "samples": [
+          357703.71662886057,
+          324465.45503351965,
+          323999.61562582187
+        ]
+      },
+      "mixed_write_active_batch_p50": {
+        "unit": "us",
+        "direction": "lower",
+        "median": 32.75,
+        "minimum": 32.333,
+        "maximum": 34.625,
+        "samples": [
+          32.333,
+          32.75,
+          34.625
+        ]
+      },
+      "mixed_write_active_batch_p99": {
+        "unit": "us",
+        "direction": "lower",
+        "median": 165.333,
+        "minimum": 92.167,
+        "maximum": 183.5,
+        "samples": [
+          165.333,
+          92.167,
+          183.5
+        ]
+      },
+      "mixed_write": {
+        "unit": "transfers/s",
+        "direction": "higher",
+        "median": 322403.0824880082,
+        "minimum": 321396.4093906701,
+        "maximum": 355239.7868561279,
+        "samples": [
+          355239.7868561279,
+          322403.0824880082,
+          321396.4093906701
+        ]
+      },
+      "mixed_read": {
+        "unit": "reads/s",
+        "direction": "higher",
+        "median": 6475068.232032232,
+        "minimum": 4138711.9603680116,
+        "maximum": 6748383.924786342,
+        "samples": [
+          6475068.232032232,
+          4138711.9603680116,
+          6748383.924786342
+        ]
+      },
+      "read": {
+        "unit": "reads/s",
+        "direction": "higher",
+        "median": 3067669.1729323305,
+        "minimum": 2924731.1827956988,
+        "maximum": 3879507.074395254,
+        "samples": [
+          2924731.1827956988,
+          3067669.1729323305,
+          3879507.074395254
+        ]
+      },
+      "disk_before_close": {
+        "unit": "bytes",
+        "direction": "lower",
+        "median": 266739992,
+        "minimum": 266739992,
+        "maximum": 266739992,
+        "samples": [
+          266739992,
+          266739992,
+          266739992
+        ]
+      },
+      "allocated_before_close": {
+        "unit": "bytes",
+        "direction": "lower",
+        "median": 4096,
+        "minimum": 4096,
+        "maximum": 4096,
+        "samples": [
+          4096,
+          4096,
+          4096
+        ]
+      },
+      "close": {
+        "unit": "seconds",
+        "direction": "lower",
+        "median": 0.024018875,
+        "minimum": 0.0215275,
+        "maximum": 0.026872167,
+        "samples": [
+          0.026872167,
+          0.0215275,
+          0.024018875
+        ]
+      },
+      "disk_after_close": {
+        "unit": "bytes",
+        "direction": "lower",
+        "median": 166076696,
+        "minimum": 166076696,
+        "maximum": 166076696,
+        "samples": [
+          166076696,
+          166076696,
+          166076696
+        ]
+      },
+      "allocated_after_close": {
+        "unit": "bytes",
+        "direction": "lower",
+        "median": 166088704,
+        "minimum": 166088704,
+        "maximum": 166088704,
+        "samples": [
+          166088704,
+          166088704,
+          166088704
+        ]
+      },
+      "reopen": {
+        "unit": "seconds",
+        "direction": "lower",
+        "median": 0.009151,
+        "minimum": 0.007598042,
+        "maximum": 0.009297083,
+        "samples": [
+          0.007598042,
+          0.009151,
+          0.009297083
+        ]
+      },
+      "peak_rss": {
+        "unit": "bytes",
+        "direction": "lower",
+        "median": 336969728,
+        "minimum": 336920576,
+        "maximum": 337084416,
+        "samples": [
+          336969728,
+          336920576,
+          337084416
+        ]
+      }
+    }
+  }
+}

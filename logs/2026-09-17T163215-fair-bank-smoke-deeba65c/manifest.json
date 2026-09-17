@@ -1,0 +1,2610 @@
+{
+  "schema_version": 1,
+  "workload": "fair-bank-v2",
+  "profile": "smoke",
+  "status": "passed",
+  "started_at": "2026-09-17T16:32:15.015499+00:00",
+  "machine_id": "dlarimer-mac",
+  "hardware": {
+    "system": "Darwin",
+    "release": "25.3.0",
+    "architecture": "arm64",
+    "model": "Mac17,6",
+    "cpu": "Apple M5 Max",
+    "memory_bytes": "137438953472",
+    "logical_cpus": 18
+  },
+  "config": {
+    "accounts": 257,
+    "transfers": 1025,
+    "warmup": 33,
+    "batch": 13,
+    "readers": 2,
+    "reads_per_snapshot": 17,
+    "read_batches": 3,
+    "seed": 12345,
+    "value_bytes": 128,
+    "cache_mib": 64,
+    "map_gib": 64,
+    "durability": "fsync"
+  },
+  "engines": [
+    "small",
+    "large",
+    "sqlite",
+    "duckdb"
+  ],
+  "repeats": 3,
+  "order_seed": 20260917,
+  "revision": "47df3812c8d12540cce9f179a0f678a8d4937772",
+  "source_status": "M .github/workflows/pages.yml\n M benchmarks/CMakeLists.txt\n M docs/api/operations.md\n M libraries/sal/src/control_block_alloc.cpp\n M scripts/build_site.py\n M website/README.md\n M website/content/benchmarking.md\n M website/content/benchmarks.md\n M website/content/compatibility.md\n M website/index.html\n?? benchmarks/fair_bank/CMakeLists.txt\n?? benchmarks/fair_bank/README.md\n?? benchmarks/fair_bank/common.hpp\n?? benchmarks/fair_bank/duckdb.hpp\n?? benchmarks/fair_bank/main.cpp\n?? benchmarks/fair_bank/mdbx.hpp\n?? benchmarks/fair_bank/psitri.hpp\n?? benchmarks/fair_bank/rocksdb.hpp\n?? benchmarks/fair_bank/sqlite.hpp\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/compile_commands.json\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/fair-bank-build.json\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/manifest.json\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-duckdb/result.json\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-duckdb/run.json\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-duckdb/stderr.log\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-duckdb/stdout.log\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-large/result.json\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-large/run.json\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-large/stderr.log\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-large/stdout.log\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-mdbx/result.json\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-mdbx/run.json\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-mdbx/stderr.log\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-mdbx/stdout.log\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-rocksdb/result.json\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-rocksdb/run.json\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-rocksdb/stderr.log\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-rocksdb/stdout.log\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-small/result.json\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-small/run.json\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-small/stderr.log\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-small/stdout.log\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-sqlite/result.json\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-sqlite/run.json\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-sqlite/stderr.log\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/r1-sqlite/stdout.log\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/source.patch\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/source/benchmarks/fair_bank/CMakeLists.txt\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/source/benchmarks/fair_bank/common.hpp\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/source/benchmarks/fair_bank/duckdb.hpp\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/source/benchmarks/fair_bank/main.cpp\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/source/benchmarks/fair_bank/mdbx.hpp\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/source/benchmarks/fair_bank/psitri.hpp\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/source/benchmarks/fair_bank/rocksdb.hpp\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/source/benchmarks/fair_bank/sqlite.hpp\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/source/scripts/benchmark.py\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/source/scripts/fair_bank.py\n?? logs/2026-09-17T161723-fair-bank-smoke-0fdb8986/summary.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/compile_commands.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/fair-bank-build.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/manifest.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-duckdb/result.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-duckdb/run.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-duckdb/stderr.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-duckdb/stdout.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-large/result.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-large/run.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-large/stderr.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-large/stdout.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-mdbx/result.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-mdbx/run.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-mdbx/stderr.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-mdbx/stdout.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-rocksdb/result.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-rocksdb/run.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-rocksdb/stderr.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-rocksdb/stdout.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-small/result.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-small/run.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-small/stderr.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-small/stdout.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-sqlite/result.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-sqlite/run.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-sqlite/stderr.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r1-sqlite/stdout.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-duckdb/result.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-duckdb/run.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-duckdb/stderr.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-duckdb/stdout.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-large/result.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-large/run.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-large/stderr.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-large/stdout.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-mdbx/result.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-mdbx/run.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-mdbx/stderr.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-mdbx/stdout.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-rocksdb/result.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-rocksdb/run.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-rocksdb/stderr.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-rocksdb/stdout.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-small/result.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-small/run.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-small/stderr.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-small/stdout.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-sqlite/result.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-sqlite/run.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-sqlite/stderr.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r2-sqlite/stdout.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-duckdb/result.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-duckdb/run.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-duckdb/stderr.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-duckdb/stdout.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-large/result.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-large/run.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-large/stderr.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-large/stdout.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-mdbx/result.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-mdbx/run.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-mdbx/stderr.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-mdbx/stdout.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-rocksdb/result.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-rocksdb/run.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-rocksdb/stderr.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-rocksdb/stdout.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-small/result.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-small/run.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-small/stderr.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-small/stdout.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-sqlite/result.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-sqlite/run.json\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-sqlite/stderr.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/r3-sqlite/stdout.log\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/source.patch\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/source/benchmarks/fair_bank/CMakeLists.txt\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/source/benchmarks/fair_bank/common.hpp\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/source/benchmarks/fair_bank/duckdb.hpp\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/source/benchmarks/fair_bank/main.cpp\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/source/benchmarks/fair_bank/mdbx.hpp\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/source/benchmarks/fair_bank/psitri.hpp\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/source/benchmarks/fair_bank/rocksdb.hpp\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/source/benchmarks/fair_bank/sqlite.hpp\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/source/scripts/benchmark.py\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/source/scripts/fair_bank.py\n?? logs/2026-09-17T161803-fair-bank-smoke-e829a89b/summary.json\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/compile_commands.json\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/fair-bank-build.json\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/manifest.json\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-duckdb/result.json\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-duckdb/run.json\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-duckdb/stderr.log\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-duckdb/stdout.log\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-large/result.json\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-large/run.json\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-large/stderr.log\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-large/stdout.log\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-mdbx/result.json\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-mdbx/run.json\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-mdbx/stderr.log\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-mdbx/stdout.log\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-rocksdb/result.json\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-rocksdb/run.json\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-rocksdb/stderr.log\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-rocksdb/stdout.log\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-small/result.json\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-small/run.json\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-small/stderr.log\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-small/stdout.log\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-sqlite/result.json\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-sqlite/run.json\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-sqlite/stderr.log\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/r1-sqlite/stdout.log\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/source.patch\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/source/benchmarks/fair_bank/CMakeLists.txt\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/source/benchmarks/fair_bank/common.hpp\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/source/benchmarks/fair_bank/duckdb.hpp\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/source/benchmarks/fair_bank/main.cpp\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/source/benchmarks/fair_bank/mdbx.hpp\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/source/benchmarks/fair_bank/psitri.hpp\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/source/benchmarks/fair_bank/rocksdb.hpp\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/source/benchmarks/fair_bank/sqlite.hpp\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/source/scripts/benchmark.py\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/source/scripts/fair_bank.py\n?? logs/2026-09-17T162104-fair-bank-smoke-2fa7bf0f/summary.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/compile_commands.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/fair-bank-build.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/manifest.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-duckdb/result.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-duckdb/run.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-duckdb/stderr.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-duckdb/stdout.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-large/result.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-large/run.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-large/stderr.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-large/stdout.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-mdbx/result.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-mdbx/run.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-mdbx/stderr.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-mdbx/stdout.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-rocksdb/result.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-rocksdb/run.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-rocksdb/stderr.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-rocksdb/stdout.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-small/result.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-small/run.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-small/stderr.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-small/stdout.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-sqlite/result.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-sqlite/run.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-sqlite/stderr.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r1-sqlite/stdout.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-duckdb/result.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-duckdb/run.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-duckdb/stderr.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-duckdb/stdout.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-large/result.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-large/run.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-large/stderr.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-large/stdout.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-mdbx/result.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-mdbx/run.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-mdbx/stderr.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-mdbx/stdout.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-rocksdb/result.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-rocksdb/run.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-rocksdb/stderr.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-rocksdb/stdout.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-small/result.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-small/run.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-small/stderr.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-small/stdout.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-sqlite/result.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-sqlite/run.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-sqlite/stderr.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r2-sqlite/stdout.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-duckdb/result.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-duckdb/run.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-duckdb/stderr.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-duckdb/stdout.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-large/result.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-large/run.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-large/stderr.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-large/stdout.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-mdbx/result.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-mdbx/run.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-mdbx/stderr.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-mdbx/stdout.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-rocksdb/result.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-rocksdb/run.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-rocksdb/stderr.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-rocksdb/stdout.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-small/result.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-small/run.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-small/stderr.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-small/stdout.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-sqlite/result.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-sqlite/run.json\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-sqlite/stderr.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/r3-sqlite/stdout.log\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/source.patch\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/source/benchmarks/fair_bank/CMakeLists.txt\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/source/benchmarks/fair_bank/README.md\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/source/benchmarks/fair_bank/common.hpp\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/source/benchmarks/fair_bank/duckdb.hpp\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/source/benchmarks/fair_bank/main.cpp\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/source/benchmarks/fair_bank/mdbx.hpp\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/source/benchmarks/fair_bank/psitri.hpp\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/source/benchmarks/fair_bank/rocksdb.hpp\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/source/benchmarks/fair_bank/sqlite.hpp\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/source/scripts/benchmark.py\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/source/scripts/fair_bank.py\n?? logs/2026-09-17T162332-fair-bank-smoke-d270ce65/summary.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/compile_commands.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/fair-bank-build.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/manifest.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-duckdb/result.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-duckdb/run.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-duckdb/stderr.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-duckdb/stdout.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-large/database/header\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-large/database/iref/free_list.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-large/database/iref/header.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-large/database/iref/zone.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-large/database/ptrs/free_list.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-large/database/ptrs/header.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-large/database/ptrs/zone.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-large/database/roots\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-large/database/segs\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-large/database/session_ops.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-large/database/types.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-large/result.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-large/run.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-large/stderr.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-large/stdout.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-mdbx/result.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-mdbx/run.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-mdbx/stderr.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-mdbx/stdout.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-rocksdb/result.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-rocksdb/run.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-rocksdb/stderr.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-rocksdb/stdout.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-small/result.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-small/run.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-small/stderr.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-small/stdout.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-sqlite/result.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-sqlite/run.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-sqlite/stderr.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r1-sqlite/stdout.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-duckdb/result.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-duckdb/run.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-duckdb/stderr.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-duckdb/stdout.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-large/database/header\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-large/database/iref/free_list.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-large/database/iref/header.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-large/database/iref/zone.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-large/database/ptrs/free_list.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-large/database/ptrs/header.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-large/database/ptrs/zone.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-large/database/roots\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-large/database/segs\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-large/database/session_ops.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-large/database/types.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-large/result.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-large/run.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-large/stderr.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-large/stdout.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-mdbx/result.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-mdbx/run.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-mdbx/stderr.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-mdbx/stdout.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-rocksdb/result.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-rocksdb/run.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-rocksdb/stderr.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-rocksdb/stdout.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-small/result.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-small/run.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-small/stderr.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-small/stdout.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-sqlite/result.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-sqlite/run.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-sqlite/stderr.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r2-sqlite/stdout.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-duckdb/result.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-duckdb/run.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-duckdb/stderr.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-duckdb/stdout.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-large/database/header\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-large/database/iref/free_list.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-large/database/iref/header.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-large/database/iref/zone.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-large/database/ptrs/free_list.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-large/database/ptrs/header.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-large/database/ptrs/zone.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-large/database/roots\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-large/database/segs\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-large/database/session_ops.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-large/database/types.bin\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-large/result.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-large/run.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-large/stderr.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-large/stdout.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-mdbx/result.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-mdbx/run.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-mdbx/stderr.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-mdbx/stdout.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-rocksdb/result.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-rocksdb/run.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-rocksdb/stderr.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-rocksdb/stdout.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-small/result.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-small/run.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-small/stderr.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-small/stdout.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-sqlite/result.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-sqlite/run.json\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-sqlite/stderr.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/r3-sqlite/stdout.log\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/source.patch\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/source/benchmarks/fair_bank/CMakeLists.txt\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/source/benchmarks/fair_bank/README.md\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/source/benchmarks/fair_bank/common.hpp\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/source/benchmarks/fair_bank/duckdb.hpp\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/source/benchmarks/fair_bank/main.cpp\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/source/benchmarks/fair_bank/mdbx.hpp\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/source/benchmarks/fair_bank/psitri.hpp\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/source/benchmarks/fair_bank/rocksdb.hpp\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/source/benchmarks/fair_bank/sqlite.hpp\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/source/scripts/benchmark.py\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/source/scripts/fair_bank.py\n?? logs/2026-09-17T162834-fair-bank-smoke-cfd47026/summary.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/compile_commands.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/fair-bank-build.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/manifest.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r1-large/result.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r1-large/run.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r1-large/stderr.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r1-large/stdout.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r1-mdbx/result.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r1-mdbx/run.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r1-mdbx/stderr.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r1-mdbx/stdout.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r1-rocksdb/result.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r1-rocksdb/run.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r1-rocksdb/stderr.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r1-rocksdb/stdout.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r1-small/result.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r1-small/run.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r1-small/stderr.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r1-small/stdout.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r1-sqlite/result.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r1-sqlite/run.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r1-sqlite/stderr.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r1-sqlite/stdout.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r2-large/result.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r2-large/run.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r2-large/stderr.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r2-large/stdout.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r2-mdbx/result.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r2-mdbx/run.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r2-mdbx/stderr.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r2-mdbx/stdout.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r2-rocksdb/result.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r2-rocksdb/run.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r2-rocksdb/stderr.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r2-rocksdb/stdout.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r2-small/result.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r2-small/run.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r2-small/stderr.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r2-small/stdout.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r2-sqlite/result.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r2-sqlite/run.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r2-sqlite/stderr.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r2-sqlite/stdout.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r3-large/result.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r3-large/run.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r3-large/stderr.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r3-large/stdout.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r3-mdbx/result.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r3-mdbx/run.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r3-mdbx/stderr.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r3-mdbx/stdout.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r3-rocksdb/result.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r3-rocksdb/run.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r3-rocksdb/stderr.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r3-rocksdb/stdout.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r3-small/result.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r3-small/run.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r3-small/stderr.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r3-small/stdout.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r3-sqlite/result.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r3-sqlite/run.json\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r3-sqlite/stderr.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/r3-sqlite/stdout.log\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/source.patch\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/source/benchmarks/fair_bank/CMakeLists.txt\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/source/benchmarks/fair_bank/README.md\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/source/benchmarks/fair_bank/common.hpp\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/source/benchmarks/fair_bank/duckdb.hpp\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/source/benchmarks/fair_bank/main.cpp\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/source/benchmarks/fair_bank/mdbx.hpp\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/source/benchmarks/fair_bank/psitri.hpp\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/source/benchmarks/fair_bank/rocksdb.hpp\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/source/benchmarks/fair_bank/sqlite.hpp\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/source/scripts/benchmark.py\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/source/scripts/fair_bank.py\n?? logs/2026-09-17T163211-fair-bank-smoke-5f8cf8c0/summary.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/compile_commands.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/fair-bank-build.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/manifest.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r1-large/result.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r1-large/run.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r1-large/stderr.log\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r1-large/stdout.log\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r1-mdbx/result.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r1-mdbx/run.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r1-mdbx/stderr.log\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r1-mdbx/stdout.log\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r1-small/result.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r1-small/run.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r1-small/stderr.log\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r1-small/stdout.log\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r2-large/result.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r2-large/run.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r2-large/stderr.log\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r2-large/stdout.log\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r2-mdbx/result.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r2-mdbx/run.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r2-mdbx/stderr.log\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r2-mdbx/stdout.log\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r2-small/result.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r2-small/run.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r2-small/stderr.log\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r2-small/stdout.log\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r3-large/result.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r3-large/run.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r3-large/stderr.log\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r3-large/stdout.log\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r3-mdbx/result.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r3-mdbx/run.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r3-mdbx/stderr.log\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r3-mdbx/stdout.log\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r3-small/result.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r3-small/run.json\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r3-small/stderr.log\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/r3-small/stdout.log\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/source.patch\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/source/benchmarks/fair_bank/CMakeLists.txt\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/source/benchmarks/fair_bank/README.md\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/source/benchmarks/fair_bank/common.hpp\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/source/benchmarks/fair_bank/duckdb.hpp\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/source/benchmarks/fair_bank/main.cpp\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/source/benchmarks/fair_bank/mdbx.hpp\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/source/benchmarks/fair_bank/psitri.hpp\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/source/benchmarks/fair_bank/rocksdb.hpp\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/source/benchmarks/fair_bank/sqlite.hpp\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/source/scripts/benchmark.py\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/source/scripts/fair_bank.py\n?? logs/2026-09-17T163213-fair-bank-smoke-a3c93dc6/summary.json\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/compile_commands.json\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/fair-bank-build.json\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/manifest.json\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r1-large/result.json\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r1-large/run.json\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r1-large/stderr.log\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r1-large/stdout.log\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r1-small/result.json\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r1-small/run.json\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r1-small/stderr.log\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r1-small/stdout.log\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r2-large/result.json\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r2-large/run.json\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r2-large/stderr.log\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r2-large/stdout.log\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r2-small/result.json\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r2-small/run.json\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r2-small/stderr.log\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r2-small/stdout.log\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r3-large/result.json\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r3-large/run.json\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r3-large/stderr.log\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r3-large/stdout.log\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r3-small/result.json\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r3-small/run.json\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r3-small/stderr.log\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/r3-small/stdout.log\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/source.patch\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/source/benchmarks/fair_bank/CMakeLists.txt\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/source/benchmarks/fair_bank/README.md\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/source/benchmarks/fair_bank/common.hpp\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/source/benchmarks/fair_bank/duckdb.hpp\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/source/benchmarks/fair_bank/main.cpp\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/source/benchmarks/fair_bank/mdbx.hpp\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/source/benchmarks/fair_bank/psitri.hpp\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/source/benchmarks/fair_bank/rocksdb.hpp\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/source/benchmarks/fair_bank/sqlite.hpp\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/source/scripts/benchmark.py\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/source/scripts/fair_bank.py\n?? logs/2026-09-17T163214-fair-bank-smoke-4049b5a6/summary.json\n?? scripts/fair_bank.py\n?? tests/website/fixtures/fair-bank.json\n?? tests/website/test_fair_bank.py\n?? website/content/fair-comparison.md",
+  "dirty": true,
+  "command": [
+    "scripts/fair_bank.py",
+    "--machine",
+    "dlarimer-mac",
+    "--profile",
+    "smoke",
+    "--repeats",
+    "3",
+    "--durability",
+    "fsync",
+    "--engines",
+    "small",
+    "large",
+    "sqlite",
+    "duckdb",
+    "--accounts",
+    "257",
+    "--transfers",
+    "1025",
+    "--warmup",
+    "33",
+    "--batch",
+    "13",
+    "--reads-per-snapshot",
+    "17",
+    "--read-batches",
+    "3",
+    "--value-bytes",
+    "128",
+    "--notes",
+    "Final v2 explicit durability cohort validation on a shared development machine; not performance publication evidence. Matching full account state, rollback, snapshots, reopen and partial batches."
+  ],
+  "records": [
+    {
+      "engine": "small",
+      "repetition": 1,
+      "directory": "r1-small",
+      "command": [
+        "/Users/dlarimer/gofractally/psitri/build/fair/bin/fair-bank-small",
+        "--path",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r1-small/database",
+        "--result",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r1-small/result.json",
+        "--accounts",
+        "257",
+        "--transfers",
+        "1025",
+        "--warmup",
+        "33",
+        "--batch",
+        "13",
+        "--readers",
+        "2",
+        "--reads-per-snapshot",
+        "17",
+        "--read-batches",
+        "3",
+        "--seed",
+        "12345",
+        "--value-bytes",
+        "128",
+        "--cache-mib",
+        "64",
+        "--map-gib",
+        "64",
+        "--durability",
+        "fsync"
+      ],
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.07579045795137063,
+      "result": {
+        "schema_version": 1,
+        "workload": "fair-bank-v2",
+        "engine": "small",
+        "version": "psitri API 1",
+        "settings": "sync_mode=fsync; fixed arena; default max_segments=4096; background release enabled",
+        "status": "passed",
+        "config": {
+          "accounts": 257,
+          "transfers": 1025,
+          "warmup": 33,
+          "batch": 13,
+          "readers": 2,
+          "reads_per_snapshot": 17,
+          "read_batches": 3,
+          "seed": 12345,
+          "value_bytes": 128,
+          "cache_mib": 64,
+          "map_gib": 64,
+          "durability": "fsync"
+        },
+        "validation": {
+          "read_your_writes": true,
+          "rollback": true,
+          "snapshot": true,
+          "exact_accounts": true,
+          "balance": true,
+          "reopen": true,
+          "final_hash": "12130220473362157698"
+        },
+        "counts": {
+          "write_transfers": 1025,
+          "write_commits": 79,
+          "mixed_transfers": 1025,
+          "mixed_commits": 79,
+          "mixed_reads": 44404,
+          "read_only_reads": 102,
+          "reader_checksum": "44506000000000516"
+        },
+        "metrics": [
+          {
+            "engine": "small",
+            "name": "load",
+            "unit": "accounts/s",
+            "direction": "higher",
+            "value": 128403.6972270797
+          },
+          {
+            "engine": "small",
+            "name": "write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 166176.91762083292
+          },
+          {
+            "engine": "small",
+            "name": "write_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 62.916999999999994
+          },
+          {
+            "engine": "small",
+            "name": "write_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 127.95800000000001
+          },
+          {
+            "engine": "small",
+            "name": "mixed_write_active",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 127762.34657923484
+          },
+          {
+            "engine": "small",
+            "name": "mixed_write_active_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 73.5
+          },
+          {
+            "engine": "small",
+            "name": "mixed_write_active_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 385.66700000000003
+          },
+          {
+            "engine": "small",
+            "name": "mixed_write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 127395.13733382236
+          },
+          {
+            "engine": "small",
+            "name": "mixed_read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 5518881.637240047
+          },
+          {
+            "engine": "small",
+            "name": "read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 3961165.0485436893
+          },
+          {
+            "engine": "small",
+            "name": "disk_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 38375744
+          },
+          {
+            "engine": "small",
+            "name": "allocated_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 1593344
+          },
+          {
+            "engine": "small",
+            "name": "close",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.012903125
+          },
+          {
+            "engine": "small",
+            "name": "disk_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 38375744
+          },
+          {
+            "engine": "small",
+            "name": "allocated_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 6123520
+          },
+          {
+            "engine": "small",
+            "name": "reopen",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.00187925
+          },
+          {
+            "engine": "small",
+            "name": "peak_rss",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 4603904
+          }
+        ]
+      }
+    },
+    {
+      "engine": "duckdb",
+      "repetition": 1,
+      "directory": "r1-duckdb",
+      "command": [
+        "/Users/dlarimer/gofractally/psitri/build/fair/bin/fair-bank-duckdb",
+        "--path",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r1-duckdb/database",
+        "--result",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r1-duckdb/result.json",
+        "--accounts",
+        "257",
+        "--transfers",
+        "1025",
+        "--warmup",
+        "33",
+        "--batch",
+        "13",
+        "--readers",
+        "2",
+        "--reads-per-snapshot",
+        "17",
+        "--read-batches",
+        "3",
+        "--seed",
+        "12345",
+        "--value-bytes",
+        "128",
+        "--cache-mib",
+        "64",
+        "--map-gib",
+        "64",
+        "--durability",
+        "fsync"
+      ],
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 1.5913197080371901,
+      "result": {
+        "schema_version": 1,
+        "workload": "fair-bank-v2",
+        "engine": "duckdb",
+        "version": "v1.5.5",
+        "settings": "persistent database; synchronous WAL commits; platform_sync=fsync; threads=1; memory_limit_mib=64",
+        "status": "passed",
+        "config": {
+          "accounts": 257,
+          "transfers": 1025,
+          "warmup": 33,
+          "batch": 13,
+          "readers": 2,
+          "reads_per_snapshot": 17,
+          "read_batches": 3,
+          "seed": 12345,
+          "value_bytes": 128,
+          "cache_mib": 64,
+          "map_gib": 64,
+          "durability": "fsync"
+        },
+        "validation": {
+          "read_your_writes": true,
+          "rollback": true,
+          "snapshot": true,
+          "exact_accounts": true,
+          "balance": true,
+          "reopen": true,
+          "final_hash": "12130220473362157698"
+        },
+        "counts": {
+          "write_transfers": 1025,
+          "write_commits": 79,
+          "mixed_transfers": 1025,
+          "mixed_commits": 79,
+          "mixed_reads": 21641,
+          "read_only_reads": 102,
+          "reader_checksum": "21743000000000385"
+        },
+        "metrics": [
+          {
+            "engine": "duckdb",
+            "name": "load",
+            "unit": "accounts/s",
+            "direction": "higher",
+            "value": 3087.8722040954244
+          },
+          {
+            "engine": "duckdb",
+            "name": "write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 2672.0710524600177
+          },
+          {
+            "engine": "duckdb",
+            "name": "write_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 4822.791
+          },
+          {
+            "engine": "duckdb",
+            "name": "write_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 5575.791
+          },
+          {
+            "engine": "duckdb",
+            "name": "mixed_write_active",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 1042.1099690215071
+          },
+          {
+            "engine": "duckdb",
+            "name": "mixed_write_active_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 12391.833
+          },
+          {
+            "engine": "duckdb",
+            "name": "mixed_write_active_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 14931.625
+          },
+          {
+            "engine": "duckdb",
+            "name": "mixed_write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 1041.6000233188333
+          },
+          {
+            "engine": "duckdb",
+            "name": "mixed_read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 21991.47912648085
+          },
+          {
+            "engine": "duckdb",
+            "name": "read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 27598.3359826834
+          },
+          {
+            "engine": "duckdb",
+            "name": "disk_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 620192
+          },
+          {
+            "engine": "duckdb",
+            "name": "allocated_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 667648
+          },
+          {
+            "engine": "duckdb",
+            "name": "close",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.001826541
+          },
+          {
+            "engine": "duckdb",
+            "name": "disk_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 798720
+          },
+          {
+            "engine": "duckdb",
+            "name": "allocated_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 798720
+          },
+          {
+            "engine": "duckdb",
+            "name": "reopen",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.00333875
+          },
+          {
+            "engine": "duckdb",
+            "name": "peak_rss",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 48136192
+          }
+        ]
+      }
+    },
+    {
+      "engine": "sqlite",
+      "repetition": 1,
+      "directory": "r1-sqlite",
+      "command": [
+        "/Users/dlarimer/gofractally/psitri/build/fair/bin/fair-bank-sqlite",
+        "--path",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r1-sqlite/database",
+        "--result",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r1-sqlite/result.json",
+        "--accounts",
+        "257",
+        "--transfers",
+        "1025",
+        "--warmup",
+        "33",
+        "--batch",
+        "13",
+        "--readers",
+        "2",
+        "--reads-per-snapshot",
+        "17",
+        "--read-batches",
+        "3",
+        "--seed",
+        "12345",
+        "--value-bytes",
+        "128",
+        "--cache-mib",
+        "64",
+        "--map-gib",
+        "64",
+        "--durability",
+        "fsync"
+      ],
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.03809112502494827,
+      "result": {
+        "schema_version": 1,
+        "workload": "fair-bank-v2",
+        "engine": "sqlite",
+        "version": "3.53.0 2026-04-09 11:41:38 4525003a53a7fc63ca75c59b22c79608659ca12f0131f52c18637f829977f20b",
+        "settings": "journal_mode=WAL; synchronous=FULL; fullfsync=OFF; WITHOUT ROWID; mmap_size=0; wal_autocheckpoint=1000; per_connection_cache_mib=64",
+        "status": "passed",
+        "config": {
+          "accounts": 257,
+          "transfers": 1025,
+          "warmup": 33,
+          "batch": 13,
+          "readers": 2,
+          "reads_per_snapshot": 17,
+          "read_batches": 3,
+          "seed": 12345,
+          "value_bytes": 128,
+          "cache_mib": 64,
+          "map_gib": 64,
+          "durability": "fsync"
+        },
+        "validation": {
+          "read_your_writes": true,
+          "rollback": true,
+          "snapshot": true,
+          "exact_accounts": true,
+          "balance": true,
+          "reopen": true,
+          "final_hash": "12130220473362157698"
+        },
+        "counts": {
+          "write_transfers": 1025,
+          "write_commits": 79,
+          "mixed_transfers": 1025,
+          "mixed_commits": 79,
+          "mixed_reads": 15691,
+          "read_only_reads": 102,
+          "reader_checksum": "15793000000000523"
+        },
+        "metrics": [
+          {
+            "engine": "sqlite",
+            "name": "load",
+            "unit": "accounts/s",
+            "direction": "higher",
+            "value": 146136.89672329233
+          },
+          {
+            "engine": "sqlite",
+            "name": "write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 113314.97372806154
+          },
+          {
+            "engine": "sqlite",
+            "name": "write_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 112.333
+          },
+          {
+            "engine": "sqlite",
+            "name": "write_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 153.834
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 73108.75844352666
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 166.833
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 475.084
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 72701.48062771522
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 1112935.5439311995
+          },
+          {
+            "engine": "sqlite",
+            "name": "read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 1070405.3898059628
+          },
+          {
+            "engine": "sqlite",
+            "name": "disk_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 4313192
+          },
+          {
+            "engine": "sqlite",
+            "name": "allocated_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 4317184
+          },
+          {
+            "engine": "sqlite",
+            "name": "close",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.0013495
+          },
+          {
+            "engine": "sqlite",
+            "name": "disk_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 49152
+          },
+          {
+            "engine": "sqlite",
+            "name": "allocated_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 49152
+          },
+          {
+            "engine": "sqlite",
+            "name": "reopen",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.000204958
+          },
+          {
+            "engine": "sqlite",
+            "name": "peak_rss",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 3424256
+          }
+        ]
+      }
+    },
+    {
+      "engine": "large",
+      "repetition": 1,
+      "directory": "r1-large",
+      "command": [
+        "/Users/dlarimer/gofractally/psitri/build/fair/bin/fair-bank-large",
+        "--path",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r1-large/database",
+        "--result",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r1-large/result.json",
+        "--accounts",
+        "257",
+        "--transfers",
+        "1025",
+        "--warmup",
+        "33",
+        "--batch",
+        "13",
+        "--readers",
+        "2",
+        "--reads-per-snapshot",
+        "17",
+        "--read-batches",
+        "3",
+        "--seed",
+        "12345",
+        "--value-bytes",
+        "128",
+        "--cache-mib",
+        "64",
+        "--map-gib",
+        "64",
+        "--durability",
+        "fsync"
+      ],
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.07218216598266736,
+      "result": {
+        "schema_version": 1,
+        "workload": "fair-bank-v2",
+        "engine": "large",
+        "version": "psitri API 1",
+        "settings": "sync_mode=fsync; enable_read_cache=false; max_pinned_cache_size_mb=64",
+        "status": "passed",
+        "config": {
+          "accounts": 257,
+          "transfers": 1025,
+          "warmup": 33,
+          "batch": 13,
+          "readers": 2,
+          "reads_per_snapshot": 17,
+          "read_batches": 3,
+          "seed": 12345,
+          "value_bytes": 128,
+          "cache_mib": 64,
+          "map_gib": 64,
+          "durability": "fsync"
+        },
+        "validation": {
+          "read_your_writes": true,
+          "rollback": true,
+          "snapshot": true,
+          "exact_accounts": true,
+          "balance": true,
+          "reopen": true,
+          "final_hash": "12130220473362157698"
+        },
+        "counts": {
+          "write_transfers": 1025,
+          "write_commits": 79,
+          "mixed_transfers": 1025,
+          "mixed_commits": 79,
+          "mixed_reads": 12733,
+          "read_only_reads": 102,
+          "reader_checksum": "12835000000000531"
+        },
+        "metrics": [
+          {
+            "engine": "large",
+            "name": "load",
+            "unit": "accounts/s",
+            "direction": "higher",
+            "value": 750638.9193136181
+          },
+          {
+            "engine": "large",
+            "name": "write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 313451.727363663
+          },
+          {
+            "engine": "large",
+            "name": "write_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 27.75
+          },
+          {
+            "engine": "large",
+            "name": "write_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 170.917
+          },
+          {
+            "engine": "large",
+            "name": "mixed_write_active",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 364422.8058280628
+          },
+          {
+            "engine": "large",
+            "name": "mixed_write_active_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 30.583000000000002
+          },
+          {
+            "engine": "large",
+            "name": "mixed_write_active_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 105.5
+          },
+          {
+            "engine": "large",
+            "name": "mixed_write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 361748.6612652592
+          },
+          {
+            "engine": "large",
+            "name": "mixed_read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 4493800.6867224835
+          },
+          {
+            "engine": "large",
+            "name": "read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 2612637.995952972
+          },
+          {
+            "engine": "large",
+            "name": "disk_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 266739992
+          },
+          {
+            "engine": "large",
+            "name": "allocated_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 53248
+          },
+          {
+            "engine": "large",
+            "name": "close",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.019958334
+          },
+          {
+            "engine": "large",
+            "name": "disk_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 166076696
+          },
+          {
+            "engine": "large",
+            "name": "allocated_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 132501504
+          },
+          {
+            "engine": "large",
+            "name": "reopen",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.004044833
+          },
+          {
+            "engine": "large",
+            "name": "peak_rss",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 336904192
+          }
+        ]
+      }
+    },
+    {
+      "engine": "duckdb",
+      "repetition": 2,
+      "directory": "r2-duckdb",
+      "command": [
+        "/Users/dlarimer/gofractally/psitri/build/fair/bin/fair-bank-duckdb",
+        "--path",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r2-duckdb/database",
+        "--result",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r2-duckdb/result.json",
+        "--accounts",
+        "257",
+        "--transfers",
+        "1025",
+        "--warmup",
+        "33",
+        "--batch",
+        "13",
+        "--readers",
+        "2",
+        "--reads-per-snapshot",
+        "17",
+        "--read-batches",
+        "3",
+        "--seed",
+        "12345",
+        "--value-bytes",
+        "128",
+        "--cache-mib",
+        "64",
+        "--map-gib",
+        "64",
+        "--durability",
+        "fsync"
+      ],
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 1.4738049170118757,
+      "result": {
+        "schema_version": 1,
+        "workload": "fair-bank-v2",
+        "engine": "duckdb",
+        "version": "v1.5.5",
+        "settings": "persistent database; synchronous WAL commits; platform_sync=fsync; threads=1; memory_limit_mib=64",
+        "status": "passed",
+        "config": {
+          "accounts": 257,
+          "transfers": 1025,
+          "warmup": 33,
+          "batch": 13,
+          "readers": 2,
+          "reads_per_snapshot": 17,
+          "read_batches": 3,
+          "seed": 12345,
+          "value_bytes": 128,
+          "cache_mib": 64,
+          "map_gib": 64,
+          "durability": "fsync"
+        },
+        "validation": {
+          "read_your_writes": true,
+          "rollback": true,
+          "snapshot": true,
+          "exact_accounts": true,
+          "balance": true,
+          "reopen": true,
+          "final_hash": "12130220473362157698"
+        },
+        "counts": {
+          "write_transfers": 1025,
+          "write_commits": 79,
+          "mixed_transfers": 1025,
+          "mixed_commits": 79,
+          "mixed_reads": 21267,
+          "read_only_reads": 102,
+          "reader_checksum": "21369000000000356"
+        },
+        "metrics": [
+          {
+            "engine": "duckdb",
+            "name": "load",
+            "unit": "accounts/s",
+            "direction": "higher",
+            "value": 5913.217119366386
+          },
+          {
+            "engine": "duckdb",
+            "name": "write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 2701.128377537699
+          },
+          {
+            "engine": "duckdb",
+            "name": "write_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 4811.25
+          },
+          {
+            "engine": "duckdb",
+            "name": "write_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 5303.166
+          },
+          {
+            "engine": "duckdb",
+            "name": "mixed_write_active",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 1072.0542009685878
+          },
+          {
+            "engine": "duckdb",
+            "name": "mixed_write_active_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 12031.541
+          },
+          {
+            "engine": "duckdb",
+            "name": "mixed_write_active_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 13829.5
+          },
+          {
+            "engine": "duckdb",
+            "name": "mixed_write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 1071.7825023925584
+          },
+          {
+            "engine": "duckdb",
+            "name": "mixed_read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 22237.657052080525
+          },
+          {
+            "engine": "duckdb",
+            "name": "read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 28722.960289662606
+          },
+          {
+            "engine": "duckdb",
+            "name": "disk_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 620192
+          },
+          {
+            "engine": "duckdb",
+            "name": "allocated_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 626688
+          },
+          {
+            "engine": "duckdb",
+            "name": "close",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.001704458
+          },
+          {
+            "engine": "duckdb",
+            "name": "disk_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 798720
+          },
+          {
+            "engine": "duckdb",
+            "name": "allocated_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 798720
+          },
+          {
+            "engine": "duckdb",
+            "name": "reopen",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.003156667
+          },
+          {
+            "engine": "duckdb",
+            "name": "peak_rss",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 42237952
+          }
+        ]
+      }
+    },
+    {
+      "engine": "sqlite",
+      "repetition": 2,
+      "directory": "r2-sqlite",
+      "command": [
+        "/Users/dlarimer/gofractally/psitri/build/fair/bin/fair-bank-sqlite",
+        "--path",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r2-sqlite/database",
+        "--result",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r2-sqlite/result.json",
+        "--accounts",
+        "257",
+        "--transfers",
+        "1025",
+        "--warmup",
+        "33",
+        "--batch",
+        "13",
+        "--readers",
+        "2",
+        "--reads-per-snapshot",
+        "17",
+        "--read-batches",
+        "3",
+        "--seed",
+        "12345",
+        "--value-bytes",
+        "128",
+        "--cache-mib",
+        "64",
+        "--map-gib",
+        "64",
+        "--durability",
+        "fsync"
+      ],
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.07211720803752542,
+      "result": {
+        "schema_version": 1,
+        "workload": "fair-bank-v2",
+        "engine": "sqlite",
+        "version": "3.53.0 2026-04-09 11:41:38 4525003a53a7fc63ca75c59b22c79608659ca12f0131f52c18637f829977f20b",
+        "settings": "journal_mode=WAL; synchronous=FULL; fullfsync=OFF; WITHOUT ROWID; mmap_size=0; wal_autocheckpoint=1000; per_connection_cache_mib=64",
+        "status": "passed",
+        "config": {
+          "accounts": 257,
+          "transfers": 1025,
+          "warmup": 33,
+          "batch": 13,
+          "readers": 2,
+          "reads_per_snapshot": 17,
+          "read_batches": 3,
+          "seed": 12345,
+          "value_bytes": 128,
+          "cache_mib": 64,
+          "map_gib": 64,
+          "durability": "fsync"
+        },
+        "validation": {
+          "read_your_writes": true,
+          "rollback": true,
+          "snapshot": true,
+          "exact_accounts": true,
+          "balance": true,
+          "reopen": true,
+          "final_hash": "12130220473362157698"
+        },
+        "counts": {
+          "write_transfers": 1025,
+          "write_commits": 79,
+          "mixed_transfers": 1025,
+          "mixed_commits": 79,
+          "mixed_reads": 21318,
+          "read_only_reads": 102,
+          "reader_checksum": "21420000000000314"
+        },
+        "metrics": [
+          {
+            "engine": "sqlite",
+            "name": "load",
+            "unit": "accounts/s",
+            "direction": "higher",
+            "value": 85265.20963795463
+          },
+          {
+            "engine": "sqlite",
+            "name": "write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 105483.41918997584
+          },
+          {
+            "engine": "sqlite",
+            "name": "write_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 107.667
+          },
+          {
+            "engine": "sqlite",
+            "name": "write_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 1068.667
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 60651.48691114285
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 207.708
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 431.959
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 60352.400315057195
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 1255212.1657720872
+          },
+          {
+            "engine": "sqlite",
+            "name": "read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 882162.1621621621
+          },
+          {
+            "engine": "sqlite",
+            "name": "disk_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 6488552
+          },
+          {
+            "engine": "sqlite",
+            "name": "allocated_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 6492160
+          },
+          {
+            "engine": "sqlite",
+            "name": "close",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.001194334
+          },
+          {
+            "engine": "sqlite",
+            "name": "disk_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 49152
+          },
+          {
+            "engine": "sqlite",
+            "name": "allocated_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 49152
+          },
+          {
+            "engine": "sqlite",
+            "name": "reopen",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.000272208
+          },
+          {
+            "engine": "sqlite",
+            "name": "peak_rss",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 3407872
+          }
+        ]
+      }
+    },
+    {
+      "engine": "large",
+      "repetition": 2,
+      "directory": "r2-large",
+      "command": [
+        "/Users/dlarimer/gofractally/psitri/build/fair/bin/fair-bank-large",
+        "--path",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r2-large/database",
+        "--result",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r2-large/result.json",
+        "--accounts",
+        "257",
+        "--transfers",
+        "1025",
+        "--warmup",
+        "33",
+        "--batch",
+        "13",
+        "--readers",
+        "2",
+        "--reads-per-snapshot",
+        "17",
+        "--read-batches",
+        "3",
+        "--seed",
+        "12345",
+        "--value-bytes",
+        "128",
+        "--cache-mib",
+        "64",
+        "--map-gib",
+        "64",
+        "--durability",
+        "fsync"
+      ],
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.07226574997184798,
+      "result": {
+        "schema_version": 1,
+        "workload": "fair-bank-v2",
+        "engine": "large",
+        "version": "psitri API 1",
+        "settings": "sync_mode=fsync; enable_read_cache=false; max_pinned_cache_size_mb=64",
+        "status": "passed",
+        "config": {
+          "accounts": 257,
+          "transfers": 1025,
+          "warmup": 33,
+          "batch": 13,
+          "readers": 2,
+          "reads_per_snapshot": 17,
+          "read_batches": 3,
+          "seed": 12345,
+          "value_bytes": 128,
+          "cache_mib": 64,
+          "map_gib": 64,
+          "durability": "fsync"
+        },
+        "validation": {
+          "read_your_writes": true,
+          "rollback": true,
+          "snapshot": true,
+          "exact_accounts": true,
+          "balance": true,
+          "reopen": true,
+          "final_hash": "12130220473362157698"
+        },
+        "counts": {
+          "write_transfers": 1025,
+          "write_commits": 79,
+          "mixed_transfers": 1025,
+          "mixed_commits": 79,
+          "mixed_reads": 12002,
+          "read_only_reads": 102,
+          "reader_checksum": "12104000000000670"
+        },
+        "metrics": [
+          {
+            "engine": "large",
+            "name": "load",
+            "unit": "accounts/s",
+            "direction": "higher",
+            "value": 678397.3983327791
+          },
+          {
+            "engine": "large",
+            "name": "write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 370996.0030157451
+          },
+          {
+            "engine": "large",
+            "name": "write_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 26.166
+          },
+          {
+            "engine": "large",
+            "name": "write_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 175.709
+          },
+          {
+            "engine": "large",
+            "name": "mixed_write_active",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 403172.9911069872
+          },
+          {
+            "engine": "large",
+            "name": "mixed_write_active_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 29.125
+          },
+          {
+            "engine": "large",
+            "name": "mixed_write_active_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 93.459
+          },
+          {
+            "engine": "large",
+            "name": "mixed_write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 400214.7493777149
+          },
+          {
+            "engine": "large",
+            "name": "mixed_read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 4686221.875152521
+          },
+          {
+            "engine": "large",
+            "name": "read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 2978102.189781022
+          },
+          {
+            "engine": "large",
+            "name": "disk_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 266739992
+          },
+          {
+            "engine": "large",
+            "name": "allocated_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 53248
+          },
+          {
+            "engine": "large",
+            "name": "close",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.020178042
+          },
+          {
+            "engine": "large",
+            "name": "disk_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 166076696
+          },
+          {
+            "engine": "large",
+            "name": "allocated_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 132501504
+          },
+          {
+            "engine": "large",
+            "name": "reopen",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.00398125
+          },
+          {
+            "engine": "large",
+            "name": "peak_rss",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 336855040
+          }
+        ]
+      }
+    },
+    {
+      "engine": "small",
+      "repetition": 2,
+      "directory": "r2-small",
+      "command": [
+        "/Users/dlarimer/gofractally/psitri/build/fair/bin/fair-bank-small",
+        "--path",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r2-small/database",
+        "--result",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r2-small/result.json",
+        "--accounts",
+        "257",
+        "--transfers",
+        "1025",
+        "--warmup",
+        "33",
+        "--batch",
+        "13",
+        "--readers",
+        "2",
+        "--reads-per-snapshot",
+        "17",
+        "--read-batches",
+        "3",
+        "--seed",
+        "12345",
+        "--value-bytes",
+        "128",
+        "--cache-mib",
+        "64",
+        "--map-gib",
+        "64",
+        "--durability",
+        "fsync"
+      ],
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.0759413749910891,
+      "result": {
+        "schema_version": 1,
+        "workload": "fair-bank-v2",
+        "engine": "small",
+        "version": "psitri API 1",
+        "settings": "sync_mode=fsync; fixed arena; default max_segments=4096; background release enabled",
+        "status": "passed",
+        "config": {
+          "accounts": 257,
+          "transfers": 1025,
+          "warmup": 33,
+          "batch": 13,
+          "readers": 2,
+          "reads_per_snapshot": 17,
+          "read_batches": 3,
+          "seed": 12345,
+          "value_bytes": 128,
+          "cache_mib": 64,
+          "map_gib": 64,
+          "durability": "fsync"
+        },
+        "validation": {
+          "read_your_writes": true,
+          "rollback": true,
+          "snapshot": true,
+          "exact_accounts": true,
+          "balance": true,
+          "reopen": true,
+          "final_hash": "12130220473362157698"
+        },
+        "counts": {
+          "write_transfers": 1025,
+          "write_commits": 79,
+          "mixed_transfers": 1025,
+          "mixed_commits": 79,
+          "mixed_reads": 37978,
+          "read_only_reads": 102,
+          "reader_checksum": "38080000000000273"
+        },
+        "metrics": [
+          {
+            "engine": "small",
+            "name": "load",
+            "unit": "accounts/s",
+            "direction": "higher",
+            "value": 159792.77923166408
+          },
+          {
+            "engine": "small",
+            "name": "write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 132648.15278064823
+          },
+          {
+            "engine": "small",
+            "name": "write_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 61.541
+          },
+          {
+            "engine": "small",
+            "name": "write_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 233.167
+          },
+          {
+            "engine": "small",
+            "name": "mixed_write_active",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 139456.57920766348
+          },
+          {
+            "engine": "small",
+            "name": "mixed_write_active_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 60.666
+          },
+          {
+            "engine": "small",
+            "name": "mixed_write_active_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 298.166
+          },
+          {
+            "engine": "small",
+            "name": "mixed_write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 139117.4524540658
+          },
+          {
+            "engine": "small",
+            "name": "mixed_read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 5154539.131024888
+          },
+          {
+            "engine": "small",
+            "name": "read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 4156309.8488244163
+          },
+          {
+            "engine": "small",
+            "name": "disk_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 38375744
+          },
+          {
+            "engine": "small",
+            "name": "allocated_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 1593344
+          },
+          {
+            "engine": "small",
+            "name": "close",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.018407917
+          },
+          {
+            "engine": "small",
+            "name": "disk_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 38375744
+          },
+          {
+            "engine": "small",
+            "name": "allocated_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 6123520
+          },
+          {
+            "engine": "small",
+            "name": "reopen",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.001267292
+          },
+          {
+            "engine": "small",
+            "name": "peak_rss",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 4538368
+          }
+        ]
+      }
+    },
+    {
+      "engine": "sqlite",
+      "repetition": 3,
+      "directory": "r3-sqlite",
+      "command": [
+        "/Users/dlarimer/gofractally/psitri/build/fair/bin/fair-bank-sqlite",
+        "--path",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r3-sqlite/database",
+        "--result",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r3-sqlite/result.json",
+        "--accounts",
+        "257",
+        "--transfers",
+        "1025",
+        "--warmup",
+        "33",
+        "--batch",
+        "13",
+        "--readers",
+        "2",
+        "--reads-per-snapshot",
+        "17",
+        "--read-batches",
+        "3",
+        "--seed",
+        "12345",
+        "--value-bytes",
+        "128",
+        "--cache-mib",
+        "64",
+        "--map-gib",
+        "64",
+        "--durability",
+        "fsync"
+      ],
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.040503291005734354,
+      "result": {
+        "schema_version": 1,
+        "workload": "fair-bank-v2",
+        "engine": "sqlite",
+        "version": "3.53.0 2026-04-09 11:41:38 4525003a53a7fc63ca75c59b22c79608659ca12f0131f52c18637f829977f20b",
+        "settings": "journal_mode=WAL; synchronous=FULL; fullfsync=OFF; WITHOUT ROWID; mmap_size=0; wal_autocheckpoint=1000; per_connection_cache_mib=64",
+        "status": "passed",
+        "config": {
+          "accounts": 257,
+          "transfers": 1025,
+          "warmup": 33,
+          "batch": 13,
+          "readers": 2,
+          "reads_per_snapshot": 17,
+          "read_batches": 3,
+          "seed": 12345,
+          "value_bytes": 128,
+          "cache_mib": 64,
+          "map_gib": 64,
+          "durability": "fsync"
+        },
+        "validation": {
+          "read_your_writes": true,
+          "rollback": true,
+          "snapshot": true,
+          "exact_accounts": true,
+          "balance": true,
+          "reopen": true,
+          "final_hash": "12130220473362157698"
+        },
+        "counts": {
+          "write_transfers": 1025,
+          "write_commits": 79,
+          "mixed_transfers": 1025,
+          "mixed_commits": 79,
+          "mixed_reads": 14637,
+          "read_only_reads": 102,
+          "reader_checksum": "14739000000000546"
+        },
+        "metrics": [
+          {
+            "engine": "sqlite",
+            "name": "load",
+            "unit": "accounts/s",
+            "direction": "higher",
+            "value": 169306.2856111397
+          },
+          {
+            "engine": "sqlite",
+            "name": "write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 110475.39556658464
+          },
+          {
+            "engine": "sqlite",
+            "name": "write_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 115.583
+          },
+          {
+            "engine": "sqlite",
+            "name": "write_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 174.458
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 77762.46215528564
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 159.125
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 335.625
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 77232.2027995581
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 1102875.8559776896
+          },
+          {
+            "engine": "sqlite",
+            "name": "read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 976459.6636000727
+          },
+          {
+            "engine": "sqlite",
+            "name": "disk_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 4313192
+          },
+          {
+            "engine": "sqlite",
+            "name": "allocated_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 4317184
+          },
+          {
+            "engine": "sqlite",
+            "name": "close",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.001503542
+          },
+          {
+            "engine": "sqlite",
+            "name": "disk_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 49152
+          },
+          {
+            "engine": "sqlite",
+            "name": "allocated_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 49152
+          },
+          {
+            "engine": "sqlite",
+            "name": "reopen",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.0002265
+          },
+          {
+            "engine": "sqlite",
+            "name": "peak_rss",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 3375104
+          }
+        ]
+      }
+    },
+    {
+      "engine": "large",
+      "repetition": 3,
+      "directory": "r3-large",
+      "command": [
+        "/Users/dlarimer/gofractally/psitri/build/fair/bin/fair-bank-large",
+        "--path",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r3-large/database",
+        "--result",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r3-large/result.json",
+        "--accounts",
+        "257",
+        "--transfers",
+        "1025",
+        "--warmup",
+        "33",
+        "--batch",
+        "13",
+        "--readers",
+        "2",
+        "--reads-per-snapshot",
+        "17",
+        "--read-batches",
+        "3",
+        "--seed",
+        "12345",
+        "--value-bytes",
+        "128",
+        "--cache-mib",
+        "64",
+        "--map-gib",
+        "64",
+        "--durability",
+        "fsync"
+      ],
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.07222533295862377,
+      "result": {
+        "schema_version": 1,
+        "workload": "fair-bank-v2",
+        "engine": "large",
+        "version": "psitri API 1",
+        "settings": "sync_mode=fsync; enable_read_cache=false; max_pinned_cache_size_mb=64",
+        "status": "passed",
+        "config": {
+          "accounts": 257,
+          "transfers": 1025,
+          "warmup": 33,
+          "batch": 13,
+          "readers": 2,
+          "reads_per_snapshot": 17,
+          "read_batches": 3,
+          "seed": 12345,
+          "value_bytes": 128,
+          "cache_mib": 64,
+          "map_gib": 64,
+          "durability": "fsync"
+        },
+        "validation": {
+          "read_your_writes": true,
+          "rollback": true,
+          "snapshot": true,
+          "exact_accounts": true,
+          "balance": true,
+          "reopen": true,
+          "final_hash": "12130220473362157698"
+        },
+        "counts": {
+          "write_transfers": 1025,
+          "write_commits": 79,
+          "mixed_transfers": 1025,
+          "mixed_commits": 79,
+          "mixed_reads": 16592,
+          "read_only_reads": 102,
+          "reader_checksum": "16694000000000446"
+        },
+        "metrics": [
+          {
+            "engine": "large",
+            "name": "load",
+            "unit": "accounts/s",
+            "direction": "higher",
+            "value": 707745.2667814114
+          },
+          {
+            "engine": "large",
+            "name": "write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 410602.2714117067
+          },
+          {
+            "engine": "large",
+            "name": "write_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 26.041999999999998
+          },
+          {
+            "engine": "large",
+            "name": "write_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 123.24999999999999
+          },
+          {
+            "engine": "large",
+            "name": "mixed_write_active",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 255210.5275214053
+          },
+          {
+            "engine": "large",
+            "name": "mixed_write_active_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 39.625
+          },
+          {
+            "engine": "large",
+            "name": "mixed_write_active_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 396.416
+          },
+          {
+            "engine": "large",
+            "name": "mixed_write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 254134.83576195326
+          },
+          {
+            "engine": "large",
+            "name": "mixed_read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 4113761.165816906
+          },
+          {
+            "engine": "large",
+            "name": "read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 3766200.1993870693
+          },
+          {
+            "engine": "large",
+            "name": "disk_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 266739992
+          },
+          {
+            "engine": "large",
+            "name": "allocated_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 53248
+          },
+          {
+            "engine": "large",
+            "name": "close",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.017506083
+          },
+          {
+            "engine": "large",
+            "name": "disk_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 166076696
+          },
+          {
+            "engine": "large",
+            "name": "allocated_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 132501504
+          },
+          {
+            "engine": "large",
+            "name": "reopen",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.004707417
+          },
+          {
+            "engine": "large",
+            "name": "peak_rss",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 336953344
+          }
+        ]
+      }
+    },
+    {
+      "engine": "small",
+      "repetition": 3,
+      "directory": "r3-small",
+      "command": [
+        "/Users/dlarimer/gofractally/psitri/build/fair/bin/fair-bank-small",
+        "--path",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r3-small/database",
+        "--result",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r3-small/result.json",
+        "--accounts",
+        "257",
+        "--transfers",
+        "1025",
+        "--warmup",
+        "33",
+        "--batch",
+        "13",
+        "--readers",
+        "2",
+        "--reads-per-snapshot",
+        "17",
+        "--read-batches",
+        "3",
+        "--seed",
+        "12345",
+        "--value-bytes",
+        "128",
+        "--cache-mib",
+        "64",
+        "--map-gib",
+        "64",
+        "--durability",
+        "fsync"
+      ],
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.073000582982786,
+      "result": {
+        "schema_version": 1,
+        "workload": "fair-bank-v2",
+        "engine": "small",
+        "version": "psitri API 1",
+        "settings": "sync_mode=fsync; fixed arena; default max_segments=4096; background release enabled",
+        "status": "passed",
+        "config": {
+          "accounts": 257,
+          "transfers": 1025,
+          "warmup": 33,
+          "batch": 13,
+          "readers": 2,
+          "reads_per_snapshot": 17,
+          "read_batches": 3,
+          "seed": 12345,
+          "value_bytes": 128,
+          "cache_mib": 64,
+          "map_gib": 64,
+          "durability": "fsync"
+        },
+        "validation": {
+          "read_your_writes": true,
+          "rollback": true,
+          "snapshot": true,
+          "exact_accounts": true,
+          "balance": true,
+          "reopen": true,
+          "final_hash": "12130220473362157698"
+        },
+        "counts": {
+          "write_transfers": 1025,
+          "write_commits": 79,
+          "mixed_transfers": 1025,
+          "mixed_commits": 79,
+          "mixed_reads": 47022,
+          "read_only_reads": 102,
+          "reader_checksum": "47124000000000807"
+        },
+        "metrics": [
+          {
+            "engine": "small",
+            "name": "load",
+            "unit": "accounts/s",
+            "direction": "higher",
+            "value": 126235.64806287223
+          },
+          {
+            "engine": "small",
+            "name": "write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 106324.58020981107
+          },
+          {
+            "engine": "small",
+            "name": "write_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 63.87499999999999
+          },
+          {
+            "engine": "small",
+            "name": "write_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 1092.541
+          },
+          {
+            "engine": "small",
+            "name": "mixed_write_active",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 106553.01012253597
+          },
+          {
+            "engine": "small",
+            "name": "mixed_write_active_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 66.042
+          },
+          {
+            "engine": "small",
+            "name": "mixed_write_active_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 1153.75
+          },
+          {
+            "engine": "small",
+            "name": "mixed_write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 106289.67326865529
+          },
+          {
+            "engine": "small",
+            "name": "mixed_read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 4876051.723354838
+          },
+          {
+            "engine": "small",
+            "name": "read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 4026368.7680101055
+          },
+          {
+            "engine": "small",
+            "name": "disk_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 38375744
+          },
+          {
+            "engine": "small",
+            "name": "allocated_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 1593344
+          },
+          {
+            "engine": "small",
+            "name": "close",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.011429416
+          },
+          {
+            "engine": "small",
+            "name": "disk_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 38375744
+          },
+          {
+            "engine": "small",
+            "name": "allocated_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 6123520
+          },
+          {
+            "engine": "small",
+            "name": "reopen",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.001469584
+          },
+          {
+            "engine": "small",
+            "name": "peak_rss",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 4653056
+          }
+        ]
+      }
+    },
+    {
+      "engine": "duckdb",
+      "repetition": 3,
+      "directory": "r3-duckdb",
+      "command": [
+        "/Users/dlarimer/gofractally/psitri/build/fair/bin/fair-bank-duckdb",
+        "--path",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r3-duckdb/database",
+        "--result",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17T163215-fair-bank-smoke-deeba65c/r3-duckdb/result.json",
+        "--accounts",
+        "257",
+        "--transfers",
+        "1025",
+        "--warmup",
+        "33",
+        "--batch",
+        "13",
+        "--readers",
+        "2",
+        "--reads-per-snapshot",
+        "17",
+        "--read-batches",
+        "3",
+        "--seed",
+        "12345",
+        "--value-bytes",
+        "128",
+        "--cache-mib",
+        "64",
+        "--map-gib",
+        "64",
+        "--durability",
+        "fsync"
+      ],
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 1.5889882499468513,
+      "result": {
+        "schema_version": 1,
+        "workload": "fair-bank-v2",
+        "engine": "duckdb",
+        "version": "v1.5.5",
+        "settings": "persistent database; synchronous WAL commits; platform_sync=fsync; threads=1; memory_limit_mib=64",
+        "status": "passed",
+        "config": {
+          "accounts": 257,
+          "transfers": 1025,
+          "warmup": 33,
+          "batch": 13,
+          "readers": 2,
+          "reads_per_snapshot": 17,
+          "read_batches": 3,
+          "seed": 12345,
+          "value_bytes": 128,
+          "cache_mib": 64,
+          "map_gib": 64,
+          "durability": "fsync"
+        },
+        "validation": {
+          "read_your_writes": true,
+          "rollback": true,
+          "snapshot": true,
+          "exact_accounts": true,
+          "balance": true,
+          "reopen": true,
+          "final_hash": "12130220473362157698"
+        },
+        "counts": {
+          "write_transfers": 1025,
+          "write_commits": 79,
+          "mixed_transfers": 1025,
+          "mixed_commits": 79,
+          "mixed_reads": 21641,
+          "read_only_reads": 102,
+          "reader_checksum": "21743000000000369"
+        },
+        "metrics": [
+          {
+            "engine": "duckdb",
+            "name": "load",
+            "unit": "accounts/s",
+            "direction": "higher",
+            "value": 5827.047736240702
+          },
+          {
+            "engine": "duckdb",
+            "name": "write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 2691.582404272395
+          },
+          {
+            "engine": "duckdb",
+            "name": "write_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 4841.583
+          },
+          {
+            "engine": "duckdb",
+            "name": "write_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 5491.958
+          },
+          {
+            "engine": "duckdb",
+            "name": "mixed_write_active",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 969.6040940941651
+          },
+          {
+            "engine": "duckdb",
+            "name": "mixed_write_active_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 13262.625
+          },
+          {
+            "engine": "duckdb",
+            "name": "mixed_write_active_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 20045.041999999998
+          },
+          {
+            "engine": "duckdb",
+            "name": "mixed_write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 968.9037048454941
+          },
+          {
+            "engine": "duckdb",
+            "name": "mixed_read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 20456.62934298667
+          },
+          {
+            "engine": "duckdb",
+            "name": "read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 26284.425833467547
+          },
+          {
+            "engine": "duckdb",
+            "name": "disk_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 620192
+          },
+          {
+            "engine": "duckdb",
+            "name": "allocated_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 675840
+          },
+          {
+            "engine": "duckdb",
+            "name": "close",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.00186175
+          },
+          {
+            "engine": "duckdb",
+            "name": "disk_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 798720
+          },
+          {
+            "engine": "duckdb",
+            "name": "allocated_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 798720
+          },
+          {
+            "engine": "duckdb",
+            "name": "reopen",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.003227875
+          },
+          {
+            "engine": "duckdb",
+            "name": "peak_rss",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 46727168
+          }
+        ]
+      }
+    }
+  ],
+  "dependencies": {
+    "/Users/dlarimer/arbtrie/external/libmdbx/build/libmdbx.dylib": {
+      "resolved_path": "/Users/dlarimer/arbtrie/external/libmdbx/build/libmdbx.dylib",
+      "sha256": "da83151c04dbbbdbf33b50ae3e8226bd424a31176a6b44410d83b2abbc8de7bc",
+      "compiler_and_build_flags": "prebuilt dependency; inspect its separate build provenance"
+    },
+    "/Users/dlarimer/psitri-merge/build/release/_deps/rocksdb-build/librocksdb.a": {
+      "resolved_path": "/Users/dlarimer/psitri-merge/build/release/_deps/rocksdb-build/librocksdb.a",
+      "sha256": "e723ff70466d8ee5c0da25233d4e3ddd5da370cec62543691be497260cd49275",
+      "compiler_and_build_flags": "prebuilt dependency; inspect its separate build provenance"
+    },
+    "/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib": {
+      "resolved_path": "/opt/homebrew/Cellar/sqlite/3.53.0/lib/libsqlite3.3.53.0.dylib",
+      "sha256": "b4e993433371d8375b3db569a08789cbf2ea9ccc8c5e513d0e01b994fde73a78",
+      "compiler_and_build_flags": "prebuilt dependency; inspect its separate build provenance"
+    },
+    "/Users/dlarimer/gofractally/psitri/build/fair-deps/duckdb/libduckdb.dylib": {
+      "resolved_path": "/Users/dlarimer/gofractally/psitri/build/fair-deps/duckdb/libduckdb.dylib",
+      "sha256": "b9027d18ef3e8d960568f77e946a83ca68009cb22d71cf7f94de842afdd094d8",
+      "compiler_and_build_flags": "prebuilt dependency; inspect its separate build provenance"
+    }
+  },
+  "binaries": {
+    "small": {
+      "path": "/Users/dlarimer/gofractally/psitri/build/fair/bin/fair-bank-small",
+      "sha256": "5b8e87b78283e471b0ebfaa2d0a6ea63cc702907dbe562162daa02b4a3d80fde",
+      "description": {
+        "engine": "small",
+        "version": "psitri API 1",
+        "workload": "fair-bank-v2",
+        "durability": [
+          "none",
+          "async",
+          "msync",
+          "fsync",
+          "full"
+        ]
+      }
+    },
+    "large": {
+      "path": "/Users/dlarimer/gofractally/psitri/build/fair/bin/fair-bank-large",
+      "sha256": "e37a8e8ecf488a7d246813be2c52b650e7adc877043a43d246db2c945b90b160",
+      "description": {
+        "engine": "large",
+        "version": "psitri API 1",
+        "workload": "fair-bank-v2",
+        "durability": [
+          "none",
+          "async",
+          "msync",
+          "fsync",
+          "full"
+        ]
+      }
+    },
+    "sqlite": {
+      "path": "/Users/dlarimer/gofractally/psitri/build/fair/bin/fair-bank-sqlite",
+      "sha256": "7ea2b9f4b07e9797704c3909beeb0c7d70a905c72307647551e34ac0ece2028d",
+      "description": {
+        "engine": "sqlite",
+        "version": "3.53.0 2026-04-09 11:41:38 4525003a53a7fc63ca75c59b22c79608659ca12f0131f52c18637f829977f20b",
+        "workload": "fair-bank-v2",
+        "durability": [
+          "none",
+          "fsync",
+          "full"
+        ]
+      }
+    },
+    "duckdb": {
+      "path": "/Users/dlarimer/gofractally/psitri/build/fair/bin/fair-bank-duckdb",
+      "sha256": "49ca88bb25de893e81026ff5e277a05081df7e876c80af525d7490e05662eb2b",
+      "description": {
+        "engine": "duckdb",
+        "version": "v1.5.5",
+        "workload": "fair-bank-v2",
+        "durability": [
+          "fsync"
+        ]
+      }
+    }
+  },
+  "environment": {
+    "SAL_LOG_LEVEL": "ERROR"
+  },
+  "notes": "Final v2 explicit durability cohort validation on a shared development machine; not performance publication evidence. Matching full account state, rollback, snapshots, reopen and partial batches.",
+  "storage": {
+    "df": "Filesystem    512-blocks       Used  Available Capacity  Mounted on\n/dev/disk3s5 15622068800 9872684704 5669992080    64%    /System/Volumes/Data",
+    "total_bytes": 7998499225600,
+    "free_bytes": 2903035944960,
+    "filesystem_fragment_bytes": 4096
+  },
+  "build": {
+    "compiler": "/opt/homebrew/opt/llvm/bin/clang++",
+    "compiler_version": "22.1.2",
+    "build_type": "Release",
+    "native_dependencies": {
+      "psio": "/Users/dlarimer/gofractally/psio",
+      "ucc": "/Users/dlarimer/gofractally/ucc"
+    },
+    "libraries": [
+      "/Users/dlarimer/arbtrie/external/libmdbx/build/libmdbx.dylib",
+      "/Users/dlarimer/psitri-merge/build/release/_deps/rocksdb-build/librocksdb.a",
+      "/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib",
+      "/Users/dlarimer/gofractally/psitri/build/fair-deps/duckdb/libduckdb.dylib"
+    ]
+  },
+  "compiler_version_output": "Homebrew clang version 22.1.2\nTarget: arm64-apple-darwin25.3.0\nThread model: posix\nInstalledDir: /opt/homebrew/Cellar/llvm/22.1.2/bin\nConfiguration file: /opt/homebrew/Cellar/llvm/22.1.2/etc/clang/arm64-apple-darwin25.cfg",
+  "native_dependencies": {
+    "psio": {
+      "path": "/Users/dlarimer/gofractally/psio",
+      "revision": "ff114b6a8c9265e6b5da5ffb85df1617b2b43514",
+      "status": "?? .claude/\n?? tools/__pycache__/"
+    },
+    "ucc": {
+      "path": "/Users/dlarimer/gofractally/ucc",
+      "revision": "2c124eba978e7bcf20e252eec7fd5b2ea3635295",
+      "status": "M include/ucc/hierarchical_bitmap.hpp"
+    }
+  },
+  "source_sha256": {
+    "scripts/fair_bank.py": "09f38ad8e17025206df076e5611a16da1bc1129d27bd4b6e45f29e584125188f",
+    "scripts/benchmark.py": "110039b585cc09e9705dfee02364e326e754cc20c567f1567a4eff2e9a565e29",
+    "benchmarks/fair_bank/CMakeLists.txt": "7a56689febeb08bc47bb69a29b1ed728cbab5c9f1a5e9759a3193c0f351c6fdf",
+    "benchmarks/fair_bank/README.md": "e56b8f446c0aea2548d259241e4741a33c9ad31c929a676dd3f3d0c5b22e7f6f",
+    "benchmarks/fair_bank/common.hpp": "4e9dbc912cce5fc88e9c8fcd739e676b86fa910e992dd29a6113c2a70d01f533",
+    "benchmarks/fair_bank/duckdb.hpp": "00da5db5a07f33db8020b1b387feb80621ba354c1c8b4d572221c75a3c12c951",
+    "benchmarks/fair_bank/main.cpp": "c1e811f8fb967829ccd44b37d11e645b02321e0154e78d56e34fb55dc33ce035",
+    "benchmarks/fair_bank/mdbx.hpp": "488c572bd7dd93ded529065179effc8be4bbffc92128aff83ca249676be9c878",
+    "benchmarks/fair_bank/psitri.hpp": "17b22486765808542988c5d7e0bfe135a69b5cd26abab60bb6de48a5a0e1750e",
+    "benchmarks/fair_bank/rocksdb.hpp": "f289ba0e24ed1dbf08cb4672d8393738c0eb6017afdfabaa4c2b30ed650e57ea",
+    "benchmarks/fair_bank/sqlite.hpp": "7e2cc8f9be5c2091b6b23f09e7899041218a9c1f05dcc7ae84b1f638bcd3fc5b"
+  },
+  "finished_at": "2026-09-17T16:32:20.717921+00:00"
+}

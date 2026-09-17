@@ -2,6 +2,11 @@
 # pipeline benches (delta_art = hot delta over cold base) drive the
 # start_ver + sal_art_ref instantiation.
 
+option(PSITRI_FAIR_BANK "Build the common bank workload against all comparison libraries" OFF)
+if(PSITRI_FAIR_BANK)
+    add_subdirectory(fair_bank)
+endif()
+
 # delta_art scale bench: start_ver (hot delta) -> sal_art_ref dwal (cold base).
 # The cold engine is sal_art_ref::radix::dwal_engine (heart_dwal_engine.hpp,
 # under sal_art_ref/test); it uses psitri's dwal::kv_engine concept.

@@ -1,0 +1,46 @@
+Command: otool -arch arm64 -tvV -p __ZN6duckdb15LocalFileSystem8FileSyncERNS_10FileHandleE build/fair-deps/duckdb/libduckdb.dylib
+build/fair-deps/duckdb/libduckdb.dylib:
+(__TEXT,__text) section
+__ZN6duckdb15LocalFileSystem8FileSyncERNS_10FileHandleE:
+0000000000caf2ac	sub	sp, sp, #0x70
+0000000000caf2b0	stp	x22, x21, [sp, #0x40]
+0000000000caf2b4	stp	x20, x19, [sp, #0x50]
+0000000000caf2b8	stp	x29, x30, [sp, #0x60]
+0000000000caf2bc	add	x29, sp, #0x60
+0000000000caf2c0	mov	x20, x1
+0000000000caf2c4	ldr	w0, [x1, #0x48]
+0000000000caf2c8	bl	0x1f50388 ; symbol stub for: _fsync
+0000000000caf2cc	cbnz	w0, 0xcaf2e4
+0000000000caf2d0	ldp	x29, x30, [sp, #0x60]
+0000000000caf2d4	ldp	x20, x19, [sp, #0x50]
+0000000000caf2d8	ldp	x22, x21, [sp, #0x40]
+0000000000caf2dc	add	sp, sp, #0x70
+0000000000caf2e0	ret
+0000000000caf2e4	bl	0x1f500dc ; symbol stub for: ___error
+0000000000caf2e8	ldr	w21, [x0]
+0000000000caf2ec	mov	w0, #0x10
+0000000000caf2f0	bl	0x1f50028 ; symbol stub for: ___cxa_allocate_exception
+0000000000caf2f4	mov	x19, x0
+0000000000caf2f8	cmp	w21, #0x5
+0000000000caf2fc	b.ne	0xcaf340
+0000000000caf300	adrp	x1, 6776 ; 0x2727000
+0000000000caf304	add	x1, x1, #0xb6c ; literal pool for: "fsync failed!"
+0000000000caf308	add	x0, sp, #0x28
+0000000000caf30c	bl	__ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEC1B9nqe210106ILi0EEEPKc
+0000000000caf310	mov	w21, #0x1
+0000000000caf314	add	x1, sp, #0x28
+0000000000caf318	mov	x0, x19
+0000000000caf31c	bl	__ZN6duckdb14FatalExceptionC1ERKNSt3__112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE
+0000000000caf320	mov	w21, #0x0
+0000000000caf324	adrp	x1, 7012 ; 0x2813000
+0000000000caf328	add	x1, x1, #0xfd8
+0000000000caf32c	adrp	x2, -3225 ; 0x16000
+0000000000caf330	add	x2, x2, #0xa60
+0000000000caf334	mov	x0, x19
+0000000000caf338	bl	0x1f500b8 ; symbol stub for: ___cxa_throw
+0000000000caf33c	b	0xcaf3bc
+0000000000caf340	adrp	x1, 6776 ; 0x2727000
+0000000000caf344	add	x1, x1, #0xb7a ; literal pool for: "Could not fsync file \"%s\": %s"
+0000000000caf348	add	x0, sp, #0x28
+0000000000caf34c	bl	__ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEC1B9nqe210106ILi0EEEPKc
+0000000000caf350	ldrsb	w8, [x20, #0x27]

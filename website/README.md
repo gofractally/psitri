@@ -26,7 +26,7 @@ toggle, the snapshot illustration, example switching/copy, menu, and details.
 
 - `website/index.html`, `website/assets`, and curated `website/data`;
 - the listed API Markdown guides, rendered as public HTML;
-- the three curated methodology/integration guides in `website/content`;
+- the four curated methodology/integration guides in `website/content`;
 - `examples/api/basic.cpp` and `examples/api/revisions.cpp`;
 - the curated native bank and scale logs, integration bank logs with their
   correctness status and provenance, and a benchmark-only ART measurement excerpt.
@@ -78,7 +78,9 @@ Claims that must remain explicit until evidence changes:
   larger psitri disk high-water. Separate RocksDB/SQLite bank records use a
   different configuration and workload; do not merge them into that chart. The
   retained system SQLite run failed validation and cannot support a speedup claim.
-  DuckDB has a TATP driver, without a retained result in the public dataset.
+  The integration suite has a DuckDB TATP driver. The common fair-bank suite also
+  tests native DuckDB with the maintained engines and other competitors; its
+  smoke results are not public performance evidence.
 
 ## Public audience and terminology
 

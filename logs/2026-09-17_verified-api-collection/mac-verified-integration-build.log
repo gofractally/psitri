@@ -1,0 +1,8 @@
+[1/8] Building CXX object CMakeFiles/fair-bank-psitrirocks.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o
+[2/8] Building CXX object CMakeFiles/fair-bank-rocksdb.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o
+[3/8] Building CXX object CMakeFiles/fair-bank-sqlite.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o
+[4/8] Building CXX object CMakeFiles/fair-bank-psitri_sqlite.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o
+[5/8] Linking CXX executable bin/fair-bank-psitrirocks
+[6/8] Linking CXX executable bin/fair-bank-sqlite
+[7/8] Linking CXX executable bin/fair-bank-psitri_sqlite
+[8/8] Linking CXX executable bin/fair-bank-rocksdb

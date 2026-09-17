@@ -1,0 +1,192 @@
+{
+  "schema_version": 1,
+  "workload": "api-bank-v1",
+  "profile": "smoke",
+  "status": "failed",
+  "started_at": "2026-09-17T20:01:09.340030+00:00",
+  "machine_id": "cloud-x86",
+  "hardware": {
+    "system": "Linux",
+    "release": "6.17.0-22-generic",
+    "architecture": "x86_64",
+    "cpu": "AMD EPYC-Turin Processor",
+    "memory": "MemTotal:       127438796 kB",
+    "logical_cpus": 16
+  },
+  "config": {
+    "accounts": 128,
+    "transfers": 256,
+    "warmup": 64,
+    "batch": 32,
+    "readers": 2,
+    "reads_per_snapshot": 16,
+    "read_batches": 2,
+    "seed": 12345,
+    "value_bytes": 8,
+    "cache_mib": 64,
+    "map_gib": 64,
+    "durability": "none"
+  },
+  "engines": [
+    "mdbx",
+    "psitrimdbx"
+  ],
+  "repeats": 1,
+  "order_seed": 20260917,
+  "revision": "5ba8186a9bb6c99f92262b9cc3cf77bc13c92e5b",
+  "source_status": "",
+  "dirty": false,
+  "command": [
+    "scripts/api_bank_matrix.py",
+    "--machine",
+    "cloud-x86",
+    "--build-mdbx",
+    "../build-mdbx",
+    "--build-integrations",
+    "../build-integrations",
+    "--output",
+    "../results/verified-collection",
+    "--repeats",
+    "5",
+    "--idle-timeout",
+    "60"
+  ],
+  "records": [
+    {
+      "engine": "psitrimdbx",
+      "repetition": 1,
+      "directory": "r1-psitrimdbx",
+      "command": [
+        "/home/dlarimer/psitri-api-bench-20260917/build-mdbx/bin/fair-bank-psitrimdbx",
+        "--path",
+        "/home/dlarimer/psitri-api-bench-20260917/results/verified-collection/2026-09-17T200109-api-matrix-8a417797/mdbx/smoke/2026-09-17T200109-fair-bank-smoke-f0a47e71/r1-psitrimdbx/database",
+        "--result",
+        "/home/dlarimer/psitri-api-bench-20260917/results/verified-collection/2026-09-17T200109-api-matrix-8a417797/mdbx/smoke/2026-09-17T200109-fair-bank-smoke-f0a47e71/r1-psitrimdbx/result.json",
+        "--accounts",
+        "128",
+        "--transfers",
+        "256",
+        "--warmup",
+        "64",
+        "--batch",
+        "32",
+        "--readers",
+        "2",
+        "--reads-per-snapshot",
+        "16",
+        "--read-batches",
+        "2",
+        "--seed",
+        "12345",
+        "--value-bytes",
+        "8",
+        "--cache-mib",
+        "64",
+        "--map-gib",
+        "64",
+        "--durability",
+        "none"
+      ],
+      "status": "not_run",
+      "exit_code": null,
+      "error": "Machine did not become idle; no benchmark started"
+    }
+  ],
+  "dependencies": {
+    "/home/dlarimer/arbtrie/build/release/_deps/libmdbx-build/libmdbx.a": {
+      "resolved_path": "/home/dlarimer/arbtrie/build/release/_deps/libmdbx-build/libmdbx.a",
+      "sha256": "180bc4ab42c8f049b8580f4fe79aecadc71256a7e0165e6629a0cda3e75d504b",
+      "compiler_and_build_flags": "prebuilt dependency; inspect its separate build provenance"
+    }
+  },
+  "binaries": {
+    "mdbx": {
+      "path": "/home/dlarimer/psitri-api-bench-20260917/build-mdbx/bin/fair-bank-mdbx",
+      "sha256": "f1f6f888bbadd563e9c3ee6e98e7f5a4a65587b9c0e73045bcdf962c24dec742",
+      "description": {
+        "engine": "mdbx",
+        "version": "v0.13.11-0-gb862eb08",
+        "workload": "api-bank-v1",
+        "durability": [
+          "none",
+          "async",
+          "fsync",
+          "full"
+        ]
+      }
+    },
+    "psitrimdbx": {
+      "path": "/home/dlarimer/psitri-api-bench-20260917/build-mdbx/bin/fair-bank-psitrimdbx",
+      "sha256": "72ec53858bc42c32cbc37cf26747e1946d998bef9a09e99a3909f176b2febf27",
+      "description": {
+        "engine": "psitrimdbx",
+        "version": "psitrimdbx-0.1",
+        "workload": "api-bank-v1",
+        "durability": [
+          "none"
+        ]
+      }
+    }
+  },
+  "environment": {
+    "SAL_LOG_LEVEL": "ERROR"
+  },
+  "notes": "Same-API pair; no concurrent benchmarks; wait for idle before every process.",
+  "isolation": {
+    "machine_lock": true,
+    "idle_seconds": 10,
+    "max_cpu_busy_percent": 3,
+    "idle_timeout_seconds": 60.0
+  },
+  "storage": {
+    "df": "Filesystem     1024-blocks      Used Available Capacity Mounted on\n/dev/vda2        943230904 806570936  96344836      90% /",
+    "total_bytes": 965868445696,
+    "free_bytes": 98657112064,
+    "filesystem_fragment_bytes": 4096
+  },
+  "build": {
+    "compiler": "/usr/bin/clang++-20",
+    "compiler_version": "20.1.8",
+    "build_type": "Release",
+    "native_dependencies": {
+      "psio": "/home/dlarimer/psitri-api-bench-20260917/psio",
+      "ucc": "/home/dlarimer/psitri-api-bench-20260917/ucc"
+    },
+    "libraries": [
+      "/home/dlarimer/arbtrie/build/release/_deps/libmdbx-build/libmdbx.a"
+    ]
+  },
+  "compiler_version_output": "Ubuntu clang version 20.1.8 (0ubuntu4)\nTarget: x86_64-pc-linux-gnu\nThread model: posix\nInstalledDir: /usr/lib/llvm-20/bin",
+  "native_dependencies": {
+    "psio": {
+      "path": "/home/dlarimer/psitri-api-bench-20260917/psio",
+      "revision": "ff114b6a8c9265e6b5da5ffb85df1617b2b43514",
+      "status": ""
+    },
+    "ucc": {
+      "path": "/home/dlarimer/psitri-api-bench-20260917/ucc",
+      "revision": "2c124eba978e7bcf20e252eec7fd5b2ea3635295",
+      "status": ""
+    }
+  },
+  "source_sha256": {
+    "scripts/fair_bank.py": "d64ce9651e48665a281e99f7065977ebbff58feb42e92cfa369f314064d1c82c",
+    "scripts/benchmark.py": "110039b585cc09e9705dfee02364e326e754cc20c567f1567a4eff2e9a565e29",
+    "scripts/benchmark_idle.py": "494cbe19e61f109e276d7930ee60906e6d4900fc77764731a1e6e381f9ba453b",
+    "scripts/api_bank_matrix.py": "1d98a687197db01e2e7e08e1a8fa43f83cb53386b11e5da3e73c2399e8dd8195",
+    "benchmarks/fair_bank/CMakeLists.txt": "7a56689febeb08bc47bb69a29b1ed728cbab5c9f1a5e9759a3193c0f351c6fdf",
+    "benchmarks/fair_bank/README.md": "e56b8f446c0aea2548d259241e4741a33c9ad31c929a676dd3f3d0c5b22e7f6f",
+    "benchmarks/fair_bank/common.hpp": "4e9dbc912cce5fc88e9c8fcd739e676b86fa910e992dd29a6113c2a70d01f533",
+    "benchmarks/fair_bank/duckdb.hpp": "00da5db5a07f33db8020b1b387feb80621ba354c1c8b4d572221c75a3c12c951",
+    "benchmarks/fair_bank/main.cpp": "b735ac8893d6d41494b8ef177eaca58cd39bb65293866b2e972c00bcf477202d",
+    "benchmarks/fair_bank/mdbx.hpp": "0d56517af0daae4e6fbacbced99aa5dd4889e30ab67e217310e9b1b6be17268e",
+    "benchmarks/fair_bank/psitri.hpp": "17b22486765808542988c5d7e0bfe135a69b5cd26abab60bb6de48a5a0e1750e",
+    "benchmarks/fair_bank/rocksdb.hpp": "afc9682fdf9f0e1f6abfaca00e7497ce1e5e8f2d4aa1d074b2bc950a1b183bc9",
+    "benchmarks/fair_bank/sqlite.hpp": "187536b28b02ca0bfd684b7df249c1f30b1144f7d48118510727add01aa445bd",
+    "benchmarks/api_bank/CMakeLists.txt": "cc01ec9b274d25a7e61966e5f252eeb37e595591e7414d92c60ad73d53d69f01",
+    "benchmarks/api_bank/README.md": "48b7fb60d18cd06654e54a30489dea8468fe36b348a5a88bd9e44f60f1912b1a",
+    "benchmarks/api_bank/sources.json": "a3e4e32e45e55f26e6035b0fc1a86c8666884e9cf81dde214a190d4cfaa4650c"
+  },
+  "error": "Machine did not become idle; no benchmark started",
+  "finished_at": "2026-09-17T20:02:09.412951+00:00"
+}

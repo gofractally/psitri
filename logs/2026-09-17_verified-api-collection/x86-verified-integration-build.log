@@ -1,0 +1,22 @@
+[1/22] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_transaction.cpp.o
+[2/22] Building CXX object integrations/sal/CMakeFiles/sal.dir/src/allocator.cpp.o
+[3/22] Linking CXX static library integrations/sal/libsal.a
+[4/22] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/dwal/transaction.cpp.o
+[5/22] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_read_session.cpp.o
+[6/22] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_database.cpp.o
+[7/22] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/dwal/merge_cursor.cpp.o
+[8/22] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/dwal/merge_pool.cpp.o
+[9/22] Linking CXX static library integrations/psitri/libpsitri.a
+[10/22] Building CXX object psitrirocks/CMakeFiles/psitrirocks.dir/src/db_impl.cpp.o
+[11/22] Building CXX object psitri-sqlite/CMakeFiles/psitri-sqlite.dir/src/btree_psitri.cpp.o
+[12/22] Building CXX object CMakeFiles/fair-bank-rocksdb.dir/home/dlarimer/psitri-api-bench-20260917/psitri/benchmarks/fair_bank/main.cpp.o
+[13/22] Building CXX object CMakeFiles/fair-bank-psitrirocks.dir/home/dlarimer/psitri-api-bench-20260917/psitri/benchmarks/fair_bank/main.cpp.o
+[14/22] Building CXX object CMakeFiles/fair-bank-sqlite.dir/home/dlarimer/psitri-api-bench-20260917/psitri/benchmarks/fair_bank/main.cpp.o
+[15/22] Building CXX object CMakeFiles/fair-bank-psitri_sqlite.dir/home/dlarimer/psitri-api-bench-20260917/psitri/benchmarks/fair_bank/main.cpp.o
+[16/22] Linking CXX static library psitrirocks/libpsitrirocks.a
+[17/22] Building C object psitri-sqlite/CMakeFiles/psitri-sqlite.dir/src/btree_helpers.c.o
+[18/22] Linking CXX static library psitri-sqlite/libpsitri-sqlite.a
+[19/22] Linking CXX executable bin/fair-bank-psitrirocks
+[20/22] Linking CXX executable bin/fair-bank-sqlite
+[21/22] Linking CXX executable bin/fair-bank-psitri_sqlite
+[22/22] Linking CXX executable bin/fair-bank-rocksdb

@@ -1,0 +1,16 @@
+{
+  "workload": "api-bank-v1",
+  "status": "blocked",
+  "machine": "mac-arm64",
+  "revision": "5ba8186a9bb6c99f92262b9cc3cf77bc13c92e5b",
+  "pairs": [
+    {
+      "api": "mdbx",
+      "status": "failed",
+      "runs": [
+        "mdbx/smoke/2026-09-17T195956-fair-bank-smoke-ee650c38/manifest.json"
+      ]
+    }
+  ],
+  "error": "Machine did not become idle; no benchmark started"
+}

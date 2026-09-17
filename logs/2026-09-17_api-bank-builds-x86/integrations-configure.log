@@ -1,0 +1,39 @@
+-- The C compiler identification is Clang 20.1.8
+-- The CXX compiler identification is Clang 20.1.8
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/clang-20 - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/clang++-20 - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE
+-- psio: simdjson not found; json_to_pjson disabled
+CMake Warning (dev) at /home/dlarimer/psitri-api-bench-20260917/psio/cpp/CMakeLists.txt:65 (find_package):
+  Policy CMP0167 is not set: The FindBoost module is removed.  Run "cmake
+  --help-policy CMP0167" for policy details.  Use the cmake_policy command to
+  set the policy and suppress this warning.
+
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- Found Boost: /usr/lib/x86_64-linux-gnu/cmake/Boost-1.88.0/BoostConfig.cmake (found version "1.88.0")
+CMake Warning at /home/dlarimer/arbtrie/build/release/_deps/abseil-src/CMakeLists.txt:52 (message):
+  A future Abseil release will default ABSL_PROPAGATE_CXX_STD to ON for CMake
+  3.8 and up.  We recommend enabling this option to ensure your project still
+  builds correctly.
+
+
+-- Performing Test ABSL_INTERNAL_AT_LEAST_CXX17
+-- Performing Test ABSL_INTERNAL_AT_LEAST_CXX17 - Success
+-- Performing Test ABSL_INTERNAL_AT_LEAST_CXX20
+-- Performing Test ABSL_INTERNAL_AT_LEAST_CXX20 - Success
+-- SQLite source not found at /home/dlarimer/psitri-api-bench-20260917/psitri/benchmarks/api_bank/external/sqlite-src — skipping testfixture
+-- Found SQLite3: /usr/include (found version "3.46.1")
+-- Configuring done (0.8s)
+-- Generating done (0.1s)
+-- Build files have been written to: /home/dlarimer/psitri-api-bench-20260917/build-integrations

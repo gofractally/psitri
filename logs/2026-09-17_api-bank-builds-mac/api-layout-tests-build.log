@@ -1,0 +1,41 @@
+[0/1] Re-running CMake...
+-- psio: simdjson found, json_to_pjson enabled
+CMake Warning (dev) at /Users/dlarimer/gofractally/psio/cpp/CMakeLists.txt:65 (find_package):
+  Policy CMP0167 is not set: The FindBoost module is removed.  Run "cmake
+  --help-policy CMP0167" for policy details.  Use the cmake_policy command to
+  set the policy and suppress this warning.
+
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- psitrimdbx backend: delta_art
+-- mdbx-bank-bench: using /Users/dlarimer/arbtrie/external/libmdbx/build/libmdbx.dylib
+-- Configuring done (0.1s)
+-- Generating done (0.0s)
+-- Build files have been written to: /Users/dlarimer/gofractally/psitri/build
+[1/20] Building CXX object libraries/sal/CMakeFiles/sal.dir/src/block_allocator.cpp.o
+[2/20] Building CXX object libraries/sal/CMakeFiles/sal.dir/src/mapping.cpp.o
+[3/20] Building CXX object libraries/sal/CMakeFiles/sal.dir/src/allocator.cpp.o
+[4/20] Building CXX object libraries/sal/CMakeFiles/sal.dir/src/control_block_alloc.cpp.o
+[5/20] Building CXX object libraries/sal_art_ref/CMakeFiles/sal_art_ref-tests.dir/test/bitset_tests.cpp.o
+[6/20] Building CXX object libraries/sal/CMakeFiles/sal.dir/src/allocator_session.cpp.o
+[7/20] Linking CXX static library libraries/sal/libsal.a
+[8/20] Building CXX object libraries/sal_art_ref/CMakeFiles/sal_art_ref-tests.dir/test/smart_address_tests.cpp.o
+[9/20] Building CXX object libraries/sal_art_ref/CMakeFiles/sal_art_ref-tests.dir/test/compact_addresses_tests.cpp.o
+[10/20] Building CXX object libraries/sal_art_ref/CMakeFiles/sal_art_ref-tests.dir/test/radix_bitset_tests.cpp.o
+[11/20] Building CXX object libraries/sal_art_ref/CMakeFiles/sal_art_ref-tests.dir/test/radix_full_tests.cpp.o
+[12/20] Building CXX object libraries/sal_art_ref/CMakeFiles/sal_art_ref-tests.dir/test/paged_tests.cpp.o
+[13/20] Building CXX object libraries/sal_art_ref/CMakeFiles/sal_art_ref-tests.dir/test/leaf_page_tests.cpp.o
+[14/20] Building CXX object libraries/sal_art_ref/CMakeFiles/sal_art_ref-tests.dir/test/radix_node_tests.cpp.o
+[15/20] Building CXX object libraries/sal_art_ref/CMakeFiles/sal_art_ref-tests.dir/test/branch_smart_address_tests.cpp.o
+[16/20] Building CXX object libraries/sal_art_ref/CMakeFiles/sal_art_ref-tests.dir/test/radix_tree_tests.cpp.o
+[17/20] Building CXX object libraries/sal_art_ref/CMakeFiles/sal_art_ref-tests.dir/test/sal_radix_tree_tests.cpp.o
+In file included from /Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/test/sal_radix_tree_tests.cpp:14:
+/Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/test/sal_radix_tree.hpp:563:18: warning: offset of on non-standard-layout type 'full_node' [-Winvalid-offsetof]
+  563 |    static_assert(offsetof(full_node, children) == full_node::header_bytes,
+      |                  ^                   ~~~~~~~~
+/Library/Developer/CommandLineTools/usr/lib/clang/17/include/__stddef_offsetof.h:16:24: note: expanded from macro 'offsetof'
+   16 | #define offsetof(t, d) __builtin_offsetof(t, d)
+      |                        ^                     ~
+1 warning generated.
+[18/20] Building CXX object libraries/sal_art_ref/CMakeFiles/sal_art_ref-tests.dir/test/radix_engine_tests.cpp.o
+[19/20] Linking CXX executable bin/sal_art_ref-tests

@@ -1,0 +1,59 @@
+[1/33] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/mapping.cpp.o
+[2/33] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/block_allocator.cpp.o
+[3/33] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/control_block_alloc.cpp.o
+[4/33] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/segment_thread.cpp.o
+[5/33] Building CXX object psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/block_allocator.cpp.o
+[6/33] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/allocator_session.cpp.o
+[7/33] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/allocator.cpp.o
+[8/33] Linking CXX static library psitri/libraries/sal/libsal.a
+[9/33] Building CXX object psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/mapping.cpp.o
+[10/33] Building CXX object psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/control_block_alloc.cpp.o
+[11/33] Building CXX object psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/segment_thread.cpp.o
+[12/33] Building CXX object psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/allocator_session.cpp.o
+[13/33] Building CXX object psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/allocator.cpp.o
+[14/33] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/node/inner.cpp.o
+[15/33] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/database.cpp.o
+[16/33] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_status.cpp.o
+[17/33] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/node/leaf.cpp.o
+[18/33] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_writer.cpp.o
+[19/33] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_reader.cpp.o
+[20/33] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_transaction.cpp.o
+[21/33] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_read_session.cpp.o
+[22/33] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/transaction.cpp.o
+[23/33] Linking CXX static library psitri/experimental/sal_hybrid/libsal_hybrid_alloc.a
+[24/33] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/merge_cursor.cpp.o
+[25/33] Building CXX object psitri/libraries/psitrimdbx/CMakeFiles/psitrimdbx.dir/src/mdbx_impl.cpp.o
+FAILED: psitri/libraries/psitrimdbx/CMakeFiles/psitrimdbx.dir/src/mdbx_impl.cpp.o 
+/usr/bin/clang++-20 -DPSITRIMDBX_BACKEND_SAL_ART_REF=1 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/psitri/libraries/psitrimdbx/include -I/home/dlarimer/psitri-api-bench-20260917/psitri/libraries/psitri/include -I/home/dlarimer/psitri-api-bench-20260917/psitri/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -I/home/dlarimer/psitri-api-bench-20260917/psitri/libraries/art/include -I/home/dlarimer/psitri-api-bench-20260917/psitri/libraries/delta_art/include -I/home/dlarimer/psitri-api-bench-20260917/psitri/libraries/adb/include -I/home/dlarimer/psitri-api-bench-20260917/psitri/experimental/start_ver/include -I/home/dlarimer/psitri-api-bench-20260917/psitri/libraries/start_ref/include -I/home/dlarimer/psitri-api-bench-20260917/psitri/libraries/sal_art_ref/include -I/home/dlarimer/psitri-api-bench-20260917/psitri/experimental/gcart/include -I/home/dlarimer/psitri-api-bench-20260917/psitri/experimental/sal_hybrid/include -I/home/dlarimer/psitri-api-bench-20260917/psitri/experimental/rcart/include -stdlib=libc++ -O3 -DNDEBUG -std=gnu++23 -march=native -MD -MT psitri/libraries/psitrimdbx/CMakeFiles/psitrimdbx.dir/src/mdbx_impl.cpp.o -MF psitri/libraries/psitrimdbx/CMakeFiles/psitrimdbx.dir/src/mdbx_impl.cpp.o.d -o psitri/libraries/psitrimdbx/CMakeFiles/psitrimdbx.dir/src/mdbx_impl.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/psitri/libraries/psitrimdbx/src/mdbx_impl.cpp
+In file included from /home/dlarimer/psitri-api-bench-20260917/psitri/libraries/psitrimdbx/src/mdbx_impl.cpp:87:
+In file included from /home/dlarimer/psitri-api-bench-20260917/psitri/libraries/sal_art_ref/include/sal_art_ref/engine.hpp:3:
+In file included from /home/dlarimer/psitri-api-bench-20260917/psitri/libraries/sal_art_ref/include/sal_art_ref/radix_engine.hpp:49:
+/home/dlarimer/psitri-api-bench-20260917/psitri/libraries/sal_art_ref/include/sal_art_ref/radix_nodes.hpp:599:18: error: static assertion failed due to requirement 'sizeof(sal_art_ref::bitset1_node) == 128': 1 cacheline
+  599 |    static_assert(sizeof(bitset1_node) == 128, "1 cacheline");
+      |                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/dlarimer/psitri-api-bench-20260917/psitri/libraries/sal_art_ref/include/sal_art_ref/radix_nodes.hpp:599:39: note: expression evaluates to '130 == 128'
+  599 |    static_assert(sizeof(bitset1_node) == 128, "1 cacheline");
+      |                  ~~~~~~~~~~~~~~~~~~~~~^~~~~~
+/home/dlarimer/psitri-api-bench-20260917/psitri/libraries/sal_art_ref/include/sal_art_ref/radix_nodes.hpp:600:18: error: static assertion failed due to requirement 'sizeof(sal_art_ref::bitset_rN_node<7, 8, sal_art_ref::dispatch_shape::r2, sal_art_ref::radix_node_type::bitset128>) == 384': 3 cachelines
+  600 |    static_assert(sizeof(bitset_r2_node) == 384, "3 cachelines");
+      |                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/dlarimer/psitri-api-bench-20260917/psitri/libraries/sal_art_ref/include/sal_art_ref/radix_nodes.hpp:600:41: note: expression evaluates to '392 == 384'
+  600 |    static_assert(sizeof(bitset_r2_node) == 384, "3 cachelines");
+      |                  ~~~~~~~~~~~~~~~~~~~~~~~^~~~~~
+/home/dlarimer/psitri-api-bench-20260917/psitri/libraries/sal_art_ref/include/sal_art_ref/radix_nodes.hpp:601:18: error: static assertion failed due to requirement 'sizeof(sal_art_ref::bitset_rN_node<6, 9, sal_art_ref::dispatch_shape::r4, sal_art_ref::radix_node_type::bitset64>) == 640': 5 cachelines
+  601 |    static_assert(sizeof(bitset_r4_node) == 640, "5 cachelines");
+      |                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/dlarimer/psitri-api-bench-20260917/psitri/libraries/sal_art_ref/include/sal_art_ref/radix_nodes.hpp:601:41: note: expression evaluates to '648 == 640'
+  601 |    static_assert(sizeof(bitset_r4_node) == 640, "5 cachelines");
+      |                  ~~~~~~~~~~~~~~~~~~~~~~~^~~~~~
+/home/dlarimer/psitri-api-bench-20260917/psitri/libraries/sal_art_ref/include/sal_art_ref/radix_nodes.hpp:602:18: error: static assertion failed due to requirement 'sizeof(sal_art_ref::full_radix_node) == 1152': 9 cachelines
+  602 |    static_assert(sizeof(full_radix_node) == 1152, "9 cachelines");
+      |                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/dlarimer/psitri-api-bench-20260917/psitri/libraries/sal_art_ref/include/sal_art_ref/radix_nodes.hpp:602:42: note: expression evaluates to '1156 == 1152'
+  602 |    static_assert(sizeof(full_radix_node) == 1152, "9 cachelines");
+      |                  ~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~
+4 errors generated.
+[26/33] Building CXX object CMakeFiles/fair-bank-mdbx.dir/home/dlarimer/psitri-api-bench-20260917/psitri/benchmarks/fair_bank/main.cpp.o
+[27/33] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_database.cpp.o
+[28/33] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/merge_pool.cpp.o
+ninja: build stopped: subcommand failed.

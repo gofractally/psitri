@@ -1,0 +1,16 @@
+[0/1] Re-running CMake...
+-- psio: simdjson found, json_to_pjson enabled
+CMake Warning (dev) at /Users/dlarimer/gofractally/psitri/build/bench-sources/psio/cpp/CMakeLists.txt:65 (find_package):
+  Policy CMP0167 is not set: The FindBoost module is removed.  Run "cmake
+  --help-policy CMP0167" for policy details.  Use the cmake_policy command to
+  set the policy and suppress this warning.
+
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- psitrimdbx backend: sal_art_ref
+-- Configuring done (0.1s)
+-- Generating done (0.0s)
+-- Build files have been written to: /Users/dlarimer/gofractally/psitri/build/api-mdbx
+[1/4] Building CXX object psitri/libraries/psitrimdbx/CMakeFiles/psitrimdbx.dir/src/mdbx_impl.cpp.o
+[2/4] Linking CXX static library psitri/libraries/psitrimdbx/libpsitrimdbx.a
+[3/4] Linking CXX executable bin/fair-bank-psitrimdbx

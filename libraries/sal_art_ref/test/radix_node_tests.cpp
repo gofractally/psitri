@@ -110,6 +110,11 @@ TEST_CASE("full_radix_node is 9 cachelines with an r8 tier", "[radix_node]")
    // with no prefix, the stamped shape is the tier (r8); a prefix would force r1
    alignas(128) static unsigned char buf[1152];
    auto* n = new (buf) sal_art_ref::full_radix_node();
+   // Skip-header readers address dense branches directly from byte 128. A
+   // nested header gaining platform-specific alignment breaks that path.
+   REQUIRE(reinterpret_cast<unsigned char*>(&n->fixed) - buf == 29);
+   REQUIRE(reinterpret_cast<unsigned char*>(&n->branches) - buf ==
+           sal_art_ref::full_radix_node::branch_offset);
    n->init_page(sizeof(buf), sal::header_type::start_user_type, sal::ptr_address_seq{});
    n->set_rtype(sal_art_ref::radix_node_type::full256);
    REQUIRE(n->stamp_shape() == sal_art_ref::dispatch_shape::r8);

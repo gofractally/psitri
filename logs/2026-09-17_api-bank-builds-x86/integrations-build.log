@@ -1,0 +1,164 @@
+[1/163] Building CXX object abseil/absl/base/CMakeFiles/absl_spinlock_wait.dir/internal/spinlock_wait.cc.o
+[2/163] Linking CXX static library abseil/absl/base/libabsl_spinlock_wait.a
+[3/163] Building CXX object abseil/absl/base/CMakeFiles/absl_raw_logging_internal.dir/internal/raw_logging.cc.o
+[4/163] Building CXX object abseil/absl/base/CMakeFiles/absl_log_severity.dir/log_severity.cc.o
+[5/163] Linking CXX static library abseil/absl/base/libabsl_log_severity.a
+[6/163] Linking CXX static library abseil/absl/base/libabsl_raw_logging_internal.a
+[7/163] Building CXX object abseil/absl/base/CMakeFiles/absl_base.dir/internal/cycleclock.cc.o
+[8/163] Building CXX object abseil/absl/base/CMakeFiles/absl_base.dir/internal/unscaledcycleclock.cc.o
+[9/163] Building CXX object abseil/absl/base/CMakeFiles/absl_base.dir/internal/spinlock.cc.o
+[10/163] Building CXX object abseil/absl/debugging/CMakeFiles/absl_utf8_for_code_point.dir/internal/utf8_for_code_point.cc.o
+[11/163] Building CXX object abseil/absl/base/CMakeFiles/absl_base.dir/internal/sysinfo.cc.o
+[12/163] Linking CXX static library abseil/absl/debugging/libabsl_utf8_for_code_point.a
+[13/163] Building CXX object abseil/absl/debugging/CMakeFiles/absl_decode_rust_punycode.dir/internal/decode_rust_punycode.cc.o
+[14/163] Building CXX object abseil/absl/base/CMakeFiles/absl_throw_delegate.dir/internal/throw_delegate.cc.o
+[15/163] Linking CXX static library abseil/absl/base/libabsl_throw_delegate.a
+[16/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_string_view.dir/string_view.cc.o
+[17/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_strings_internal.dir/internal/utf8.cc.o
+[18/163] Building CXX object abseil/absl/base/CMakeFiles/absl_base.dir/internal/thread_identity.cc.o
+[19/163] Linking CXX static library abseil/absl/base/libabsl_base.a
+[20/163] Building CXX object abseil/absl/numeric/CMakeFiles/absl_int128.dir/int128.cc.o
+[21/163] Linking CXX static library abseil/absl/debugging/libabsl_decode_rust_punycode.a
+[22/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_strings_internal.dir/internal/ostringstream.cc.o
+[23/163] Linking CXX static library abseil/absl/numeric/libabsl_int128.a
+[24/163] Linking CXX static library abseil/absl/strings/libabsl_string_view.a
+[25/163] Building CXX object abseil/absl/crc/CMakeFiles/absl_crc_cpu_detect.dir/internal/cpu_detect.cc.o
+[26/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_strings_internal.dir/internal/escaping.cc.o
+[27/163] Building CXX object abseil/absl/debugging/CMakeFiles/absl_demangle_rust.dir/internal/demangle_rust.cc.o
+[28/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_strings.dir/ascii.cc.o
+[29/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_strings.dir/internal/charconv_parse.cc.o
+[30/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_strings.dir/internal/charconv_bigint.cc.o
+[31/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_strings.dir/escaping.cc.o
+[32/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_strings.dir/internal/damerau_levenshtein_distance.cc.o
+[33/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_strings.dir/charconv.cc.o
+[34/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_strings.dir/internal/memutil.cc.o
+[35/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_strings.dir/internal/stringify_sink.cc.o
+[36/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_strings.dir/match.cc.o
+[37/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_strings.dir/str_replace.cc.o
+[38/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_strings.dir/str_cat.cc.o
+[39/163] Linking CXX static library abseil/absl/strings/libabsl_strings_internal.a
+[40/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_strings.dir/numbers.cc.o
+[41/163] Building CXX object abseil/absl/time/CMakeFiles/absl_civil_time.dir/internal/cctz/src/civil_time_detail.cc.o
+[42/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_strings.dir/substitute.cc.o
+[43/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_strings.dir/str_split.cc.o
+[44/163] Building CXX object abseil/absl/time/CMakeFiles/absl_time_zone.dir/internal/cctz/src/time_zone_fixed.cc.o
+[45/163] Building CXX object abseil/absl/time/CMakeFiles/absl_time_zone.dir/internal/cctz/src/time_zone_format.cc.o
+[46/163] Building CXX object abseil/absl/time/CMakeFiles/absl_time_zone.dir/internal/cctz/src/time_zone_if.cc.o
+[47/163] Building CXX object abseil/absl/time/CMakeFiles/absl_time_zone.dir/internal/cctz/src/time_zone_impl.cc.o
+[48/163] Building CXX object abseil/absl/time/CMakeFiles/absl_time_zone.dir/internal/cctz/src/time_zone_info.cc.o
+[49/163] Building CXX object abseil/absl/time/CMakeFiles/absl_time_zone.dir/internal/cctz/src/time_zone_posix.cc.o
+[50/163] Building CXX object abseil/absl/time/CMakeFiles/absl_time_zone.dir/internal/cctz/src/time_zone_libc.cc.o
+[51/163] Linking CXX static library abseil/absl/crc/libabsl_crc_cpu_detect.a
+[52/163] Building CXX object abseil/absl/time/CMakeFiles/absl_time_zone.dir/internal/cctz/src/zone_info_source.cc.o
+[53/163] Building CXX object abseil/absl/time/CMakeFiles/absl_time_zone.dir/internal/cctz/src/time_zone_lookup.cc.o
+[54/163] Building CXX object abseil/absl/base/CMakeFiles/absl_malloc_internal.dir/internal/low_level_alloc.cc.o
+[55/163] Building CXX object abseil/absl/crc/CMakeFiles/absl_crc_internal.dir/internal/crc.cc.o
+[56/163] Building CXX object abseil/absl/debugging/CMakeFiles/absl_debugging_internal.dir/internal/elf_mem_image.cc.o
+[57/163] Building CXX object abseil/absl/debugging/CMakeFiles/absl_debugging_internal.dir/internal/vdso_support.cc.o
+[58/163] Linking CXX static library abseil/absl/debugging/libabsl_demangle_rust.a
+[59/163] Linking CXX static library abseil/absl/strings/libabsl_strings.a
+[60/163] Building CXX object abseil/absl/debugging/CMakeFiles/absl_debugging_internal.dir/internal/address_is_readable.cc.o
+[61/163] Building CXX object abseil/absl/crc/CMakeFiles/absl_crc_internal.dir/internal/crc_x86_arm_combined.cc.o
+[62/163] Building CXX object abseil/absl/debugging/CMakeFiles/absl_demangle_internal.dir/internal/demangle.cc.o
+[63/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_str_format_internal.dir/internal/str_format/bind.cc.o
+[64/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_str_format_internal.dir/internal/str_format/arg.cc.o
+[65/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_str_format_internal.dir/internal/str_format/extension.cc.o
+[66/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_str_format_internal.dir/internal/str_format/parser.cc.o
+[67/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_str_format_internal.dir/internal/str_format/output.cc.o
+[68/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_str_format_internal.dir/internal/str_format/float_conversion.cc.o
+[69/163] Building CXX object abseil/absl/time/CMakeFiles/absl_time.dir/civil_time.cc.o
+[70/163] Building CXX object abseil/absl/time/CMakeFiles/absl_time.dir/clock.cc.o
+[71/163] Linking CXX static library abseil/absl/time/libabsl_civil_time.a
+[72/163] Linking CXX static library abseil/absl/time/libabsl_time_zone.a
+[73/163] Linking CXX static library abseil/absl/base/libabsl_malloc_internal.a
+[74/163] Linking CXX static library abseil/absl/crc/libabsl_crc_internal.a
+[75/163] Building CXX object abseil/absl/time/CMakeFiles/absl_time.dir/format.cc.o
+[76/163] Building CXX object abseil/absl/time/CMakeFiles/absl_time.dir/time.cc.o
+[77/163] Building CXX object abseil/absl/time/CMakeFiles/absl_time.dir/duration.cc.o
+[78/163] Building CXX object abseil/absl/crc/CMakeFiles/absl_crc32c.dir/crc32c.cc.o
+[79/163] Building CXX object abseil/absl/debugging/CMakeFiles/absl_stacktrace.dir/stacktrace.cc.o
+[80/163] Building CXX object abseil/absl/crc/CMakeFiles/absl_crc32c.dir/internal/crc_memcpy_fallback.cc.o
+[81/163] Linking CXX static library abseil/absl/debugging/libabsl_debugging_internal.a
+[82/163] Linking CXX static library abseil/absl/debugging/libabsl_demangle_internal.a
+[83/163] Linking CXX static library abseil/absl/strings/libabsl_str_format_internal.a
+[84/163] Building CXX object abseil/absl/crc/CMakeFiles/absl_crc32c.dir/internal/crc_memcpy_x86_arm_combined.cc.o
+[85/163] Building CXX object abseil/absl/debugging/CMakeFiles/absl_symbolize.dir/symbolize.cc.o
+[86/163] Linking CXX static library abseil/absl/time/libabsl_time.a
+[87/163] Building CXX object abseil/absl/synchronization/CMakeFiles/absl_graphcycles_internal.dir/internal/graphcycles.cc.o
+[88/163] Linking CXX static library abseil/absl/debugging/libabsl_stacktrace.a
+[89/163] Linking CXX static library abseil/absl/debugging/libabsl_symbolize.a
+[90/163] Building CXX object abseil/absl/profiling/CMakeFiles/absl_exponential_biased.dir/internal/exponential_biased.cc.o
+[91/163] Linking CXX static library abseil/absl/synchronization/libabsl_graphcycles_internal.a
+[92/163] Building CXX object abseil/absl/synchronization/CMakeFiles/absl_kernel_timeout_internal.dir/internal/kernel_timeout.cc.o
+[93/163] Building CXX object abseil/absl/crc/CMakeFiles/absl_crc32c.dir/internal/crc_non_temporal_memcpy.cc.o
+[94/163] Linking CXX static library abseil/absl/crc/libabsl_crc32c.a
+[95/163] Linking CXX static library abseil/absl/synchronization/libabsl_kernel_timeout_internal.a
+[96/163] Building CXX object abseil/absl/synchronization/CMakeFiles/absl_synchronization.dir/barrier.cc.o
+[97/163] Building CXX object abseil/absl/crc/CMakeFiles/absl_crc_cord_state.dir/internal/crc_cord_state.cc.o
+[98/163] Building CXX object abseil/absl/synchronization/CMakeFiles/absl_synchronization.dir/blocking_counter.cc.o
+[99/163] Building CXX object abseil/absl/synchronization/CMakeFiles/absl_synchronization.dir/internal/create_thread_identity.cc.o
+[100/163] Building CXX object abseil/absl/synchronization/CMakeFiles/absl_synchronization.dir/internal/futex_waiter.cc.o
+[101/163] Building CXX object abseil/absl/synchronization/CMakeFiles/absl_synchronization.dir/internal/per_thread_sem.cc.o
+[102/163] Building CXX object abseil/absl/synchronization/CMakeFiles/absl_synchronization.dir/internal/pthread_waiter.cc.o
+[103/163] Building CXX object abseil/absl/synchronization/CMakeFiles/absl_synchronization.dir/internal/win32_waiter.cc.o
+[104/163] Building CXX object abseil/absl/synchronization/CMakeFiles/absl_synchronization.dir/internal/sem_waiter.cc.o
+[105/163] Building CXX object abseil/absl/synchronization/CMakeFiles/absl_synchronization.dir/notification.cc.o
+[106/163] Building CXX object abseil/absl/synchronization/CMakeFiles/absl_synchronization.dir/internal/waiter_base.cc.o
+[107/163] Linking CXX static library abseil/absl/crc/libabsl_crc_cord_state.a
+[108/163] Building CXX object abseil/absl/synchronization/CMakeFiles/absl_synchronization.dir/internal/stdcpp_waiter.cc.o
+[109/163] Linking CXX static library abseil/absl/profiling/libabsl_exponential_biased.a
+[110/163] Building CXX object abseil/absl/synchronization/CMakeFiles/absl_synchronization.dir/mutex.cc.o
+[111/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_cord_internal.dir/internal/cord_rep_btree_navigator.cc.o
+[112/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_cord_internal.dir/internal/cord_rep_btree_reader.cc.o
+[113/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_cord_internal.dir/internal/cord_internal.cc.o
+[114/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_cord_internal.dir/internal/cord_rep_btree.cc.o
+[115/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_cord_internal.dir/internal/cord_rep_consume.cc.o
+[116/163] Linking CXX static library abseil/absl/synchronization/libabsl_synchronization.a
+[117/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_cordz_functions.dir/internal/cordz_functions.cc.o
+[118/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_cord_internal.dir/internal/cord_rep_crc.cc.o
+[119/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_cordz_handle.dir/internal/cordz_handle.cc.o
+[120/163] Building CXX object integrations/sal/CMakeFiles/sal.dir/src/block_allocator.cpp.o
+[121/163] Building CXX object integrations/sal/CMakeFiles/sal.dir/src/mapping.cpp.o
+[122/163] Building CXX object integrations/sal/CMakeFiles/sal.dir/src/control_block_alloc.cpp.o
+[123/163] Linking CXX static library abseil/absl/strings/libabsl_cord_internal.a
+[124/163] Linking CXX static library abseil/absl/strings/libabsl_cordz_functions.a
+[125/163] Linking CXX static library abseil/absl/strings/libabsl_cordz_handle.a
+[126/163] Building CXX object integrations/sal/CMakeFiles/sal.dir/src/segment_thread.cpp.o
+[127/163] Building CXX object abseil/absl/types/CMakeFiles/absl_bad_optional_access.dir/bad_optional_access.cc.o
+[128/163] Building CXX object integrations/sal/CMakeFiles/sal.dir/src/allocator_session.cpp.o
+[129/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_cordz_info.dir/internal/cordz_info.cc.o
+[130/163] Building CXX object integrations/sal/CMakeFiles/sal.dir/src/allocator.cpp.o
+[131/163] Linking CXX static library integrations/sal/libsal.a
+[132/163] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/node/inner.cpp.o
+[133/163] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/dwal/wal_writer.cpp.o
+[134/163] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/node/leaf.cpp.o
+[135/163] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/dwal/wal_status.cpp.o
+[136/163] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/database.cpp.o
+[137/163] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/dwal/wal_reader.cpp.o
+[138/163] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_transaction.cpp.o
+[139/163] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_read_session.cpp.o
+[140/163] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/dwal/transaction.cpp.o
+[141/163] Linking CXX static library abseil/absl/strings/libabsl_cordz_info.a
+[142/163] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/dwal/merge_cursor.cpp.o
+[143/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_cord.dir/cord.cc.o
+[144/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_cord.dir/cord_buffer.cc.o
+[145/163] Linking CXX static library abseil/absl/types/libabsl_bad_optional_access.a
+[146/163] Building CXX object abseil/absl/strings/CMakeFiles/absl_cord.dir/cord_analysis.cc.o
+[147/163] Linking CXX static library abseil/absl/strings/libabsl_cord.a
+[148/163] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_database.cpp.o
+[149/163] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/dwal/merge_pool.cpp.o
+[150/163] Linking CXX static library integrations/psitri/libpsitri.a
+[151/163] Building CXX object psitrirocks/CMakeFiles/psitrirocks.dir/src/db_impl.cpp.o
+[152/163] Building CXX object psitri-sqlite/CMakeFiles/psitri-sqlite.dir/src/btree_psitri.cpp.o
+[153/163] Building CXX object CMakeFiles/fair-bank-rocksdb.dir/home/dlarimer/psitri-api-bench-20260917/psitri/benchmarks/fair_bank/main.cpp.o
+[154/163] Building CXX object CMakeFiles/fair-bank-psitrirocks.dir/home/dlarimer/psitri-api-bench-20260917/psitri/benchmarks/fair_bank/main.cpp.o
+[155/163] Linking CXX static library psitrirocks/libpsitrirocks.a
+[156/163] Linking CXX executable bin/fair-bank-rocksdb
+FAILED: bin/fair-bank-rocksdb 
+: && /usr/bin/clang++-20 -O3 -DNDEBUG -Xlinker --dependency-file=CMakeFiles/fair-bank-rocksdb.dir/link.d CMakeFiles/fair-bank-rocksdb.dir/home/dlarimer/psitri-api-bench-20260917/psitri/benchmarks/fair_bank/main.cpp.o -o bin/fair-bank-rocksdb  /home/dlarimer/arbtrie/build/release/_deps/rocksdb-build/librocksdb.a && :
+/usr/bin/ld: /home/dlarimer/arbtrie/build/release/_deps/rocksdb-build/librocksdb.a: error adding symbols: file format not recognized
+clang++-20: error: linker command failed with exit code 1 (use -v to see invocation)
+[157/163] Building CXX object CMakeFiles/fair-bank-sqlite.dir/home/dlarimer/psitri-api-bench-20260917/psitri/benchmarks/fair_bank/main.cpp.o
+[158/163] Building CXX object CMakeFiles/fair-bank-psitri_sqlite.dir/home/dlarimer/psitri-api-bench-20260917/psitri/benchmarks/fair_bank/main.cpp.o
+[159/163] Building C object psitri-sqlite/CMakeFiles/psitri-sqlite.dir/src/btree_helpers.c.o
+ninja: build stopped: subcommand failed.

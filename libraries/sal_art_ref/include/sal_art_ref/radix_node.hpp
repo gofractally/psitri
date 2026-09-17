@@ -185,7 +185,11 @@ namespace sal_art_ref
       static constexpr sal::implicit_ref_region no_region = 0xFFFF;
       sal::implicit_ref_region region = no_region;
       sal::implicit_ref_addr   off[range_count] = {};  // offset within `region`, one per range
-   };
+   } __attribute__((packed));
+   // This member starts at byte 29 of a packed radix header. Clang on x86 does
+   // not pack a non-POD member merely because its containing class is packed.
+   // Give the nested header alignment 1 too, preserving CL1 at byte 128.
+   static_assert(alignof(range_ctrs) == 1);
    static_assert(sizeof(range_ctrs) == 2 + 2 * range_count, "region(2) + range_count offsets(2 each)");
 
    /**

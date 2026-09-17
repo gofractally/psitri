@@ -1,0 +1,32 @@
+[1/32] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/mapping.cpp.o
+[2/32] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/block_allocator.cpp.o
+[3/32] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/control_block_alloc.cpp.o
+[4/32] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/segment_thread.cpp.o
+[5/32] Building CXX object psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/block_allocator.cpp.o
+[6/32] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/allocator_session.cpp.o
+[7/32] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/allocator.cpp.o
+[8/32] Linking CXX static library psitri/libraries/sal/libsal.a
+[9/32] Building CXX object psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/mapping.cpp.o
+[10/32] Building CXX object psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/control_block_alloc.cpp.o
+[11/32] Building CXX object psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/segment_thread.cpp.o
+[12/32] Building CXX object psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/allocator_session.cpp.o
+[13/32] Building CXX object psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/allocator.cpp.o
+[14/32] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/node/inner.cpp.o
+[15/32] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_writer.cpp.o
+[16/32] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/database.cpp.o
+[17/32] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/node/leaf.cpp.o
+[18/32] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_status.cpp.o
+[19/32] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_reader.cpp.o
+[20/32] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_transaction.cpp.o
+[21/32] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_read_session.cpp.o
+[22/32] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/transaction.cpp.o
+[23/32] Linking CXX static library psitri/experimental/sal_hybrid/libsal_hybrid_alloc.a
+[24/32] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/merge_cursor.cpp.o
+[25/32] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_database.cpp.o
+[26/32] Building CXX object CMakeFiles/fair-bank-mdbx.dir/home/dlarimer/psitri-api-bench-20260917/psitri/benchmarks/fair_bank/main.cpp.o
+[27/32] Linking CXX executable bin/fair-bank-mdbx
+[28/32] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/merge_pool.cpp.o
+[29/32] Linking CXX static library psitri/libraries/psitri/libpsitri.a
+[30/32] Building CXX object psitri/libraries/psitrimdbx/CMakeFiles/psitrimdbx.dir/src/mdbx_impl.cpp.o
+[31/32] Linking CXX static library psitri/libraries/psitrimdbx/libpsitrimdbx.a
+[32/32] Linking CXX executable bin/fair-bank-psitrimdbx

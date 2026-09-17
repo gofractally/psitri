@@ -1,0 +1,5 @@
+[1/5] Linking CXX static library psitri-sqlite/libpsitri-sqlite.a
+[2/5] Linking CXX executable bin/fair-bank-sqlite
+[3/5] Linking CXX executable bin/fair-bank-psitrirocks
+[4/5] Linking CXX executable bin/fair-bank-psitri_sqlite
+[5/5] Linking CXX executable bin/fair-bank-rocksdb

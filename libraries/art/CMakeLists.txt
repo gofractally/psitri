@@ -4,7 +4,7 @@ target_include_directories(art INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 target_link_libraries(art INTERFACE ucc)
 
-option(ART_BUILD_TESTS "Build the art test suite" ON)
+option(ART_BUILD_TESTS "Build the art test suite" ${BUILD_TESTS})
 if(ART_BUILD_TESTS)
     enable_testing()
     find_package(Catch2 3 QUIET)

@@ -15,7 +15,7 @@ target_include_directories(sal_art_ref INTERFACE
 )
 
 target_compile_features(sal_art_ref INTERFACE cxx_std_23)
-target_link_libraries(sal_art_ref INTERFACE sal ucc)
+target_link_libraries(sal_art_ref INTERFACE sal ucc adb)
 
 # Tests
 option(SAL_ART_REF_BUILD_TESTS "Build the sal_art_ref test suite" OFF)

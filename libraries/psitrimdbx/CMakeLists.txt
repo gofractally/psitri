@@ -10,9 +10,6 @@ target_include_directories(psitrimdbx
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
-    PRIVATE
-        # heart_dwal_engine.hpp / radix_engine.hpp (the cold base instantiation)
-        ${CMAKE_SOURCE_DIR}/libraries/sal_art_ref/test
 )
 
 target_link_libraries(psitrimdbx PUBLIC psitri delta_art start_ver start_ref sal_art_ref gcart rcart)
@@ -50,7 +47,7 @@ if(PSITRIMDBX_DEBUG)
     message(STATUS "psitrimdbx: debug tracing ON")
 endif()
 
-option(PSITRIMDBX_BUILD_TESTS "Build the psitrimdbx test suite" ON)
+option(PSITRIMDBX_BUILD_TESTS "Build the psitrimdbx test suite" ${BUILD_TESTS})
 if(PSITRIMDBX_BUILD_TESTS)
     enable_testing()
     find_package(Catch2 3 QUIET)

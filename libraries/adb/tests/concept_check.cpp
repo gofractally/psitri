@@ -147,6 +147,44 @@ static_assert(!adb::kv_database<int>);
 static_assert(!adb::kv_cursor<std::string>);
 static_assert(!adb::storable_type<std::string>);
 
+// An unchanged engine still satisfies every original requirement without
+// implementing any range method. A separate capability detects the extension.
+struct legacy_engine
+{
+   using database = mock::database;
+   using write_session = mock::write_session;
+   using read_session = mock::read_session;
+   using transaction = mock::transaction;
+   using cursor = mock::cursor;
+};
+static_assert(adb::kv_engine<legacy_engine>);
+static_assert(!adb::range_engine<legacy_engine>);
+static_assert(!adb::range_engine<int>);
+
+struct ranged_cursor : mock::cursor, adb::detail::range_cursor
+{
+   using mock::cursor::get;
+   using mock::cursor::get_value;
+   using mock::cursor::value;
+   using adb::detail::range_cursor::get;
+   using adb::detail::range_cursor::get_value;
+   using adb::detail::range_cursor::value;
+};
+static_assert(adb::range_cursor<ranged_cursor>);
+static_assert(sizeof(ranged_cursor) == sizeof(mock::cursor));
+
+// A method name alone isn't a capability: require the public result types.
+struct wrong_range_result : mock::cursor
+{
+   using mock::cursor::get;
+   template <class S>
+   S get(std::string_view, uint64_t, uint64_t = adb::read_all);
+   template <class F>
+   void get(std::string_view, F&&, uint64_t, uint64_t = adb::read_all);
+};
+static_assert(adb::mergeable_cursor<wrong_range_result>);
+static_assert(!adb::range_reader<wrong_range_result>);
+
 int main()
 {
    return 0;  // the assertions above ARE the test

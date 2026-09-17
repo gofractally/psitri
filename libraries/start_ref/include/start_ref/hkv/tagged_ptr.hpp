@@ -41,7 +41,7 @@ namespace start_ref::hkv::detail
                          // instead of copying them (design5 implicit-to-explicit)
       value_large  = 14, // LARGE terminal: a leaf (suffix + value) structurally
                          // identical to value_ptr, but allocated from the SECOND
-                         // (8 KB-grain) arena and indexed off the large base. Read
+                         // (32 KiB-grain) arena and indexed off the large base. Read
                          // paths treat it as value_ptr's verbatim; only alloc/free
                          // routes to the large arena (deref/pack use grain encoding).
       null         = 0xF,

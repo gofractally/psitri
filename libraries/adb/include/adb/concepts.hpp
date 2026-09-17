@@ -5,10 +5,14 @@
 // against them, so drift is a compile error naming the class, not a
 // harness surprise. Zero dependencies beyond the standard library.
 #pragma once
+#include <adb/value_range.hpp>
 #include <concepts>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
+#include <type_traits>
+#include <utility>
 #include <string>
 #include <string_view>
 
@@ -115,6 +119,57 @@ namespace adb
        && kv_transaction<typename E::transaction>      //
        && mergeable_cursor<typename E::cursor>;
 
+   // Public engine contract: a named configuration, matching role factories,
+   // owned/copyable snapshots, and owning byte reads. Mode is a parameter so
+   // adb remains independent of the storage libraries. Runtime semantics are
+   // specified in docs/api/reference.md and checked by api-conformance-tests.
+   template <class E, class Mode>
+   concept openable_engine = kv_engine<E> && requires {
+      typename E::config;
+      requires std::default_initializable<typename E::config>;
+   } && requires(const std::filesystem::path& path, Mode mode,
+                 const typename E::config& cfg, typename E::database& db,
+                 typename E::write_session& ws, typename E::read_session& rs,
+                 typename E::transaction& tx, typename E::cursor& cur,
+                 uint32_t root, std::string_view key) {
+      { E::database::open(path, mode, cfg) } -> std::same_as<std::shared_ptr<typename E::database>>;
+      { db.start_write_session() } -> std::same_as<std::shared_ptr<typename E::write_session>>;
+      { db.start_read_session() } -> std::same_as<std::shared_ptr<typename E::read_session>>;
+      { ws.start_transaction(root) } -> std::same_as<typename E::transaction>;
+      { rs.create_cursor(root) } -> std::same_as<typename E::cursor>;
+      { ws.get_root(root) } -> shared_snapshot;
+      { ws.get_root(root).snapshot_cursor() } -> std::same_as<typename E::cursor>;
+      { tx.remove(key) } -> std::same_as<int>;
+      tx.abort();
+      { tx.template get<std::string>(key) } -> std::same_as<std::optional<std::string>>;
+      { cur.template get<std::string>(key) } -> std::same_as<std::optional<std::string>>;
+      { cur.template value<std::string>() } -> std::same_as<std::optional<std::string>>;
+   };
+
+   // Optional byte-range capability. Never add these requirements to the base
+   // concepts: existing/experimental engines keep their original contract.
+   template <class R>
+   concept range_reader = requires(R& reader, std::string_view key, uint64_t offset,
+                                   uint64_t length) {
+      { reader.template get<std::string>(key, offset) } -> std::same_as<std::optional<std::string>>;
+      { reader.template get<std::string>(key, offset, length) } -> std::same_as<std::optional<std::string>>;
+      { reader.get(key, [](std::string_view) {}, offset) } -> std::same_as<bool>;
+      { reader.get(key, [](std::string_view) {}, offset, length) } -> std::same_as<bool>;
+   };
+
+   template <class C>
+   concept range_cursor = mergeable_cursor<C> && range_reader<C> &&
+       requires(C& cur, uint64_t offset, uint64_t length) {
+          { cur.template value<std::string>(offset) } -> std::same_as<std::optional<std::string>>;
+          { cur.template value<std::string>(offset, length) } -> std::same_as<std::optional<std::string>>;
+          { cur.get_value([](std::string_view) {}, offset) } -> std::same_as<bool>;
+          { cur.get_value([](std::string_view) {}, offset, length) } -> std::same_as<bool>;
+       };
+
+   template <class E>
+   concept range_engine = kv_engine<E> && range_reader<typename E::transaction> &&
+                          range_cursor<typename E::cursor>;
+
    // Openable by an embedder: a static factory taking a directory and a storage
    // open-mode, returning a handle. The mode type is the storage layer's
    // (sal::open_mode) so it is a TEMPLATE PARAMETER here — adb stays std-only
@@ -189,10 +244,9 @@ namespace adb
        };
 
    // ── multi-root transactions (psitri's model) ──────────────────────────
-   // open_root in STRICTLY ASCENDING index order (deadlock-free by
-   // construction); one tree_handle abstraction targets any held root;
-   // abort rolls back all roots; cross-root publish is ORDERED (descending
-   // index), not atomic — engines with a WAL may strengthen.
+   // Acquire distinct roots in strictly ascending index order (required by
+   // some engines for deadlock freedom). Abort rolls back all held roots;
+   // cross-root publication order and atomicity are NOT portable guarantees.
    // set_root(tree) -> tree is THE exchange: assign, return the displaced
    // tree as the engine's owned-tree value.
    template <class H>

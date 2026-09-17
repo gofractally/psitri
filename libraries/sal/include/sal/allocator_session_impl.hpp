@@ -64,7 +64,7 @@ namespace sal
    }
    inline void allocator_session::prepare_alloc(uint32_t size, msec_timestamp vage)
    {
-      assert(size < sizeof(mapped_memory::segment::data));
+      assert(size <= fresh_allocation_capacity);
       assert(size == ucc::round_up_multiple<cacheline_size>(size));
 
       if (not _alloc_seg_ptr) [[unlikely]]

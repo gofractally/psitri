@@ -4,10 +4,10 @@
 #   libraries/adb           abstract database concepts
 #   libraries/sal           smart alloc (movable memory, persistent storage)
 #   libraries/start_ref     static ART, refcount liveness
-#   libraries/start_ver     static ART, version/stamp liveness
 #   libraries/sal_art_ref   ART on sal
 #   libraries/psitri        legacy sal btree
 #   libraries/delta_art     two adb engines composed (hot delta -> base)
+#   experimental/          research engines and allocators, kept for comparison
 #   shims/psi-*             foreign-API products over our engines
 #   vendor/{psio,ucc}       FetchContent deps (co-dev override pattern)
 #   tests/ benchmarks/      written against adb, instantiated per engine
@@ -17,6 +17,7 @@ project(psitri VERSION 0.1.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(PSITRI_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # When embedded as a subdirectory (e.g. Silkworm's psitrimdbx backend), default
 # the dev-only targets OFF so the consumer gets just the libraries it links.
@@ -42,7 +43,7 @@ endif()
 FetchContent_Declare(psio
     GIT_REPOSITORY https://github.com/gofractally/psio.git
     GIT_TAG        main
-    SOURCE_DIR     ${CMAKE_SOURCE_DIR}/vendor/psio
+    SOURCE_DIR     ${PSITRI_SOURCE_DIR}/vendor/psio
     SOURCE_SUBDIR  cpp)
 if(NOT DEFINED FETCHCONTENT_SOURCE_DIR_UCC AND EXISTS "$ENV{HOME}/gofractally/ucc/CMakeLists.txt")
     set(FETCHCONTENT_SOURCE_DIR_UCC "$ENV{HOME}/gofractally/ucc")
@@ -51,26 +52,35 @@ endif()
 FetchContent_Declare(ucc
     GIT_REPOSITORY https://github.com/gofractally/ucc.git
     GIT_TAG        main
-    SOURCE_DIR     ${CMAKE_SOURCE_DIR}/vendor/ucc)
+    SOURCE_DIR     ${PSITRI_SOURCE_DIR}/vendor/ucc)
 FetchContent_MakeAvailable(psio ucc)
 
 # ── libraries, in dependency order (added as each one migrates) ──────────────
 add_subdirectory(libraries/adb)
 set(SAL_BUILD_TESTS ${BUILD_TESTS})
 add_subdirectory(libraries/sal)
-add_subdirectory(libraries/sal2)
-add_subdirectory(libraries/sal2gc)  # version-liveness GC allocator (fork of sal2; gcart's allocator)
-add_subdirectory(libraries/gcart)
-add_subdirectory(libraries/rcart)  # refcount engine (fork of gcart; gcart evolves to the GC spec)
+# Research targets keep their existing names and participate in the same
+# tests/benchmarks. Only their source location changes; backend defaults do not.
+add_subdirectory(experimental/sal2)
+add_subdirectory(experimental/sal2gc)
+add_subdirectory(experimental/gcart)
+add_subdirectory(experimental/rcart)
 add_subdirectory(libraries/art)
 add_subdirectory(libraries/start_ref)
-add_subdirectory(libraries/start_ver)
+add_subdirectory(experimental/start_ver)
 set(SAL_ART_REF_BUILD_TESTS ${BUILD_TESTS})
 add_subdirectory(libraries/sal_art_ref)
 add_subdirectory(libraries/psitri)
 add_subdirectory(libraries/delta_art)
-add_subdirectory(libraries/walart)
+add_subdirectory(libraries/psitri_api)
+add_subdirectory(experimental/api)
+add_subdirectory(experimental/walart)
 add_subdirectory(libraries/psitrimdbx)
+
+option(PSITRI_BUILD_EXAMPLES "Build the public API examples" ${PSITRI_IS_TOP})
+if(PSITRI_BUILD_EXAMPLES)
+    add_subdirectory(examples/api)
+endif()
 
 if(BUILD_TESTS)
     add_subdirectory(tests)

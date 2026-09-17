@@ -33,7 +33,7 @@ namespace sal_art_ref
       //                retain/release the decoded address.
       //   vt_extern_val — VALUE-ONLY external: the FULL post-cpfx suffix stays in THIS record
       //                (the page's common prefix keeps it short), and only the VALUE lives in an
-      //                external node (a key_val_node with key_len==0, value at data+0). Payload is
+      //                external node (a key_val_node with key_len==0, possibly chunked). Payload is
       //                the same 2-byte cbase code as vt_extern, but the suffix is COMPLETE — so the
       //                key never needs the external object (exact-match compares the in-page
       //                suffix). Used when suffix <= ext_frag_cap; a longer suffix falls back to

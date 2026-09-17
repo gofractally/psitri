@@ -1,0 +1,4 @@
+add_library(psitri_api_experimental INTERFACE)
+add_library(psitri::experimental ALIAS psitri_api_experimental)
+target_include_directories(psitri_api_experimental INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(psitri_api_experimental INTERFACE psitri_api delta_art)

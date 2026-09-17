@@ -1,5 +1,8 @@
 #pragma once
-// The base-tier ("Tri") engine concept for the DWAL layer.
+// Internal base-tier ("Tri") protocol for the legacy DWAL layer.
+// New third-party consumers use <psitri/concepts.hpp> and psitri::engine.
+// This narrower protocol does not require owned snapshots and is retained
+// for existing DWAL/tiered implementations; it is not API conformance.
 //
 // dwal historically hardwired psitri as its COW base. Everything dwal needs
 // from the base is the psitri-shaped public API that heart implemented as a

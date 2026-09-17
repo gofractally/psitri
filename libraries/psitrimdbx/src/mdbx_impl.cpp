@@ -84,7 +84,7 @@
 #include <delta_art/tiered_kv.hpp>
 #endif
 #if PSITRIMDBX_BACKEND_DELTA_ART || PSITRIMDBX_BACKEND_SAL_ART_REF
-#include <heart_dwal_engine.hpp>  // sal_art_ref::radix::dwal_engine (cold base / direct)
+#include <sal_art_ref/engine.hpp>  // sal_art_ref::radix::dwal_engine (cold base / direct)
 #endif
 #if PSITRIMDBX_USES_PSITRI
 #include <psitri/database_impl.hpp>     // basic_database<LockPolicy> full def

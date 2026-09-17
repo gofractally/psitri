@@ -45,7 +45,7 @@ namespace start_ref
             std::memcpy(p.b, &raw, HANDLE_BYTES);
             return p;
          }
-         // LARGE arena: the index counts 8 KB GRAINS, not 128 B lines. The handle
+         // LARGE arena: the index counts 32 KiB GRAINS, not 128 B lines. The handle
          // is otherwise identical (36-bit index in the high nibbles, 4-bit tag);
          // deref multiplies the index by large_grain_bytes instead of line_bytes.
          static line_ptr from_grain_off(size_t byte_off, hkv::detail::K k) noexcept
@@ -80,7 +80,7 @@ namespace start_ref
    // Namespace-scope (not nested) so allocator REBINDS share the pointer.
    struct value_hooks
    {
-      void (*on_copy)(const char* bytes, size_t n, void* user);
+      void (*on_copy)(char* bytes, size_t n, void* user, large_session* session);
       void (*on_release)(const char* bytes, size_t n, void* user);
       void* user;
    };
@@ -98,7 +98,7 @@ namespace start_ref
                                // cascades to the background releaser
       const value_hooks* vhooks = nullptr;
 
-      // ── large-value second arena (8 KB grain; value_large leaves) ─────────
+      // ── large-value second arena (32 KiB grain; value_large leaves) ─────────
       // lses (writer-only) is the allocation context; the deref/free base comes
       // from a->companion() so EVERY allocator copy — views, drain, releaser —
       // resolves and frees a large leaf without carrying lses. The same COW /
@@ -146,7 +146,7 @@ namespace start_ref
          assert(la && lses && "large-value store has no large arena/session");
          (void)la;
          if (bytes > large_max_bytes)
-            throw std::runtime_error("part: value exceeds the large-arena 0.5 MB object cap");
+            throw std::runtime_error("part: physical allocation exceeds the large-arena 2 MiB cap");
          const uint32_t units = uint32_t((bytes + large_grain_bytes - 1) / large_grain_bytes);
          const line_idx g     = lses->alloc_lines(units);
          return size_t(g) * large_grain_bytes;

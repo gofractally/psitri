@@ -3,8 +3,8 @@ project(start_ref VERSION 0.1.0 LANGUAGES CXX)
 
 # start_ref — static ART with refcount liveness (formerly `part`; see
 # SPEC.md). Layer 1 is a non-relocating, line-granular (128 B) allocator
-# whose placement policy minimizes msync write amplification. Depends only
-# on sal + ucc — never on psitri.
+# whose placement policy minimizes msync write amplification. Depends on
+# sal + ucc + the standard-only adb helpers — never on psitri.
 add_library(start_ref INTERFACE)
 
 target_include_directories(start_ref INTERFACE
@@ -13,9 +13,9 @@ target_include_directories(start_ref INTERFACE
 )
 
 target_compile_features(start_ref INTERFACE cxx_std_23)
-target_link_libraries(start_ref INTERFACE sal ucc)
+target_link_libraries(start_ref INTERFACE sal ucc adb)
 
-option(START_REF_BUILD_TESTS "Build the start_ref test suite" ON)
+option(START_REF_BUILD_TESTS "Build the start_ref test suite" ${BUILD_TESTS})
 if(START_REF_BUILD_TESTS)
     enable_testing()
     find_package(Catch2 3 QUIET)

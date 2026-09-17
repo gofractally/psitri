@@ -48,8 +48,8 @@ namespace start_ref
    // (bits), <= 64 per u64 word; the byte-size-per-unit lives only here. A
    // `geometry` instantiation freezes one grain. The DEFAULT (`line_geometry`)
    // reproduces today's exact constants verbatim — the existing line arena is
-   // byte-identical. A second instance at an 8 KB grain reuses the SAME freeset
-   // and gets 1..64 chunks/word = 0.5 MB max object, with no allocator changes.
+   // byte-identical. A second instance at a 32 KiB grain reuses the SAME freeset
+   // and gets 1..64 grains/word = 2 MiB max allocation, with no allocator changes.
    template <uint32_t GrainBytes,
              uint32_t SegBytes  = segment_bytes,
              uint32_t PageBytes = disk_page_bytes>
@@ -75,13 +75,11 @@ namespace start_ref
    static_assert(line_geometry::units_per_page == lines_per_page);
    static_assert(line_geometry::pages_per_segment_ == pages_per_segment);
 
-   // The large-value grain: 32 KB units. Max object = max_alloc_lines (64) x
-   // 32768 = 2 MB (the single-CAS cap — an allocation stays in one freeset u64
-   // word). 32 KB (vs the line arena's 128 B) lifts the object cap to 2 MB so the
-   // full MDBX value-size battery (up to a 1 MB value, which with the leaf's key
-   // suffix + header spans ~33 grains) and any future large blob fit; Ethereum
-   // bytecode (EIP-170: 24 KB) sits comfortably inside. The segment is sized so
-   // units_per_segment == lines_per_segment (the default geometry's): the
+   // The large-value grain: 32 KiB units. Max allocation = max_alloc_lines (64)
+   // x 32768 = 2 MiB (the single-CAS cap — a run stays in one freeset u64 word).
+   // The byte API chunks larger logical values across these fixed-address runs.
+   // The segment keeps units_per_segment == lines_per_segment (the default
+   // geometry's): the
    // per-segment metadata (seg_freeset, the 1 B/unit refcount block) is then
    // BYTE-IDENTICAL in size to the line arena's — critically, a whole-page
    // multiple, so the contiguous-VA block_allocator's MAP_FIXED grows succeed on

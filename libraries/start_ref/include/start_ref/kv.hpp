@@ -13,6 +13,7 @@
 // inline byte strings (<= 126 B): COW clones are memcpys and every value byte
 // lives in the arena.
 #pragma once
+#include <adb/value_range.hpp>
 #include <cassert>
 #include <cstring>
 #include <filesystem>
@@ -27,6 +28,7 @@
 #include <thread>
 
 #include <start_ref/hkv/tree.hpp>
+#include <start_ref/large_value.hpp>
 #include <start_ref/tree_alloc.hpp>
 
 namespace start_ref::kv
@@ -102,7 +104,8 @@ namespace start_ref::kv
 
    // ── typed values (the LOCKED adb API) ─────────────────────────────────
    // EVERY stored slot is [u16 LE typenum][payload]. Typenum 0 = raw bytes
-   // (the null-hook builtin); registered ids >= 1 dispatch retain/release
+   // (the null-hook builtin); 65535 is internal chunked bytes. Registered
+   // ids 1..65534 dispatch retain/release
    // through the database registry from the tree's value-lifecycle hooks —
    // overwrite, remove, abort, privatize clone, generation retirement and
    // background-releaser cascades included. Reads are THREE-OUTCOME:
@@ -128,11 +131,16 @@ namespace start_ref::kv
       T::t_pod::release(ses, p);
    };
 
-   inline uint16_t slot_type(value_view s) noexcept
+   inline uint16_t storage_type(value_view s) noexcept
    {
       uint16_t t;
       std::memcpy(&t, s.data(), 2);
       return t;
+   }
+   inline uint16_t slot_type(value_view s) noexcept
+   {
+      const auto type = storage_type(s);
+      return type == large_value_detail::chunked_type ? kRawType : type;
    }
    inline value_view slot_payload(value_view s) noexcept
    {
@@ -167,26 +175,79 @@ namespace start_ref::kv
          __builtin_unreachable();
       }
    };
+   struct chunked_val : tagged_val
+   {
+      large_value_detail::source chunks;
+      chunked_val(large_session& session, uint32_t key_size, value_view value)
+          : tagged_val{}, chunks(session, key_size, value) {}
+      size_t size() const noexcept { return chunks.size(); }
+      void write(char* dest) const noexcept { chunks.write(dest); }
+   };
+
+   inline void upsert_bytes(engine_t& tree, key_view key, value_view value)
+   {
+      if (value.size() > large_value_detail::max_value_size)
+         throw std::invalid_argument("start_ref: value exceeds UINT32_MAX");
+      if (uint64_t(key.size()) + value.size() + large_value_detail::leaf_header_size + 2 >
+          large_max_object_bytes)
+      {
+         if (key.size() > UINT16_MAX)
+            throw std::invalid_argument("start_ref: key exceeds leaf length field");
+         if constexpr (engine_t::cb_create)
+            throw std::invalid_argument("start_ref: chunked values require the radix layout");
+         else
+         {
+            chunked_val source(*tree.allocator_mut().lses, uint32_t(key.size()), value);
+            tree.cow_insert(key, source);
+         }
+      }
+      else if constexpr (engine_t::cb_create)
+      {
+         std::string env(value.size() + 2, '\0');
+         std::memcpy(env.data() + 2, value.data(), value.size());
+         tree.pg_upsert(key, env);
+      }
+      else
+         tree.cow_insert(key, tagged_val{kRawType, value});
+   }
+
    template <class S>
-   S slot_decode(value_view slot)
+   S slot_decode(value_view slot, const large_arena* store,
+                 uint64_t offset = 0, uint64_t length = adb::read_all)
    {
       const uint16_t t = slot_type(slot);
       if constexpr (storable<S>)
       {
-         if (t != S::type_id)
+         if (offset || length != adb::read_all)
+            throw std::invalid_argument("start_ref: byte ranges require a byte value");
+         if (t != S::type_id || slot.size() - 2 != sizeof(typename S::t_pod))
             throw invalid_type{t, S::type_id};
          typename S::t_pod pod;
-         if (slot.size() - 2 != sizeof(pod))
-            throw invalid_type{t, S::type_id};
          std::memcpy(&pod, slot.data() + 2, sizeof(pod));
-         return S::make_from_pod(pod, true);  // a RETAINED handle out
+         return S::make_from_pod(pod, true);
       }
       else
       {
-         if (t != kRawType)
-            throw invalid_type{t, kRawType};
-         const value_view p = slot_payload(slot);
-         return S(p.data(), p.size());
+         if (t != kRawType) throw invalid_type{t, kRawType};
+         if (storage_type(slot) == kRawType)
+         {
+            const auto p = adb::detail::value_slice(slot_payload(slot), offset, length);
+            return S(p.data(), p.size());
+         }
+         return large_value_detail::read(store, slot, offset, length).template copy_or_take<S>();
+      }
+   }
+   template <class F>
+   void slot_visit(value_view slot, const large_arena* store, F&& fn,
+                   uint64_t offset = 0, uint64_t length = adb::read_all)
+   {
+      if (slot_type(slot) != kRawType) throw invalid_type{slot_type(slot), kRawType};
+      if (storage_type(slot) == kRawType)
+         fn(adb::detail::value_slice(slot_payload(slot), offset, length));
+      else
+      {
+         auto held = large_value_detail::read(store, slot, offset, length);
+         fn(held.view());
       }
    }
 
@@ -213,21 +274,25 @@ namespace start_ref::kv
          std::memcpy(&pod, _s + 2, sizeof(pod));
          return T::make_from_pod(pod, true);
       }
-      std::string_view bytes() const
+      std::string_view bytes(uint64_t offset = 0, uint64_t length = adb::read_all) const
       {
-         if (type() != kRawType)
-            throw invalid_type{type(), kRawType};
-         return {_s + 2, _n - 2};
+         if (!_s) return {};
+         if (type() != kRawType) throw invalid_type{type(), kRawType};
+         _range = large_value_detail::read(_large, {_s, _n}, offset, length);
+         return _range->view();
       }
-      std::string_view raw_pod() const noexcept
+      std::string_view raw_pod() const
       {
+         if (_s && large_value_detail::chunked({_s, _n})) return bytes();
          return _s ? std::string_view{_s + 2, _n - 2} : std::string_view{};
       }
       explicit operator bool() const noexcept { return _s != nullptr; }
 
      private:
       friend class transaction;
-      any_value(const char* s, size_t n) : _s(s), _n(n) {}
+      any_value(const char* s, size_t n, const large_arena* large) : _large(large), _s(s), _n(n) {}
+      const large_arena* _large = nullptr;
+      mutable std::optional<large_value_detail::range> _range;
       const char* _s = nullptr;
       size_t      _n = 0;  // the FULL slot (envelope included), in the tree
    };
@@ -336,69 +401,58 @@ namespace start_ref::kv
       key_view key() const { return (*_it).first; }
 
       template <class S = std::string>
-      std::optional<S> value() const
+      std::optional<S> value(uint64_t offset = 0, uint64_t length = adb::read_all) const
       {
-         if (is_end())
-            return std::nullopt;
-         return slot_decode<S>((*_it).second.v);
+         if (is_end() || is_rend()) return std::nullopt;
+         return slot_decode<S>((*_it).second.v, large_(), offset, length);
       }
-      template <class F>
-      bool get_value(F&& f) const
+      template <class F> requires adb::detail::value_callback<F>
+      bool get_value(F&& f, uint64_t offset = 0, uint64_t length = adb::read_all) const
       {
-         if (is_end())
-            return false;
-         const value_view s = (*_it).second.v;
-         if (slot_type(s) != kRawType)
-            throw invalid_type{slot_type(s), kRawType};
-         f(slot_payload(s));
+         if (is_end() || is_rend()) return false;
+         slot_visit((*_it).second.v, large_(), std::forward<F>(f), offset, length);
          return true;
       }
-      uint16_t value_type() const { return is_end() ? kRawType : slot_type((*_it).second.v); }
-      template <class T>
-      bool is_type() const
+      int64_t value_size() const
       {
-         return !is_end() && slot_type((*_it).second.v) == T::type_id;
+         if (is_end() || is_rend()) return -1;
+         const auto slot = (*_it).second.v;
+         return large_value_detail::chunked(slot) ? large_value_detail::head_view(slot).size() : slot.size() - 2;
       }
-
-      // Point read against the snapshot (the bank reader hot path).
+      uint16_t value_type() const { return is_end() || is_rend() ? kRawType : slot_type((*_it).second.v); }
+      template <class T> bool is_type() const
+      {
+         return !is_end() && !is_rend() && slot_type((*_it).second.v) == T::type_id;
+      }
       template <class S = std::string>
-      std::optional<S> get(key_view k) const
+      std::optional<S> get(key_view k, uint64_t offset = 0, uint64_t length = adb::read_all) const
       {
-         if constexpr (engine_t::cb_create)
-         {
-            std::string_view out;
-            if (!_view.pg_find(k, out))
-               return std::nullopt;
-            return slot_decode<S>(out);
-         }
-         bval out;
-         if (!_view.find(k, out))
-            return std::nullopt;
-         return slot_decode<S>(out.v);
+         value_view slot;
+         if (!find_slot_(k, slot)) return std::nullopt;
+         return slot_decode<S>(slot, large_(), offset, length);
       }
-      template <class F>
-      bool get(key_view k, F&& f) const
+      template <class F> requires adb::detail::value_callback<F>
+      bool get(key_view k, F&& f, uint64_t offset = 0, uint64_t length = adb::read_all) const
       {
-         if constexpr (engine_t::cb_create)
-         {
-            std::string_view out;
-            if (!_view.pg_find(k, out))
-               return false;
-            if (slot_type(out) != kRawType)
-               throw invalid_type{slot_type(out), kRawType};
-            f(slot_payload(out));
-            return true;
-         }
-         bval out;
-         if (!_view.find(k, out))
-            return false;
-         if (slot_type(out.v) != kRawType)
-            throw invalid_type{slot_type(out.v), kRawType};
-         f(slot_payload(out.v));
+         value_view slot;
+         if (!find_slot_(k, slot)) return false;
+         slot_visit(slot, large_(), std::forward<F>(f), offset, length);
          return true;
       }
 
      private:
+      const large_arena* large_() const noexcept
+      {
+         return _a ? static_cast<const large_arena*>(_a->companion()) : nullptr;
+      }
+      bool find_slot_(key_view key, value_view& out) const
+      {
+         if constexpr (engine_t::cb_create) return _view.pg_find(key, out);
+         bval value;
+         if (!_view.find(key, value)) return false;
+         out = value.v;
+         return true;
+      }
       friend class database;
       friend class read_session;
       friend class tree;
@@ -457,7 +511,7 @@ namespace start_ref::kv
       void abort() noexcept;
       ~transaction() { abort(); }
       transaction(transaction&& o) noexcept
-          : _ws(o._ws), _tx(std::move(o._tx)), _roots(std::move(o._roots)), _done(o._done)
+          : _ws(o._ws), _tx(std::move(o._tx)), _large_tx(std::move(o._large_tx)), _roots(std::move(o._roots)), _done(o._done)
       {
          o._done = true;  // moved-from: nothing to roll back
       }
@@ -465,9 +519,10 @@ namespace start_ref::kv
       transaction& operator=(const transaction&) = delete;
 
       template <class F>
-      bool get(key_view k, F&& fn) const;
-      template <class S>
-      std::optional<S> get(key_view k) const;
+         requires adb::detail::value_callback<F>
+      bool get(key_view k, F&& fn, uint64_t offset = 0, uint64_t length = adb::read_all) const;
+      template <class S = std::string>
+      std::optional<S> get(key_view k, uint64_t offset = 0, uint64_t length = adb::read_all) const;
 
      private:
       friend class write_session;
@@ -483,6 +538,7 @@ namespace start_ref::kv
       engine_t&   tree_(uint32_t root_index);       // working tree for a held root
       write_session*          _ws;
       start_ref::transaction  _tx;
+      start_ref::large_transaction _large_tx;
       std::vector<root_state> _roots;  // [0] = primary; ascending order
       bool                    _done = false;
    };
@@ -490,7 +546,7 @@ namespace start_ref::kv
    // A tree IS a snapshot (adb): an owned, FROZEN handle holding ONE refcount
    // on its root (under node-COW that ref keeps the version readable across
    // later commits). The single owned-tree type: get_root returns it, set_root
-   // exchanges it, snapshot_cursor reads it. Move-only; default = empty.
+   // exchanges it, snapshot_cursor reads it. Copyable; default = empty.
    class tree
    {
      public:
@@ -524,8 +580,14 @@ namespace start_ref::kv
       ~tree() { release_(); }
       cursor snapshot_cursor() const;  // out-of-line (needs database)
       template <class S = std::string>
-      std::optional<S> get(key_view k) const;
+      std::optional<S> get(key_view k, uint64_t offset = 0, uint64_t length = adb::read_all) const;
       explicit operator bool() const noexcept { return _db != nullptr; }
+      template <class F>
+         requires adb::detail::value_callback<F>
+      bool get(key_view k, F&& fn, uint64_t offset = 0, uint64_t length = adb::read_all) const
+      {
+         return _db && snapshot_cursor().get(k, std::forward<F>(fn), offset, length);
+      }
 
      private:
       friend class database;
@@ -547,8 +609,11 @@ namespace start_ref::kv
       void upsert(key_view k, value_view v);
       int  remove(key_view k);
       template <class S = std::string>
-      std::optional<S> get(key_view k) const;
+      std::optional<S> get(key_view k, uint64_t offset = 0, uint64_t length = adb::read_all) const;
       tree set_root(tree t);  // THE exchange: assign, return the displaced tree
+      template <class F>
+         requires adb::detail::value_callback<F>
+      bool get(key_view k, F&& fn, uint64_t offset = 0, uint64_t length = adb::read_all) const;
 
      private:
       friend class transaction;
@@ -712,7 +777,7 @@ namespace start_ref::kv
          std::lock_guard g(_root_mx);
          const root_ptr  r = _live_root[idx];
          if (!r.is_null())
-            _arena.add_ref_or_throw(uint32_t(r.raw() >> 4));  // the snapshot's ref
+            retain_root_(r);  // the snapshot's ref
          return tree(this, r, 0);
       }
       // debug/back-compat alias (root 0 snapshot cursor over an owned tree)
@@ -725,6 +790,13 @@ namespace start_ref::kv
       friend class tree;
       friend class tree_handle;
 
+      void retain_root_(root_ptr root)
+      {
+         if (root.tag() == hkv::detail::K::value_large)
+            _large.add_ref_or_throw(root.index());
+         else
+            _arena.add_ref_or_throw(root.index());
+      }
       database(std::filesystem::path dir, runtime_config cfg)
           : _arena(make_cfg_(dir, cfg)), _large(make_large_cfg_(dir, cfg))
       {
@@ -816,10 +888,10 @@ namespace start_ref::kv
       }
       // The large-value second arena lives in a `large/` subdirectory (its own
       // data/free/refs/meta.part), so it persists across reopen exactly like the
-      // line arena. Its index is 28-bit GRAINS of 8 KB (vs 128 B lines), so the
-      // same max_segments would address 64x the bytes — cap segment count to a
-      // modest ceiling (a few hundred 8 MB-equiv grain segments is gigabytes of
-      // 0.5 MB-max objects, well within the grain index band).
+      // line arena. Direct 32-bit indices count 32 KiB grains, and each large
+      // segment holds 2 GiB. Cap this separate reservation at 512 segments (1 TiB);
+      // pages are touched as needed. A physical run is at most 2 MiB, while the
+      // byte API spans runs through its embedded continuation directory.
       static start_ref::arena_config make_large_cfg_(std::filesystem::path dir, runtime_config cfg)
       {
          start_ref::arena_config c = make_cfg_(std::move(dir), cfg);
@@ -875,8 +947,8 @@ namespace start_ref::kv
       std::atomic<bool>         _rel_stop{false};
 
       start_ref::arena      _arena;
-      // Large-value second arena (8 KB grain) in a `large/` subdirectory: same
-      // COW/refcount/recovery machinery, max object 0.5 MB. Linked to _arena as
+      // Large-value second arena (32 KiB grain) in a `large/` subdirectory: same
+      // COW/refcount/recovery machinery, max allocation 2 MiB. Linked to _arena as
       // its companion so every part_alloc (writer, view, releaser) reaches it.
       // value_large leaves live here; value_ptr leaves stay in _arena. Declared
       // AFTER _arena so it is constructed after (and destroyed before) it.
@@ -898,7 +970,8 @@ namespace start_ref::kv
       void reg_type_()
       {
          static_assert(storable<T>);
-         static_assert(T::type_id != kRawType, "type_id 0 is the raw-bytes builtin");
+         static_assert(T::type_id != kRawType && T::type_id != large_value_detail::chunked_type,
+                       "type IDs 0 and 65535 are reserved for byte values");
          _types[T::type_id] = {&vh_retain_t_<T>, &vh_release_t_<T>};
       }
       template <class T>
@@ -925,13 +998,25 @@ namespace start_ref::kv
          std::memcpy(&t, b, 2);
          if (t == kRawType)
             return;
+         if (t == large_value_detail::chunked_type)
+         {
+            assert(!retain); // copies use the writer-aware mutable callback
+            large_value_detail::release_head(_large, {b, n});
+            return;
+         }
          const auto& e = _types[t];
          if (auto f = retain ? e.retain : e.release)
             f(this, b + 2, n - 2);
       }
-      static void vh_copy_s_(const char* b, size_t n, void* u)
+      static void vh_copy_s_(char* b, size_t n, void* u, large_session* session)
       {
-         static_cast<database*>(u)->vh_fire_(b, n, true);
+         if (large_value_detail::chunked({b, n}))
+         {
+            assert(session);
+            large_value_detail::copy_head(*session, b, n);
+         }
+         else
+            static_cast<database*>(u)->vh_fire_(b, n, true);
       }
       static void vh_release_s_(const char* b, size_t n, void* u)
       {
@@ -993,7 +1078,7 @@ namespace start_ref::kv
       // borrow the held ref for the cursor: retain again so the cursor's
       // write-side dtor release balances; the tree keeps its own ref.
       if (!_root.is_null())
-         _db->_arena.add_ref_or_throw(uint32_t(_root.raw() >> 4));
+         _db->retain_root_(_root);
       return cursor(&_db->_arena, _root, nullptr, &_db->_vh);
    }
    inline void tree::release_()
@@ -1010,33 +1095,19 @@ namespace start_ref::kv
    inline tree::tree(const tree& o) : _db(o._db), _root(o._root), _count(o._count)
    {
       if (_db && !_root.is_null())
-         _db->_arena.add_ref_or_throw(uint32_t(_root.raw() >> 4));
+         _db->retain_root_(_root);
    }
    template <class S>
-   inline std::optional<S> tree::get(key_view k) const
+   inline std::optional<S> tree::get(key_view k, uint64_t offset, uint64_t length) const
    {
       if (!_db)
          return std::nullopt;
-      return snapshot_cursor().template get<S>(k);
+      return snapshot_cursor().template get<S>(k, offset, length);
    }
 
    inline void transaction::upsert(key_view k, value_view v)
    {
-      if constexpr (engine_t::cb_create)
-      {
-         // gated page engine (PART_CBUCKET=1): the page path doesn't take a
-         // value-source; build the [0][bytes] envelope in a CALLER-LOCAL (never
-         // thread_local) buffer just for this gated arm.
-         std::string env;
-         env.resize(2 + v.size());
-         env[0] = env[1] = 0;
-         std::memcpy(env.data() + 2, v.data(), v.size());
-         _ws->tree_for(_roots[0].index).pg_upsert(k, env);  // bytes straight to the page
-      }
-      else
-      {  // [0][bytes] gathered straight into the leaf — one copy, no envelope.
-         _ws->tree_for(_roots[0].index).cow_insert(k, tagged_val{kRawType, v});
-      }
+      upsert_bytes(_ws->tree_for(_roots[0].index), k, v);
    }
    template <class T>
       requires storable<std::remove_cvref_t<T>>
@@ -1069,12 +1140,12 @@ namespace start_ref::kv
          std::string_view out;
          if (!_ws->tree_for(_roots[0].index).pg_find(k, out))
             return {};
-         return any_value{out.data(), out.size()};
+         return any_value{out.data(), out.size(), &_ws->_db->_large};
       }
       bval out;
       if (!_ws->tree_for(_roots[0].index).find(k, out))
          return {};
-      return any_value{out.v.data(), out.v.size()};  // slot view, txn-pinned
+      return any_value{out.v.data(), out.v.size(), &_ws->_db->_large};  // slot view, txn-pinned
    }
    inline int transaction::remove(key_view k)
    {
@@ -1083,46 +1154,25 @@ namespace start_ref::kv
       else
          return _ws->tree_for(_roots[0].index).cow_remove(k) ? 0 : -1;
    }
-   template <class F>
-   inline bool transaction::get(key_view k, F&& fn) const
+   template <class F> requires adb::detail::value_callback<F>
+   inline bool transaction::get(key_view k, F&& fn, uint64_t offset, uint64_t length) const
    {
-      if constexpr (engine_t::cb_create)
-      {
-         std::string_view out;
-         if (!_ws->tree_for(_roots[0].index).pg_find(k, out))
-            return false;
-         if (slot_type(out) != kRawType)
-            throw invalid_type{slot_type(out), kRawType};
-         fn(slot_payload(out));
-         return true;
-      }
-      bval out;
-      if (!_ws->tree_for(_roots[0].index).find(k, out))
-         return false;
-      if (slot_type(out.v) != kRawType)
-         throw invalid_type{slot_type(out.v), kRawType};
-      fn(slot_payload(out.v));
+      const auto found = get_any(k);
+      if (!found) return false;
+      slot_visit({found._s, found._n}, &_ws->_db->_large, std::forward<F>(fn), offset, length);
       return true;
    }
    template <class S>
-   inline std::optional<S> transaction::get(key_view k) const
+   inline std::optional<S> transaction::get(key_view k, uint64_t offset, uint64_t length) const
    {
-      if constexpr (engine_t::cb_create)
-      {
-         std::string_view out;
-         if (!_ws->tree_for(_roots[0].index).pg_find(k, out))
-            return std::nullopt;
-         return slot_decode<S>(out);
-      }
-      bval out;
-      if (!_ws->tree_for(_roots[0].index).find(k, out))
-         return std::nullopt;
-      return slot_decode<S>(out.v);
+      const auto found = get_any(k);
+      if (!found) return std::nullopt;
+      return slot_decode<S>({found._s, found._n}, &_ws->_db->_large, offset, length);
    }
 
    inline transaction::transaction(write_session* ws, uint32_t root_index,
                                    start_ref::transaction&& tx)
-       : _ws(ws), _tx(std::move(tx))
+       : _ws(ws), _tx(std::move(tx)), _large_tx(ws->_lses.start_transaction())
    {
       auto& t = ws->tree_for(root_index);
       _roots.push_back({root_index, t.root_handle(), t.size_hint(),
@@ -1165,6 +1215,7 @@ namespace start_ref::kv
    inline void transaction::commit()
    {
       _done = true;
+      _large_tx.commit(); // continuation/head data must precede root publication
       _tx.commit();  // data msync + floor advance (layer 1)
       database*       db = _ws->_db;
       std::lock_guard g(db->_root_mx);
@@ -1220,19 +1271,29 @@ namespace start_ref::kv
 
    inline void tree_handle::upsert(key_view k, value_view v)
    {
-      _tx->tree_(_ri).cow_insert(k, tagged_val{kRawType, v});
+      upsert_bytes(_tx->tree_(_ri), k, v);
    }
    inline int tree_handle::remove(key_view k)
    {
       return _tx->tree_(_ri).cow_remove(k) ? 0 : -1;
    }
    template <class S>
-   inline std::optional<S> tree_handle::get(key_view k) const
+   inline std::optional<S> tree_handle::get(key_view k, uint64_t offset, uint64_t length) const
    {
       bval out;
       if (!_tx->tree_(_ri).find(k, out))
          return std::nullopt;
-      return slot_decode<S>(out.v);
+      return slot_decode<S>(out.v, &_tx->_ws->_db->_large, offset, length);
+   }
+   template <class F>
+      requires adb::detail::value_callback<F>
+   inline bool tree_handle::get(key_view k, F&& fn, uint64_t offset, uint64_t length) const
+   {
+      bval out;
+      if (!_tx->tree_(_ri).find(k, out))
+         return false;
+      slot_visit(out.v, &_tx->_ws->_db->_large, std::forward<F>(fn), offset, length);
+      return true;
    }
    // THE exchange (pure ref transfer): the working handle and the owned tree
    // swap the ref each already holds — no retain/release. The displaced root
@@ -1252,6 +1313,7 @@ namespace start_ref::kv
    // The engine as a kv_engine aggregate (delta_art's W/B type param).
    struct engine
    {
+      static constexpr uint64_t max_value_size = large_value_detail::max_value_size;
       using database      = start_ref::kv::database;
       using write_session = start_ref::kv::write_session;
       using read_session  = start_ref::kv::read_session;

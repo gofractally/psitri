@@ -33,7 +33,7 @@ namespace sal
          //     "padding bytes within [0, alloc_pos)" already counted during
          //     the active-segment per-page sync path with "the tail" breaks
          //     bounds and trips the assertion in add_freed_space.
-         // So this fall-through writes a 64-byte terminal header (just a
+         // So this fall-through writes a one-grain terminal header (just a
          // marker for compaction's alloc_header chain walk), advances
          // _first_writable_page directly to pages_per_segment, mprotects/
          // msyncs the rest. The caller is responsible for accounting the

@@ -147,6 +147,9 @@ namespace sal
       void stop_compactor_thread();
 
       void set_runtime_config(const runtime_config& cfg);
+      // Inspect the effective settings (including platform memory-limit clamps).
+      // Callers must serialize this with set_runtime_config().
+      runtime_config get_runtime_config() const { return _mapped_state->_config; }
 
       /// Returns the allocator_session for the calling thread, creating one if
       /// none exists.  Sessions are stored in thread_local storage and are

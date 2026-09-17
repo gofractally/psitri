@@ -8,8 +8,8 @@ if(BUILD_TESTS)
         add_executable(delta_art-tests test/delta_art_tests.cpp)
         target_link_libraries(delta_art-tests PRIVATE delta_art start_ver sal_art_ref Catch2::Catch2WithMain)
         target_include_directories(delta_art-tests PRIVATE
-            ${CMAKE_SOURCE_DIR}/libraries/sal_art_ref/test
-            ${CMAKE_SOURCE_DIR}/libraries/psitri/include)
+            ${PSITRI_SOURCE_DIR}/libraries/sal_art_ref/test
+            ${PSITRI_SOURCE_DIR}/libraries/psitri/include)
         # NDEBUG matches sal_art_ref's own test conditions: sal_art_ref's database flow
         # trips sal's session-thread-ownership assert (LATENT sal_art_ref bug,
         # repro: open db + write on main; see task list) — start_ver-side assert

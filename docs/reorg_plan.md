@@ -1,5 +1,11 @@
 # Reorg plan — psitri-merge → @gofractally/psitri (+ siblings)
 
+> **Layout update, 2026-09-17:** `gcart`, `rcart`, `sal2`, `sal2gc`,
+> `start_ver`, and `walart` now live under `experimental/`. Their CMake targets,
+> include spellings, and namespaces are unchanged. The plan below records the
+> earlier reorganization; see [the current layout](../README.md) and
+> [experimental inventory](../experimental/README.md) for today's locations.
+
 Refines `~/myartlib/ThePlan.md`. Revision 2 — Dan's annotations of 2026-06-12
 are folded in as rulings (§6 records them). This file is the working copy for
 the psitri portion: target tree, rename map, review findings, the

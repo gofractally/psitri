@@ -24,8 +24,8 @@
 // Grain-parameterized (large-value second arena): arena_t<Geo> derives all its
 // size constants from Geo. line_geometry (128 B grain) reproduces today's exact
 // constants verbatim — the default `arena = arena_t<line_geometry>` alias is
-// byte-identical to the pre-template arena. large_geometry (8 KB grain) is the
-// same allocator at a coarser grain (max object 0.5 MB). The geometry constants
+// byte-identical to the pre-template arena. large_geometry (32 KiB grain) is the
+// same allocator at a coarser grain (max object 2 MiB). The geometry constants
 // shadow the file-scope globals so the class bodies are byte-identical.
 #pragma once
 #include <sys/mman.h>
@@ -83,7 +83,7 @@ namespace start_ref
    };
 
    // Grain-parameterized: line_geometry (128 B) reproduces today's constants
-   // verbatim; large_geometry (8 KB) is the same allocator at a coarser grain.
+   // verbatim; large_geometry (32 KiB) is the same allocator at a coarser grain.
    template <class Geo>
    class arena_t;
 
@@ -537,7 +537,7 @@ namespace start_ref
       }
       const arena_config& config() const noexcept { return _cfg; }
 
-      // Companion link to the large-value arena (the 8 KB-grain second instance).
+      // Companion link to the large-value arena (the 32 KiB-grain second instance).
       // The line arena holds it so view/drain allocators (which carry only an
       // arena*) can resolve and free value_large leaves; null when no large
       // arena is attached. Stored type-erased: arena_t<line_geometry> cannot
@@ -1128,7 +1128,7 @@ namespace start_ref
    using transaction  = transaction_t<line_geometry>;
    using read_session = read_session_t<line_geometry>;
 
-   // The large-value second arena (8 KB grain): same allocator, same COW /
+   // The large-value second arena (32 KiB grain): same allocator, same COW /
    // refcount / recovery machinery, max object large_max_object_bytes.
    using large_arena        = arena_t<large_geometry>;
    using large_session      = session_t<large_geometry>;

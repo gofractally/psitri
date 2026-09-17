@@ -145,6 +145,9 @@ TEST_CASE("read-only sampled reads enqueue MFU cache promotion", "[sal][read_cac
 
    {
       sal::allocator alloc(path, cfg, false);
+      alloc.register_type_ops<cache_test_node>();
+      alloc.start_background_threads();  // allocations require the segment provider
+      alloc.stop_compactor_thread();     // this test inspects/drains the promotion queue itself
       auto           ses = alloc.create_session();
       auto           adr = ses->alloc<cache_test_node>(uint32_t{64}, sal::alloc_hint{});
 
@@ -183,6 +186,9 @@ TEST_CASE("promoter skips young HOT advisories before copying", "[sal][read_cach
 
    {
       sal::allocator alloc(path, cfg, false);
+      alloc.register_type_ops<cache_test_node>();
+      alloc.start_background_threads();  // allocations require the segment provider
+      alloc.stop_compactor_thread();     // this test inspects/drains the promotion queue itself
       auto           ses = alloc.create_session();
       auto           adr = ses->alloc<cache_test_node>(uint32_t{64}, sal::alloc_hint{});
 
@@ -236,6 +242,9 @@ TEST_CASE("disabled read cache does not enqueue sampled reads", "[sal][read_cach
 
    {
       sal::allocator alloc(path, cfg, false);
+      alloc.register_type_ops<cache_test_node>();
+      alloc.start_background_threads();  // allocations require the segment provider
+      alloc.stop_compactor_thread();     // this test inspects/drains the promotion queue itself
       auto           ses = alloc.create_session();
       auto           adr = ses->alloc<cache_test_node>(uint32_t{64}, sal::alloc_hint{});
 

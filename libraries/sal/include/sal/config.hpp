@@ -435,10 +435,10 @@ namespace sal
     */
    static constexpr const uint32_t max_threads = 64;
 
-   // the maximum object size that can be allocated in a segment
-   // generally limited to half the segment size (16MB)
-   static constexpr const uint64_t max_object_size = segment_size / 2;
-   static_assert(max_object_size <= segment_size / 2);
+   // Largest grain-aligned allocation after the 64-byte footer and one-grain
+   // terminal reserve. Large immutable chunks may occupy almost a whole segment.
+   static constexpr const uint64_t max_object_size = segment_size - 2 * cacheline_size;
+   static_assert(max_object_size < (uint64_t{1} << 25));  // alloc_header::_size
 
    struct config_state
    {

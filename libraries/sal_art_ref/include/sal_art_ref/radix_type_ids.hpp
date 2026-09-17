@@ -36,6 +36,8 @@ namespace sal_art_ref
       // exceed the 128-byte in-page cap lives in its own allocation; the page keeps a
       // comparison fragment + cbase code. NOT in radix_kind (never dispatched as a router).
       inline constexpr sal::header_type key_val = sal::header_type(base + 13);
+      // Raw continuation payload; the directory and first payload live in key_val.
+      inline constexpr sal::header_type value_chunk = sal::header_type(base + 14);
 
       // The same taxonomy as a STRONG enum (enumerator order == the header_type offsets above).
       // Engine dispatch switches on this — never on a raw int — so -Wswitch flags any switch that

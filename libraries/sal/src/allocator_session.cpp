@@ -43,6 +43,9 @@ namespace sal
 
    void allocator_session::finalize_active_segment()
    {
+      // sync() owns terminal-marker and trailing-space accounting when this
+      // dirty segment is drained. Rollover callers (including chunk placement)
+      // must not also credit the skipped tail as freed space here.
       if (_alloc_seg_ptr)
       {
          if (not _alloc_seg_ptr->is_finalized())

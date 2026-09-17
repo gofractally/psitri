@@ -551,7 +551,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
 
      private:
       // value_large gate, defined up front so the leaf helpers below can use it.
-      // The allocator exposes a second 8 KB-grain arena via has_large; heap/PMR
+      // The allocator exposes a second 32 KiB-grain arena via has_large; heap/PMR
       // allocators lack it and large_ok_ is false, making every leaf value_ptr
       // (the large path is dead code under `if constexpr`).
       template <class A, class = void>
@@ -594,7 +594,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          node_at::deallocate(na, static_cast<node_block*>(p), nblocks_(n));
       }
 
-      // ── large-value leaves: a second 8 KB-grain arena (value_large) ────────
+      // ── large-value leaves: a second 32 KiB-grain arena (value_large) ────────
       // A leaf whose byte size exceeds the line arena's single-CAS cap lives in
       // the allocator's large arena instead. Allocation/free route there; the
       // leaf bytes and accessors are value_ptr's verbatim, so once a value_large
@@ -617,7 +617,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             if (bytes > Allocator::large_threshold_bytes)
             {
                out_tag           = K::value_large;
-               const size_t goff = alloc_.allocate_large(bytes);  // throws past 0.5 MB
+               const size_t goff = alloc_.allocate_large(bytes);  // throws past 2 MiB
                return static_cast<char*>(
                    deref_large_(uint64_t(goff / start_ref::large_grain_bytes) << 4));
             }
@@ -670,11 +670,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
             if (auto* h = alloc_.vhooks; h && h->on_release)
                h->on_release(b.data(), b.size(), h->user);
       }
-      void vh_copy_(std::string_view b) noexcept
+      void vh_copy_(std::string_view b)
       {
          if constexpr (vh_on)
             if (auto* h = alloc_.vhooks; h && h->on_copy)
-               h->on_copy(b.data(), b.size(), h->user);
+               h->on_copy(const_cast<char*>(b.data()), b.size(), h->user, alloc_.lses);
       }
       void vh_leaf_dies_(const char* L) noexcept
       {
@@ -741,7 +741,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          if constexpr (indexed)
          {
             // value_large: the node lives in the large arena — index it off the
-            // large base in 8 KB grains, not the line base in 128 B lines.
+            // large base in 32 KiB grains, not the line base in 128 B lines.
             if constexpr (large_ok_)
                if (k == K::value_large)
                   return packed_ptr::from_grain_off(
@@ -3423,7 +3423,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
       // the suffix in both forms, so point lookup is identical.
       static constexpr uint16_t LEAF_FULL = 0x8000;
       // raw_vals value length is u32 (offset 4): values up to the large arena's
-      // 0.5 MB cap (value_large) need >16 bits; a u16 capped at 65535. The +2 B
+      // 2 MiB cap (value_large) need >16 bits; a u16 capped at 65535. The +2 B
       // over the old u16 layout is uniform for value_ptr and value_large, so the
       // two are byte-identical (the design's "same leaf layout"). suffix/prefix
       // lengths stay u16 (keys never exceed 64 KB).
@@ -8383,7 +8383,10 @@ namespace detail  // implementation types & node helpers — not part of the pub
                std::memcpy(dst, deref_(cur), bytes);
                const Ptr np = pack_(dst, K::value_large);
                if constexpr (vh_on)
-                  vh_copy_(leaf_bytes(static_cast<const char*>(dst)));
+               {
+                  try { vh_copy_(leaf_bytes(static_cast<const char*>(dst))); }
+                  catch (...) { leaf_free_(dst, bytes, kt); throw; }
+               }
                return np;
             }
          void*        dst   = node_alloc_(bytes);

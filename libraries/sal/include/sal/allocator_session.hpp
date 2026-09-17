@@ -98,6 +98,24 @@ namespace sal
       uint64_t seg_alloc_count() const noexcept { return _seg_alloc_count; }
       uint64_t seg_alloc_ns() const noexcept { return _seg_alloc_ns; }
 
+      /// Grain-aligned object capacity, excluding the footer and terminal marker.
+      /// Owner thread only: consume this observation before another allocation/sync.
+      static constexpr uint32_t fresh_allocation_capacity =
+          (segment_size - mapped_memory::segment_footer_size - cacheline_size) /
+          cacheline_size * cacheline_size;
+      uint32_t current_allocation_capacity() const noexcept
+      {
+         if (!_alloc_seg_ptr)
+            return fresh_allocation_capacity;
+         if (_alloc_seg_ptr->is_finalized())
+            return 0;
+         const auto pos = _alloc_seg_ptr->get_alloc_pos();
+         return pos < fresh_allocation_capacity ? fresh_allocation_capacity - pos : 0;
+      }
+
+      /// Abandon the active tail. Normal finalization/sync credits it exactly once.
+      void next_allocation_segment() { finalize_active_segment(); }
+
 
       /// DEBUG: Call visitor(ptr_address, ref_count, alloc_header*) for each live object
       template <typename Visitor>

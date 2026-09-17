@@ -24,7 +24,7 @@ target_compile_definitions(psitri PUBLIC XXH_INLINE_ALL)
 
 target_link_libraries( psitri PUBLIC sal ucc art)
 
-option(PSITRI_BUILD_TESTS "Build the psitri test suite" ON)
+option(PSITRI_BUILD_TESTS "Build the psitri test suite" ${BUILD_TESTS})
 if(PSITRI_BUILD_TESTS)
     enable_testing()
     find_package(Catch2 3 QUIET)

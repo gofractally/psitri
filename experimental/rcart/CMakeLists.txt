@@ -1,5 +1,5 @@
-# rcart — refcount-baseline GC-ART engine on sal2 (same node taxonomy as gcart;
-# header-only; depends on sal2 + adb + ucc).
+# rcart — refcount-baseline GC-ART engine on sal_hybrid (same node taxonomy as gcart;
+# header-only; depends on sal_hybrid + adb + ucc).
 cmake_minimum_required(VERSION 3.20)
 
 add_library(rcart INTERFACE)
@@ -7,11 +7,11 @@ add_library(rcart::rcart ALIAS rcart)
 target_include_directories(rcart INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
-# rcart's SMALL leaf region (suffix_value) rides the copied SAL 1.0 allocator
-# (sal2_alloc, a compiled library — the from-scratch sal2 header-only FIX allocators
+# rcart's SMALL leaf region (suffix_value) rides the copied SAL allocator
+# (sal_hybrid_alloc, a compiled library — the from-scratch sal_hybrid header-only FIX allocators
 # still drive routing, and big_suffix_value stays on the header-only big_allocator).
-# Link both: sal2 (FIX routing + BIG) + sal2_alloc (SAL 1.0 leaf).
-target_link_libraries(rcart INTERFACE sal2 sal2_alloc adb ucc)
+# Link both: sal_hybrid (FIX routing + BIG) + sal_hybrid_alloc (SAL leaf).
+target_link_libraries(rcart INTERFACE sal_hybrid sal_hybrid_alloc adb ucc)
 target_compile_features(rcart INTERFACE cxx_std_23)
 
 if(BUILD_TESTS)

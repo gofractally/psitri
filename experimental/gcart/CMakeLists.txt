@@ -1,4 +1,4 @@
-# gcart — GC-ART engine on sal2 (header-only; depends on sal2 + adb + ucc).
+# gcart — GC-ART engine on sal_hybrid (header-only; depends on sal_hybrid + adb + ucc).
 cmake_minimum_required(VERSION 3.20)
 
 add_library(gcart INTERFACE)
@@ -6,10 +6,10 @@ add_library(gcart::gcart ALIAS gcart)
 target_include_directories(gcart INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
-# Phase 2: gcart's LEAF region rides the copied SAL 1.0 allocator (sal2_alloc, a
-# compiled library — the from-scratch sal2 header-only FIX allocators still drive
-# routing). Link both: sal2 (FIX routing) + sal2_alloc (SAL 1.0 leaf).
-target_link_libraries(gcart INTERFACE sal2 sal2_alloc adb ucc)
+# Phase 2: gcart's LEAF region rides the copied SAL allocator (sal_hybrid_alloc, a
+# compiled library — the from-scratch sal_hybrid header-only FIX allocators still drive
+# routing). Link both: sal_hybrid (FIX routing) + sal_hybrid_alloc (SAL leaf).
+target_link_libraries(gcart INTERFACE sal_hybrid sal_hybrid_alloc adb ucc)
 target_compile_features(gcart INTERFACE cxx_std_23)
 
 if(BUILD_TESTS)

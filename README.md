@@ -66,9 +66,13 @@ include metadata, fragmentation, retained snapshots, and pending reclamation.
 
 ## Compatibility during reorganization
 
-The layout move preserves existing CMake target names, public include spellings,
-C++ namespaces, backend selections, and database formats. Experimental engines
-remain in the existing build and comparison suite. In particular, the MDBX
+The layout move preserves engine targets, public include spellings, backend
+selections, and database formats. A subsequent naming cleanup gives the
+experimental allocators descriptive names, `sal_hybrid` and `sal_gc`, while
+`sal` remains the canonical maintained library. See the
+[allocator rename map](experimental/README.md#allocator-names) for research
+namespace, header, and target changes. Experimental engines remain in the
+existing build and comparison suite. In particular, the MDBX
 shim's existing `delta_art` default still uses experimental `start_ver` over
 `sal_art_ref`; the directory move does not switch existing users' engines.
 
@@ -85,4 +89,5 @@ engines do not acquire public API status merely by satisfying it.
 Migrated from psitri-merge at tag `reorg-baseline`. The earlier rename map and
 carried TODO ledger remain in [docs/reorg_plan.md](docs/reorg_plan.md). Historical
 documents and logs retain their original paths; for the six research modules,
-read `libraries/<name>` as `experimental/<name>` in the current checkout.
+read `libraries/<name>` as `experimental/<name>` in the current checkout,
+then apply the allocator rename map above.

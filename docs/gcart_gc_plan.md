@@ -1,5 +1,9 @@
 # gcart → version-liveness GC — implementation plan
 
+> Historical design record. Current code uses `experimental/sal_hybrid`
+> (formerly `sal2`) and `experimental/sal_gc` (formerly `sal2gc`).
+> See the [allocator rename map](../experimental/README.md#allocator-names).
+
 Status: planning (2026-06-17). Branch `sal2`. Companion to `docs/sal2_design.md`
 (§4–§5 are the normative spec) and `docs/sal2_gcart_status.md` (M5 = "the deferred
 perf lever").

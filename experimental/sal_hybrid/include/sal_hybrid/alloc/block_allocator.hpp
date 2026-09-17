@@ -1,0 +1,305 @@
+#pragma once
+#include <atomic>
+#include <filesystem>
+#include <mutex>
+#include <utility>
+
+#include <cassert>
+
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/mman.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <sal_hybrid/alloc/config.hpp>
+#include <sal_hybrid/alloc/mapping.hpp>  // sync_type
+#include <ucc/typed_int.hpp>
+
+namespace sal_hybrid
+{
+   /**
+    * Responsible for maintaining a memory mapped file on disk that grows as needed.
+    * Uses a contiguous address space reservation to ensure blocks are mapped contiguously.
+    */
+   class block_allocator
+   {
+     public:
+      // 64-bit offset from the base pointer
+      using offset_ptr                        = ucc::typed_int<uint64_t, struct offset_ptr_tag>;
+      using block_number                      = ucc::typed_int<uint64_t, struct block_num_tag>;
+      static constexpr offset_ptr null_offset = offset_ptr(-1);
+
+      struct mlock_stats
+      {
+         uint64_t successful_regions = 0;
+         uint64_t failed_regions     = 0;
+         uint64_t skipped_regions    = 0;
+         uint64_t successful_bytes   = 0;
+         uint64_t failed_bytes       = 0;
+         uint64_t skipped_bytes      = 0;
+      };
+
+      /**
+       * Constructor for block_allocator.
+       * 
+       * @param file The path to the file to use for block allocation
+       * @param block_size The size of each block in bytes (MUST be a power of 2)
+       * @param max_blocks The maximum number of blocks that can be allocated
+       * @param read_write Whether the file should be opened in read-write mode
+       * 
+       * @throws std::runtime_error If the reservation of virtual address space fails
+       * @throws std::invalid_argument If block_size is not a power of 2
+       */
+      block_allocator(std::filesystem::path file,
+                      uint64_t              block_size,
+                      uint32_t              max_blocks,
+                      access_mode           mode = access_mode::read_write);
+      ~block_allocator();
+
+      uint64_t block_size() const { return _block_size; }
+      uint64_t num_blocks() const { return _num_blocks.load(std::memory_order_relaxed); }
+
+      // Number of blocks whose file backing is committed AND mmap'd — i.e. the
+      // blocks that are safe to dereference. alloc() bumps num_blocks() BEFORE
+      // reserve() grows the file (ftruncate+mmap) and publishes _file_size, so
+      // num_blocks() can transiently exceed this. Any observer that walks
+      // segments and dereferences their memory (e.g. allocator::dump()) MUST
+      // clamp to this count or it can fault on a not-yet-committed segment.
+      // The acquire load pairs with reserve()'s _file_size store (after mmap).
+      uint64_t mapped_blocks() const
+      {
+         return _file_size.load(std::memory_order_acquire) / _block_size;
+      }
+
+      /**
+       * Resizes the file and num_blocks() count to nblocks.
+       */
+      void truncate(uint32_t nblocks);
+      bool fsync(bool full = false) noexcept;
+
+      /**
+       * Return a pointer to the block at the specified offset
+       * 
+       * @param offset The offset pointer (returned by alloc)
+       * @return A pointer to the block at the specified offset
+       */
+      template <typename T = char>
+      inline T* get(offset_ptr offset) noexcept
+      {
+         assert(*offset + sizeof(T) <= _file_size.load(std::memory_order_relaxed));
+         return reinterpret_cast<T*>(((char*)_mapped_base) + *offset);
+      }
+      /**
+       * Return a const pointer to the block at the specified offset
+       * 
+       * @param offset The offset pointer (returned by alloc)
+       * @return A const pointer to the block at the specified offset
+       */
+      template <typename T = char>
+      inline const T* get(offset_ptr offset) const noexcept
+      {
+         assert(*offset + sizeof(T) <= _file_size.load(std::memory_order_relaxed));
+         return reinterpret_cast<const T*>(((const char*)_mapped_base) + *offset);
+      }
+      /**
+       * Return a const pointer to the block at the specified block number
+       * 
+       * @param block_num The block number (index)
+       * @return A const pointer to the block at the specified block number
+       */
+      template <typename T = char>
+      inline T* get(block_number block_num) noexcept
+      {
+         assert(*block_num < _num_blocks.load(std::memory_order_relaxed));
+         return get<T>(block_to_offset(block_num));
+      }
+
+      /**
+       * Return a const pointer to the block at the specified offset
+       * 
+       * @param offset The offset pointer (returned by alloc)
+       * @return A const pointer to the block at the specified offset
+       */
+      template <typename T = char>
+      inline const T* get(block_number block_num) const noexcept
+      {
+         assert(*block_num < _num_blocks.load(std::memory_order_relaxed));
+         return get<T>(block_to_offset(block_num));
+      }
+
+      /**
+       * Convenience method to convert a block number (index) to an offset pointer
+       * Uses efficient bit shifting since block_size is guaranteed to be a power of 2
+       * 
+       * @param block_num The block number (index)
+       * @return The offset pointer to the start of the block
+       */
+      inline offset_ptr block_to_offset(block_number block_num) const noexcept
+      {
+         assert(*block_num < _num_blocks.load(std::memory_order_relaxed));
+         return offset_ptr(*block_num << _log2_block_size);  // Fast multiplication by power of 2
+      }
+
+      /**
+       * Convenience method to convert an offset pointer to a block number (index)
+       * Uses efficient bit shifting since block_size is guaranteed to be a power of 2
+       * 
+       * @param offset The offset pointer
+       * @return The block number (index)
+       */
+      inline block_number offset_to_block(offset_ptr offset) const noexcept
+      {
+         assert(*offset < _file_size.load(std::memory_order_relaxed));
+         // Fast division by power of 2
+         return block_number(*offset >> _log2_block_size);
+      }
+
+      /**
+       * Check if an address is aligned to a block boundary
+       * 
+       * @param offset The offset to check
+       * @return True if the offset is at a block boundary, false otherwise
+       */
+      inline bool is_block_aligned(offset_ptr offset) const noexcept
+      {
+         // Fast modulo using bit mask since block_size is a power of 2
+         return (*offset & (_block_size - 1)) == 0;
+      }
+
+      // ensures that at least the desired number of blocks are present
+      uint32_t reserve(uint32_t desired_num_blocks, bool mlock = false);
+
+      /**
+       * Pins the already-mapped prefix of this file. This is intentionally
+       * separate from reserve() so callers that reopen pre-existing metadata
+       * files can mlock the mapped pages even when no growth is required.
+       *
+       * @param desired_num_blocks Number of blocks to pin. 0 means all mapped blocks.
+       * @return true when every newly-attempted block was pinned.
+       */
+      bool mlock_mapped_blocks(uint32_t desired_num_blocks = 0) noexcept;
+
+      mlock_stats get_mlock_stats() const noexcept
+      {
+         return {
+             _successful_mlock_regions.load(std::memory_order_relaxed),
+             _failed_mlock_regions.load(std::memory_order_relaxed),
+             _skipped_mlock_regions.load(std::memory_order_relaxed),
+             _successful_mlock_bytes.load(std::memory_order_relaxed),
+             _failed_mlock_bytes.load(std::memory_order_relaxed),
+             _skipped_mlock_bytes.load(std::memory_order_relaxed),
+         };
+      }
+
+      /**
+       * Allocate a new block and return both the block number and offset pointer to it
+       * 
+       * @return A pair containing the block number and offset pointer to the newly allocated block
+       * @throws std::runtime_error If the maximum number of blocks has been reached
+       */
+      std::pair<block_number, offset_ptr> alloc();
+
+      /**
+       * Resizes the block allocator to the specified number of blocks.
+       * Similar to std::vector::resize(), this ensures _num_blocks equals the desired size.
+       * 
+       * NOTE: This method is not thread-safe when used simultaneously with alloc().
+       * 
+       * @param desired_num_blocks The desired number of allocated blocks
+       * @return The actual number of blocks after resizing
+       * @throws std::runtime_error If the maximum number of blocks would be exceeded
+       */
+      uint32_t resize(uint32_t desired_num_blocks);
+
+      /**
+       * Finds the maximum possible reservation size as a multiple of the specified block size.
+       * This method performs a binary search to identify the largest number of blocks that can
+       * be reserved contiguously in the virtual address space of the current system.
+       *
+       * @param block_size The size of each block in bytes (MUST be a power of 2)
+       * @return The maximum reservation size in bytes (will be a multiple of block_size)
+       * @throws std::invalid_argument If block_size is not a power of 2
+       */
+      static uint64_t find_max_reservation_size(uint64_t block_size);
+
+      /**
+       * Returns the cached RLIMIT_MEMLOCK value in bytes (queried once at construction).
+       * Returns RLIM_INFINITY (~0ULL) if there is no limit.
+       */
+      uint64_t mlock_limit_bytes() const noexcept { return _mlock_limit_bytes; }
+
+      /**
+       * Punch a hole in the backing file for the given block range, releasing
+       * disk space and commit charge without unmapping the virtual address.
+       * Subsequent reads of the hole return zeroes.
+       *
+       * No-op on platforms that don't support FALLOC_FL_PUNCH_HOLE.
+       *
+       * @param block  The starting block number
+       * @param count  Number of blocks to punch (default 1)
+       * @return true if the hole was punched, false if unsupported or failed
+       */
+      bool punch_hole(block_number block, uint32_t count = 1) noexcept;
+
+      /**
+       * Helper method to determine if a value is a power of 2
+       *
+       * @param x The value to check
+       * @return True if x is a power of 2, false otherwise
+       */
+      static bool is_power_of_2(uint64_t x) noexcept
+      {
+         // Zero and negative numbers are not powers of 2
+         return x > 0 && (x & (x - 1)) == 0;
+      }
+
+      /// Base address of the contiguous-block mmap reservation. Valid as
+      /// soon as the block_allocator is constructed (the address-space
+      /// reservation happens in the ctor) — before any block has been
+      /// allocated, before file_size has been bumped. Used by the
+      /// debug free_range_tracker to anchor offset arithmetic.
+      ///
+      /// Prefer the mapped base when populated; fall back to the reservation
+      /// base. Both share the same address (MAP_FIXED maps onto the
+      /// reservation), but `_mapped_base` is null until first resize.
+      const void* mapped_base() const noexcept {
+         return _mapped_base ? _mapped_base : _reserved_base;
+      }
+
+     private:
+      bool mlock_mapped_blocks_locked(uint32_t desired_num_blocks) noexcept;
+
+      std::filesystem::path _filename;
+      uint64_t              _block_size;
+      uint8_t               _log2_block_size;  // log2 of block_size for fast bit shifting
+      uint64_t              _max_blocks;
+      std::atomic<uint64_t> _file_size;
+      int                   _fd;
+      std::atomic<uint64_t> _num_blocks;
+      mutable std::mutex    _resize_mutex;
+
+      // Address space reservation
+      void*    _reserved_base;     // Base address of the reserved virtual memory region
+      uint64_t _reservation_size;  // Size of the reserved region
+      void*    _mapped_base;       // Base address of the mapped file region
+
+      // Cached RLIMIT_MEMLOCK value (bytes). Set once in constructor.
+      // RLIM_INFINITY (~0ULL) means no limit.
+      uint64_t _mlock_limit_bytes;
+      access_mode _mode = access_mode::read_write;
+
+      // mlock diagnostics for metadata files that opt into pinning.
+      std::atomic<uint32_t> _mlock_attempted_blocks{0};
+      std::atomic<uint64_t> _successful_mlock_regions{0};
+      std::atomic<uint64_t> _failed_mlock_regions{0};
+      std::atomic<uint64_t> _skipped_mlock_regions{0};
+      std::atomic<uint64_t> _successful_mlock_bytes{0};
+      std::atomic<uint64_t> _failed_mlock_bytes{0};
+      std::atomic<uint64_t> _skipped_mlock_bytes{0};
+      bool                  _mlock_limit_warned = false;
+      bool                  _mlock_error_warned = false;
+   };
+
+}  // namespace sal_hybrid

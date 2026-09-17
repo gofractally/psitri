@@ -1,0 +1,67 @@
+#pragma once
+#include <cstdint>
+#include <sal_hybrid/alloc/block_allocator.hpp>
+#include <sal_hybrid/alloc/config.hpp>
+#include <sal_hybrid/alloc/numbers.hpp>
+
+namespace sal_hybrid
+{
+   using offset_ptr = block_allocator::offset_ptr;
+
+   /**
+    * References a location in shared memory, addressed by cacheline
+    * as used in shared_ptr_data::cacheline_offset. Its purpose is to
+    * keep track of whether the location is addressed in bytes (absolute),
+    * on by cacheline index.  The cacheline grain is sal_hybrid::cacheline_size (128 B).
+    */
+   struct location
+   {
+     public:
+      static constexpr uint64_t location_shift = cacheline_shift;
+      uint64_t absolute_address() const noexcept { return _cacheline_offset << location_shift; }
+      uint64_t cacheline() const noexcept { return _cacheline_offset; }
+      offset_ptr offset() const noexcept { return offset_ptr(absolute_address()); }
+
+      location() noexcept : _cacheline_offset(0) {}
+
+      static constexpr location from_absolute_address(uint64_t address) noexcept
+      {
+         return location(address >> location_shift);
+      }
+      static constexpr location from_cacheline(uint64_t cacheline) noexcept
+      {
+         return location(cacheline);
+      }
+      static constexpr location null() noexcept { return location::from_absolute_address(-1ull); }
+
+      constexpr bool operator==(const location& other) const noexcept
+      {
+         return _cacheline_offset == other._cacheline_offset;
+      }
+      constexpr bool operator!=(const location& other) const noexcept
+      {
+         return _cacheline_offset != other._cacheline_offset;
+      }
+
+      segment_number segment() const noexcept
+      {
+         return segment_number(absolute_address() / segment_size);
+      }
+
+      uint64_t segment_offset() const noexcept { return absolute_address() % segment_size; }
+
+      friend std::ostream& operator<<(std::ostream& os, const location& loc)
+      {
+         os << "location{ abs:" << loc.absolute_address() << "}";
+         return os;
+      }
+
+     private:
+      explicit constexpr location(uint64_t cacheline_offset) noexcept
+          : _cacheline_offset(cacheline_offset)
+      {
+      }
+      uint64_t _cacheline_offset : 41;
+   };
+
+}  // namespace sal_hybrid

@@ -25,7 +25,7 @@
 #include <psitri/write_session_impl.hpp>
 
 #include <start_ver/kv.hpp>  // the 4th engine: vpart must pass standalone (Dan)
-#include <gcart/kv.hpp>      // the 5th engine: gcart (sal2 GC-ART)
+#include <gcart/kv.hpp>      // the 5th engine: gcart (sal_hybrid GC-ART)
 
 // The harness shape is compiler-enforced (SPEC §12.3): a drift in any engine
 // fails HERE, by name, before a single test runs.

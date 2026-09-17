@@ -59,10 +59,10 @@ FetchContent_MakeAvailable(psio ucc)
 add_subdirectory(libraries/adb)
 set(SAL_BUILD_TESTS ${BUILD_TESTS})
 add_subdirectory(libraries/sal)
-# Research targets keep their existing names and participate in the same
-# tests/benchmarks. Only their source location changes; backend defaults do not.
-add_subdirectory(experimental/sal2)
-add_subdirectory(experimental/sal2gc)
+# Research allocators have descriptive names distinct from the maintained sal.
+# They participate in the same tests/benchmarks without changing backend defaults.
+add_subdirectory(experimental/sal_hybrid)
+add_subdirectory(experimental/sal_gc)
 add_subdirectory(experimental/gcart)
 add_subdirectory(experimental/rcart)
 add_subdirectory(libraries/art)

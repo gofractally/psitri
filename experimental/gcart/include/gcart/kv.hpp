@@ -78,7 +78,7 @@ namespace gcart::kv
       // root we publish here is never reclaimed out from under the cursor. (See the
       // create_cursor publish loop comment.)
       static snap publish(gcart::engine& e, std::atomic<uint64_t>& live,
-                          std::atomic<uint64_t>* hp, sal2::allocator_session* ses)
+                          std::atomic<uint64_t>* hp, sal_hybrid::allocator_session* ses)
       {
          for (;;)
          {
@@ -100,7 +100,7 @@ namespace gcart::kv
       // vsrc = root_version(slot) the commit wrote alongside the live root.
       static snap publish(gcart::engine& e, std::atomic<uint64_t>& live,
                           std::atomic<uint64_t>& vsrc, std::atomic<uint64_t>* hp,
-                          std::atomic<uint64_t>* hv, sal2::allocator_session* ses)
+                          std::atomic<uint64_t>* hv, sal_hybrid::allocator_session* ses)
       {
          for (;;)
          {
@@ -115,7 +115,7 @@ namespace gcart::kv
       }
       // ADOPT an existing owned (tag,ptr) WITHOUT retaining — the caller transfers a
       // ref it already holds (the set_root exchange: a work tree's root → a snapshot).
-      static snap adopt(gcart::engine& e, bt t, uint32_t p, sal2::allocator_session* ses) noexcept
+      static snap adopt(gcart::engine& e, bt t, uint32_t p, sal_hybrid::allocator_session* ses) noexcept
       {
          return snap(&e, t, p, ses);
       }
@@ -167,7 +167,7 @@ namespace gcart::kv
       bt       tag() const noexcept { return _t; }
       uint32_t ptr() const noexcept { return _p; }
       gcart::engine*           eng() const noexcept { return _e; }
-      sal2::allocator_session* session() const noexcept { return _ses; }  // borrowed
+      sal_hybrid::allocator_session* session() const noexcept { return _ses; }  // borrowed
       void     give() noexcept { _t = bt::null; }  // relinquish the view
       // Phase C: a snap NEVER frees a node. A reader-cursor snap owns its hazard slot
       // (_hp): reset CLEARS it (version slot first, root last — mirror of publish so a
@@ -187,7 +187,7 @@ namespace gcart::kv
       }
 
      private:
-      snap(gcart::engine* e, bt t, uint32_t p, sal2::allocator_session* ses,
+      snap(gcart::engine* e, bt t, uint32_t p, sal_hybrid::allocator_session* ses,
            std::atomic<uint64_t>* hp = nullptr, std::atomic<uint64_t>* hv = nullptr)
           : _e(e), _t(t), _p(p), _ses(ses), _hp(hp), _hv(hv)
       {
@@ -195,7 +195,7 @@ namespace gcart::kv
       gcart::engine*           _e   = nullptr;
       bt                       _t   = bt::null;
       uint32_t                 _p   = 0;
-      sal2::allocator_session* _ses = nullptr;  // BORROWED holder session (not owning)
+      sal_hybrid::allocator_session* _ses = nullptr;  // BORROWED holder session (not owning)
       std::atomic<uint64_t>*   _hp  = nullptr;  // reader-cursor HAZARD slot; reset clears it
       std::atomic<uint64_t>*   _hv  = nullptr;  // parallel VERSION slot (floor_ reads it)
    };
@@ -216,7 +216,7 @@ namespace gcart::kv
      public:
       cursor() = default;
       // The cursor does NOT hold a lifetime leaf read_lock — that would block the
-      // SAL 1.0 leaf compactor from recycling segments for the cursor's whole life
+      // SAL leaf compactor from recycling segments for the cursor's whole life
       // (4 readers each pinning forever stalls compaction → garbage bloat → page
       // faults → reads collapse). Instead each leaf-touching operation takes a SHORT,
       // LOCAL read_lock (the reference engine's value_ref discipline): the lock spans
@@ -232,8 +232,8 @@ namespace gcart::kv
       // global map, no lock. _ses caches the raw pointer for the hot read path.
       explicit cursor(snap s)
           : _s(std::move(s)),
-            _lses(_s.session() ? sal2::allocator_session_ptr(_s.session(), /*retain=*/true)
-                               : sal2::allocator_session_ptr(nullptr)),
+            _lses(_s.session() ? sal_hybrid::allocator_session_ptr(_s.session(), /*retain=*/true)
+                               : sal_hybrid::allocator_session_ptr(nullptr)),
             _ses(_lses.get())
       {
       }
@@ -375,7 +375,7 @@ namespace gcart::kv
       // This cursor's leaf session: BORROWED from its snap (the read_session's owned
       // session), set at construction. A cursor is single-thread, so every leaf touch
       // (lock + get_ref) drives this one session — no map, no lock.
-      sal2::allocator_session& ses_() const { return *_ses; }
+      sal_hybrid::allocator_session& ses_() const { return *_ses; }
 
       // EXTERNAL leaf: store the (tag, ptr) — NOT a resolved pointer. The body is
       // re-resolved (get_ref, MFU-sampled) under a SHORT lock at value/key time, so
@@ -944,8 +944,8 @@ namespace gcart::kv
       // CO-OWNED leaf session (refcounted): keeps the holder's session alive for the
       // cursor's whole lifetime. _ses is the cached raw pointer (hot path). Declared
       // before _ses so the ctor's _ses(_lses.get()) init runs after _lses.
-      sal2::allocator_session_ptr _lses{nullptr};
-      sal2::allocator_session*    _ses = nullptr;
+      sal_hybrid::allocator_session_ptr _lses{nullptr};
+      sal_hybrid::allocator_session*    _ses = nullptr;
       frame       _f[MAXF];
       int         _n  = 0;       // frames in use
       bt          _lt = bt::null;
@@ -994,7 +994,7 @@ namespace gcart::kv
       bt       tag() const noexcept { return _s.tag(); }
       uint32_t ptr() const noexcept { return _s.ptr(); }
       void     give() noexcept { _s.give(); _pin.reset(); }  // relinquish (moved into a work tree)
-      static snapshot adopt(gcart::engine& e, bt t, uint32_t p, sal2::allocator_session* ses)
+      static snapshot adopt(gcart::engine& e, bt t, uint32_t p, sal_hybrid::allocator_session* ses)
       {
          return snapshot(snap::adopt(e, t, p, ses));  // unowned view (no version pin)
       }
@@ -1145,7 +1145,7 @@ namespace gcart::kv
 
      private:
       database*                   _db;
-      sal2::allocator_session_ptr _lses;       // this reader's owned leaf session
+      sal_hybrid::allocator_session_ptr _lses;       // this reader's owned leaf session
       uint32_t                    _hz_slot;     // claimed hazard slot index (Part B)
    };
 
@@ -1397,7 +1397,7 @@ namespace gcart::kv
       // Free one supersession-log entry on the drain's OWN leaf session (Phase C: NO
       // refcount). SHALLOW = free the node's slot line only (its children are carried by
       // the clone that superseded it). DEEP = cascade-free the dropped subtree.
-      void free_entry_(sal2::allocator_session& ses, const tree::dead_entry& e) noexcept
+      void free_entry_(sal_hybrid::allocator_session& ses, const tree::dead_entry& e) noexcept
       {
          if (e.deep)
             gcart::free_subtree_deep_(_e, ses, e.tag, e.ptr);
@@ -1415,7 +1415,7 @@ namespace gcart::kv
       {
          // The drain OWNS its leaf session (start_ver reaper: engine_t v{...}). Frees
          // SYNCHRONOUSLY on THIS thread's session — a SAL session is single-thread-owned.
-         sal2::allocator_session_ptr rses = _e.leaf_create_session();
+         sal_hybrid::allocator_session_ptr rses = _e.leaf_create_session();
          std::vector<dead_batch>      deferred;
          std::unique_lock<std::mutex> lk(_dead_mx);
          for (;;)

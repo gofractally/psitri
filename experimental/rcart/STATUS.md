@@ -1,5 +1,8 @@
 # rcart — status & TODO
 
+> Historical status record. The allocator formerly called `sal2` is now
+> `sal_hybrid`; see the [rename map](../README.md#allocator-names).
+
 `rcart` is the **refcount** version of the spec engine (the frozen reference;
 byte-identical fork of the original gcart). 3-region node taxonomy (FIX
 cl1/cl2/cl9, SAL var_allocator<32> leaves, BIG big_allocator<64>), node-level

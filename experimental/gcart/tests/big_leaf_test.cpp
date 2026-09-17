@@ -1,8 +1,8 @@
 // gcart big_suffix_value round-trip — exercises big-leaf alloc + FREE. Phase 2:
-// big leaves are SAL-1.0 big_leaf objects (alloc<big_leaf>) in the SAME leaf
+// big leaves are SAL big_leaf objects (alloc<big_leaf>) in the SAME leaf
 // allocator as small sv_leaf (the SAL large-object path takes the bigger size),
 // so this gate confirms big insert / overwrite / remove reclaim correctly via the
-// SAL 1.0 control_block refcount (don't assert/leak), and the leaf allocator
+// SAL control_block refcount (don't assert/leak), and the leaf allocator
 // drains to 0 live bytes after remove-all.
 #include <gcart/tree.hpp>
 #include <cstdio>
@@ -60,7 +60,7 @@ int main()
       ck(!t.find(k, out), "gone after remove");
 
    e.drain();
-   const uint64_t live = e.live_bytes();  // total (FIX routing + SAL 1.0 leaf)
+   const uint64_t live = e.live_bytes();  // total (FIX routing + SAL leaf)
    ck(live == 0, "engine drained to 0 (leaf big objects freed) after remove-all");
    std::printf("big-leaf-test: %s (fails=%d, total live=%lluB after drain)\n",
                fails ? "FAIL" : "PASS", fails, (unsigned long long)live);

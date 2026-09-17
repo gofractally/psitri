@@ -40,10 +40,10 @@ static int g_nodes_cmp = 0;
 struct shared_pin
 {
    engine&                   e;
-   sal2::allocator_session&  ses;
+   sal_hybrid::allocator_session&  ses;
    bt                        t;
    uint32_t                  p;
-   shared_pin(engine& e_, sal2::allocator_session& s_, bt t_, uint32_t p_) : e(e_), ses(s_), t(t_), p(p_)
+   shared_pin(engine& e_, sal_hybrid::allocator_session& s_, bt t_, uint32_t p_) : e(e_), ses(s_), t(t_), p(p_)
    {
       retain(e, ses, t, p);
    }
@@ -71,8 +71,8 @@ static void dump128(const char* tag, const void* n)
 // recursive, and the `full` arm's 256-way loop gives it a sizeable frame; letting the
 // compiler inline a few recursion levels into main blew main's frame past the 8 MB
 // stack (a stack-probe fault on entry, before any code ran).
-static __attribute__((noinline)) bool cmp_node(engine& ea, sal2::allocator_session& sa, bt ta, uint32_t pa, engine& eb,
-                     sal2::allocator_session& sb, bt tb, uint32_t pb)
+static __attribute__((noinline)) bool cmp_node(engine& ea, sal_hybrid::allocator_session& sa, bt ta, uint32_t pa, engine& eb,
+                     sal_hybrid::allocator_session& sb, bt tb, uint32_t pb)
 {
    if (ta != tb)
    {
@@ -517,7 +517,7 @@ int main()
 
    // ── leak gate: drop everything, both engines must settle to 0 live bytes ─────
    {
-      auto drain = [&](tree& t, engine& e, sal2::allocator_session& s, bool shared)
+      auto drain = [&](tree& t, engine& e, sal_hybrid::allocator_session& s, bool shared)
       {
          for (;;)
          {

@@ -1,5 +1,9 @@
 # sal2 — spec-conformance audit (2026-06-17)
 
+> Historical design record. Current code uses `experimental/sal_hybrid`
+> (formerly `sal2`) and `experimental/sal_gc` (formerly `sal2gc`).
+> See the [allocator rename map](../experimental/README.md#allocator-names).
+
 Audit of `libraries/sal2/` against `docs/sal2_design.md` (the normative spec).
 **The only sanctioned deviation was: refcount liveness instead of
 death_ver + version-interval GC** (Dan, "refcount for now"). Everything else was

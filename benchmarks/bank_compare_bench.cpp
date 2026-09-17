@@ -17,7 +17,7 @@
 #include <heart_kv.hpp>           // sal_art_ref::kv (standalone)
 #include <start_ver/kv.hpp>       // start_ver::kv (hot, standalone)
 #include <start_ref/kv.hpp>       // start_ref::kv (hot, standalone)
-#include <gcart/kv.hpp>      // gcart::kv (sal2 GC-ART: 3-region node taxonomy, CB-movable leaves)
+#include <gcart/kv.hpp>      // gcart::kv (sal_hybrid GC-ART: 3-region node taxonomy, CB-movable leaves)
 #include <rcart/kv.hpp>      // rcart::kv (SAME taxonomy, direct-grain leaves = baseline)
 
 #include <atomic>
@@ -283,7 +283,7 @@ int main(int argc, char** argv)
       auto db = sal_art_ref::kv::database::create(base + "/sal_art_ref");
       rows.push_back(run_bank("sal_art_ref", db, p, base + "/sal_art_ref"));
    }
-   {  // gcart (sal2 GC-ART: 3-region node taxonomy, FIX routing + SAL suffix_value, CB-movable)
+   {  // gcart (sal_hybrid GC-ART: 3-region node taxonomy, FIX routing + SAL suffix_value, CB-movable)
       std::filesystem::remove_all(base + "/gcart");
       auto db = gcart::kv::database::create(base + "/gcart");
       rows.push_back(run_bank("gcart", db, p, base + "/gcart"));

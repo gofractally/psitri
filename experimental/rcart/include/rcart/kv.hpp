@@ -59,7 +59,7 @@ namespace rcart::kv
       // through this session. A snap lives within one thread's use of its holder, so
       // the borrowed session is single-thread-correct.
       static snap acquire(rcart::engine& e, std::atomic<uint64_t>& slot,
-                          sal2::allocator_session* ses)
+                          sal_hybrid::allocator_session* ses)
       {
          for (;;)
          {
@@ -77,7 +77,7 @@ namespace rcart::kv
       }
       // ADOPT an existing owned (tag,ptr) WITHOUT retaining — the caller transfers a
       // ref it already holds (the set_root exchange: a work tree's root → a snapshot).
-      static snap adopt(rcart::engine& e, bt t, uint32_t p, sal2::allocator_session* ses) noexcept
+      static snap adopt(rcart::engine& e, bt t, uint32_t p, sal_hybrid::allocator_session* ses) noexcept
       {
          return snap(&e, t, p, ses);
       }
@@ -92,7 +92,7 @@ namespace rcart::kv
       // (snap::reset under _hp) just CLEARS the slot — readers never touch a node
       // refcount or lock; reclamation is the writer's deferred retire/drain.
       static snap publish(rcart::engine& e, std::atomic<uint64_t>& live,
-                          std::atomic<uint64_t>* hp, sal2::allocator_session* ses) noexcept
+                          std::atomic<uint64_t>* hp, sal_hybrid::allocator_session* ses) noexcept
       {
          for (;;)
          {
@@ -154,7 +154,7 @@ namespace rcart::kv
       bt       tag() const noexcept { return _t; }
       uint32_t ptr() const noexcept { return _p; }
       rcart::engine*           eng() const noexcept { return _e; }
-      sal2::allocator_session* session() const noexcept { return _ses; }  // borrowed
+      sal_hybrid::allocator_session* session() const noexcept { return _ses; }  // borrowed
       void     give() noexcept { _t = bt::null; _hp = nullptr; }  // relinquish without releasing
       // HAZARD snap (_hp set): reset just CLEARS the slot (store null_root, seq_cst) —
       //   no node refcount touched; reclamation is the writer's deferred drain.
@@ -172,7 +172,7 @@ namespace rcart::kv
       }
 
      private:
-      snap(rcart::engine* e, bt t, uint32_t p, sal2::allocator_session* ses,
+      snap(rcart::engine* e, bt t, uint32_t p, sal_hybrid::allocator_session* ses,
            std::atomic<uint64_t>* hp = nullptr)
           : _e(e), _t(t), _p(p), _ses(ses), _hp(hp)
       {
@@ -180,7 +180,7 @@ namespace rcart::kv
       rcart::engine*           _e   = nullptr;
       bt                       _t   = bt::null;
       uint32_t                 _p   = 0;
-      sal2::allocator_session* _ses = nullptr;  // BORROWED holder session (refcount-snap path)
+      sal_hybrid::allocator_session* _ses = nullptr;  // BORROWED holder session (refcount-snap path)
       std::atomic<uint64_t>*   _hp  = nullptr;  // reader-cursor HAZARD slot; reset clears it
    };
 
@@ -207,8 +207,8 @@ namespace rcart::kv
       // map, no lock. _ses caches the raw pointer for the hot read path.
       explicit cursor(snap s)
           : _s(std::move(s)),
-            _lses(_s.session() ? sal2::allocator_session_ptr(_s.session(), /*retain=*/true)
-                               : sal2::allocator_session_ptr(nullptr)),
+            _lses(_s.session() ? sal_hybrid::allocator_session_ptr(_s.session(), /*retain=*/true)
+                               : sal_hybrid::allocator_session_ptr(nullptr)),
             _ses(_lses.get())
       {
       }
@@ -363,7 +363,7 @@ namespace rcart::kv
       rcart::engine& eng_() const { return *_s.eng(); }
       // This cursor's leaf session (borrowed-with-retain from its snap). A cursor is
       // single-thread, so every leaf touch (lock + get_ref) drives this one session.
-      sal2::allocator_session& ses_() const { return *_ses; }
+      sal_hybrid::allocator_session& ses_() const { return *_ses; }
 
       // EXTERNAL leaf: store the (tag, ptr_address) — NOT a resolved pointer. The body
       // is re-resolved (get_ref, MFU-sampled) under a SHORT lock at value/key time, so
@@ -937,8 +937,8 @@ namespace rcart::kv
       // CO-OWNED leaf session (refcounted): keeps the holder's session alive for the
       // cursor's whole lifetime. _ses caches the raw pointer (hot path). Declared
       // before _ses so the ctor's _ses(_lses.get()) init runs after _lses.
-      sal2::allocator_session_ptr _lses{nullptr};
-      sal2::allocator_session*    _ses = nullptr;
+      sal_hybrid::allocator_session_ptr _lses{nullptr};
+      sal_hybrid::allocator_session*    _ses = nullptr;
       frame       _f[MAXF];
       int         _n  = 0;       // frames in use
       bt          _lt = bt::null;
@@ -978,9 +978,9 @@ namespace rcart::kv
       // root-exchange primitives (set_root): the snapshot IS the owned tree.
       bt                       tag() const noexcept { return _s.tag(); }
       uint32_t                 ptr() const noexcept { return _s.ptr(); }
-      sal2::allocator_session* session() const noexcept { return _s.session(); }
+      sal_hybrid::allocator_session* session() const noexcept { return _s.session(); }
       void     give() noexcept { _s.give(); }  // relinquish the ref (it moved into a work tree)
-      static snapshot adopt(rcart::engine& e, bt t, uint32_t p, sal2::allocator_session* ses)
+      static snapshot adopt(rcart::engine& e, bt t, uint32_t p, sal_hybrid::allocator_session* ses)
       {
          return snapshot(snap::adopt(e, t, p, ses));
       }
@@ -1129,7 +1129,7 @@ namespace rcart::kv
 
      private:
       database*                   _db;
-      sal2::allocator_session_ptr _lses;     // this reader's OWN leaf session (cursors borrow it)
+      sal_hybrid::allocator_session_ptr _lses;     // this reader's OWN leaf session (cursors borrow it)
       uint32_t                    _hz_slot;   // claimed hazard slot index
    };
 
@@ -1330,12 +1330,12 @@ namespace rcart::kv
      public:
       // The database-owned leaf session used by the deferred-root drain and the
       // transaction snapshot-acquire path (single-thread-owned per its callers).
-      sal2::allocator_session* drain_session() noexcept { return _drain_ses.get(); }
+      sal_hybrid::allocator_session* drain_session() noexcept { return _drain_ses.get(); }
 
      private:
       rcart::engine                         _e;
       sal::mapping                          _roots_map;
-      sal2::allocator_session_ptr           _drain_ses;  // declared after _e; dropped before it
+      sal_hybrid::allocator_session_ptr           _drain_ses;  // declared after _e; dropped before it
       std::array<std::unique_ptr<tree>, 64> _work{};
       // Hazard-slot registry: published reader roots + a word-bitmap claim.
       std::array<std::atomic<uint64_t>, kHazardSlots>      _hazard{};

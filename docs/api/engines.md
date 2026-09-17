@@ -112,9 +112,9 @@ existing `start_ver`/Heart tiered default.
 | Source directory / namespace | Status |
 |---|---|
 | `experimental/gcart`, `gcart::*` | GC research; reference/benchmarks, not a release profile |
-| `experimental/sal2gc`, `sal2gc::*` | GC allocator research |
-| `experimental/rcart`, `rcart::*` | Hybrid refcount research using sal2 |
-| `experimental/sal2`, `sal2::*` | Research fixed/movable allocator |
+| `experimental/sal_gc`, `sal_gc::*` | GC allocator research |
+| `experimental/rcart`, `rcart::*` | Hybrid refcount research using sal_hybrid |
+| `experimental/sal_hybrid`, `sal_hybrid::*` | Research fixed/movable allocator |
 | `experimental/start_ver`, `start_ver::*` | Version/stamp liveness and reclamation experiments |
 | `experimental/walart`, `walart::*` | WAL/write-set research |
 | `psitri::experimental::*` | New opt-in experiment aliases, currently tiered/write |

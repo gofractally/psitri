@@ -1,5 +1,9 @@
 # SAL 2.0 / gcart — build status (2026-06-17)
 
+> Historical design record. Current code uses `experimental/sal_hybrid`
+> (formerly `sal2`) and `experimental/sal_gc` (formerly `sal2gc`).
+> See the [allocator rename map](../experimental/README.md#allocator-names).
+
 Autonomous build session against `docs/sal2_design.md`. Branch `sal2`.
 **Headline result: gcart meets both stated goals — read perf ≈ start_ver and
 3.4× faster than sal_art_ref; memory 2.4–2.7× lower.**

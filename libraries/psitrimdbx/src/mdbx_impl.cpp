@@ -43,7 +43,7 @@
 #if !defined(PSITRIMDBX_BACKEND_START_REF)
 #define PSITRIMDBX_BACKEND_START_REF 0
 #endif
-//   PSITRIMDBX_BACKEND_GCART         — gcart spec engine DIRECT (sal2 3-region FIX/SAL/BIG, refcount, node-level COW)
+//   PSITRIMDBX_BACKEND_GCART         — gcart spec engine DIRECT (sal_hybrid 3-region FIX/SAL/BIG, refcount, node-level COW)
 #if !defined(PSITRIMDBX_BACKEND_GCART)
 #define PSITRIMDBX_BACKEND_GCART 0
 #endif
@@ -51,7 +51,7 @@
 #if !defined(PSITRIMDBX_BACKEND_DELTA_GCART)
 #define PSITRIMDBX_BACKEND_DELTA_GCART 0
 #endif
-//   PSITRIMDBX_BACKEND_RCART         — rcart refcount baseline DIRECT (sal2 FIX/SAL/BIG, refcount + hazard readers, compact reclaim)
+//   PSITRIMDBX_BACKEND_RCART         — rcart refcount baseline DIRECT (sal_hybrid FIX/SAL/BIG, refcount + hazard readers, compact reclaim)
 #if !defined(PSITRIMDBX_BACKEND_RCART)
 #define PSITRIMDBX_BACKEND_RCART 0
 #endif

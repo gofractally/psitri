@@ -18,21 +18,21 @@
 #include <gcart/branch_tag.hpp>  // branch_type, tag3_get/set, tag3_bytes
 #include <ucc/lower_bound.hpp>   // ucc::lower_bound_padded (vectorized in-node scan)
 #include <ucc/round.hpp>         // ucc::round_up_multiple (cacheline-rounded leaf alloc)
-#include <sal2/fixed_allocator.hpp>  // FIX routing (cl1/cl2/cl9) — UNCHANGED, direct, no CB
-// ── Phase 2: the LEAF region rides the copied SAL 1.0 allocator ──────────────
-// (libraries/sal2/include/sal2/alloc/* — namespace sal2 — carries the real
+#include <sal_hybrid/fixed_allocator.hpp>  // FIX routing (cl1/cl2/cl9) — UNCHANGED, direct, no CB
+// ── Phase 2: the LEAF region rides the copied SAL allocator ──────────────
+// (experimental/sal_hybrid/include/sal_hybrid/alloc/* — namespace sal_hybrid — carries the real
 //  machinery: background compactor, MFU read-cache (get_ref SAMPLES the active
 //  bit), segment threads, control_block refcount). Routing stays on the
 //  from-scratch fixed_allocator above; only suffix_value / big_suffix_value
 //  leaves move here, so the MFU cache + compactor become functional on the leaf.
 //  NOTE: movable_region.hpp / big_region.hpp are NO LONGER included — they pull
-//  in the from-scratch sal2/control_block_alloc.hpp which redefines sal2::
+//  in the from-scratch sal_hybrid/control_block_alloc.hpp which redefines sal_hybrid::
 //  ptr_address (uint32_t) and would collide with the typed ptr_address the SAL
 //  1.0 subsystem declares. gcart no longer references those regions at all.
-#include <sal2/alloc/allocator.hpp>
-#include <sal2/alloc/allocator_session_impl.hpp>
-#include <sal2/alloc/read_lock.hpp>
-#include <sal2/alloc/smart_ptr.hpp>
+#include <sal_hybrid/alloc/allocator.hpp>
+#include <sal_hybrid/alloc/allocator_session_impl.hpp>
+#include <sal_hybrid/alloc/read_lock.hpp>
+#include <sal_hybrid/alloc/smart_ptr.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -50,11 +50,11 @@ namespace gcart
 {
    using sv = std::string_view;
    using bt = branch_type;
-   // The LEAF region's SAL-1.0 pointer is a typed_int<uint32_t> — the SAME width
+   // The LEAF region's SAL pointer is a typed_int<uint32_t> — the SAME width
    // as the engine's u32 routing-branch slot, so a leaf branch (suffix_value /
    // big_suffix_value) keeps storing a bare u32 (the ptr_address value) and only
-   // reconstructs leaf_addr() at the SAL-1.0 call boundary.
-   using leaf_addr_t = sal2::ptr_address;
+   // reconstructs leaf_addr() at the SAL call boundary.
+   using leaf_addr_t = sal_hybrid::ptr_address;
    inline leaf_addr_t leaf_addr(uint32_t p) noexcept { return leaf_addr_t(p); }
 
    // Lock-free MPSC ring of packed (tag,ptr) roots awaiting their release
@@ -175,28 +175,28 @@ namespace gcart
    // The engine owns the release thread (SAL puts it in the allocator). A
    // smart_ptr release routes through release_async() — the smart_ptr OWNS its
    // own (async) reclamation; no caller does manual accounting.
-   // sv_leaf / big_leaf are SAL-1.0 alloc_header nodes (declared just below the
-   // engine); the leaf body cap is what fits a single SAL-1.0 cacheline-rounded
-   // allocation comfortably below the 2 KB inline ceiling psitri kept. The SAL 1.0
+   // sv_leaf / big_leaf are SAL alloc_header nodes (declared just below the
+   // engine); the leaf body cap is what fits a single SAL cacheline-rounded
+   // allocation comfortably below the 2 KB inline ceiling psitri kept. The SAL
    // large-object path takes everything bigger automatically (one allocator,
    // small + large), so there is no longer a separate "big region": a leaf whose
-   // body exceeds sal_max_body is a big_suffix_value (a bigger SAL 1.0 alloc) but
+   // body exceeds sal_max_body is a big_suffix_value (a bigger SAL alloc) but
    // still lives in the SAME allocator (its CB ref is the liveness).
    struct engine
    {
       // WithBirth=true: each class carries a parallel per-slot u32 BIRTH array (.bv);
       // the COW birth==V latch reads it instead of a node-header field (see fixed_allocator).
-      sal2::fixed_allocator<128, true>  cl1;  // setlist / nested_setlist  (FIX, direct, no CB)
-      sal2::fixed_allocator<256, true>  cl2;  // double_setlist / big_nested (FIX)
-      sal2::fixed_allocator<1152, true> cl9;  // full / node256             (FIX)
+      sal_hybrid::fixed_allocator<128, true>  cl1;  // setlist / nested_setlist  (FIX, direct, no CB)
+      sal_hybrid::fixed_allocator<256, true>  cl2;  // double_setlist / big_nested (FIX)
+      sal_hybrid::fixed_allocator<1152, true> cl9;  // full / node256             (FIX)
 
-      // The copied SAL 1.0 allocator drives ALL leaf data (suffix_value AND
+      // The copied SAL allocator drives ALL leaf data (suffix_value AND
       // big_suffix_value): the CB region holds small leaves, the large-object
       // path holds big ones — exactly how sal_art_ref drives one sal::allocator
       // for both leaf_node and large values. Opened in the ctor, threads started
       // (compactor + MFU promoter). A per-thread session (thread_local) drives
       // get_ref / retain / release; the writer's session is bound per tree.
-      std::unique_ptr<sal2::allocator> leaf;
+      std::unique_ptr<sal_hybrid::allocator> leaf;
 
       // Leaf body cap below which a (suffix,value) is a suffix_value (inline-able
       // into a nested_setlist); larger bodies are big_suffix_value. Both are SAL
@@ -223,7 +223,7 @@ namespace gcart
             cl9({.dir = dir, .name = "cl9", .max_segments = seg_cap("GCART_CL9_SEGS", 2048)}),
             _dir(std::move(dir))
       {
-         // The leaf allocator (the copied SAL 1.0) opens its own files under a
+         // The leaf allocator (the copied SAL) opens its own files under a
          // "leaf" subdir of the engine dir: register the leaf node type ops BEFORE
          // start_background_threads (the SAL contract — the compactor/release loops
          // read the non-atomic type-ops array on every object they touch), then turn
@@ -244,23 +244,23 @@ namespace gcart
          // already puts these after `leaf`, but be explicit (and ordered vs the bg
          // join above — _bg_ses is the reclaimer thread's session). Assigning a null
          // ptr drops the held session (end_session) BEFORE `leaf` is destroyed.
-         _admin_ses = sal2::allocator_session_ptr{nullptr};
-         _bg_ses    = sal2::allocator_session_ptr{nullptr};
+         _admin_ses = sal_hybrid::allocator_session_ptr{nullptr};
+         _bg_ses    = sal_hybrid::allocator_session_ptr{nullptr};
          // The leaf allocator destructor stops its own background threads.
       }
 
       // ── leaf sessions: one per session-HOLDER, never a global map ──────────────
-      // SAL 1.0 sessions are single-thread-owned (each thread atomically claims a
+      // SAL sessions are single-thread-owned (each thread atomically claims a
       // slot) and every get_ref copies a NON-atomic session-ptr refcount, so each
       // thread MUST drive get_ref/retain/release through its OWN session, never
       // another thread's. There is NO global session map and NO mutex: each holder
       // (a read_session's cursors, a work tree's writer) OWNS its session, created
       // via leaf_create_session() and used only on that one thread. The protection
       // for a read is the snapshot pin (the held root's refcount), not a lock.
-      sal2::allocator_session_ptr leaf_create_session() { return leaf->create_session(); }
+      sal_hybrid::allocator_session_ptr leaf_create_session() { return leaf->create_session(); }
       // Cold single-thread admin path (leaf_live_bytes_, snapshot::get, get_root):
       // an engine-owned session used only on the main/admin thread.
-      sal2::allocator_session& admin_ses() noexcept { return *_admin_ses; }
+      sal_hybrid::allocator_session& admin_ses() noexcept { return *_admin_ses; }
 
       void init_leaf_();  // out-of-line (needs sv_leaf/big_leaf complete)
 
@@ -274,7 +274,7 @@ namespace gcart
          drain();
          return live_bytes_raw();
       }
-      uint64_t leaf_live_bytes_() noexcept;  // out-of-line (iterates the SAL 1.0 live set)
+      uint64_t leaf_live_bytes_() noexcept;  // out-of-line (iterates the SAL live set)
 
       // smart_ptr release entry: bounded-inline cascade, spill the rest to the bg.
       void release_async(bt t, uint32_t p) noexcept;
@@ -302,27 +302,27 @@ namespace gcart
       // ~engine BEFORE `leaf`): the background reclaimer's session (used only by the
       // bg thread) and the cold admin/main-thread session. Every other holder owns
       // its own via leaf_create_session().
-      sal2::allocator_session_ptr    _bg_ses{nullptr};
-      sal2::allocator_session_ptr    _admin_ses{nullptr};
+      sal_hybrid::allocator_session_ptr    _bg_ses{nullptr};
+      sal_hybrid::allocator_session_ptr    _admin_ses{nullptr};
       release_ring<release_ring_cap> _rq;
       std::thread                    _bg;
       std::atomic<bool>              _bg_stop{false};
       std::atomic<uint64_t>          _bg_inflight{0};
    };
 
-   // ── suffix_value (SAL 1.0 leaf): alloc_header + [u32 birth][u16 vlen][u8 slen][value][suffix]
+   // ── suffix_value (SAL leaf): alloc_header + [u32 birth][u16 vlen][u8 slen][value][suffix]
    // slen==0 => the term (a "leaf" is suffix_value with a 0-length suffix).
    //
-   // sv_leaf is a SAL-1.0 alloc_header-derived NODE (mirrors sal_art_ref::leaf_node):
+   // sv_leaf is a SAL alloc_header-derived NODE (mirrors sal_art_ref::leaf_node):
    // alloc_size(suffix,value) sizes a cacheline-rounded allocation; the ctor writes
    // the body; the leaf session's alloc<sv_leaf>(suffix,value) hands back a
    // ptr_address; get_ref<sv_leaf>(pa) reads it back (and SAMPLES the MFU active
-   // bit — the whole point of moving the leaf onto SAL 1.0). It owns no children
+   // bit — the whole point of moving the leaf onto SAL). It owns no children
    // (a byte leaf is pure data), so destroy/visit_children are no-ops (the
    // alloc_header defaults). The CB refcount IS the leaf's liveness (Phase 2 v1).
-   struct sv_leaf : sal2::alloc_header
+   struct sv_leaf : sal_hybrid::alloc_header
    {
-      static constexpr sal2::header_type type_id = sal2::header_type::start_user_type;  // 3
+      static constexpr sal_hybrid::header_type type_id = sal_hybrid::header_type::start_user_type;  // 3
 
       // body (immediately after the 14-B packed alloc_header):
       //   [u32 birth][u16 vlen][u8 slen][value][suffix].
@@ -333,21 +333,21 @@ namespace gcart
       static constexpr uint32_t birth_bytes = 4;
       static uint32_t bytes_for(uint32_t vlen, uint32_t slen) noexcept { return 3 + vlen + slen; }
 
-      char*       body() noexcept { return reinterpret_cast<char*>(this) + sizeof(sal2::alloc_header); }
+      char*       body() noexcept { return reinterpret_cast<char*>(this) + sizeof(sal_hybrid::alloc_header); }
       const char* body() const noexcept
       {
-         return reinterpret_cast<const char*>(this) + sizeof(sal2::alloc_header);
+         return reinterpret_cast<const char*>(this) + sizeof(sal_hybrid::alloc_header);
       }
 
-      // ── SAL 1.0 construction contract ──────────────────────────────────────
+      // ── SAL construction contract ──────────────────────────────────────
       static uint32_t alloc_size(sv suffix, sv value) noexcept
       {
-         const uint32_t raw = uint32_t(sizeof(sal2::alloc_header) + birth_bytes +
+         const uint32_t raw = uint32_t(sizeof(sal_hybrid::alloc_header) + birth_bytes +
                                        bytes_for(uint32_t(value.size()), uint32_t(suffix.size())));
-         return ucc::round_up_multiple<sal2::cacheline_size>(raw);
+         return ucc::round_up_multiple<sal_hybrid::cacheline_size>(raw);
       }
-      sv_leaf(uint32_t asize, sal2::ptr_address_seq seq, sv suffix, sv value) noexcept
-          : sal2::alloc_header(asize, type_id, seq)
+      sv_leaf(uint32_t asize, sal_hybrid::ptr_address_seq seq, sv suffix, sv value) noexcept
+          : sal_hybrid::alloc_header(asize, type_id, seq)
       {
          const uint16_t vl = uint16_t(value.size());
          char*          d  = body();
@@ -376,35 +376,35 @@ namespace gcart
       }
    };
 
-   // ── big_leaf (SAL 1.0 large-object leaf): alloc_header + [u32 birth][u32 vlen][u8 slen][value][suffix]
+   // ── big_leaf (SAL large-object leaf): alloc_header + [u32 birth][u32 vlen][u8 slen][value][suffix]
    // The same (suffix,value) leaf as sv_leaf but with a u32 vlen (big values can
    // exceed 64K) and never inlined into a nested node. Reached as a
-   // bt::big_suffix_value branch. It rides the SAME SAL 1.0 leaf allocator as
-   // sv_leaf — SAL 1.0's large-object path handles the bigger size (one allocator,
+   // bt::big_suffix_value branch. It rides the SAME SAL leaf allocator as
+   // sv_leaf — SAL's large-object path handles the bigger size (one allocator,
    // small + large, exactly how sal_art_ref stores both leaf_node and large values).
-   struct big_leaf : sal2::alloc_header
+   struct big_leaf : sal_hybrid::alloc_header
    {
-      static constexpr sal2::header_type type_id =
-          sal2::header_type(uint8_t(sal2::header_type::start_user_type) + 1);  // 4
+      static constexpr sal_hybrid::header_type type_id =
+          sal_hybrid::header_type(uint8_t(sal_hybrid::header_type::start_user_type) + 1);  // 4
 
       static constexpr uint32_t birth_bytes = 4;
       // birth-free body size: [u32 vlen][u8 slen][value][suffix] = 5 + vlen + slen.
       static uint32_t bytes_for(uint32_t vlen, uint32_t slen) noexcept { return 5 + vlen + slen; }
 
-      char*       body() noexcept { return reinterpret_cast<char*>(this) + sizeof(sal2::alloc_header); }
+      char*       body() noexcept { return reinterpret_cast<char*>(this) + sizeof(sal_hybrid::alloc_header); }
       const char* body() const noexcept
       {
-         return reinterpret_cast<const char*>(this) + sizeof(sal2::alloc_header);
+         return reinterpret_cast<const char*>(this) + sizeof(sal_hybrid::alloc_header);
       }
 
       static uint32_t alloc_size(sv suffix, sv value) noexcept
       {
-         const uint32_t raw = uint32_t(sizeof(sal2::alloc_header) + birth_bytes +
+         const uint32_t raw = uint32_t(sizeof(sal_hybrid::alloc_header) + birth_bytes +
                                        bytes_for(uint32_t(value.size()), uint32_t(suffix.size())));
-         return ucc::round_up_multiple<sal2::cacheline_size>(raw);
+         return ucc::round_up_multiple<sal_hybrid::cacheline_size>(raw);
       }
-      big_leaf(uint32_t asize, sal2::ptr_address_seq seq, sv suffix, sv value) noexcept
-          : sal2::alloc_header(asize, type_id, seq)
+      big_leaf(uint32_t asize, sal_hybrid::ptr_address_seq seq, sv suffix, sv value) noexcept
+          : sal_hybrid::alloc_header(asize, type_id, seq)
       {
          const uint32_t vl = uint32_t(value.size());
          char*          d  = body();
@@ -437,8 +437,8 @@ namespace gcart
    inline void engine::init_leaf_()
    {
       std::filesystem::create_directories(_dir / "leaf");
-      sal2::runtime_config cfg;  // MFU read-cache defaults ON (the lever this phase earns)
-      leaf = std::make_unique<sal2::allocator>(_dir / "leaf", cfg, /*start_threads_now=*/false);
+      sal_hybrid::runtime_config cfg;  // MFU read-cache defaults ON (the lever this phase earns)
+      leaf = std::make_unique<sal_hybrid::allocator>(_dir / "leaf", cfg, /*start_threads_now=*/false);
       leaf->register_type_ops<sv_leaf>();   // ops BEFORE start_background_threads (SAL contract)
       leaf->register_type_ops<big_leaf>();
       leaf->start_background_threads();      // compactor + MFU promoter + release thread ON
@@ -452,7 +452,7 @@ namespace gcart
    {
       uint64_t b = 0;
       _admin_ses->for_each_live_object(
-          [&](auto, auto, const sal2::alloc_header* h) { b += h->size(); });
+          [&](auto, auto, const sal_hybrid::alloc_header* h) { b += h->size(); });
       return b;
    }
 
@@ -464,13 +464,13 @@ namespace gcart
    //    refcount keeps it alive (the snapshot/work root pins it). ──────────────────
    // Each caller passes its OWN leaf session (a cursor's, a work tree's): no global
    // map, no lock — the read's protection is the snapshot pin, not a session probe.
-   inline sv leaf_suffix(sal2::allocator_session& ses, bt t, uint32_t p) noexcept
+   inline sv leaf_suffix(sal_hybrid::allocator_session& ses, bt t, uint32_t p) noexcept
    {
       return t == bt::big_suffix_value
                  ? ses.get_ref<big_leaf>(leaf_addr(p)).obj()->suffix()
                  : ses.get_ref<sv_leaf>(leaf_addr(p)).obj()->suffix();
    }
-   inline sv leaf_value(sal2::allocator_session& ses, bt t, uint32_t p) noexcept
+   inline sv leaf_value(sal_hybrid::allocator_session& ses, bt t, uint32_t p) noexcept
    {
       return t == bt::big_suffix_value
                  ? ses.get_ref<big_leaf>(leaf_addr(p)).obj()->value()
@@ -482,11 +482,11 @@ namespace gcart
    }
    // The birth version stamped on a leaf — read via the caller's owned session
    // (used by make_sv / pack_nested_leaves to decide private-this-txn inlining).
-   inline uint32_t sv_birth(sal2::allocator_session& ses, uint32_t p) noexcept
+   inline uint32_t sv_birth(sal_hybrid::allocator_session& ses, uint32_t p) noexcept
    {
       return ses.get_ref<sv_leaf>(leaf_addr(p)).obj()->birth();
    }
-   inline uint32_t big_birth(sal2::allocator_session& ses, uint32_t p) noexcept
+   inline uint32_t big_birth(sal_hybrid::allocator_session& ses, uint32_t p) noexcept
    {
       return ses.get_ref<big_leaf>(leaf_addr(p)).obj()->birth();
    }
@@ -765,7 +765,7 @@ namespace gcart
              t == bt::big_nested || t == bt::full;
    }
    // Which region a tag lives in. ROUTING tags → FIX (cl1/cl2/cl9), DIRECT (no CB,
-   // address-stable). LEAF tags → the SAL 1.0 leaf allocator via get_ref (MFU-sampled);
+   // address-stable). LEAF tags → the SAL leaf allocator via get_ref (MFU-sampled);
    // resolve returns the leaf's BODY pointer (past the alloc_header) so the existing
    // body readers (leaf_value_body / find_in's standalone-leaf path) work verbatim —
    // a standalone body still begins with the [birth] prefix. The returned pointer is
@@ -774,7 +774,7 @@ namespace gcart
    // Routing tags resolve via the direct FIX allocators (e.cl*); LEAF tags via the
    // caller-supplied leaf SESSION (get_ref, MFU-sampled). The caller passes its OWN
    // session (cursor's, work tree's) — there is no global session map and no lock.
-   inline void* resolve(engine& e, sal2::allocator_session& ses, bt t, uint32_t p) noexcept
+   inline void* resolve(engine& e, sal_hybrid::allocator_session& ses, bt t, uint32_t p) noexcept
    {
       switch (t)
       {
@@ -957,13 +957,13 @@ namespace gcart
    // so destroy is a no-op). The CB survives ONLY for relocation/MFU (the compactor
    // moves leaves; get_ref MFU-samples) — it is NOT the liveness signal. The drain
    // calls leaf_free when the leaf's death <= floor (born-this-txn leaves free inline).
-   inline void leaf_free(sal2::allocator_session& ses, uint32_t p) noexcept
+   inline void leaf_free(sal_hybrid::allocator_session& ses, uint32_t p) noexcept
    {
       ses.release(leaf_addr(p));  // ref 1→0 → destroy+free (the single, only release)
    }
    // a leaf's birth version (the committing txn that created it). 0 = the inline /
    // pre-version form. Read for the COW privacy decision (born this txn ⟹ free inline).
-   inline uint32_t leaf_birth(sal2::allocator_session& ses, bt t, uint32_t p) noexcept
+   inline uint32_t leaf_birth(sal_hybrid::allocator_session& ses, bt t, uint32_t p) noexcept
    {
       return t == bt::big_suffix_value ? ses.get_ref<big_leaf>(leaf_addr(p)).obj()->birth()
                                        : ses.get_ref<sv_leaf>(leaf_addr(p)).obj()->birth();
@@ -1026,7 +1026,7 @@ namespace gcart
    // root is alive (the caller pins it); the caller constructs/copies if it needs
    // ownership. Mirrors start_ref's view-based pg_find — the read hot path never
    // allocates or copies the value (the bank reader discards it entirely).
-   inline bool find_in(engine& e, sal2::allocator_session& ses, bt t, uint32_t p, sv key, sv& out)
+   inline bool find_in(engine& e, sal_hybrid::allocator_session& ses, bt t, uint32_t p, sv key, sv& out)
    {
       uint32_t depth = 0;
       for (;;)
@@ -1034,7 +1034,7 @@ namespace gcart
          if (t == bt::null)
             return false;
          void* node = resolve(e, ses, t, p);  // leaf: get_ref (MFU-sampled) → body pointer
-         if (is_leaf_tag(t))  // suffix_value / big_suffix_value (both SAL 1.0 leaves)
+         if (is_leaf_tag(t))  // suffix_value / big_suffix_value (both SAL leaves)
          {
             // Read suffix + value from the ONE resolved body (the get_ref already
             // sampled MFU); leaf_*_body skip the [birth] prefix. No second get_ref.
@@ -1278,7 +1278,7 @@ namespace gcart
    //     childless so its deep == its single leaf_free.
    // BOTH are reached only through the floor-gated drain (a node is freed only once
    // its death <= floor): a reader pinned at version < death can still reach it.
-   inline void free_node_shallow_(engine& e, sal2::allocator_session& ses, bt t, uint32_t p) noexcept
+   inline void free_node_shallow_(engine& e, sal_hybrid::allocator_session& ses, bt t, uint32_t p) noexcept
    {
       if (is_leaf_tag(t))  // a leaf carries no shared children → shallow == its free
       {
@@ -1288,7 +1288,7 @@ namespace gcart
       if (is_routing(t))
          free_node_(e, t, p);  // free ONLY this line; children carried by the clone
    }
-   inline void free_subtree_deep_(engine& e, sal2::allocator_session& ses, bt t, uint32_t p) noexcept
+   inline void free_subtree_deep_(engine& e, sal_hybrid::allocator_session& ses, bt t, uint32_t p) noexcept
    {
       if (t == bt::null)
          return;
@@ -1379,7 +1379,7 @@ namespace gcart
       // routing-node sessions (cl1/cl2/cl9) latch _floor = _cursor = the current
       // frontier so this txn's at/after-floor frees recycle hot and the freeset scan
       // first-fits forward from here. Called at write-transaction start. The leaf
-      // allocator (copied SAL 1.0) manages its own txn/segment lifecycle (active
+      // allocator (copied SAL) manages its own txn/segment lifecycle (active
       // segment + background compactor), so it needs no per-txn begin marker here.
       void begin_txn() noexcept
       {
@@ -1391,7 +1391,7 @@ namespace gcart
       engine& eng() noexcept { return _e; }
       // The work tree's owned leaf session (the writer thread's). transaction::abort
       // and start_transaction borrow it for the snap that pins/releases the root.
-      sal2::allocator_session* leaf_session() const noexcept { return _lses.get(); }
+      sal_hybrid::allocator_session* leaf_session() const noexcept { return _lses.get(); }
       // Public deep-drop a (tag,ptr) subtree (abort: the diverged work tree). Phase C:
       // version-liveness, NO refcount — born-this-txn nodes free inline, committed
       // nodes log for the floor-gated drain (commit then publishes the log).
@@ -1506,9 +1506,9 @@ namespace gcart
       }
 
      private:
-      // Build a terminal leaf via the SAL 1.0 leaf allocator: a small body is a
+      // Build a terminal leaf via the SAL leaf allocator: a small body is a
       // suffix_value (inline-able into a nested node), a large body is a
-      // big_suffix_value (a bigger SAL 1.0 alloc, never inlined). BOTH are SAL 1.0
+      // big_suffix_value (a bigger SAL alloc, never inlined). BOTH are SAL
       // alloc<…>(suffix,value) → ptr_address (CB ref = 1, MFU-trackable), mirroring
       // sal_art_ref's make_leaf. Returns the tag so callers stay region-agnostic.
       // The leaf's birth is stamped here (version liveness; born this txn).
@@ -2451,7 +2451,7 @@ namespace gcart
                static_cast<setlist*>(_e.cl1.get(s))->set_death(0);   // alive (Phase B)
                scratch[nb++] = br{n->okeys()[i], bt::setlist, s};
             }
-            else  // inline suffix_value → fresh standalone SAL 1.0 leaf (born this txn)
+            else  // inline suffix_value → fresh standalone SAL leaf (born this txn)
             {
                // Reconstruct the (suffix,value) from the inline (birth-free) body and
                // allocate a fresh sv_leaf via the leaf session — make_sv stamps birth.
@@ -2820,7 +2820,7 @@ namespace gcart
                tago = bt::setlist;
                ptro = s;
             }
-            else  // inline-sv (3-byte body) → fresh standalone SAL-1.0 leaf
+            else  // inline-sv (3-byte body) → fresh standalone SAL leaf
             {
                uint16_t v16;
                std::memcpy(&v16, e.body, 2);
@@ -3146,12 +3146,12 @@ namespace gcart
       }
 
       engine&                                    _e;
-      sal2::fixed_allocator<128, true>::session  _s1;
-      sal2::fixed_allocator<256, true>::session  _s2;
-      sal2::fixed_allocator<1152, true>::session _s9;
+      sal_hybrid::fixed_allocator<128, true>::session  _s1;
+      sal_hybrid::fixed_allocator<256, true>::session  _s2;
+      sal_hybrid::fixed_allocator<1152, true>::session _s9;
       // The writer's OWNED leaf session (single-thread): every leaf op on the write
       // path drives *_lses — no engine session map, no lock. Created in the ctor.
-      sal2::allocator_session_ptr          _lses;
+      sal_hybrid::allocator_session_ptr          _lses;
       bt                                   _rt   = bt::null;
       uint32_t                             _rp   = 0;
       uint64_t                             _size = 0;

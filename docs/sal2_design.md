@@ -1,5 +1,9 @@
 # SAL 2.0 — a movable + fixed multi-region memory system (design + build plan)
 
+> Historical design record. Current code uses `experimental/sal_hybrid`
+> (formerly `sal2`) and `experimental/sal_gc` (formerly `sal2gc`).
+> See the [allocator rename map](../experimental/README.md#allocator-names).
+
 **Status:** design, ready to build. **Repo:** `@gofractally/psitri`.
 **Branch:** `sal2`. **New libraries:** `libraries/sal2/` (the allocator) and
 `libraries/gcart/` (the GC-ART engine built on it).

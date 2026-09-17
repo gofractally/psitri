@@ -73,6 +73,23 @@ Small Engine and Large Engine alongside real MDBX, RocksDB, SQLite, and DuckDB
 with one workload and explicit durability settings. Its validation runs establish
 that the adapters agree on the resulting state; they are not performance claims.
 
+**SQLite and RocksDB participate in the same bank transfer test**, using the same
+account data, transfer sequence, transaction batches, and correctness checks as
+the Small Engine and Large Engine. Both passed the retained no-sync and full-flush
+validation cohorts. Run the five-engine no-sync comparison with:
+
+```sh
+python3 scripts/fair_bank.py --machine my-runner --profile smoke \
+  --engines small large mdbx rocksdb sqlite --durability none
+```
+
+Use `--profile performance --repeats 5` on a clean build and dedicated runner to
+collect comparison results. The [comparison protocol](fair-comparison.html)
+documents build dependencies, durability tiers, and the checks required before
+publishing timings. The June chart above contains its recorded MDBX cohort;
+RocksDB and SQLite need results from a new matched performance series to appear
+alongside the maintained engines.
+
 The separate integration suite runs bank workloads through real and psitri-backed
 RocksDB/SQLite APIs, plus a TATP telecom workload through DuckDB and its psitri
 storage extension. The retained integration records below measure those source

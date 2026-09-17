@@ -20,7 +20,7 @@ def controls(engines):
         selected = engine["status"] != "research"
         badge = '<small>experimental</small>' if not selected else ''
         choices.append(
-            f'<label class="engine-choice"><input type="checkbox" data-chart-choice '
+            f'<label class="engine-choice"{" hidden" if not selected else ""}><input type="checkbox" data-chart-choice '
             f'value="{escape(engine["id"])}" aria-label="{escape(engine["name"])}" '
             f'data-default="{str(selected).lower()}" data-status="{engine["status"]}" '
             f'{"checked" if selected else ""} disabled><span>{escape(engine["name"])}{badge}</span></label>'

@@ -83,9 +83,13 @@ all("[data-comparison-chart]").forEach((chart) => {
   const panels = within("[data-chart-panel]");
   const buttons = within("[data-chart-metric]");
   const research = chart.querySelector("[data-chart-research]");
+  const experiments = choices.filter((c) => c.dataset.status === "research");
+  let researchInitialized = false;
   let metric = "write";
   function render() {
-    const selected = new Set(choices.filter((c) => c.checked).map((c) => c.value));
+    experiments.forEach((choice) => { choice.closest("label").hidden = !research.checked; });
+    const selected = new Set(choices.filter((c) => c.checked &&
+      (c.dataset.status !== "research" || research.checked)).map((c) => c.value));
     panels.forEach((panel) => {
       panel.hidden = selected.size === 0 || (buttons.length > 0 && panel.dataset.chartPanel !== metric);
     });
@@ -97,11 +101,6 @@ all("[data-comparison-chart]").forEach((chart) => {
       row.querySelector(".bar-fill").style.setProperty("--bar-width", `${largest ? 100 * Number(row.dataset.value) / largest : 0}%`);
     });
     buttons.forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.chartMetric === metric)));
-    if (research) {
-      const experiments = choices.filter((c) => c.dataset.status === "research");
-      research.checked = experiments.every((c) => c.checked);
-      research.indeterminate = experiments.some((c) => c.checked) && !research.checked;
-    }
     chart.querySelector("[data-chart-empty]").hidden = selected.size !== 0;
     const reference = selected.has(chart.dataset.baseline) ? "reference shown" : "reference hidden; ratios unchanged";
     chart.querySelector("[data-chart-status]").textContent = `${selected.size} engine${selected.size === 1 ? "" : "s"} selected · ${chart.dataset.baselineName} ${reference}`;
@@ -112,11 +111,16 @@ all("[data-comparison-chart]").forEach((chart) => {
     render();
   }));
   research?.addEventListener("change", () => {
-    choices.filter((c) => c.dataset.status === "research").forEach((c) => { c.checked = research.checked; });
+    if (research.checked && !researchInitialized) {
+      experiments.forEach((c) => { c.checked = true; });
+      researchInitialized = true;
+    }
     render();
   });
   chart.querySelector("[data-chart-reset]").addEventListener("click", () => {
     choices.forEach((c) => { c.checked = c.dataset.default === "true"; });
+    if (research) research.checked = false;
+    researchInitialized = false;
     render();
   });
   chart.querySelector("[data-chart-clear]").addEventListener("click", () => {

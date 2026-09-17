@@ -18,7 +18,8 @@ Open `http://localhost:8080/site/`. Relative links also work at the project Page
 path `https://gofractally.github.io/psitri/`. The builder checks local links,
 fragments, duplicate IDs, image alt attributes, and root-relative asset paths.
 For visual review, check desktop and mobile, every benchmark metric, the experimental-engine
-toggle, individual engine checkboxes (including hiding the baseline), empty/reset
+toggle (experimental choices stay hidden until enabled), individual engine
+checkboxes (including hiding the baseline), empty/reset
 selections, ART latency bars, the snapshot illustration, example switching/copy, menu, and details.
 
 ## Publication boundary

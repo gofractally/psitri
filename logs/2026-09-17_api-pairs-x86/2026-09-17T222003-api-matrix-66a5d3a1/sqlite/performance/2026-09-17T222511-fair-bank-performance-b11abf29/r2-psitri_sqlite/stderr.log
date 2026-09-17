@@ -1,0 +1,23 @@
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+psitri_sqlite 3.51.3 2026-03-13 10:38:09 737ae4a34738ffa0c3ff7f9bb18df914dd1cad163f28fd6b6e114a344fe6d618
+journal_mode=WAL; synchronous=OFF; fullfsync=OFF; WITHOUT ROWID; mmap_size=0; wal_autocheckpoint=1000; per_connection_cache_mib=256
+load
+contract checks
+warmup
+write
+[MERGE] root=0 entries=100004  27 ms wall / 27 ms cpu  syscall=0%  3763958 entries/sec  0.27 us/entry  max=0.0 ms
+        latency: <1us=98792  <10us=1137  <100us=75  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=75215  31 ms wall / 31 ms cpu  syscall=0%  2392851 entries/sec  0.42 us/entry  max=0.1 ms
+        latency: <1us=73994  <10us=1212  <100us=9  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+mixed
+[MERGE] root=0 entries=63870  24 ms wall / 24 ms cpu  syscall=0%  2620757 entries/sec  0.38 us/entry  max=0.0 ms
+        latency: <1us=62658  <10us=1205  <100us=7  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=75359  30 ms wall / 30 ms cpu  syscall=0%  2474151 entries/sec  0.40 us/entry  max=0.1 ms
+        latency: <1us=74137  <10us=1207  <100us=15  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+read
+close/reopen validation
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m

@@ -1,0 +1,32 @@
+{
+  "workload": "api-bank-v1",
+  "status": "passed",
+  "machine": "cloud-x86",
+  "revision": "5ba8186a9bb6c99f92262b9cc3cf77bc13c92e5b",
+  "pairs": [
+    {
+      "api": "mdbx",
+      "status": "passed",
+      "runs": [
+        "mdbx/smoke/2026-09-17T222003-fair-bank-smoke-32179b2f/manifest.json",
+        "mdbx/performance/2026-09-17T222025-fair-bank-performance-d7512fbb/manifest.json"
+      ]
+    },
+    {
+      "api": "rocksdb",
+      "status": "passed",
+      "runs": [
+        "rocksdb/smoke/2026-09-17T222225-fair-bank-smoke-c4769c20/manifest.json",
+        "rocksdb/performance/2026-09-17T222248-fair-bank-performance-e976ad43/manifest.json"
+      ]
+    },
+    {
+      "api": "sqlite",
+      "status": "passed",
+      "runs": [
+        "sqlite/smoke/2026-09-17T222449-fair-bank-smoke-e7150b44/manifest.json",
+        "sqlite/performance/2026-09-17T222511-fair-bank-performance-b11abf29/manifest.json"
+      ]
+    }
+  ]
+}

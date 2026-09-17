@@ -80,11 +80,11 @@ Claims that must remain explicit until evidence changes:
 - The libart result measures four-byte handles, not the supplied five-byte Small Engine
   profile; keep it in configuration-specific methodology, not current-profile
   marketing. Inserts were slower in that measurement.
-- The MDBX bank comparison identifies its measured revision, uses no per-commit
+- The June native-engine MDBX bank comparison identifies its measured revision, uses no per-commit
   fsync, and has a
-  larger psitri disk high-water. Separate RocksDB/SQLite bank records use a
-  different configuration and workload; do not merge them into that chart. The
-  retained system SQLite run failed validation and cannot support a speedup claim.
+  larger psitri disk high-water. Same-API comparisons use a separate workload
+  and retain all repetitions; do not merge them into that chart. Failed or
+  incomplete cohorts cannot support a speedup claim.
   The integration suite has a DuckDB TATP driver. The common fair-bank suite also
   tests native DuckDB with the maintained engines and other competitors; its
   smoke results are not public performance evidence.

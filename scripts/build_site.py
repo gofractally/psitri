@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from html import escape
 from html.parser import HTMLParser
 import json
@@ -185,6 +186,14 @@ def build(output: Path) -> None:
         "Verbatim benchmark excerpts from libraries/start_ref/STATUS.md.\n"
         "Unrelated implementation notes are omitted.\n\n" + art_excerpt)
     (output / "build-info.json").write_text(json.dumps({"revision": revision, "benchmark_data": "data/benchmarks.json"}, indent=2) + "\n")
+    # Returning visitors need the CSS/JS matching the new chart markup.
+    assets = {name: hashlib.sha256((output / "assets" / name).read_bytes()).hexdigest()[:12]
+              for name in ("site.css", "site.js")}
+    for page in output.rglob("*.html"):
+        html = page.read_text()
+        for name, digest in assets.items():
+            html = html.replace(f'assets/{name}"', f'assets/{name}?v={digest}"')
+        page.write_text(html)
     count = validate(output)
     print(f"Built {count} validated HTML pages in {output}")
 

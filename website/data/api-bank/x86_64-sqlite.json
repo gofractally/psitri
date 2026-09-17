@@ -1,0 +1,1089 @@
+{
+  "workload": "api-bank-v1",
+  "revision": "5ba8186a9bb6c99f92262b9cc3cf77bc13c92e5b",
+  "machine_id": "cloud-x86",
+  "architecture": "x86_64",
+  "config": {
+    "accounts": 100000,
+    "transfers": 100000,
+    "warmup": 10000,
+    "batch": 1000,
+    "readers": 4,
+    "reads_per_snapshot": 100,
+    "read_batches": 100,
+    "seed": 12345,
+    "value_bytes": 8,
+    "cache_mib": 256,
+    "map_gib": 64,
+    "durability": "none"
+  },
+  "isolation": {
+    "machine_lock": true,
+    "idle_seconds": 10,
+    "max_cpu_busy_percent": 3,
+    "idle_timeout_seconds": 1800.0
+  },
+  "source_manifest": "https://github.com/gofractally/psitri/blob/sal2/logs/2026-09-17_api-pairs-x86/2026-09-17T222003-api-matrix-66a5d3a1/sqlite/performance/2026-09-17T222511-fair-bank-performance-b11abf29/manifest.json",
+  "summary": {
+    "load": {
+      "unit": "accounts/s",
+      "direction": "higher",
+      "median": 2590476.202318367,
+      "minimum": 2577483.1382341837,
+      "maximum": 2601419.3916513114,
+      "samples": [
+        2577730.0313436505,
+        2590476.202318367,
+        2592154.259307344,
+        2601419.3916513114,
+        2577483.1382341837
+      ]
+    },
+    "write": {
+      "unit": "transfers/s",
+      "direction": "higher",
+      "median": 353764.2155772198,
+      "minimum": 349880.9579024071,
+      "maximum": 355294.9112086928,
+      "samples": [
+        353761.2170297155,
+        354983.71812154364,
+        349880.9579024071,
+        355294.9112086928,
+        353764.2155772198
+      ]
+    },
+    "write_batch_p50": {
+      "unit": "us",
+      "direction": "lower",
+      "median": 2701.028,
+      "minimum": 2687.269,
+      "maximum": 2743.227,
+      "samples": [
+        2692.1459999999997,
+        2701.028,
+        2727.264,
+        2687.269,
+        2743.227
+      ]
+    },
+    "write_batch_p99": {
+      "unit": "us",
+      "direction": "lower",
+      "median": 3009.972,
+      "minimum": 2988.3940000000002,
+      "maximum": 3048.105,
+      "samples": [
+        3009.972,
+        2998.728,
+        3044.63,
+        2988.3940000000002,
+        3048.105
+      ]
+    },
+    "mixed_write_active": {
+      "unit": "transfers/s",
+      "direction": "higher",
+      "median": 283773.6292128969,
+      "minimum": 279417.41078666603,
+      "maximum": 291128.4632991348,
+      "samples": [
+        282983.7280196528,
+        283773.6292128969,
+        285198.5546490897,
+        291128.4632991348,
+        279417.41078666603
+      ]
+    },
+    "mixed_write_active_batch_p50": {
+      "unit": "us",
+      "direction": "lower",
+      "median": 3495.519,
+      "minimum": 3416.862,
+      "maximum": 3518.303,
+      "samples": [
+        3495.519,
+        3495.569,
+        3492.826,
+        3416.862,
+        3518.303
+      ]
+    },
+    "mixed_write_active_batch_p99": {
+      "unit": "us",
+      "direction": "lower",
+      "median": 4109.233,
+      "minimum": 3960.7389999999996,
+      "maximum": 4397.469,
+      "samples": [
+        4073.653,
+        4109.233,
+        3960.7389999999996,
+        4292.174,
+        4397.469
+      ]
+    },
+    "mixed_write": {
+      "unit": "transfers/s",
+      "direction": "higher",
+      "median": 282592.4433921556,
+      "minimum": 278266.3686893925,
+      "maximum": 290003.5315760065,
+      "samples": [
+        281862.8719708736,
+        282592.4433921556,
+        284099.42723112216,
+        290003.5315760065,
+        278266.3686893925
+      ]
+    },
+    "mixed_read": {
+      "unit": "reads/s",
+      "direction": "higher",
+      "median": 2950830.2939008884,
+      "minimum": 2769969.415503441,
+      "maximum": 3155172.9888419593,
+      "samples": [
+        3155172.9888419593,
+        2950830.2939008884,
+        2769969.415503441,
+        3127688.08804723,
+        2925970.8667689622
+      ]
+    },
+    "read": {
+      "unit": "reads/s",
+      "direction": "higher",
+      "median": 3610648.9229750196,
+      "minimum": 3511081.235710996,
+      "maximum": 3789283.6217215,
+      "samples": [
+        3511081.235710996,
+        3610648.9229750196,
+        3590142.509809391,
+        3687531.4880618476,
+        3789283.6217215
+      ]
+    },
+    "disk_before_close": {
+      "unit": "bytes",
+      "direction": "lower",
+      "median": 247969168,
+      "minimum": 206172152,
+      "maximum": 247969168,
+      "samples": [
+        247969168,
+        247969168,
+        247969168,
+        206172152,
+        247969168
+      ]
+    },
+    "allocated_before_close": {
+      "unit": "bytes",
+      "direction": "lower",
+      "median": 247971840,
+      "minimum": 206172160,
+      "maximum": 247971840,
+      "samples": [
+        247971840,
+        247971840,
+        247971840,
+        206172160,
+        247971840
+      ]
+    },
+    "close": {
+      "unit": "seconds",
+      "direction": "lower",
+      "median": 0.025323564,
+      "minimum": 0.021065416,
+      "maximum": 0.028826692,
+      "samples": [
+        0.025838356,
+        0.025081829,
+        0.028826692,
+        0.021065416,
+        0.025323564
+      ]
+    },
+    "disk_after_close": {
+      "unit": "bytes",
+      "direction": "lower",
+      "median": 2543616,
+      "minimum": 2543616,
+      "maximum": 2543616,
+      "samples": [
+        2543616,
+        2543616,
+        2543616,
+        2543616,
+        2543616
+      ]
+    },
+    "allocated_after_close": {
+      "unit": "bytes",
+      "direction": "lower",
+      "median": 2543616,
+      "minimum": 2543616,
+      "maximum": 2543616,
+      "samples": [
+        2543616,
+        2543616,
+        2543616,
+        2543616,
+        2543616
+      ]
+    },
+    "reopen": {
+      "unit": "seconds",
+      "direction": "lower",
+      "median": 0.000206524,
+      "minimum": 0.000190411,
+      "maximum": 0.000230747,
+      "samples": [
+        0.000200185,
+        0.000190411,
+        0.000230747,
+        0.000207505,
+        0.000206524
+      ]
+    },
+    "peak_rss": {
+      "unit": "bytes",
+      "direction": "lower",
+      "median": 21258240,
+      "minimum": 21258240,
+      "maximum": 21258240,
+      "samples": [
+        21258240,
+        21258240,
+        21258240,
+        21258240,
+        21258240
+      ]
+    }
+  },
+  "repetitions": [
+    {
+      "repetition": 1,
+      "result": {
+        "schema_version": 1,
+        "workload": "api-bank-v1",
+        "engine": "sqlite",
+        "version": "3.46.1 2024-08-13 09:16:08 c9c2ab54ba1f5f46360f1b4f35d849cd3f080e6fc2b6c60e91b16c63f69aalt1",
+        "settings": "journal_mode=WAL; synchronous=OFF; fullfsync=OFF; WITHOUT ROWID; mmap_size=0; wal_autocheckpoint=1000; per_connection_cache_mib=256",
+        "status": "passed",
+        "config": {
+          "accounts": 100000,
+          "transfers": 100000,
+          "warmup": 10000,
+          "batch": 1000,
+          "readers": 4,
+          "reads_per_snapshot": 100,
+          "read_batches": 100,
+          "seed": 12345,
+          "value_bytes": 8,
+          "cache_mib": 256,
+          "map_gib": 64,
+          "durability": "none"
+        },
+        "validation": {
+          "read_your_writes": true,
+          "rollback": true,
+          "snapshot": true,
+          "exact_accounts": true,
+          "balance": true,
+          "reopen": true,
+          "final_hash": "2427670804914841226"
+        },
+        "counts": {
+          "write_transfers": 100000,
+          "write_commits": 100,
+          "mixed_transfers": 100000,
+          "mixed_commits": 100,
+          "mixed_reads": 1119400,
+          "read_only_reads": 40000,
+          "reader_checksum": "1159400000000001141"
+        },
+        "metrics": [
+          {
+            "engine": "sqlite",
+            "name": "load",
+            "unit": "accounts/s",
+            "direction": "higher",
+            "value": 2577730.0313436505
+          },
+          {
+            "engine": "sqlite",
+            "name": "write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 353761.2170297155
+          },
+          {
+            "engine": "sqlite",
+            "name": "write_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 2692.1459999999997
+          },
+          {
+            "engine": "sqlite",
+            "name": "write_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 3009.972
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 282983.7280196528
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 3495.519
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 4073.653
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 281862.8719708736
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 3155172.9888419593
+          },
+          {
+            "engine": "sqlite",
+            "name": "read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 3511081.235710996
+          },
+          {
+            "engine": "sqlite",
+            "name": "disk_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 247969168
+          },
+          {
+            "engine": "sqlite",
+            "name": "allocated_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 247971840
+          },
+          {
+            "engine": "sqlite",
+            "name": "close",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.025838356
+          },
+          {
+            "engine": "sqlite",
+            "name": "disk_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 2543616
+          },
+          {
+            "engine": "sqlite",
+            "name": "allocated_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 2543616
+          },
+          {
+            "engine": "sqlite",
+            "name": "reopen",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.000200185
+          },
+          {
+            "engine": "sqlite",
+            "name": "peak_rss",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 21258240
+          }
+        ]
+      }
+    },
+    {
+      "repetition": 2,
+      "result": {
+        "schema_version": 1,
+        "workload": "api-bank-v1",
+        "engine": "sqlite",
+        "version": "3.46.1 2024-08-13 09:16:08 c9c2ab54ba1f5f46360f1b4f35d849cd3f080e6fc2b6c60e91b16c63f69aalt1",
+        "settings": "journal_mode=WAL; synchronous=OFF; fullfsync=OFF; WITHOUT ROWID; mmap_size=0; wal_autocheckpoint=1000; per_connection_cache_mib=256",
+        "status": "passed",
+        "config": {
+          "accounts": 100000,
+          "transfers": 100000,
+          "warmup": 10000,
+          "batch": 1000,
+          "readers": 4,
+          "reads_per_snapshot": 100,
+          "read_batches": 100,
+          "seed": 12345,
+          "value_bytes": 8,
+          "cache_mib": 256,
+          "map_gib": 64,
+          "durability": "none"
+        },
+        "validation": {
+          "read_your_writes": true,
+          "rollback": true,
+          "snapshot": true,
+          "exact_accounts": true,
+          "balance": true,
+          "reopen": true,
+          "final_hash": "2427670804914841226"
+        },
+        "counts": {
+          "write_transfers": 100000,
+          "write_commits": 100,
+          "mixed_transfers": 100000,
+          "mixed_commits": 100,
+          "mixed_reads": 1044200,
+          "read_only_reads": 40000,
+          "reader_checksum": "1084200000000001040"
+        },
+        "metrics": [
+          {
+            "engine": "sqlite",
+            "name": "load",
+            "unit": "accounts/s",
+            "direction": "higher",
+            "value": 2590476.202318367
+          },
+          {
+            "engine": "sqlite",
+            "name": "write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 354983.71812154364
+          },
+          {
+            "engine": "sqlite",
+            "name": "write_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 2701.028
+          },
+          {
+            "engine": "sqlite",
+            "name": "write_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 2998.728
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 283773.6292128969
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 3495.569
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 4109.233
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 282592.4433921556
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 2950830.2939008884
+          },
+          {
+            "engine": "sqlite",
+            "name": "read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 3610648.9229750196
+          },
+          {
+            "engine": "sqlite",
+            "name": "disk_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 247969168
+          },
+          {
+            "engine": "sqlite",
+            "name": "allocated_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 247971840
+          },
+          {
+            "engine": "sqlite",
+            "name": "close",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.025081829
+          },
+          {
+            "engine": "sqlite",
+            "name": "disk_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 2543616
+          },
+          {
+            "engine": "sqlite",
+            "name": "allocated_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 2543616
+          },
+          {
+            "engine": "sqlite",
+            "name": "reopen",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.000190411
+          },
+          {
+            "engine": "sqlite",
+            "name": "peak_rss",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 21258240
+          }
+        ]
+      }
+    },
+    {
+      "repetition": 3,
+      "result": {
+        "schema_version": 1,
+        "workload": "api-bank-v1",
+        "engine": "sqlite",
+        "version": "3.46.1 2024-08-13 09:16:08 c9c2ab54ba1f5f46360f1b4f35d849cd3f080e6fc2b6c60e91b16c63f69aalt1",
+        "settings": "journal_mode=WAL; synchronous=OFF; fullfsync=OFF; WITHOUT ROWID; mmap_size=0; wal_autocheckpoint=1000; per_connection_cache_mib=256",
+        "status": "passed",
+        "config": {
+          "accounts": 100000,
+          "transfers": 100000,
+          "warmup": 10000,
+          "batch": 1000,
+          "readers": 4,
+          "reads_per_snapshot": 100,
+          "read_batches": 100,
+          "seed": 12345,
+          "value_bytes": 8,
+          "cache_mib": 256,
+          "map_gib": 64,
+          "durability": "none"
+        },
+        "validation": {
+          "read_your_writes": true,
+          "rollback": true,
+          "snapshot": true,
+          "exact_accounts": true,
+          "balance": true,
+          "reopen": true,
+          "final_hash": "2427670804914841226"
+        },
+        "counts": {
+          "write_transfers": 100000,
+          "write_commits": 100,
+          "mixed_transfers": 100000,
+          "mixed_commits": 100,
+          "mixed_reads": 975000,
+          "read_only_reads": 40000,
+          "reader_checksum": "1015000000000000729"
+        },
+        "metrics": [
+          {
+            "engine": "sqlite",
+            "name": "load",
+            "unit": "accounts/s",
+            "direction": "higher",
+            "value": 2592154.259307344
+          },
+          {
+            "engine": "sqlite",
+            "name": "write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 349880.9579024071
+          },
+          {
+            "engine": "sqlite",
+            "name": "write_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 2727.264
+          },
+          {
+            "engine": "sqlite",
+            "name": "write_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 3044.63
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 285198.5546490897
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 3492.826
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 3960.7389999999996
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 284099.42723112216
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 2769969.415503441
+          },
+          {
+            "engine": "sqlite",
+            "name": "read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 3590142.509809391
+          },
+          {
+            "engine": "sqlite",
+            "name": "disk_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 247969168
+          },
+          {
+            "engine": "sqlite",
+            "name": "allocated_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 247971840
+          },
+          {
+            "engine": "sqlite",
+            "name": "close",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.028826692
+          },
+          {
+            "engine": "sqlite",
+            "name": "disk_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 2543616
+          },
+          {
+            "engine": "sqlite",
+            "name": "allocated_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 2543616
+          },
+          {
+            "engine": "sqlite",
+            "name": "reopen",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.000230747
+          },
+          {
+            "engine": "sqlite",
+            "name": "peak_rss",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 21258240
+          }
+        ]
+      }
+    },
+    {
+      "repetition": 4,
+      "result": {
+        "schema_version": 1,
+        "workload": "api-bank-v1",
+        "engine": "sqlite",
+        "version": "3.46.1 2024-08-13 09:16:08 c9c2ab54ba1f5f46360f1b4f35d849cd3f080e6fc2b6c60e91b16c63f69aalt1",
+        "settings": "journal_mode=WAL; synchronous=OFF; fullfsync=OFF; WITHOUT ROWID; mmap_size=0; wal_autocheckpoint=1000; per_connection_cache_mib=256",
+        "status": "passed",
+        "config": {
+          "accounts": 100000,
+          "transfers": 100000,
+          "warmup": 10000,
+          "batch": 1000,
+          "readers": 4,
+          "reads_per_snapshot": 100,
+          "read_batches": 100,
+          "seed": 12345,
+          "value_bytes": 8,
+          "cache_mib": 256,
+          "map_gib": 64,
+          "durability": "none"
+        },
+        "validation": {
+          "read_your_writes": true,
+          "rollback": true,
+          "snapshot": true,
+          "exact_accounts": true,
+          "balance": true,
+          "reopen": true,
+          "final_hash": "2427670804914841226"
+        },
+        "counts": {
+          "write_transfers": 100000,
+          "write_commits": 100,
+          "mixed_transfers": 100000,
+          "mixed_commits": 100,
+          "mixed_reads": 1078500,
+          "read_only_reads": 40000,
+          "reader_checksum": "1118500000000000457"
+        },
+        "metrics": [
+          {
+            "engine": "sqlite",
+            "name": "load",
+            "unit": "accounts/s",
+            "direction": "higher",
+            "value": 2601419.3916513114
+          },
+          {
+            "engine": "sqlite",
+            "name": "write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 355294.9112086928
+          },
+          {
+            "engine": "sqlite",
+            "name": "write_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 2687.269
+          },
+          {
+            "engine": "sqlite",
+            "name": "write_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 2988.3940000000002
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 291128.4632991348
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 3416.862
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 4292.174
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 290003.5315760065
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 3127688.08804723
+          },
+          {
+            "engine": "sqlite",
+            "name": "read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 3687531.4880618476
+          },
+          {
+            "engine": "sqlite",
+            "name": "disk_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 206172152
+          },
+          {
+            "engine": "sqlite",
+            "name": "allocated_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 206172160
+          },
+          {
+            "engine": "sqlite",
+            "name": "close",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.021065416
+          },
+          {
+            "engine": "sqlite",
+            "name": "disk_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 2543616
+          },
+          {
+            "engine": "sqlite",
+            "name": "allocated_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 2543616
+          },
+          {
+            "engine": "sqlite",
+            "name": "reopen",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.000207505
+          },
+          {
+            "engine": "sqlite",
+            "name": "peak_rss",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 21258240
+          }
+        ]
+      }
+    },
+    {
+      "repetition": 5,
+      "result": {
+        "schema_version": 1,
+        "workload": "api-bank-v1",
+        "engine": "sqlite",
+        "version": "3.46.1 2024-08-13 09:16:08 c9c2ab54ba1f5f46360f1b4f35d849cd3f080e6fc2b6c60e91b16c63f69aalt1",
+        "settings": "journal_mode=WAL; synchronous=OFF; fullfsync=OFF; WITHOUT ROWID; mmap_size=0; wal_autocheckpoint=1000; per_connection_cache_mib=256",
+        "status": "passed",
+        "config": {
+          "accounts": 100000,
+          "transfers": 100000,
+          "warmup": 10000,
+          "batch": 1000,
+          "readers": 4,
+          "reads_per_snapshot": 100,
+          "read_batches": 100,
+          "seed": 12345,
+          "value_bytes": 8,
+          "cache_mib": 256,
+          "map_gib": 64,
+          "durability": "none"
+        },
+        "validation": {
+          "read_your_writes": true,
+          "rollback": true,
+          "snapshot": true,
+          "exact_accounts": true,
+          "balance": true,
+          "reopen": true,
+          "final_hash": "2427670804914841226"
+        },
+        "counts": {
+          "write_transfers": 100000,
+          "write_commits": 100,
+          "mixed_transfers": 100000,
+          "mixed_commits": 100,
+          "mixed_reads": 1051500,
+          "read_only_reads": 40000,
+          "reader_checksum": "1091500000000000325"
+        },
+        "metrics": [
+          {
+            "engine": "sqlite",
+            "name": "load",
+            "unit": "accounts/s",
+            "direction": "higher",
+            "value": 2577483.1382341837
+          },
+          {
+            "engine": "sqlite",
+            "name": "write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 353764.2155772198
+          },
+          {
+            "engine": "sqlite",
+            "name": "write_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 2743.227
+          },
+          {
+            "engine": "sqlite",
+            "name": "write_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 3048.105
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 279417.41078666603
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 3518.303
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write_active_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 4397.469
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 278266.3686893925
+          },
+          {
+            "engine": "sqlite",
+            "name": "mixed_read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 2925970.8667689622
+          },
+          {
+            "engine": "sqlite",
+            "name": "read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 3789283.6217215
+          },
+          {
+            "engine": "sqlite",
+            "name": "disk_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 247969168
+          },
+          {
+            "engine": "sqlite",
+            "name": "allocated_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 247971840
+          },
+          {
+            "engine": "sqlite",
+            "name": "close",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.025323564
+          },
+          {
+            "engine": "sqlite",
+            "name": "disk_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 2543616
+          },
+          {
+            "engine": "sqlite",
+            "name": "allocated_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 2543616
+          },
+          {
+            "engine": "sqlite",
+            "name": "reopen",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.000206524
+          },
+          {
+            "engine": "sqlite",
+            "name": "peak_rss",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 21258240
+          }
+        ]
+      }
+    }
+  ]
+}

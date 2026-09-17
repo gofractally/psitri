@@ -77,24 +77,36 @@ Choose the architecture and API pairs to focus the view.
 
 <!-- API_CHART -->
 
-The validated x86 RocksDB pair records **2.34× write-only throughput** and
-**3.05× write throughput with a reader**, with **2.91× reported file size**.
-These ratios describe this run and API integration. Translation overhead and
-the workflows imposed by an existing API can limit the optimization paths
-available through psitri's native interface.
+The x86 comparison uses five repetitions per implementation. Bars show the
+median; the range beneath each value shows the minimum and maximum. Each
+**All repetitions** link includes every sample, its exact library settings,
+validation results, and the underlying source archive.
 
-The ARM view has no published same-API pair yet. Native-engine measurements on
-Apple Silicon do not include shim overhead. New comparisons use the same
-[`api-bank-v1` driver](https://github.com/gofractally/psitri/tree/sal2/benchmarks/api_bank)
-on both architectures, retaining every repetition and checking the resulting
-state before admitting either side to the chart. Runs wait for an idle machine
-and execute one benchmark process at a time.
+The [`api-bank-v1` driver](https://github.com/gofractally/psitri/tree/sal2/benchmarks/api_bank)
+uses 100,000 accounts, 100,000 completed transfers per phase, batches of 1,000,
+four concurrent readers, eight-byte values, and seed 12345. Each process performs
+10,000 warm-up transfers. Runs use a 256 MiB cache budget, a 64 GiB map limit,
+and **no per-commit synchronization** (`durability=none`). This policy is useful
+when the application provides its own recovery or replication; it does not
+establish identical crash semantics or measure synchronous commit performance.
 
-The MDBX, RocksDB and SQLite shims pass the `api-bank-v1` functional contract
-checks on ARM64 macOS and x86-64 Linux: rollback, held snapshots, read-your-writes,
-exact balances, cardinality, concurrent readers and reopen. These functional runs
-do not supply performance bars. Fresh paired measurements require idle hosts and
-complete passing repetitions. See the [tested source pins and regression evidence](https://github.com/gofractally/psitri/blob/sal2/logs/2026-09-17_api-contract-fixes/README.md).
+Collection runs one benchmark process at a time on an otherwise idle host,
+with ten continuous seconds below 3% CPU activity required before each process.
+Every repetition must pass rollback, held snapshots, read-your-writes, exact
+account state, balance conservation, and reopen. Both implementations must
+produce the same final state. Storage bars show allocated storage after close
+in MiB, including engine overhead, rather than just the live account payload.
+The dataset fits in RAM; this comparison does not measure beyond-RAM behavior.
+
+Translation overhead and the workflows imposed by an existing API can limit
+optimization paths available through psitri's native interface. Compare each
+API pair under its recorded settings; these results do not imply the same
+speedup for every application or durability policy.
+
+The ARM view has no published same-API performance pair yet. The functional
+contract checks pass on ARM64 macOS and x86-64 Linux, but functional checks and
+native-engine timings do not substitute for repeated shim measurements.
+See the [source pins and collection records](https://github.com/gofractally/psitri/blob/sal2/logs/2026-09-17_api-pairs-x86/README.md).
 
 ### Common native-engine workload
 
@@ -120,45 +132,10 @@ publishing timings. The June chart above contains its recorded MDBX cohort;
 RocksDB and SQLite need results from a new matched performance series to appear
 alongside the maintained engines.
 
-The separate integration suite runs bank workloads through real and psitri-backed
-RocksDB/SQLite APIs, plus a TATP telecom workload through DuckDB and its psitri
-storage extension. The retained integration records below measure those source
-configurations.
-
-| Interface | Benchmark targets | Retained evidence |
-|---|---|---|
-| RocksDB | `bank-bench-rocksdb`, `bank-bench-psitrirocks` | April 6 bank logs; both passed balance conservation |
-| SQLite | `bank-bench-system-sqlite`, `bank-bench-psitri-sqlite` | April 6 bank logs; psitri-backed run passed, system SQLite run failed balance conservation |
-| DuckDB | `tatp-bench --engine duckdb`, `tatp-bench --engine psitri` | Benchmark implementation exists; no retained result is included here |
-
-These integrations use a separate source configuration from the maintained
-Small Engine and Large Engine profiles. Their measurements do not belong in the
-June native-engine chart: the April workload uses one million accounts, one
-million transfer attempts, batch size 1, one concurrent reader, and no per-commit
-sync on AMD EPYC-Turin. The June workload uses different hardware, keys,
-transaction work, batching, and reader counts.
-
-The April machine record identifies revision `ec383f2`, a clean Release build
-with `clang++-20`, 16 logical CPUs, 121 GB RAM, Linux, and ext4. Full compiler and
-dependency versions, repeated measurements, and variability are not recorded in
-this archive. The throughput counters include skipped transfer attempts.
-
-RocksDB and PsiTriRocks both passed this run's final balance check. The system
-SQLite result **failed validation**, so its timings do not support a SQLite
-speedup claim. The failure's cause is not established by the saved output.
-The cohort status also records failed or incomplete runs for other configurations.
-
-Raw evidence: [RocksDB](../evidence/integration-bank-rocksdb.log),
-[PsiTriRocks](../evidence/integration-bank-psitrirocks.log),
-[psitri-backed SQLite](../evidence/integration-bank-psitri-sqlite.log),
-[system SQLite, failed](../evidence/integration-bank-system-sqlite.log),
-[machine settings](../evidence/integration-bank-machine.json),
-[cohort status](../evidence/integration-bank-progress.txt), and
-[archive provenance and checksums](../evidence/integration-bank-provenance.json).
-
-The [bank driver](https://github.com/gofractally/arbtrie/blob/ec383f2b976586d15c8e0000fd1b23614caa9329/programs/bank_bench.cpp)
-and [DuckDB TATP driver](https://github.com/gofractally/arbtrie/blob/ec383f2b976586d15c8e0000fd1b23614caa9329/libraries/psitri-duckdb/benchmarks/tatp_bench.cpp)
-identify the tested interfaces. Source access may be restricted.
+The integration suite also provides a DuckDB TATP telecom workload through
+DuckDB and its psitri storage extension. No validated repeated TATP performance
+series is published here. Its workload is separate from the bank transfer
+comparisons.
 
 ## ART lookups
 

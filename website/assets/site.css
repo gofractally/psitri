@@ -2425,5 +2425,5 @@ details > a {
   .api-comparison .api-unavailable { padding-block: 0; }
 }
 
-.api-comparison .api-range { display: block; color: #69745f; font: 10px/1.5 var(--mono); margin-top: 5px; }
+.api-comparison .api-range { display: block; min-height: 3em; color: #69745f; font: 10px/1.5 var(--mono); margin-top: 5px; }
 .api-comparison .api-cohort { font: 10px/1.6 var(--mono); color: #69745f; margin-top: -12px; }

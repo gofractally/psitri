@@ -1240,13 +1240,13 @@
     ],
     "metrics": {
       "write": {
-        "label": "Write-only transfer attempts per second",
+        "label": "Completed write-only transfers per second",
         "short": "write throughput",
         "unit": "transfers/s",
         "direction": "higher"
       },
       "mixed_write": {
-        "label": "Transfer attempts per second, with readers",
+        "label": "Completed transfers per second, with readers",
         "short": "write throughput with readers",
         "unit": "transfers/s",
         "direction": "higher"
@@ -1264,9 +1264,9 @@
         "direction": "higher"
       },
       "disk": {
-        "label": "Reported file size after validation",
+        "label": "Allocated storage after close",
         "short": "File size",
-        "unit": "MB",
+        "unit": "MiB",
         "direction": "lower"
       }
     },
@@ -1275,58 +1275,275 @@
         "id": "x86_64",
         "label": "x86 \u00b7 Cloud server",
         "machine": "AMD EPYC-Turin \u00b7 16 logical CPUs \u00b7 121 GB RAM \u00b7 Linux \u00b7 ext4",
-        "date": "2026-04-06",
-        "revision": "ec383f2b976586d15c8e0000fd1b23614caa9329",
-        "source_directory": "logs/2026-04-06_integration-bank",
-        "workload": "1M accounts \u00b7 1M transfer attempts per phase \u00b7 batch 1 \u00b7 one reader \u00b7 seed 12345 \u00b7 no per-commit sync",
-        "limits": "One retained run per implementation. Throughput includes skipped transfer attempts. These integration configurations are separate from the Small Engine and Large Engine profiles.",
+        "date": "2026-09-17",
+        "revision": "5ba8186a9bb6c99f92262b9cc3cf77bc13c92e5b",
+        "source_directory": "logs/2026-09-17_api-pairs-x86",
+        "workload": "100,000 accounts \u00b7 100,000 transfers per phase \u00b7 batch 1,000 \u00b7 4 readers \u00b7 seed 12345 \u00b7 durability none",
+        "limits": "Five repetitions per implementation; every repetition passed validation. Bars show medians and minimum\u2013maximum ranges. No per-commit synchronization.",
         "pairs": [
           {
             "id": "mdbx",
-            "status": "incomplete",
-            "note": "No validated pair: the native run stopped during the mixed phase; the shim crashed. A new matched run is required.",
-            "evidence": [
-              "integration-bank-mdbx.log",
-              "integration-bank-psitrimdbx.log"
-            ]
+            "status": "passed",
+            "cohort": {
+              "date": "2026-09-17",
+              "revision": "5ba8186a9bb6c99f92262b9cc3cf77bc13c92e5b",
+              "source_directory": "logs/2026-09-17_api-pairs-x86/2026-09-17T222003-api-matrix-66a5d3a1/mdbx/performance/2026-09-17T222025-fair-bank-performance-d7512fbb",
+              "repeats": 5,
+              "workload": "100,000 accounts \u00b7 100,000 transfers per phase \u00b7 batch 1,000 \u00b7 4 readers \u00b7 seed 12345 \u00b7 durability none",
+              "metric_labels": {
+                "disk": "Allocated storage after close (MiB)"
+              },
+              "limits": "Medians of every retained repetition; ranges show minimum\u2013maximum. File size means allocated storage after close."
+            },
+            "note": "Both implementations passed rollback, held snapshots, read-your-writes, exact account state, balance conservation and reopen on every repetition.",
+            "native": {
+              "name": "libmdbx",
+              "engine": "mdbx",
+              "values": {
+                "write": 589563.6886167732,
+                "mixed_write": 458133.17666644714,
+                "mixed_read": 10305338.326457975,
+                "load": 10212881.38473599,
+                "disk": 528.00390625
+              },
+              "ranges": {
+                "write": {
+                  "minimum": 576465.6724751367,
+                  "maximum": 595152.6447800908
+                },
+                "mixed_write": {
+                  "minimum": 451134.51872687583,
+                  "maximum": 529672.3033457435
+                },
+                "mixed_read": {
+                  "minimum": 8605573.590502543,
+                  "maximum": 10845040.411004096
+                },
+                "load": {
+                  "minimum": 10030471.569581231,
+                  "maximum": 10534649.251486834
+                },
+                "disk": {
+                  "minimum": 528.00390625,
+                  "maximum": 528.00390625
+                }
+              },
+              "source": "manifest.json",
+              "evidence": "api-bank/x86_64-mdbx.json",
+              "evidence_kind": "data"
+            },
+            "shim": {
+              "name": "psitri MDBX shim",
+              "engine": "psitrimdbx",
+              "values": {
+                "write": 256577.5278532482,
+                "mixed_write": 189494.0511109267,
+                "mixed_read": 6750880.794816914,
+                "load": 2028382.2604827404,
+                "disk": 147.72265625
+              },
+              "ranges": {
+                "write": {
+                  "minimum": 249128.55330311676,
+                  "maximum": 285907.75622540625
+                },
+                "mixed_write": {
+                  "minimum": 187712.17870139345,
+                  "maximum": 201365.39146347306
+                },
+                "mixed_read": {
+                  "minimum": 6631344.31862688,
+                  "maximum": 7567714.141980245
+                },
+                "load": {
+                  "minimum": 1996666.4057023674,
+                  "maximum": 2056072.425891388
+                },
+                "disk": {
+                  "minimum": 147.359375,
+                  "maximum": 150.65625
+                }
+              },
+              "source": "manifest.json",
+              "evidence": "api-bank/x86_64-psitrimdbx.json",
+              "evidence_kind": "data"
+            }
           },
           {
             "id": "rocksdb",
             "status": "passed",
-            "note": "Both implementations passed account count, log count, and balance conservation.",
+            "cohort": {
+              "date": "2026-09-17",
+              "revision": "5ba8186a9bb6c99f92262b9cc3cf77bc13c92e5b",
+              "source_directory": "logs/2026-09-17_api-pairs-x86/2026-09-17T222003-api-matrix-66a5d3a1/rocksdb/performance/2026-09-17T222248-fair-bank-performance-e976ad43",
+              "repeats": 5,
+              "workload": "100,000 accounts \u00b7 100,000 transfers per phase \u00b7 batch 1,000 \u00b7 4 readers \u00b7 seed 12345 \u00b7 durability none",
+              "metric_labels": {
+                "disk": "Allocated storage after close (MiB)"
+              },
+              "limits": "Medians of every retained repetition; ranges show minimum\u2013maximum. File size means allocated storage after close."
+            },
+            "note": "Both implementations passed rollback, held snapshots, read-your-writes, exact account state, balance conservation and reopen on every repetition.",
             "native": {
               "name": "RocksDB",
+              "engine": "rocksdb",
               "values": {
-                "write": 157588,
-                "mixed_write": 114752,
-                "mixed_read": 289627,
-                "load": 1350387,
-                "disk": 207.0
+                "write": 395805.52378985344,
+                "mixed_write": 254281.87021223476,
+                "mixed_read": 5490295.638935387,
+                "load": 4203596.487861506,
+                "disk": 9.4765625
               },
-              "source": "rocksdb.log",
-              "evidence": "integration-bank-rocksdb.log"
+              "ranges": {
+                "write": {
+                  "minimum": 387515.2416526059,
+                  "maximum": 407351.82711714716
+                },
+                "mixed_write": {
+                  "minimum": 237407.9235032166,
+                  "maximum": 287977.5315782986
+                },
+                "mixed_read": {
+                  "minimum": 4527845.033164982,
+                  "maximum": 5785166.829198553
+                },
+                "load": {
+                  "minimum": 4121887.1714175814,
+                  "maximum": 4223833.436338551
+                },
+                "disk": {
+                  "minimum": 9.4765625,
+                  "maximum": 9.4765625
+                }
+              },
+              "source": "manifest.json",
+              "evidence": "api-bank/x86_64-rocksdb.json",
+              "evidence_kind": "data"
             },
             "shim": {
               "name": "psitri RocksDB shim",
+              "engine": "psitrirocks",
               "values": {
-                "write": 369446,
-                "mixed_write": 349623,
-                "mixed_read": 1416652,
-                "load": 2342670,
-                "disk": 601.8
+                "write": 576780.620983242,
+                "mixed_write": 315634.96139992744,
+                "mixed_read": 12092490.83647459,
+                "load": 3389133.2661087452,
+                "disk": 143.51171875
               },
-              "source": "psitrirocks.log",
-              "evidence": "integration-bank-psitrirocks.log"
+              "ranges": {
+                "write": {
+                  "minimum": 571656.3683248293,
+                  "maximum": 583096.1079705069
+                },
+                "mixed_write": {
+                  "minimum": 218627.23213238938,
+                  "maximum": 361991.57789670886
+                },
+                "mixed_read": {
+                  "minimum": 7389860.768455619,
+                  "maximum": 13822242.453627698
+                },
+                "load": {
+                  "minimum": 3379996.6659712885,
+                  "maximum": 3428107.0082231374
+                },
+                "disk": {
+                  "minimum": 143.51171875,
+                  "maximum": 143.51171875
+                }
+              },
+              "source": "manifest.json",
+              "evidence": "api-bank/x86_64-psitrirocks.json",
+              "evidence_kind": "data"
             }
           },
           {
             "id": "sqlite",
-            "status": "failed",
-            "note": "No validated pair: the psitri-backed run passed, but the native SQLite run failed balance conservation. No speedup is reported.",
-            "evidence": [
-              "integration-bank-system-sqlite.log",
-              "integration-bank-psitri-sqlite.log"
-            ]
+            "status": "passed",
+            "cohort": {
+              "date": "2026-09-17",
+              "revision": "5ba8186a9bb6c99f92262b9cc3cf77bc13c92e5b",
+              "source_directory": "logs/2026-09-17_api-pairs-x86/2026-09-17T222003-api-matrix-66a5d3a1/sqlite/performance/2026-09-17T222511-fair-bank-performance-b11abf29",
+              "repeats": 5,
+              "workload": "100,000 accounts \u00b7 100,000 transfers per phase \u00b7 batch 1,000 \u00b7 4 readers \u00b7 seed 12345 \u00b7 durability none",
+              "metric_labels": {
+                "disk": "Allocated storage after close (MiB)"
+              },
+              "limits": "Medians of every retained repetition; ranges show minimum\u2013maximum. File size means allocated storage after close."
+            },
+            "note": "Both implementations passed rollback, held snapshots, read-your-writes, exact account state, balance conservation and reopen on every repetition.",
+            "native": {
+              "name": "SQLite",
+              "engine": "sqlite",
+              "values": {
+                "write": 353764.2155772198,
+                "mixed_write": 282592.4433921556,
+                "mixed_read": 2950830.2939008884,
+                "load": 2590476.202318367,
+                "disk": 2.42578125
+              },
+              "ranges": {
+                "write": {
+                  "minimum": 349880.9579024071,
+                  "maximum": 355294.9112086928
+                },
+                "mixed_write": {
+                  "minimum": 278266.3686893925,
+                  "maximum": 290003.5315760065
+                },
+                "mixed_read": {
+                  "minimum": 2769969.415503441,
+                  "maximum": 3155172.9888419593
+                },
+                "load": {
+                  "minimum": 2577483.1382341837,
+                  "maximum": 2601419.3916513114
+                },
+                "disk": {
+                  "minimum": 2.42578125,
+                  "maximum": 2.42578125
+                }
+              },
+              "source": "manifest.json",
+              "evidence": "api-bank/x86_64-sqlite.json",
+              "evidence_kind": "data"
+            },
+            "shim": {
+              "name": "psitri SQLite shim",
+              "engine": "psitri_sqlite",
+              "values": {
+                "write": 68710.90334998319,
+                "mixed_write": 68741.2539729231,
+                "mixed_read": 274.9650158916924,
+                "load": 300527.03395892674,
+                "disk": 153.1953125
+              },
+              "ranges": {
+                "write": {
+                  "minimum": 68482.12192062956,
+                  "maximum": 69249.87657681061
+                },
+                "mixed_write": {
+                  "minimum": 68161.57724515608,
+                  "maximum": 69137.95249216154
+                },
+                "mixed_read": {
+                  "minimum": 272.64630898062427,
+                  "maximum": 345.6897624608077
+                },
+                "load": {
+                  "minimum": 288532.06679605064,
+                  "maximum": 300769.8607617811
+                },
+                "disk": {
+                  "minimum": 153.1171875,
+                  "maximum": 153.34765625
+                }
+              },
+              "source": "manifest.json",
+              "evidence": "api-bank/x86_64-psitri_sqlite.json",
+              "evidence_kind": "data"
+            }
           }
         ]
       },

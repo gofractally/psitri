@@ -1,0 +1,9 @@
+psitrimdbx psitrimdbx-0.1
+WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=psitrimdbx; compiler=clang; build_flags=
+load
+contract checks
+warmup
+write
+mixed
+read
+close/reopen validation

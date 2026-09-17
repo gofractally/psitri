@@ -1,0 +1,14 @@
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+psitrirocks psitrirocks cb3eccaa9af41b6606680fbe59359537b2f4ab20
+WAL=true; sync=false; platform_sync=unknown; compression=none; write_buffer_size=64MiB; max_write_buffer_number=2; block_cache_mib=256
+load
+contract checks
+warmup
+[MERGE] root=0 entries=100000  24 ms wall / 24 ms cpu  syscall=0%  4141057 entries/sec  0.24 us/entry  max=0.0 ms
+        latency: <1us=99194  <10us=752  <100us=54  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+write
+mixed
+read
+close/reopen validation
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m

@@ -62,3 +62,11 @@ class ApiEvidenceTest(unittest.TestCase):
         self.assertIn('../data/api-bank/test.json', html)
         self.assertIn('All repetitions', html)
         self.assertIn('100,000 accounts', html)
+
+    def test_small_positive_ratio_is_not_displayed_as_zero(self):
+        data = json.loads((ROOT/'website/data/benchmarks.json').read_text())
+        pair = data['api_bank']['platforms'][0]['pairs'][1]
+        pair['native']['values']['mixed_read'] = 3_000_000
+        pair['shim']['values']['mixed_read'] = 270
+        html = benchmark_charts.api_chart(data, 'test', '../evidence/')
+        self.assertIn('0.00009× throughput', html)

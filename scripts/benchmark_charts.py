@@ -110,16 +110,19 @@ def api_chart(data, chart_id, evidence_prefix):
                     columns = []
                     for role, value in (("native", native), ("shim", shim)):
                         engine = pair[role]
-                        number = f'{value:,.1f}' if info["unit"] == "MB" else f'{value:,.0f}'
+                        precision = 1 if info["unit"] in ("MB", "MiB") else 0
+                        number = f'{value:,.{precision}f}'
                         evidence = (evidence_prefix.replace("evidence/", "data/")
                                     if engine.get("evidence_kind") == "data" else evidence_prefix)
                         span = engine.get("ranges", {}).get(metric)
-                        spread = (f'<small class="api-range">{span["minimum"]:,.0f}–{span["maximum"]:,.0f} range</small>' if span else '')
+                        spread = (f'<small class="api-range">{span["minimum"]:,.{precision}f}–{span["maximum"]:,.{precision}f} range</small>' if span else '')
                         columns.append(f'''<div class="api-bar-column {role}"><strong>{number}</strong>{spread}
 <div class="api-bar-track" aria-hidden="true"><div class="api-bar" style="height:{100 * value / largest:.4f}%"></div></div>
 <span>{escape(engine["name"])}</span><a href="{evidence}{escape(engine["evidence"])}">{'All repetitions' if span else 'Raw result'} ↗</a></div>''')
                     ratio = shim / native
-                    body = f'<div class="api-bars">{"".join(columns)}</div><p class="api-ratio">{ratio:.2f}× {"file size" if info["direction"] == "lower" else "throughput"} · shim / original</p>'
+                    ratio_text = (f'{ratio:.2f}' if ratio >= 0.01 else
+                                  f'{ratio:.6f}'.rstrip('0') if ratio >= 0.000001 else f'{ratio:.2g}')
+                    body = f'<div class="api-bars">{"".join(columns)}</div><p class="api-ratio">{ratio_text}× {"file size" if info["direction"] == "lower" else "throughput"} · shim / original</p>'
                 else:
                     body = '<p class="api-unavailable">Comparison unavailable</p>'
                     links = [f'<a href="{evidence_prefix}{escape(name)}">{"Original library" if i == 0 else "psitri shim"} log ↗</a>' for i, name in enumerate(pair.get("evidence", []))]

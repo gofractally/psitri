@@ -1,0 +1,20 @@
+{
+  "workload": "api-bank-v1",
+  "status": "running",
+  "machine": "mac-m5-max",
+  "revision": "230e49b0b1f40aa71135a3be0fe2f9da6d92745a",
+  "pairs": [
+    {
+      "api": "mdbx",
+      "status": "failed",
+      "runs": [
+        "mdbx/smoke/2026-09-17T192038-fair-bank-smoke-46174c39/manifest.json"
+      ]
+    },
+    {
+      "api": "rocksdb",
+      "status": "running",
+      "runs": []
+    }
+  ]
+}

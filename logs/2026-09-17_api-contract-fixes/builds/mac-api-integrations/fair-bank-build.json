@@ -1,0 +1,7 @@
+{
+  "compiler": "/opt/homebrew/opt/llvm/bin/clang++",
+  "compiler_version": "22.1.2",
+  "build_type": "Release",
+  "native_dependencies": {"psio": "/Users/dlarimer/gofractally/psitri/build/bench-sources/psio", "integrations": "/Users/dlarimer/psitri-merge/build/bench-sources/integrations", "abseil": "/Users/dlarimer/psitri-merge/build/release/_deps/abseil-src"},
+  "libraries": ["/Users/dlarimer/psitri-merge/build/release/_deps/rocksdb-build/librocksdb.a", "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib/libsqlite3.tbd"]
+}

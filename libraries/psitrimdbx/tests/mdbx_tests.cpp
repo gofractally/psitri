@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -193,6 +194,51 @@ TEST_CASE("C API: basic put/get/del", "[mdbx][c-api]")
 
    mdbx_env_close(env);
    // Cleanup handled by make_temp_dir() at start of next run
+}
+
+TEST_CASE("C API: dense binary accounts retain committed values after abort",
+          "[mdbx][c-api][transaction][bank-regression]")
+{
+   auto dir = make_temp_dir("c_dense_bank");
+   MDBX_env* raw = nullptr;
+   REQUIRE(mdbx_env_create(&raw) == MDBX_SUCCESS);
+   std::unique_ptr<MDBX_env, decltype(&mdbx_env_close)> env(raw, mdbx_env_close);
+   REQUIRE(mdbx_env_open(raw, dir.c_str(),
+                        MDBX_env_flags_t(MDBX_WRITEMAP | MDBX_UTTERLY_NOSYNC), 0600) == MDBX_SUCCESS);
+   MDBX_dbi dbi;
+   MDBX_txn* tx = nullptr;
+   REQUIRE(mdbx_txn_begin(raw, nullptr, MDBX_TXN_READWRITE, &tx) == MDBX_SUCCESS);
+   REQUIRE(mdbx_dbi_open(tx, nullptr, MDBX_DB_DEFAULTS, &dbi) == MDBX_SUCCESS);
+   REQUIRE(mdbx_txn_commit(tx) == MDBX_SUCCESS);
+   for (uint64_t begin = 0; begin < 128; begin += 32)
+   {
+      REQUIRE(mdbx_txn_begin(raw, nullptr, MDBX_TXN_READWRITE, &tx) == MDBX_SUCCESS);
+      for (uint64_t i = begin; i < begin + 32; ++i)
+      {
+         INFO("loading binary account " << i);
+         auto key = be_u64(i), value = be_u64(1'000'000'000'000ULL);
+         MDBX_val k{key.data(), key.size()}, v{value.data(), value.size()};
+         REQUIRE(mdbx_put(tx, dbi, &k, &v, MDBX_UPSERT) == MDBX_SUCCESS);
+      }
+      REQUIRE(mdbx_txn_commit(tx) == MDBX_SUCCESS);
+   }
+   auto key = be_u64(0), changed = be_u64(999'999'999'999ULL);
+   MDBX_val k{key.data(), key.size()}, v{changed.data(), changed.size()}, got{};
+   REQUIRE(mdbx_txn_begin(raw, nullptr, MDBX_TXN_READWRITE, &tx) == MDBX_SUCCESS);
+   REQUIRE(mdbx_put(tx, dbi, &k, &v, MDBX_UPSERT) == MDBX_SUCCESS);
+   REQUIRE(mdbx_get(tx, dbi, &k, &got) == MDBX_SUCCESS);
+   REQUIRE(mdbx_bytes(got) == changed);
+   REQUIRE(mdbx_txn_abort(tx) == MDBX_SUCCESS);
+   REQUIRE(mdbx_txn_begin(raw, nullptr, MDBX_TXN_RDONLY, &tx) == MDBX_SUCCESS);
+   for (uint64_t i = 0; i < 128; ++i)
+   {
+      INFO("reading binary account " << i << " after abort");
+      key = be_u64(i);
+      k = {key.data(), key.size()};
+      REQUIRE(mdbx_get(tx, dbi, &k, &got) == MDBX_SUCCESS);
+      REQUIRE(from_be_u64(got) == 1'000'000'000'000ULL);
+   }
+   REQUIRE(mdbx_txn_abort(tx) == MDBX_SUCCESS);
 }
 
 TEST_CASE("C API: named databases", "[mdbx][c-api]")

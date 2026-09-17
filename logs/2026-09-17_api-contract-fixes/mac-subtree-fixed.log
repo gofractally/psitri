@@ -1,0 +1,6 @@
+Filters: "psibase upsert_subtree stores and retrieves subtree reference"
+Randomness seeded to: 761367335
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+===============================================================================
+All tests passed (7 assertions in 1 test case)
+

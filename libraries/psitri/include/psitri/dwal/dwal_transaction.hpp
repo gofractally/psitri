@@ -113,6 +113,7 @@ namespace psitri::dwal
      public:
       using database_type      = basic_dwal_database<LockPolicy, Engine>;
       using dwal_root_type     = basic_dwal_root<LockPolicy>;
+      using transaction_lock = std::unique_lock<typename dwal_root_type::shared_mutex_type>;
       using remove_result_type = basic_remove_result<LockPolicy, Engine>;
 
       basic_dwal_transaction(dwal_root_type& root,
@@ -120,7 +121,8 @@ namespace psitri::dwal
                              uint32_t        root_index,
                              database_type*  db     = nullptr,
                              bool            nested = false,
-                             root_mode       mode   = root_mode::read_write);
+                             root_mode       mode   = root_mode::read_write,
+                             transaction_lock lock = {});
 
       ~basic_dwal_transaction();
 
@@ -287,6 +289,7 @@ namespace psitri::dwal
       bool            _nested     = false;
       root_mode       _mode       = root_mode::read_write;
 
+      transaction_lock _transaction_lock;
       undo_log _undo;
    };
 

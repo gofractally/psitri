@@ -112,7 +112,12 @@ namespace sal_art_ref
          std::memcpy(dst, &saved, sizeof(sal::alloc_header));  // restore SAL header
          auto*          out = static_cast<paged*>(dst);
          const uint16_t tu  = tail_used();
-         fast_copy(out->tail() - tu, this->tail() - tu, tu);   // tail: used heap only
+         // The ends of both allocations are cacheline-aligned; the beginning
+         // of the used heap is not. Copy its short prefix before the aligned
+         // suffix. An aligned AVX-512 load at tail()-tu faults for odd sizes.
+         const uint32_t bulk = tu & ~uint32_t(63);
+         std::memcpy(out->tail() - tu, this->tail() - tu, tu - bulk);
+         ucc::memcpy_aligned_64byte(out->tail() - bulk, this->tail() - bulk, bulk);
          out->clear_checksum();
       }
    } __attribute__((packed));

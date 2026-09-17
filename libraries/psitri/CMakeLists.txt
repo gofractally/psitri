@@ -59,6 +59,7 @@ if(PSITRI_BUILD_TESTS)
             tests/truncate_tests.cpp
             tests/smart_ptr_tests.cpp
             tests/dwal_tests.cpp
+            tests/dwal_snapshot_tests.cpp
             tests/write_buffer_tests.cpp
             tests/value_node_tests.cpp
             tests/live_range_map_tests.cpp

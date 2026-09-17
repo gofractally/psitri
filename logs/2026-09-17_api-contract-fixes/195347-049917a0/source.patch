@@ -1,0 +1,609 @@
+diff --git a/benchmarks/api_bank/CMakeLists.txt b/benchmarks/api_bank/CMakeLists.txt
+index 97b99e4..c891037 100644
+--- a/benchmarks/api_bank/CMakeLists.txt
++++ b/benchmarks/api_bank/CMakeLists.txt
+@@ -38,11 +38,6 @@ if(API_BANK_INTEGRATIONS)
+     add_subdirectory("${API_BANK_ABSEIL}" abseil EXCLUDE_FROM_ALL)
+     add_subdirectory("${API_BANK_INTEGRATIONS}/libraries/psitrirocks" psitrirocks EXCLUDE_FROM_ALL)
+     add_subdirectory("${API_BANK_INTEGRATIONS}/libraries/psitri-sqlite" psitri-sqlite EXCLUDE_FROM_ALL)
+-    # This pinned integration's SQLite TU includes the database declaration only.
+-    # Supply its template definitions without modifying the integration checkout.
+-    target_compile_options(psitri-sqlite PRIVATE
+-        "$<$<COMPILE_LANGUAGE:CXX>:-include>"
+-        "$<$<COMPILE_LANGUAGE:CXX>:psitri/database_impl.hpp>")
+     execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${API_BANK_INTEGRATIONS}"
+                     OUTPUT_VARIABLE shim_revision OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+     find_path(FAIR_ROCKSDB_INCLUDE_DIR rocksdb/db.h REQUIRED)
+@@ -75,5 +70,42 @@ else()
+     set(dependencies "\"ucc\": \"${FETCHCONTENT_SOURCE_DIR_UCC}\"")
+     set(libraries "\"${FAIR_MDBX_LIBRARY}\"")
+ endif()
++option(API_BANK_BUILD_CONTRACT_TESTS "Build functional API contract regression targets" ON)
++if(API_BANK_BUILD_CONTRACT_TESTS)
++    foreach(engine mdbx psitrimdbx rocksdb psitrirocks sqlite psitri_sqlite)
++        if(TARGET fair-bank-${engine})
++            add_executable(api-contract-${engine} ../fair_bank/main.cpp)
++            get_target_property(libs fair-bank-${engine} LINK_LIBRARIES)
++            get_target_property(defs fair-bank-${engine} COMPILE_DEFINITIONS)
++            get_target_property(includes fair-bank-${engine} INCLUDE_DIRECTORIES)
++            target_link_libraries(api-contract-${engine} PRIVATE ${libs})
++            target_compile_definitions(api-contract-${engine} PRIVATE ${defs} FAIR_CONTRACT_ONLY=1)
++            if(includes)
++                target_include_directories(api-contract-${engine} PRIVATE ${includes})
++            endif()
++            set_target_properties(api-contract-${engine} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
++        endif()
++    endforeach()
++endif()
++option(API_BANK_BUILD_REGRESSION_TESTS "Build storage regressions for the API pair backends" OFF)
++if(API_BANK_BUILD_REGRESSION_TESTS)
++    find_package(Catch2 3 REQUIRED)
++    if(API_BANK_INTEGRATIONS)
++        add_executable(api-storage-regressions
++            "${API_BANK_INTEGRATIONS}/libraries/psitri/tests/dwal_tests.cpp"
++            "${API_BANK_INTEGRATIONS}/libraries/psitri/tests/dwal_snapshot_tests.cpp"
++            "${API_BANK_INTEGRATIONS}/libraries/psitri-sqlite/tests/bank_regressions.cpp")
++        target_link_libraries(api-storage-regressions PRIVATE psitrirocks psitri-sqlite Catch2::Catch2WithMain)
++    else()
++        add_executable(api-storage-regressions
++            "${PSITRI_BENCH_SOURCE}/libraries/psitri/tests/dwal_tests.cpp"
++            "${PSITRI_BENCH_SOURCE}/libraries/psitri/tests/dwal_snapshot_tests.cpp"
++            "${PSITRI_BENCH_SOURCE}/libraries/sal/test/allocator_session_tests.cpp"
++            "${PSITRI_BENCH_SOURCE}/libraries/sal_art_ref/test/paged_tests.cpp"
++            "${PSITRI_BENCH_SOURCE}/libraries/sal_art_ref/test/leaf_page_tests.cpp")
++        target_link_libraries(api-storage-regressions PRIVATE psitri sal_art_ref Catch2::Catch2WithMain)
++    endif()
++    set_target_properties(api-storage-regressions PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
++endif()
+ file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/fair-bank-build.json" CONTENT
+ "{\n  \"compiler\": \"${CMAKE_CXX_COMPILER}\",\n  \"compiler_version\": \"${CMAKE_CXX_COMPILER_VERSION}\",\n  \"build_type\": \"${CMAKE_BUILD_TYPE}\",\n  \"native_dependencies\": {\"psio\": \"${FETCHCONTENT_SOURCE_DIR_PSIO}\", ${dependencies}},\n  \"libraries\": [${libraries}]\n}\n")
+diff --git a/benchmarks/fair_bank/main.cpp b/benchmarks/fair_bank/main.cpp
+index a553b21..80d0a73 100644
+--- a/benchmarks/fair_bank/main.cpp
++++ b/benchmarks/fair_bank/main.cpp
+@@ -122,7 +122,9 @@ void model_apply(const Config &c, std::vector<uint64_t> &model, uint64_t count,
+ }
+ uint64_t validate(Store &store, const Config &c, const std::vector<uint64_t> &model)
+ {
+-   require(store.count() == c.accounts, "Account cardinality changed");
++   auto count = store.count();
++   require(count == c.accounts, "Account cardinality changed: expected " +
++                std::to_string(c.accounts) + ", observed " + std::to_string(count));
+    Store::Reader reader(store);
+    uint64_t hash = 14695981039346656037ULL;
+    unsigned __int128 sum = 0;
+@@ -463,6 +465,7 @@ int main(int argc, char **argv)
+                    tx.put(encode(i), encode(initial_balance, c.value_bytes));
+              });
+       add("load", c.accounts / seconds(start), "accounts/s");
++      std::cerr << "contract checks\n";
+       contract_check(*store, c);
+       validate(*store, c, model);
+       std::cerr << "warmup\n";
+@@ -509,7 +512,15 @@ int main(int argc, char **argv)
+               1024,
+ #endif
+           "bytes", "lower");
++#ifdef FAIR_CONTRACT_ONLY
++      // Functional regression target: exercise the same contracts, but produce
++      // no throughput or latency evidence from a potentially busy developer host.
++      std::ofstream result(c.result);
++      result << "{\"workload\":\"api-contract-v1\",\"status\":\"passed\","
++             << "\"engine\":\"" << engine_name << "\",\"final_hash\":" << hash << "}\n";
++#else
+       write_result(c, metrics, hash, solo, mixed, read);
++#endif
+       std::cout << "PASS " << engine_name << " final_hash=" << hash << "\n";
+       return 0;
+    }
+diff --git a/libraries/psitri/CMakeLists.txt b/libraries/psitri/CMakeLists.txt
+index 860a91c..751d36d 100644
+--- a/libraries/psitri/CMakeLists.txt
++++ b/libraries/psitri/CMakeLists.txt
+@@ -59,6 +59,7 @@ if(PSITRI_BUILD_TESTS)
+             tests/truncate_tests.cpp
+             tests/smart_ptr_tests.cpp
+             tests/dwal_tests.cpp
++            tests/dwal_snapshot_tests.cpp
+             tests/write_buffer_tests.cpp
+             tests/value_node_tests.cpp
+             tests/live_range_map_tests.cpp
+diff --git a/libraries/psitri/include/psitri/dwal/btree_layer.hpp b/libraries/psitri/include/psitri/dwal/btree_layer.hpp
+index 5ea2f10..eeff6bd 100644
+--- a/libraries/psitri/include/psitri/dwal/btree_layer.hpp
++++ b/libraries/psitri/include/psitri/dwal/btree_layer.hpp
+@@ -177,4 +177,56 @@ namespace psitri::dwal
+       }
+    };
+ 
++   /// Immutable root and range-deletion view. The caller retains the arena owner
++   /// and advances its COW generation while holding the root transaction lock.
++   struct btree_layer_view
++   {
++      struct map_view
++      {
++         art::arena* arena;
++         art::offset_t root;
++         const btree_layer::map_type* live_map = nullptr;
++         art::offset_t current_root() const { return live_map ? live_map->snapshot_root() : root; }
++         const btree_value* get(std::string_view key) const
++         { return art::get<btree_value>(*arena, current_root(), key); }
++         auto begin() const { return art::make_begin<btree_value>(*arena, current_root()); }
++         auto end() const { return art::make_end<btree_value>(*arena, current_root()); }
++         auto lower_bound(std::string_view key) const
++         { return art::make_lower_bound<btree_value>(*arena, current_root(), key); }
++         auto upper_bound(std::string_view key) const
++         {
++            auto it = lower_bound(key);
++            if (it != end() && it.key() == key) ++it;
++            return it;
++         }
++         bool empty() const { return current_root() == art::null_offset; }
++      };
++      struct tombstone_view
++      {
++         std::vector<range_tombstone_list::range> ranges;
++         const range_tombstone_list* live_tombstones = nullptr;
++         bool is_deleted(std::string_view key) const
++         {
++            if (live_tombstones) return live_tombstones->is_deleted(key);
++            auto it = std::upper_bound(ranges.begin(), ranges.end(), key,
++                [](auto k, const auto& range) { return k < range.low; });
++            return it != ranges.begin() && std::prev(it)->contains(key);
++         }
++      };
++      map_view map;
++      tombstone_view tombstones;
++      explicit btree_layer_view(const btree_layer& layer)
++          : map{const_cast<art::arena*>(&layer.map.get_arena()), layer.map.snapshot_root()},
++            tombstones{layer.tombstones.ranges()} {}
++      static btree_layer_view live(const btree_layer& layer)
++      {
++         return {layer, false};
++      }
++     private:
++      btree_layer_view(const btree_layer& layer, bool)
++          : map{const_cast<art::arena*>(&layer.map.get_arena()), art::null_offset, &layer.map},
++            tombstones{{}, &layer.tombstones} {}
++
++   };
++
+ }  // namespace psitri::dwal
+diff --git a/libraries/psitri/include/psitri/dwal/dwal_database.hpp b/libraries/psitri/include/psitri/dwal/dwal_database.hpp
+index a590ae9..04efa61 100644
+--- a/libraries/psitri/include/psitri/dwal/dwal_database.hpp
++++ b/libraries/psitri/include/psitri/dwal/dwal_database.hpp
+@@ -201,6 +201,7 @@ namespace psitri::dwal
+ 
+       static constexpr uint32_t       max_roots = 512;
+       std::unique_ptr<dwal_root_type> _roots[max_roots];
++      typename LockPolicy::mutex_type _root_init_mutex;
+ 
+       dwal_root_type& ensure_root(uint32_t index);
+ 
+diff --git a/libraries/psitri/include/psitri/dwal/dwal_database_impl.hpp b/libraries/psitri/include/psitri/dwal/dwal_database_impl.hpp
+index d9f86cd..db0dc63 100644
+--- a/libraries/psitri/include/psitri/dwal/dwal_database_impl.hpp
++++ b/libraries/psitri/include/psitri/dwal/dwal_database_impl.hpp
+@@ -394,10 +394,9 @@ namespace psitri::dwal
+    basic_dwal_database<LockPolicy, Engine>::ensure_root(uint32_t index)
+    {
+       assert(index < max_roots);
+-      if (!_roots[index])
+-      {
+-         _roots[index] = std::make_unique<dwal_root_type>();
+-      }
++      std::lock_guard registry_lock(_root_init_mutex);
++      if (_roots[index]) return *_roots[index];
++      _roots[index] = std::make_unique<dwal_root_type>();
+       _roots[index]->status = _wal_status ? _wal_status->root(index) : nullptr;
+       if (_roots[index]->status)
+       {
+@@ -462,6 +461,7 @@ namespace psitri::dwal
+          throw std::runtime_error("dwal: direct transaction mode not yet implemented");
+ 
+       auto& root = ensure_root(root_index);
++      std::unique_lock transaction_lock(root.tx_mutex);
+ 
+       if (_cfg.max_rw_arena_bytes > 0 &&
+           root.rw_layer->map.arena_capacity() >= _cfg.max_rw_arena_bytes)
+@@ -472,7 +472,8 @@ namespace psitri::dwal
+ 
+       ensure_wal(root_index);
+ 
+-      return dwal_transaction_type(root, root.wal.get(), root_index, this);
++      return dwal_transaction_type(root, root.wal.get(), root_index, this, false,
++                                   root_mode::read_write, std::move(transaction_lock));
+    }
+ 
+    template <class LockPolicy, class Engine>
+diff --git a/libraries/psitri/include/psitri/dwal/dwal_transaction.hpp b/libraries/psitri/include/psitri/dwal/dwal_transaction.hpp
+index 2c8bf30..d7cfc08 100644
+--- a/libraries/psitri/include/psitri/dwal/dwal_transaction.hpp
++++ b/libraries/psitri/include/psitri/dwal/dwal_transaction.hpp
+@@ -113,6 +113,7 @@ namespace psitri::dwal
+      public:
+       using database_type      = basic_dwal_database<LockPolicy, Engine>;
+       using dwal_root_type     = basic_dwal_root<LockPolicy>;
++      using transaction_lock = std::unique_lock<typename dwal_root_type::shared_mutex_type>;
+       using remove_result_type = basic_remove_result<LockPolicy, Engine>;
+ 
+       basic_dwal_transaction(dwal_root_type& root,
+@@ -120,7 +121,8 @@ namespace psitri::dwal
+                              uint32_t        root_index,
+                              database_type*  db     = nullptr,
+                              bool            nested = false,
+-                             root_mode       mode   = root_mode::read_write);
++                             root_mode       mode   = root_mode::read_write,
++                             transaction_lock lock = {});
+ 
+       ~basic_dwal_transaction();
+ 
+@@ -287,6 +289,7 @@ namespace psitri::dwal
+       bool            _nested     = false;
+       root_mode       _mode       = root_mode::read_write;
+ 
++      transaction_lock _transaction_lock;
+       undo_log _undo;
+    };
+ 
+diff --git a/libraries/psitri/include/psitri/dwal/dwal_transaction_impl.hpp b/libraries/psitri/include/psitri/dwal/dwal_transaction_impl.hpp
+index bd6b248..1ec3aa5 100644
+--- a/libraries/psitri/include/psitri/dwal/dwal_transaction_impl.hpp
++++ b/libraries/psitri/include/psitri/dwal/dwal_transaction_impl.hpp
+@@ -17,13 +17,15 @@ namespace psitri::dwal
+                                                               uint32_t        root_index,
+                                                               database_type*  db,
+                                                               bool            nested,
+-                                                              root_mode       mode)
++                                                              root_mode       mode,
++                                                              transaction_lock lock)
+        : _root(&root),
+          _wal(wal),
+          _db(db),
+          _root_index(root_index),
+          _nested(nested),
+-         _mode(mode)
++         _mode(mode),
++         _transaction_lock(std::move(lock))
+    {
+       if (_mode == root_mode::read_write)
+       {
+@@ -61,6 +63,7 @@ namespace psitri::dwal
+          _aborted(other._aborted),
+          _nested(other._nested),
+          _mode(other._mode),
++         _transaction_lock(std::move(other._transaction_lock)),
+          _undo(std::move(other._undo))
+    {
+       other._committed = true;  // prevent double-abort in moved-from dtor
+@@ -262,6 +265,7 @@ namespace psitri::dwal
+    template <class LockPolicy, class Engine>
+    void basic_dwal_transaction<LockPolicy, Engine>::commit()
+    {
++      auto lock = std::move(_transaction_lock);
+       assert(_root && !_committed && !_aborted);
+       _committed = true;
+ 
+@@ -368,6 +372,7 @@ namespace psitri::dwal
+    template <class LockPolicy, class Engine>
+    void basic_dwal_transaction<LockPolicy, Engine>::abort()
+    {
++      auto lock = std::move(_transaction_lock);
+       assert(_root && !_committed && !_aborted);
+       _aborted = true;
+ 
+diff --git a/libraries/psitri/include/psitri/dwal/merge_cursor.hpp b/libraries/psitri/include/psitri/dwal/merge_cursor.hpp
+index f1727bd..19324af 100644
+--- a/libraries/psitri/include/psitri/dwal/merge_cursor.hpp
++++ b/libraries/psitri/include/psitri/dwal/merge_cursor.hpp
+@@ -33,6 +33,10 @@ namespace psitri::dwal
+                          const btree_layer*       ro,
+                          std::optional<cursor_t>  tri);
+ 
++      basic_merge_cursor(std::optional<btree_layer_view> rw,
++                         std::optional<btree_layer_view> ro,
++                         std::optional<cursor_t> tri);
++
+       // ── Positioning ────────────────────────────────────────────────
+ 
+       bool seek_begin();
+@@ -98,8 +102,8 @@ namespace psitri::dwal
+       void skip_tri_past(std::string_view k);
+ 
+       // Layer pointers (null = excluded).
+-      const btree_layer* _rw = nullptr;
+-      const btree_layer* _ro = nullptr;
++      std::optional<btree_layer_view> _rw;
++      std::optional<btree_layer_view> _ro;
+ 
+       // Btree iterators.
+       btree_iter _rw_it, _rw_end;
+@@ -137,6 +141,14 @@ namespace psitri::dwal
+       {
+       }
+ 
++      basic_owned_merge_cursor(std::shared_ptr<btree_layer> rw,
++                               std::shared_ptr<btree_layer> ro,
++                               std::optional<btree_layer_view> rw_view,
++                               std::optional<btree_layer_view> ro_view,
++                               std::optional<cursor_t> tri)
++          : _rw(std::move(rw)), _ro(std::move(ro)),
++            _cursor(std::move(rw_view), std::move(ro_view), std::move(tri)) {}
++
+       merge_cursor_t&       cursor() noexcept { return _cursor; }
+       const merge_cursor_t& cursor() const noexcept { return _cursor; }
+ 
+diff --git a/libraries/psitri/include/psitri/dwal/merge_cursor_impl.hpp b/libraries/psitri/include/psitri/dwal/merge_cursor_impl.hpp
+index 959c523..4073d29 100644
+--- a/libraries/psitri/include/psitri/dwal/merge_cursor_impl.hpp
++++ b/libraries/psitri/include/psitri/dwal/merge_cursor_impl.hpp
+@@ -13,7 +13,15 @@ namespace psitri::dwal
+    basic_merge_cursor<Engine>::basic_merge_cursor(const btree_layer*            rw,
+                               const btree_layer*            ro,
+                               std::optional<cursor_t>  tri)
+-       : _rw(rw), _ro(ro), _tri(std::move(tri))
++       : basic_merge_cursor(rw ? std::optional(btree_layer_view::live(*rw)) : std::nullopt,
++                            ro ? std::optional(btree_layer_view::live(*ro)) : std::nullopt,
++                            std::move(tri)) {}
++
++   template <class Engine>
++   basic_merge_cursor<Engine>::basic_merge_cursor(std::optional<btree_layer_view> rw,
++                              std::optional<btree_layer_view> ro,
++                              std::optional<cursor_t> tri)
++       : _rw(std::move(rw)), _ro(std::move(ro)), _tri(std::move(tri))
+    {
+       if (_rw)
+       {
+diff --git a/libraries/psitrimdbx/tests/mdbx_tests.cpp b/libraries/psitrimdbx/tests/mdbx_tests.cpp
+index ebd10a4..8703d3c 100644
+--- a/libraries/psitrimdbx/tests/mdbx_tests.cpp
++++ b/libraries/psitrimdbx/tests/mdbx_tests.cpp
+@@ -7,6 +7,7 @@
+ #include <cstdint>
+ #include <cstring>
+ #include <filesystem>
++#include <memory>
+ #include <string>
+ #include <thread>
+ #include <vector>
+@@ -195,6 +196,51 @@ TEST_CASE("C API: basic put/get/del", "[mdbx][c-api]")
+    // Cleanup handled by make_temp_dir() at start of next run
+ }
+ 
++TEST_CASE("C API: dense binary accounts retain committed values after abort",
++          "[mdbx][c-api][transaction][bank-regression]")
++{
++   auto dir = make_temp_dir("c_dense_bank");
++   MDBX_env* raw = nullptr;
++   REQUIRE(mdbx_env_create(&raw) == MDBX_SUCCESS);
++   std::unique_ptr<MDBX_env, decltype(&mdbx_env_close)> env(raw, mdbx_env_close);
++   REQUIRE(mdbx_env_open(raw, dir.c_str(),
++                        MDBX_env_flags_t(MDBX_WRITEMAP | MDBX_UTTERLY_NOSYNC), 0600) == MDBX_SUCCESS);
++   MDBX_dbi dbi;
++   MDBX_txn* tx = nullptr;
++   REQUIRE(mdbx_txn_begin(raw, nullptr, MDBX_TXN_READWRITE, &tx) == MDBX_SUCCESS);
++   REQUIRE(mdbx_dbi_open(tx, nullptr, MDBX_DB_DEFAULTS, &dbi) == MDBX_SUCCESS);
++   REQUIRE(mdbx_txn_commit(tx) == MDBX_SUCCESS);
++   for (uint64_t begin = 0; begin < 128; begin += 32)
++   {
++      REQUIRE(mdbx_txn_begin(raw, nullptr, MDBX_TXN_READWRITE, &tx) == MDBX_SUCCESS);
++      for (uint64_t i = begin; i < begin + 32; ++i)
++      {
++         INFO("loading binary account " << i);
++         auto key = be_u64(i), value = be_u64(1'000'000'000'000ULL);
++         MDBX_val k{key.data(), key.size()}, v{value.data(), value.size()};
++         REQUIRE(mdbx_put(tx, dbi, &k, &v, MDBX_UPSERT) == MDBX_SUCCESS);
++      }
++      REQUIRE(mdbx_txn_commit(tx) == MDBX_SUCCESS);
++   }
++   auto key = be_u64(0), changed = be_u64(999'999'999'999ULL);
++   MDBX_val k{key.data(), key.size()}, v{changed.data(), changed.size()}, got{};
++   REQUIRE(mdbx_txn_begin(raw, nullptr, MDBX_TXN_READWRITE, &tx) == MDBX_SUCCESS);
++   REQUIRE(mdbx_put(tx, dbi, &k, &v, MDBX_UPSERT) == MDBX_SUCCESS);
++   REQUIRE(mdbx_get(tx, dbi, &k, &got) == MDBX_SUCCESS);
++   REQUIRE(mdbx_bytes(got) == changed);
++   REQUIRE(mdbx_txn_abort(tx) == MDBX_SUCCESS);
++   REQUIRE(mdbx_txn_begin(raw, nullptr, MDBX_TXN_RDONLY, &tx) == MDBX_SUCCESS);
++   for (uint64_t i = 0; i < 128; ++i)
++   {
++      INFO("reading binary account " << i << " after abort");
++      key = be_u64(i);
++      k = {key.data(), key.size()};
++      REQUIRE(mdbx_get(tx, dbi, &k, &got) == MDBX_SUCCESS);
++      REQUIRE(from_be_u64(got) == 1'000'000'000'000ULL);
++   }
++   REQUIRE(mdbx_txn_abort(tx) == MDBX_SUCCESS);
++}
++
+ TEST_CASE("C API: named databases", "[mdbx][c-api]")
+ {
+    auto dir = make_temp_dir("c_named");
+diff --git a/libraries/sal/include/sal/env.hpp b/libraries/sal/include/sal/env.hpp
+index 9d3893f..17f6e90 100644
+--- a/libraries/sal/include/sal/env.hpp
++++ b/libraries/sal/include/sal/env.hpp
+@@ -8,7 +8,7 @@
+ #  include <crt_externs.h>
+ #  define PSITRI_ENVIRON (*_NSGetEnviron())
+ #else
+-extern char** environ;
++#  include <unistd.h>
+ #  define PSITRI_ENVIRON environ
+ #endif
+ 
+diff --git a/libraries/sal/src/allocator.cpp b/libraries/sal/src/allocator.cpp
+index 900389c..40c1444 100644
+--- a/libraries/sal/src/allocator.cpp
++++ b/libraries/sal/src/allocator.cpp
+@@ -437,6 +437,9 @@ namespace sal
+    allocator::~allocator()
+    {
+       stop_background_threads();
++      // The utility session releases its session slot through mapped state.
++      // Destroy it before member teardown unmaps that state.
++      _utility_ses = allocator_session_ptr(nullptr);
+       truncate_free_tail_stopped();
+       free_allocator_index(_allocator_index);
+    }
+diff --git a/libraries/sal/test/allocator_session_tests.cpp b/libraries/sal/test/allocator_session_tests.cpp
+index 7719671..633b969 100644
+--- a/libraries/sal/test/allocator_session_tests.cpp
++++ b/libraries/sal/test/allocator_session_tests.cpp
+@@ -2,6 +2,7 @@
+ #include <filesystem>
+ 
+ #include <sal/allocator_session_impl.hpp>
++#include <sal/allocator_impl.hpp>
+ #include <sal/mapping.hpp>
+ #include <sal/mapped_memory/allocator_state.hpp>
+ 
+@@ -136,3 +137,23 @@ TEST_CASE("allocator open resets stale session bitmap", "[sal][session][recovery
+ 
+    fs::remove_all(path);
+ }
++
++TEST_CASE("allocator destroys its utility session before unmapping state", "[sal][session][teardown]")
++{
++   const auto path = temp_dir("sal_utility_session_teardown_test");
++   {
++      sal::allocator alloc(path, sal::runtime_config{}, false);
++      alloc.register_type_ops<tail_test_node>();
++      auto session = alloc.create_session();
++      auto object = session->smart_alloc<tail_test_node>(uint32_t(64), sal::alloc_hint{});
++      alloc.retain(object.address());
++      // Sessionless release lazily creates an allocator-owned utility session.
++      alloc.release(object.address());
++      CHECK(alloc.dump().active_sessions == 2);
++   }
++   {
++      sal::allocator reopened(path, sal::runtime_config{}, false);
++      CHECK(reopened.dump().active_sessions == 0);
++   }
++   fs::remove_all(path);
++}
+diff --git a/libraries/sal_art_ref/include/sal_art_ref/paged.hpp b/libraries/sal_art_ref/include/sal_art_ref/paged.hpp
+index f196e3f..76b151a 100644
+--- a/libraries/sal_art_ref/include/sal_art_ref/paged.hpp
++++ b/libraries/sal_art_ref/include/sal_art_ref/paged.hpp
+@@ -112,7 +112,12 @@ namespace sal_art_ref
+          std::memcpy(dst, &saved, sizeof(sal::alloc_header));  // restore SAL header
+          auto*          out = static_cast<paged*>(dst);
+          const uint16_t tu  = tail_used();
+-         fast_copy(out->tail() - tu, this->tail() - tu, tu);   // tail: used heap only
++         // The ends of both allocations are cacheline-aligned; the beginning
++         // of the used heap is not. Copy its short prefix before the aligned
++         // suffix. An aligned AVX-512 load at tail()-tu faults for odd sizes.
++         const uint32_t bulk = tu & ~uint32_t(63);
++         std::memcpy(out->tail() - tu, this->tail() - tu, tu - bulk);
++         ucc::memcpy_aligned_64byte(out->tail() - bulk, this->tail() - bulk, bulk);
+          out->clear_checksum();
+       }
+    } __attribute__((packed));
+diff --git a/libraries/sal_art_ref/test/paged_tests.cpp b/libraries/sal_art_ref/test/paged_tests.cpp
+index 7de4a24..bafb871 100644
+--- a/libraries/sal_art_ref/test/paged_tests.cpp
++++ b/libraries/sal_art_ref/test/paged_tests.cpp
+@@ -1,6 +1,7 @@
+ #include <catch2/catch_test_macros.hpp>
+ #include <cstring>
+ #include <new>
++#include <array>
+ 
+ #include <sal_art_ref/paged.hpp>
+ 
+@@ -55,3 +56,31 @@ TEST_CASE("paged tail_ptr survives relocation", "[paged]")
+    REQUIRE((void*)moved->resolve(ref) == (void*)(buf2 + 256 - 8));
+    REQUIRE(moved->resolve(ref)[0] == (char)0xAB);
+ }
++
++TEST_CASE("paged clone copies every tail alignment without touching free space", "[paged][regression]")
++{
++   for (uint16_t used = 64; used < 128; ++used)
++   {
++      CAPTURE(used);
++      alignas(128) std::array<unsigned char, 512> source{};
++      alignas(128) std::array<unsigned char, 384> destination;
++      destination.fill(0xCD);
++      auto* src = new (source.data()) sal_art_ref::paged();
++      auto* dst = new (destination.data()) sal_art_ref::paged();
++      src->init_page(512, sal::header_type::start_user_type, sal::ptr_address_seq{});
++      dst->init_page(256, sal::header_type::start_user_type, sal::ptr_address_seq{});
++      auto* bytes = src->alloc_tail(used);
++      for (uint16_t i = 0; i < used; ++i) bytes[i] = char(i + 1);
++      std::memset(source.data() + sizeof(sal_art_ref::paged), 0xAB,
++                  80 - sizeof(sal_art_ref::paged));
++      src->blit_head_tail(dst, 80);
++      REQUIRE(dst->size() == 256);
++      REQUIRE(dst->tail_used() == used);
++      REQUIRE(std::memcmp(dst->tail_top(), bytes, used) == 0);
++      REQUIRE(std::memcmp(destination.data() + sizeof(sal::alloc_header),
++                          source.data() + sizeof(sal::alloc_header),
++                          80 - sizeof(sal::alloc_header)) == 0);
++      for (size_t i = 80; i < 256 - used; ++i) REQUIRE(destination[i] == 0xCD);
++      for (size_t i = 256; i < destination.size(); ++i) REQUIRE(destination[i] == 0xCD);
++   }
++}
+diff --git a/scripts/api_bank_matrix.py b/scripts/api_bank_matrix.py
+index 48900de..72bde25 100644
+--- a/scripts/api_bank_matrix.py
++++ b/scripts/api_bank_matrix.py
+@@ -47,6 +47,9 @@ def collect(args):
+                     result = json.loads(records[0].read_text())
+                     pair["runs"].append(str(records[0].relative_to(root)))
+                     save()
++                    if code == 130:
++                        pair["status"] = "interrupted"
++                        raise KeyboardInterrupt
+                     if code:
+                         pair["status"] = "failed"
+                         if any(r["status"] == "not_run" for r in result["records"]):
+diff --git a/scripts/fair_bank.py b/scripts/fair_bank.py
+index 139bd1d..9b7aa46 100644
+--- a/scripts/fair_bank.py
++++ b/scripts/fair_bank.py
+@@ -272,14 +272,18 @@ def run(args) -> int:
+         summary = summarize(manifest["records"], engines, repeats, args.profile)
+         benchmark.write_json(archive / "summary.json", summary)
+         manifest["status"] = summary["status"]
+-    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, KeyboardInterrupt) as error:
+-        manifest.update(status="failed", error=str(error) or "Interrupted")
++    except KeyboardInterrupt:
++        manifest.update(status="interrupted", error="Interrupted")
++        if manifest["records"] and manifest["records"][-1]["status"] == "waiting_for_idle":
++            manifest["records"][-1].update(status="not_run", error="Interrupted while waiting for idle")
++    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
++        manifest.update(status="failed", error=str(error))
+         print(f"Comparison failed: {manifest['error']}", file=sys.stderr)
+     finally:
+         manifest["finished_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+         benchmark.write_json(archive / "manifest.json", manifest)
+     print(f"{manifest['status'].upper()}: {archive / 'manifest.json'}", flush=True)
+-    return 0 if manifest["status"] == "passed" else 1
++    return 130 if manifest["status"] == "interrupted" else (0 if manifest["status"] == "passed" else 1)
+ 
+ 
+ def main():
+diff --git a/tests/website/test_api_bank_matrix.py b/tests/website/test_api_bank_matrix.py
+index d75d4df..a9347cb 100644
+--- a/tests/website/test_api_bank_matrix.py
++++ b/tests/website/test_api_bank_matrix.py
+@@ -29,3 +29,18 @@ class MatrixTest(unittest.TestCase):
+             self.assertEqual(calls, [("mdbx", "smoke"), ("rocksdb", "smoke"), ("rocksdb", "performance"), ("sqlite", "smoke"), ("sqlite", "performance")])
+             manifest = json.loads(next(Path(temp).glob("*/matrix.json")).read_text())
+             self.assertEqual([p["status"] for p in manifest["pairs"]], ["failed", "passed", "passed"])
++
++    def test_interrupt_stops_before_starting_another_pair(self):
++        with tempfile.TemporaryDirectory() as temp:
++            calls = []
++            def run(args):
++                calls.append(args.engines[0])
++                p = args.output / "run"; p.mkdir(parents=True)
++                (p / "manifest.json").write_text(json.dumps(dict(records=[], status="interrupted")))
++                return 130
++            args = SimpleNamespace(output=Path(temp), machine="test", build_mdbx=Path(temp), build_integrations=Path(temp), repeats=3, timeout=10, idle_timeout=10)
++            with patch.object(api_bank_matrix.fair_bank, "WORKLOAD", "api-bank-v1"), patch.object(api_bank_matrix.fair_bank, "run", side_effect=run), patch.object(api_bank_matrix.benchmark_idle, "exclusive", return_value=contextlib.nullcontext()):
++                self.assertEqual(api_bank_matrix.collect(args), 1)
++            self.assertEqual(calls, ["mdbx"])
++            manifest = json.loads(next(Path(temp).glob("*/matrix.json")).read_text())
++            self.assertEqual(manifest["pairs"][0]["status"], "interrupted")

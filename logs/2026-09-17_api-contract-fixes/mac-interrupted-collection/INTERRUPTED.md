@@ -1,0 +1,1 @@
+This collection was stopped while waiting for idle to fix the x86 failures. No benchmark child ran. The original manifests are preserved verbatim; a running/waiting status is the last persisted state before termination, not an active collection.

@@ -1,0 +1,193 @@
+Randomness seeded to: 3436269786
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+[MERGE] root=0 entries=8  0 ms wall / 0 ms cpu  syscall=1%  182686 entries/sec  5.47 us/entry  max=0.0 ms
+        latency: <1us=6  <10us=1  <100us=1  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (2% of wall)  0.0 ms/seg
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+[MERGE] root=0 entries=1  0 ms wall / 0 ms cpu  syscall=25%  42180 entries/sec  23.71 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (3% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=1  0 ms wall / 0 ms cpu  syscall=2%  54795 entries/sec  18.25 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=0  <100us=1  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+[MERGE] root=0 entries=1  0 ms wall / 0 ms cpu  syscall=3%  73394 entries/sec  13.62 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (5% of wall)  0.0 ms/seg
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+[MERGE] root=0 entries=200  0 ms wall / 0 ms cpu  syscall=1%  2925046 entries/sec  0.34 us/entry  max=0.0 ms
+        latency: <1us=198  <10us=2  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (1% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=229  0 ms wall / 0 ms cpu  syscall=4%  1227882 entries/sec  0.81 us/entry  max=0.0 ms
+        latency: <1us=202  <10us=23  <100us=4  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=333  0 ms wall / 0 ms cpu  syscall=0%  1993511 entries/sec  0.50 us/entry  max=0.0 ms
+        latency: <1us=292  <10us=41  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=336  0 ms wall / 0 ms cpu  syscall=0%  1825670 entries/sec  0.55 us/entry  max=0.0 ms
+        latency: <1us=271  <10us=65  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=334  0 ms wall / 0 ms cpu  syscall=0%  1672442 entries/sec  0.60 us/entry  max=0.0 ms
+        latency: <1us=264  <10us=70  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=325  0 ms wall / 0 ms cpu  syscall=0%  1592809 entries/sec  0.63 us/entry  max=0.0 ms
+        latency: <1us=263  <10us=62  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=319  0 ms wall / 0 ms cpu  syscall=0%  1673811 entries/sec  0.60 us/entry  max=0.0 ms
+        latency: <1us=259  <10us=60  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] shutdown requested — aborting after 179 entries
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+[MERGE] root=0 entries=3  3 ms wall / 0 ms cpu  syscall=99%  903 entries/sec  1107.68 us/entry  max=3.3 ms
+        latency: <1us=0  <10us=2  <100us=0  <1ms=0  <10ms=1  >=10ms=0  |  stalls(>=1ms): 1 entries, 3 ms total (100% of wall)
+        segments: 1 new segs, 3 ms total (99% of wall)  3.3 ms/seg
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+batch=1 baseline: alloc=10096 db=414MB
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+[MERGE] root=0 entries=1  0 ms wall / 0 ms cpu  syscall=3%  91954 entries/sec  10.88 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (5% of wall)  0.0 ms/seg
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+[MERGE] root=0 entries=100  0 ms wall / 0 ms cpu  syscall=1%  3720930 entries/sec  0.27 us/entry  max=0.0 ms
+        latency: <1us=98  <10us=2  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (3% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=50  0 ms wall / 0 ms cpu  syscall=2%  2251340 entries/sec  0.44 us/entry  max=0.0 ms
+        latency: <1us=49  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+[MERGE] root=0 entries=1  0 ms wall / 0 ms cpu  syscall=4%  88230 entries/sec  11.33 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (6% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=1  0 ms wall / 0 ms cpu  syscall=5%  119990 entries/sec  8.33 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+[MERGE] root=0 entries=1  0 ms wall / 0 ms cpu  syscall=5%  90228 entries/sec  11.08 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (6% of wall)  0.0 ms/seg
+[MERGE] root=1 entries=1  0 ms wall / 0 ms cpu  syscall=4%  145455 entries/sec  6.88 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+[MERGE] root=0 entries=2  0 ms wall / 0 ms cpu  syscall=2%  79469 entries/sec  12.58 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=1  <100us=1  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (3% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=2  0 ms wall / 0 ms cpu  syscall=39%  63076 entries/sec  15.85 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=1  <100us=1  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+[MERGE] root=0 entries=1  0 ms wall / 0 ms cpu  syscall=3%  86640 entries/sec  11.54 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (7% of wall)  0.0 ms/seg
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+[MERGE] root=0 entries=3  0 ms wall / 0 ms cpu  syscall=3%  202252 entries/sec  4.94 us/entry  max=0.0 ms
+        latency: <1us=1  <10us=2  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (3% of wall)  0.0 ms/seg
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+[MERGE] root=0 entries=500  0 ms wall / 0 ms cpu  syscall=4%  4103945 entries/sec  0.24 us/entry  max=0.0 ms
+        latency: <1us=495  <10us=4  <100us=1  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (1% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=600  0 ms wall / 0 ms cpu  syscall=13%  2480620 entries/sec  0.40 us/entry  max=0.0 ms
+        latency: <1us=592  <10us=4  <100us=4  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+[MERGE] root=0 entries=1  0 ms wall / 0 ms cpu  syscall=54%  31250 entries/sec  32.00 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (2% of wall)  0.0 ms/seg
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+[MERGE] root=0 entries=50  0 ms wall / 0 ms cpu  syscall=2%  1957560 entries/sec  0.51 us/entry  max=0.0 ms
+        latency: <1us=48  <10us=2  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (3% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=50  0 ms wall / 0 ms cpu  syscall=21%  1772547 entries/sec  0.56 us/entry  max=0.0 ms
+        latency: <1us=49  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=50  0 ms wall / 0 ms cpu  syscall=2%  3108679 entries/sec  0.32 us/entry  max=0.0 ms
+        latency: <1us=49  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=50  0 ms wall / 0 ms cpu  syscall=2%  1585188 entries/sec  0.63 us/entry  max=0.0 ms
+        latency: <1us=49  <10us=0  <100us=1  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=50  0 ms wall / 0 ms cpu  syscall=21%  1115250 entries/sec  0.90 us/entry  max=0.0 ms
+        latency: <1us=48  <10us=2  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+===============================================================================
+All tests passed (2538 assertions in 152 test cases)
+

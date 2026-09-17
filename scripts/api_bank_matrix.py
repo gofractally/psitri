@@ -47,6 +47,9 @@ def collect(args):
                     result = json.loads(records[0].read_text())
                     pair["runs"].append(str(records[0].relative_to(root)))
                     save()
+                    if code == 130:
+                        pair["status"] = "interrupted"
+                        raise KeyboardInterrupt
                     if code:
                         pair["status"] = "failed"
                         if any(r["status"] == "not_run" for r in result["records"]):

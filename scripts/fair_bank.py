@@ -272,14 +272,18 @@ def run(args) -> int:
         summary = summarize(manifest["records"], engines, repeats, args.profile)
         benchmark.write_json(archive / "summary.json", summary)
         manifest["status"] = summary["status"]
-    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, KeyboardInterrupt) as error:
-        manifest.update(status="failed", error=str(error) or "Interrupted")
+    except KeyboardInterrupt:
+        manifest.update(status="interrupted", error="Interrupted")
+        if manifest["records"] and manifest["records"][-1]["status"] == "waiting_for_idle":
+            manifest["records"][-1].update(status="not_run", error="Interrupted while waiting for idle")
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        manifest.update(status="failed", error=str(error))
         print(f"Comparison failed: {manifest['error']}", file=sys.stderr)
     finally:
         manifest["finished_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
         benchmark.write_json(archive / "manifest.json", manifest)
     print(f"{manifest['status'].upper()}: {archive / 'manifest.json'}", flush=True)
-    return 0 if manifest["status"] == "passed" else 1
+    return 130 if manifest["status"] == "interrupted" else (0 if manifest["status"] == "passed" else 1)
 
 
 def main():

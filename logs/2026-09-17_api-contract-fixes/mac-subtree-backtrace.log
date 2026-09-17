@@ -1,0 +1,28 @@
+(lldb) target create "build/api-integrations/bin/api-storage-regressions"
+Current executable set to '/Users/dlarimer/gofractally/psitri/build/api-integrations/bin/api-storage-regressions' (arm64).
+(lldb) settings set -- target.run-args  "psibase upsert_subtree stores and retrieves subtree reference"
+(lldb) run
+Filters: "psibase upsert_subtree stores and retrieves subtree reference"
+Randomness seeded to: 1411195372
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+api-storage-regressions is a Catch2 v3.13.0 host application.
+Run with -? for options
+
+-------------------------------------------------------------------------------
+psibase upsert_subtree stores and retrieves subtree reference
+-------------------------------------------------------------------------------
+/Users/dlarimer/psitri-merge/build/bench-sources/integrations/libraries/psitri/tests/dwal_tests.cpp:5155
+...............................................................................
+
+/Users/dlarimer/psitri-merge/build/bench-sources/integrations/libraries/psitri/tests/dwal_tests.cpp:5155: FAILED:
+due to unexpected exception with message:
+  database already exists: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/
+  dwal_test_6171891720/db
+
+===============================================================================
+test cases: 1 | 1 failed
+assertions: 1 | 1 failed
+
+Process 31235 launched: '/Users/dlarimer/gofractally/psitri/build/api-integrations/bin/api-storage-regressions' (arm64)
+Process 31235 exited with status = 42 (0x0000002a)

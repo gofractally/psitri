@@ -33,6 +33,10 @@ namespace psitri::dwal
                          const btree_layer*       ro,
                          std::optional<cursor_t>  tri);
 
+      basic_merge_cursor(std::optional<btree_layer_view> rw,
+                         std::optional<btree_layer_view> ro,
+                         std::optional<cursor_t> tri);
+
       // ── Positioning ────────────────────────────────────────────────
 
       bool seek_begin();
@@ -98,8 +102,8 @@ namespace psitri::dwal
       void skip_tri_past(std::string_view k);
 
       // Layer pointers (null = excluded).
-      const btree_layer* _rw = nullptr;
-      const btree_layer* _ro = nullptr;
+      std::optional<btree_layer_view> _rw;
+      std::optional<btree_layer_view> _ro;
 
       // Btree iterators.
       btree_iter _rw_it, _rw_end;
@@ -114,6 +118,7 @@ namespace psitri::dwal
       source       _source  = source::none;
       bool         _at_end  = true;
       bool         _at_rend = true;
+      bool         _backward = false;
    };
 
    /// A merge cursor that owns its layer snapshots.
@@ -136,6 +141,14 @@ namespace psitri::dwal
             _cursor(_rw.get(), _ro.get(), std::move(tri))
       {
       }
+
+      basic_owned_merge_cursor(std::shared_ptr<btree_layer> rw,
+                               std::shared_ptr<btree_layer> ro,
+                               std::optional<btree_layer_view> rw_view,
+                               std::optional<btree_layer_view> ro_view,
+                               std::optional<cursor_t> tri)
+          : _rw(std::move(rw)), _ro(std::move(ro)),
+            _cursor(std::move(rw_view), std::move(ro_view), std::move(tri)) {}
 
       merge_cursor_t&       cursor() noexcept { return _cursor; }
       const merge_cursor_t& cursor() const noexcept { return _cursor; }

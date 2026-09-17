@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cstring>
 #include <new>
+#include <array>
 
 #include <sal_art_ref/paged.hpp>
 
@@ -54,4 +55,32 @@ TEST_CASE("paged tail_ptr survives relocation", "[paged]")
    // The same tail_ptr resolves to the block at its NEW absolute address.
    REQUIRE((void*)moved->resolve(ref) == (void*)(buf2 + 256 - 8));
    REQUIRE(moved->resolve(ref)[0] == (char)0xAB);
+}
+
+TEST_CASE("paged clone copies every tail alignment without touching free space", "[paged][regression]")
+{
+   for (uint16_t used = 64; used < 128; ++used)
+   {
+      CAPTURE(used);
+      alignas(128) std::array<unsigned char, 512> source{};
+      alignas(128) std::array<unsigned char, 384> destination;
+      destination.fill(0xCD);
+      auto* src = new (source.data()) sal_art_ref::paged();
+      auto* dst = new (destination.data()) sal_art_ref::paged();
+      src->init_page(512, sal::header_type::start_user_type, sal::ptr_address_seq{});
+      dst->init_page(256, sal::header_type::start_user_type, sal::ptr_address_seq{});
+      auto* bytes = src->alloc_tail(used);
+      for (uint16_t i = 0; i < used; ++i) bytes[i] = char(i + 1);
+      std::memset(source.data() + sizeof(sal_art_ref::paged), 0xAB,
+                  80 - sizeof(sal_art_ref::paged));
+      src->blit_head_tail(dst, 80);
+      REQUIRE(dst->size() == 256);
+      REQUIRE(dst->tail_used() == used);
+      REQUIRE(std::memcmp(dst->tail_top(), bytes, used) == 0);
+      REQUIRE(std::memcmp(destination.data() + sizeof(sal::alloc_header),
+                          source.data() + sizeof(sal::alloc_header),
+                          80 - sizeof(sal::alloc_header)) == 0);
+      for (size_t i = 80; i < 256 - used; ++i) REQUIRE(destination[i] == 0xCD);
+      for (size_t i = 256; i < destination.size(); ++i) REQUIRE(destination[i] == 0xCD);
+   }
 }

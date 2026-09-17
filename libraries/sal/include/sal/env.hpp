@@ -8,7 +8,7 @@
 #  include <crt_externs.h>
 #  define PSITRI_ENVIRON (*_NSGetEnviron())
 #else
-extern char** environ;
+#  include <unistd.h>
 #  define PSITRI_ENVIRON environ
 #endif
 

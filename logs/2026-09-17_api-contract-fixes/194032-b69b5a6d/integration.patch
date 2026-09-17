@@ -1,0 +1,510 @@
+diff --git a/libraries/psitri-sqlite/sqlite3/sqlite3.c b/libraries/psitri-sqlite/sqlite3/sqlite3.c
+index 8a45c240..495bc2c5 100644
+--- a/libraries/psitri-sqlite/sqlite3/sqlite3.c
++++ b/libraries/psitri-sqlite/sqlite3/sqlite3.c
+@@ -103329,6 +103329,11 @@ case OP_JournalMode: {    /* out2 */
+   assert( p->readOnly==0 );
+ 
+   pBt = db->aDb[pOp->p1].pBt;
++#ifdef PSITRI_BTREE_STORAGE
++  /* The replacement storage engine owns its WAL; SQLite's dummy pager does
++  ** not. Ask that engine for its effective policy instead of probing the VFS. */
++  eNew = psitri_btree_journal_mode(pBt, eNew);
++#else
+   pPager = sqlite3BtreePager(pBt);
+   eOld = sqlite3PagerGetJournalMode(pPager);
+   if( eNew==PAGER_JOURNALMODE_QUERY ) eNew = eOld;
+@@ -103390,6 +103395,8 @@ case OP_JournalMode: {    /* out2 */
+   if( rc ) eNew = eOld;
+   eNew = sqlite3PagerSetJournalMode(pPager, eNew);
+ 
++#endif
++
+   pOut->flags = MEM_Str|MEM_Static|MEM_Term;
+   pOut->z = (char *)sqlite3JournalModename(eNew);
+   pOut->n = sqlite3Strlen30(pOut->z);
+diff --git a/libraries/psitri-sqlite/src/btree_helpers.c b/libraries/psitri-sqlite/src/btree_helpers.c
+index 8fbe24e9..e28ab4b1 100644
+--- a/libraries/psitri-sqlite/src/btree_helpers.c
++++ b/libraries/psitri-sqlite/src/btree_helpers.c
+@@ -7,6 +7,9 @@
+  * Must be compiled as C, not C++.
+  */
+ #define SQLITE_CORE 1
++#define PSITRI_BTREE_STORAGE 1
++struct Btree;
++int psitri_btree_journal_mode(struct Btree*, int);
+ #include "../sqlite3/sqlite3.c"  /* Get all internal definitions (with btree.c #if 0'd) */
+ 
+ #include <string.h>
+@@ -166,7 +169,7 @@ int psitri_sizeof_sqlite3_value(void) {
+  * Returns bytes written, or -1 on error.
+  */
+ int psitri_make_comparable_key(const unsigned char *pKey, int nKey,
+-                               unsigned char *buf, int bufSize) {
++                               unsigned char *buf, int bufSize, const KeyInfo *keyInfo) {
+    if (nKey < 1) return 0;
+ 
+    u32 szHdr;
+@@ -176,8 +179,12 @@ int psitri_make_comparable_key(const unsigned char *pKey, int nKey,
+ 
+    u32 d = szHdr; /* data offset */
+    int out = 0;
++   int fields = 0;
++   /* WITHOUT ROWID payload columns are stored in the value, not the key.
++    * Ordinary non-unique indexes include their rowid in nKeyField. */
++   int max_fields = keyInfo ? keyInfo->nKeyField : 0x7fffffff;
+ 
+-   while (idx < szHdr) {
++   while (idx < szHdr && fields++ < max_fields) {
+       u32 serial_type;
+       idx += getVarint32(&pKey[idx], serial_type);
+       u32 data_len = sqlite3VdbeSerialTypeLen(serial_type);
+diff --git a/libraries/psitri-sqlite/src/btree_psitri.cpp b/libraries/psitri-sqlite/src/btree_psitri.cpp
+index 486aa04d..293b0f51 100644
+--- a/libraries/psitri-sqlite/src/btree_psitri.cpp
++++ b/libraries/psitri-sqlite/src/btree_psitri.cpp
+@@ -22,7 +22,7 @@
+ extern "C" {
+ int psitri_pack_record(UnpackedRecord *pRec, unsigned char *buf, int bufSize);
+ int psitri_make_comparable_key(const unsigned char *pKey, int nKey,
+-                               unsigned char *buf, int bufSize);
++                               unsigned char *buf, int bufSize, const KeyInfo *keyInfo);
+ int psitri_make_comparable_key_from_unpacked(UnpackedRecord *pRec,
+                                              unsigned char *buf, int bufSize);
+ int psitri_sizeof_sqlite3_value(void);
+@@ -32,6 +32,7 @@ struct Pager* psitri_get_dummy_pager(void);
+ #include <psitri/dwal/dwal_database.hpp>
+ #include <psitri/dwal/dwal_transaction.hpp>
+ #include <psitri/dwal/merge_cursor.hpp>
++#include <psitri/dwal/read_snapshot.hpp>
+ #include <psitri/database.hpp>
+ #include <sal/config.hpp>
+ 
+@@ -98,6 +99,9 @@ struct Btree {
+    // Writer uses read_mode::latest (skip_rw_lock).
+    // Non-writer uses read_mode::buffered.
+    bool is_writer = false;
++   bool memory_database = false;
++   sal::sync_type sync_mode = sal::sync_type::none;
++   std::unique_ptr<psitri::dwal::read_snapshot> read_snapshot;
+ 
+    // Single DWAL transaction for all tables (root 0).
+    // Lazily created on first write, committed in CommitPhaseOne.
+@@ -294,12 +298,12 @@ static std::string pack_index_key(UnpackedRecord* pRec) {
+ // Convert a packed SQLite record to a byte-comparable key
+ static std::string make_comparable_from_packed(const char* data, int len) {
+    int sz = psitri_make_comparable_key(
+-      (const unsigned char*)data, len, nullptr, 0);
++      (const unsigned char*)data, len, nullptr, 0, nullptr);
+    if (sz <= 0) return {};
+    std::string result(sz, '\0');
+    int written = psitri_make_comparable_key(
+       (const unsigned char*)data, len,
+-      (unsigned char*)result.data(), sz);
++      (unsigned char*)result.data(), sz, nullptr);
+    if (written > 0) result.resize(written);
+    return result;
+ }
+@@ -343,6 +347,7 @@ int sqlite3BtreeOpen(
+    pBtree->pBt = pBt;
+ 
+    bool is_memory = (flags & BTREE_MEMORY) || !zFilename || zFilename[0] == 0;
++   pBtree->memory_database = is_memory;
+    std::string path;
+ 
+    if (is_memory) {
+@@ -421,8 +426,9 @@ int sqlite3BtreeClose(Btree* p) {
+       sqlite3BtreeCloseCursor(pBt->pCursor);
+    }
+ 
+-   // Commit any lingering DWAL transaction from autocommit mode
+-   p->commit_tx();
++   // Closing a connection must never publish uncommitted writes.
++   p->abort_tx();
++   p->read_snapshot.reset();
+ 
+    // Persist metadata and release global reference
+    if (pBt->psitri && pBt->psitri->dwal_db) {
+@@ -499,11 +505,11 @@ int sqlite3BtreeSetPagerFlags(Btree* p, unsigned pgFlags) {
+    unsigned level = pgFlags & 0x07;
+    bool fullfsync = (pgFlags & 0x08) != 0;  // PAGER_FULLFSYNC
+    switch (level) {
+-      case 0x01: p->pBt->psitri->sync_mode = sal::sync_type::none; break;
+-      case 0x02: p->pBt->psitri->sync_mode = sal::sync_type::msync_async; break;
++      case 0x01: p->sync_mode = sal::sync_type::none; break;
++      case 0x02: p->sync_mode = sal::sync_type::msync_async; break;
+       case 0x03: // fall through
+       case 0x04:
+-         p->pBt->psitri->sync_mode = fullfsync ? sal::sync_type::full
++         p->sync_mode = fullfsync ? sal::sync_type::full
+                                                 : sal::sync_type::fsync;
+          break;
+       default:   break;
+@@ -531,6 +537,15 @@ int sqlite3BtreeNewDb(Btree*) { return SQLITE_OK; }
+ void sqlite3BtreeClearCache(Btree*) {}
+ struct Pager* sqlite3BtreePager(Btree*) { return psitri_get_dummy_pager(); }
+ 
++int psitri_btree_journal_mode(Btree* p, int requested) {
++   // Persistent databases always use DWAL. Unsupported transitions leave the
++   // effective mode unchanged, as SQLite's PRAGMA contract permits. The pager
++   // remains disabled because it does not own these storage files.
++   (void)requested;
++   return p->memory_database ? 4 /* MEMORY */ : 5 /* WAL */;
++}
++
++
+ // ============================================================================
+ // Transactions
+ // ============================================================================
+@@ -545,7 +560,10 @@ int sqlite3BtreeBeginTrans(Btree* p, int wrflag, int* pSchemaVersion) {
+    if (wrflag) {
+       p->inTrans = TRANS_WRITE;
+       p->is_writer = true;
++      p->read_snapshot.reset();
++      p->get_tx();
+    } else if (p->inTrans == TRANS_NONE) {
++      p->read_snapshot = std::make_unique<psitri::dwal::read_snapshot>(*p->pBt->psitri->dwal_db, 0);
+       p->inTrans = TRANS_READ;
+    }
+    p->pBt->inTransaction = p->inTrans;
+@@ -566,8 +584,8 @@ int sqlite3BtreeCommitPhaseOne(Btree* p, const char*) {
+          PTRACE("CommitPhaseOne: commit_tx THREW: %s\n", e.what());
+          return SQLITE_ERROR;
+       }
+-      if (p->pBt->psitri->sync_mode >= sal::sync_type::fsync) {
+-         p->pBt->psitri->dwal_db->flush_wal(p->pBt->psitri->sync_mode);
++      if (p->sync_mode >= sal::sync_type::fsync) {
++         p->pBt->psitri->dwal_db->flush_wal(p->sync_mode);
+       }
+    }
+    return SQLITE_OK;
+@@ -576,6 +594,8 @@ int sqlite3BtreeCommitPhaseOne(Btree* p, const char*) {
+ int sqlite3BtreeCommitPhaseTwo(Btree* p, int) {
+    PTRACE("CommitPhaseTwo: inTrans=%d\n", p ? (int)p->inTrans : -1);
+    if (p) {
++      p->read_snapshot.reset();
++      p->is_writer = false;
+       p->inTrans = TRANS_NONE;
+       p->pBt->inTransaction = TRANS_NONE;
+    }
+@@ -592,6 +612,8 @@ int sqlite3BtreeRollback(Btree* p, int, int) {
+       p->abort_tx();
+    }
+    if (p) {
++      p->read_snapshot.reset();
++      p->is_writer = false;
+       p->inTrans = TRANS_NONE;
+       p->pBt->inTransaction = TRANS_NONE;
+    }
+@@ -834,12 +856,11 @@ static void ensure_cursor(BtCursor* pCur) {
+          if (pCur->pBtree && pCur->pBtree->active_tx
+              && !pCur->pBtree->active_tx->is_committed()) {
+             pCur->cursor.emplace(pCur->pBtree->active_tx->create_cursor());
+-         } else if (pCur->pBtree && pCur->pBtree->is_writer) {
+-            pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
+-               0, psitri::dwal::read_mode::latest, /*skip_rw_lock=*/true));
++         } else if (pCur->pBtree && pCur->pBtree->read_snapshot) {
++            pCur->cursor.emplace(pCur->pBtree->read_snapshot->create_cursor());
+          } else {
+-            pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
+-               0, psitri::dwal::read_mode::buffered));
++            psitri::dwal::read_snapshot current(*pCur->psitri_db->dwal_db, 0);
++            pCur->cursor.emplace(current.create_cursor());
+          }
+       } catch (...) {
+          pCur->cursor.reset();
+@@ -1112,7 +1133,7 @@ int sqlite3BtreeInsert(
+       if (pPayload->pKey) {
+          int comp_sz = psitri_make_comparable_key(
+              (const unsigned char*)pPayload->pKey, (int)pPayload->nKey,
+-             (unsigned char*)key_buf + 4, sizeof(key_buf) - 4);
++             (unsigned char*)key_buf + 4, sizeof(key_buf) - 4, pCur->pKeyInfo);
+          if (comp_sz <= 0) comp_sz = 0;
+          key_buf[0] = (char)((pCur->pgnoRoot >> 24) & 0xFF);
+          key_buf[1] = (char)((pCur->pgnoRoot >> 16) & 0xFF);
+@@ -1132,14 +1153,14 @@ int sqlite3BtreeInsert(
+ 
+    psitri->data_version.fetch_add(1);
+ 
+-   // Mark all cursors on this root as needing re-seek.
+-   // Don't destroy the cursor objects — rebuilding owned_merge_cursor
+-   // (shared_ptr copies + tri cursor creation) is expensive.
+-   // The next seek (lower_bound, seek_begin) reinitializes the ART
+-   // iterator from the root, which is safe after structural changes.
+-   // Single ART map — any mutation invalidates all cursor positions
+-   pCur->is_valid = false;
+-   pCur->eState = CURSOR_INVALID;
++   // The writer's cursors pin a particular ART root. A mutation may replace
++   // that root, so recreate them on the next seek. Other connections retain
++   // their transaction snapshots and are deliberately unaffected.
++   for (auto* cur = pCur->pBt->pCursor; cur; cur = cur->pNext) {
++      cur->cursor.reset();
++      cur->is_valid = false;
++      cur->eState = CURSOR_INVALID;
++   }
+ 
+    return SQLITE_OK;
+ }
+@@ -1159,7 +1180,12 @@ int sqlite3BtreeDelete(BtCursor* pCur, u8 flags) {
+    }
+ 
+    psitri->data_version.fetch_add(1);
+-   pCur->is_valid = false;
++   for (auto* cur = pCur->pBt->pCursor; cur; cur = cur->pNext) {
++      cur->cursor.reset();
++      cur->is_valid = false;
++      cur->eState = CURSOR_INVALID;
++   }
++   ensure_cursor(pCur);
+ 
+    if (flags & BTREE_SAVEPOSITION) {
+       // Reposition cursor at the deleted key's location
+@@ -1189,7 +1215,9 @@ int sqlite3BtreeCount(sqlite3*, BtCursor* pCur, i64* pnEntry) {
+       *pnEntry = 0;
+       return SQLITE_OK;
+    }
+-   *pnEntry = (i64)pCur->cursor->cursor().count_keys();
++   auto low = make_prefix(pCur->pgnoRoot);
++   auto high = make_prefix(pCur->pgnoRoot + 1);
++   *pnEntry = (i64)pCur->cursor->cursor().count_keys(low, high);
+    return SQLITE_OK;
+ }
+ 
+diff --git a/libraries/psitri/include/psitri/dwal/btree_layer.hpp b/libraries/psitri/include/psitri/dwal/btree_layer.hpp
+index 5ea2f101..119ffe2f 100644
+--- a/libraries/psitri/include/psitri/dwal/btree_layer.hpp
++++ b/libraries/psitri/include/psitri/dwal/btree_layer.hpp
+@@ -177,4 +177,43 @@ namespace psitri::dwal
+       }
+    };
+ 
++   /// Immutable root and range-deletion view. The caller retains the arena owner
++   /// and advances its COW generation while holding the root transaction lock.
++   struct btree_layer_view
++   {
++      struct map_view
++      {
++         art::arena* arena;
++         art::offset_t root;
++         const btree_value* get(std::string_view key) const
++         { return art::get<btree_value>(*arena, root, key); }
++         auto begin() const { return art::make_begin<btree_value>(*arena, root); }
++         auto end() const { return art::make_end<btree_value>(*arena, root); }
++         auto lower_bound(std::string_view key) const
++         { return art::make_lower_bound<btree_value>(*arena, root, key); }
++         auto upper_bound(std::string_view key) const
++         {
++            auto it = lower_bound(key);
++            if (it != end() && it.key() == key) ++it;
++            return it;
++         }
++         bool empty() const { return root == art::null_offset; }
++      };
++      struct tombstone_view
++      {
++         std::vector<range_tombstone_list::range> ranges;
++         bool is_deleted(std::string_view key) const
++         {
++            auto it = std::upper_bound(ranges.begin(), ranges.end(), key,
++                [](auto k, const auto& range) { return k < range.low; });
++            return it != ranges.begin() && std::prev(it)->contains(key);
++         }
++      };
++      map_view map;
++      tombstone_view tombstones;
++      explicit btree_layer_view(const btree_layer& layer)
++          : map{const_cast<art::arena*>(&layer.map.get_arena()), layer.map.snapshot_root()},
++            tombstones{layer.tombstones.ranges()} {}
++   };
++
+ }  // namespace psitri::dwal
+diff --git a/libraries/psitri/include/psitri/dwal/merge_cursor.hpp b/libraries/psitri/include/psitri/dwal/merge_cursor.hpp
+index f1727bd2..19324afe 100644
+--- a/libraries/psitri/include/psitri/dwal/merge_cursor.hpp
++++ b/libraries/psitri/include/psitri/dwal/merge_cursor.hpp
+@@ -33,6 +33,10 @@ namespace psitri::dwal
+                          const btree_layer*       ro,
+                          std::optional<cursor_t>  tri);
+ 
++      basic_merge_cursor(std::optional<btree_layer_view> rw,
++                         std::optional<btree_layer_view> ro,
++                         std::optional<cursor_t> tri);
++
+       // ── Positioning ────────────────────────────────────────────────
+ 
+       bool seek_begin();
+@@ -98,8 +102,8 @@ namespace psitri::dwal
+       void skip_tri_past(std::string_view k);
+ 
+       // Layer pointers (null = excluded).
+-      const btree_layer* _rw = nullptr;
+-      const btree_layer* _ro = nullptr;
++      std::optional<btree_layer_view> _rw;
++      std::optional<btree_layer_view> _ro;
+ 
+       // Btree iterators.
+       btree_iter _rw_it, _rw_end;
+@@ -137,6 +141,14 @@ namespace psitri::dwal
+       {
+       }
+ 
++      basic_owned_merge_cursor(std::shared_ptr<btree_layer> rw,
++                               std::shared_ptr<btree_layer> ro,
++                               std::optional<btree_layer_view> rw_view,
++                               std::optional<btree_layer_view> ro_view,
++                               std::optional<cursor_t> tri)
++          : _rw(std::move(rw)), _ro(std::move(ro)),
++            _cursor(std::move(rw_view), std::move(ro_view), std::move(tri)) {}
++
+       merge_cursor_t&       cursor() noexcept { return _cursor; }
+       const merge_cursor_t& cursor() const noexcept { return _cursor; }
+ 
+diff --git a/libraries/psitri/include/psitri/dwal/merge_cursor_impl.hpp b/libraries/psitri/include/psitri/dwal/merge_cursor_impl.hpp
+index 4c003056..3231bbc5 100644
+--- a/libraries/psitri/include/psitri/dwal/merge_cursor_impl.hpp
++++ b/libraries/psitri/include/psitri/dwal/merge_cursor_impl.hpp
+@@ -13,7 +13,15 @@ namespace psitri::dwal
+    basic_merge_cursor<Engine>::basic_merge_cursor(const btree_layer*            rw,
+                               const btree_layer*            ro,
+                               std::optional<cursor_t>  tri)
+-       : _rw(rw), _ro(ro), _tri(std::move(tri))
++       : basic_merge_cursor(rw ? std::optional<btree_layer_view>(*rw) : std::nullopt,
++                            ro ? std::optional<btree_layer_view>(*ro) : std::nullopt,
++                            std::move(tri)) {}
++
++   template <class Engine>
++   basic_merge_cursor<Engine>::basic_merge_cursor(std::optional<btree_layer_view> rw,
++                              std::optional<btree_layer_view> ro,
++                              std::optional<cursor_t> tri)
++       : _rw(std::move(rw)), _ro(std::move(ro)), _tri(std::move(tri))
+    {
+       if (_rw)
+       {
+diff --git a/libraries/psitrirocks/src/db_impl.cpp b/libraries/psitrirocks/src/db_impl.cpp
+index d15f66cf..f6e7ee8f 100644
+--- a/libraries/psitrirocks/src/db_impl.cpp
++++ b/libraries/psitrirocks/src/db_impl.cpp
+@@ -4,6 +4,7 @@
+ #include <psitri/dwal/dwal_database.hpp>
+ #include <psitri/dwal/dwal_transaction.hpp>
+ #include <psitri/dwal/merge_cursor.hpp>
++#include <psitri/dwal/read_snapshot.hpp>
+ #include <psitri/read_session_impl.hpp>
+ #include <psitri/write_session_impl.hpp>
+ #include <psitri/transaction.hpp>
+@@ -22,29 +23,27 @@ namespace rocksdb
+    namespace
+    {
+ 
+-      // Snapshot backed by a psitri read_session + root snapshot
++      // Snapshots pin all layers, including committed writes not yet merged.
+       class PsiTriSnapshot : public Snapshot
+       {
+         public:
+-         PsiTriSnapshot(std::shared_ptr<psitri::read_session> rs, uint32_t root_index)
+-             : rs_(std::move(rs)), root_(rs_->get_root(root_index)), seq_(next_seq())
++         PsiTriSnapshot(psitri::dwal::dwal_database& db, uint32_t roots)
++             : seq_(next_seq())
+          {
++            for (uint32_t i = 0; i < roots; ++i)
++               roots_.push_back(std::make_unique<psitri::dwal::read_snapshot>(db, i));
+          }
+-
+          SequenceNumber GetSequenceNumber() const override { return seq_; }
+-
+-         sal::smart_ptr<sal::alloc_header> root() const { return root_; }
+-
++         const psitri::dwal::read_snapshot* root(uint32_t index) const
++         { return index < roots_.size() ? roots_[index].get() : nullptr; }
+         private:
+          static SequenceNumber next_seq()
+          {
+             static std::atomic<SequenceNumber> counter{0};
+             return counter.fetch_add(1);
+          }
+-
+-         std::shared_ptr<psitri::read_session> rs_;
+-         sal::smart_ptr<sal::alloc_header>     root_;
+-         SequenceNumber                        seq_;
++         std::vector<std::unique_ptr<psitri::dwal::read_snapshot>> roots_;
++         SequenceNumber seq_;
+       };
+ 
+       // Column family handle — maps to a psitri root index
+@@ -332,7 +331,7 @@ namespace rocksdb
+ 
+       const Snapshot* GetSnapshot() override
+       {
+-         return new PsiTriSnapshot(get_read_session(), 0);
++         return new PsiTriSnapshot(*dwal_db_, next_cf_id_.load());
+       }
+ 
+       void ReleaseSnapshot(const Snapshot* snap) override
+@@ -519,55 +518,27 @@ namespace rocksdb
+       Status GetImpl(const ReadOptions& options, uint32_t root_idx,
+                      const Slice& key, std::string* value)
+       {
+-         // Snapshot reads still go through COW cursor for consistency
+          if (options.snapshot)
+          {
+-            auto* snap = static_cast<const PsiTriSnapshot*>(options.snapshot);
+-            auto  root = snap->root();
+-            if (!root)
+-               return Status::NotFound();
+-            psitri::cursor c(std::move(root));
+-            auto           result = c.get(std::string_view(key.data(), key.size()), value);
+-            if (result < 0)
+-               return Status::NotFound();
+-            return Status::OK();
+-         }
+-
+-         // Normal reads go through DWAL get_latest for full RW → RO → Tri visibility
+-         auto result = dwal_db_->get_latest(root_idx, std::string_view(key.data(), key.size()));
+-         if (!result.found)
+-            return Status::NotFound();
+-         if (value)
+-         {
+-            if (!result.owned_data.empty())
+-               *value = std::move(result.owned_data);
+-            else
+-               value->assign(result.value.data.data(), result.value.data.size());
++            auto* root = static_cast<const PsiTriSnapshot*>(options.snapshot)->root(root_idx);
++            return root && root->get(std::string_view(key.data(), key.size()), value)
++                       ? Status::OK() : Status::NotFound();
+          }
+-         return Status::OK();
++         psitri::dwal::read_snapshot current(*dwal_db_, root_idx);
++         return current.get(std::string_view(key.data(), key.size()), value)
++                    ? Status::OK() : Status::NotFound();
+       }
+ 
+       Iterator* NewIteratorImpl(const ReadOptions& options, uint32_t root_idx)
+       {
+-         // Snapshot reads: COW cursor only (consistent point-in-time view)
+          if (options.snapshot)
+          {
+-            auto* snap = static_cast<const PsiTriSnapshot*>(options.snapshot);
+-            auto  root = snap->root();
+-            if (!root)
+-               root = get_read_session()->get_root(root_idx).copy_root();
+-            return new PsiTriIterator(std::move(root));
++            auto* root = static_cast<const PsiTriSnapshot*>(options.snapshot)->root(root_idx);
++            if (!root) return new PsiTriIterator({});
++            return new DwalMergeIterator(root->create_cursor());
+          }
+-
+-         // Non-snapshot: merge iterator via DWAL API (locking handled internally)
+-         if (dwal_db_ && root_idx < 512)
+-         {
+-            auto mc = dwal_db_->create_cursor(root_idx, psitri::dwal::read_mode::latest);
+-            return new DwalMergeIterator(std::move(mc));
+-         }
+-
+-         // No DWAL layer — use PsiTri-only iterator
+-         return new PsiTriIterator(get_read_session()->get_root(root_idx));
++         psitri::dwal::read_snapshot current(*dwal_db_, root_idx);
++         return new DwalMergeIterator(current.create_cursor());
+       }
+ 
+       // Thread-local psitri read session (for snapshots/iterators)

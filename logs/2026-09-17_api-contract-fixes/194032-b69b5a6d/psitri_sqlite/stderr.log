@@ -1,0 +1,11 @@
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+psitri_sqlite 3.51.3 2026-03-13 10:38:09 737ae4a34738ffa0c3ff7f9bb18df914dd1cad163f28fd6b6e114a344fe6d618
+journal_mode=WAL; synchronous=OFF; fullfsync=OFF; WITHOUT ROWID; mmap_size=0; wal_autocheckpoint=1000; per_connection_cache_mib=64
+load
+contract checks
+warmup
+write
+mixed
+read
+close/reopen validation
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m

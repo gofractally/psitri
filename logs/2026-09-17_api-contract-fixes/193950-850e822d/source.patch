@@ -1,0 +1,165 @@
+diff --git a/benchmarks/api_bank/CMakeLists.txt b/benchmarks/api_bank/CMakeLists.txt
+index 97b99e4..c43600d 100644
+--- a/benchmarks/api_bank/CMakeLists.txt
++++ b/benchmarks/api_bank/CMakeLists.txt
+@@ -75,5 +75,22 @@ else()
+     set(dependencies "\"ucc\": \"${FETCHCONTENT_SOURCE_DIR_UCC}\"")
+     set(libraries "\"${FAIR_MDBX_LIBRARY}\"")
+ endif()
++option(API_BANK_BUILD_CONTRACT_TESTS "Build functional API contract regression targets" ON)
++if(API_BANK_BUILD_CONTRACT_TESTS)
++    foreach(engine mdbx psitrimdbx rocksdb psitrirocks sqlite psitri_sqlite)
++        if(TARGET fair-bank-${engine})
++            add_executable(api-contract-${engine} ../fair_bank/main.cpp)
++            get_target_property(libs fair-bank-${engine} LINK_LIBRARIES)
++            get_target_property(defs fair-bank-${engine} COMPILE_DEFINITIONS)
++            get_target_property(includes fair-bank-${engine} INCLUDE_DIRECTORIES)
++            target_link_libraries(api-contract-${engine} PRIVATE ${libs})
++            target_compile_definitions(api-contract-${engine} PRIVATE ${defs} FAIR_CONTRACT_ONLY=1)
++            if(includes)
++                target_include_directories(api-contract-${engine} PRIVATE ${includes})
++            endif()
++            set_target_properties(api-contract-${engine} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
++        endif()
++    endforeach()
++endif()
+ file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/fair-bank-build.json" CONTENT
+ "{\n  \"compiler\": \"${CMAKE_CXX_COMPILER}\",\n  \"compiler_version\": \"${CMAKE_CXX_COMPILER_VERSION}\",\n  \"build_type\": \"${CMAKE_BUILD_TYPE}\",\n  \"native_dependencies\": {\"psio\": \"${FETCHCONTENT_SOURCE_DIR_PSIO}\", ${dependencies}},\n  \"libraries\": [${libraries}]\n}\n")
+diff --git a/benchmarks/fair_bank/main.cpp b/benchmarks/fair_bank/main.cpp
+index a553b21..0a78640 100644
+--- a/benchmarks/fair_bank/main.cpp
++++ b/benchmarks/fair_bank/main.cpp
+@@ -509,7 +509,15 @@ int main(int argc, char **argv)
+               1024,
+ #endif
+           "bytes", "lower");
++#ifdef FAIR_CONTRACT_ONLY
++      // Functional regression target: exercise the same contracts, but produce
++      // no throughput or latency evidence from a potentially busy developer host.
++      std::ofstream result(c.result);
++      result << "{\"workload\":\"api-contract-v1\",\"status\":\"passed\","
++             << "\"engine\":\"" << engine_name << "\",\"final_hash\":" << hash << "}\n";
++#else
+       write_result(c, metrics, hash, solo, mixed, read);
++#endif
+       std::cout << "PASS " << engine_name << " final_hash=" << hash << "\n";
+       return 0;
+    }
+diff --git a/libraries/psitrimdbx/tests/mdbx_tests.cpp b/libraries/psitrimdbx/tests/mdbx_tests.cpp
+index ebd10a4..a4efa1c 100644
+--- a/libraries/psitrimdbx/tests/mdbx_tests.cpp
++++ b/libraries/psitrimdbx/tests/mdbx_tests.cpp
+@@ -195,6 +195,51 @@ TEST_CASE("C API: basic put/get/del", "[mdbx][c-api]")
+    // Cleanup handled by make_temp_dir() at start of next run
+ }
+ 
++TEST_CASE("C API: dense binary accounts retain committed values after abort",
++          "[mdbx][c-api][transaction][bank-regression]")
++{
++   auto dir = make_temp_dir("c_dense_bank");
++   MDBX_env* raw = nullptr;
++   REQUIRE(mdbx_env_create(&raw) == MDBX_SUCCESS);
++   std::unique_ptr<MDBX_env, decltype(&mdbx_env_close)> env(raw, mdbx_env_close);
++   REQUIRE(mdbx_env_open(raw, dir.c_str(),
++                        MDBX_env_flags_t(MDBX_WRITEMAP | MDBX_UTTERLY_NOSYNC), 0600) == MDBX_SUCCESS);
++   MDBX_dbi dbi;
++   MDBX_txn* tx = nullptr;
++   REQUIRE(mdbx_txn_begin(raw, nullptr, MDBX_TXN_READWRITE, &tx) == MDBX_SUCCESS);
++   REQUIRE(mdbx_dbi_open(tx, nullptr, MDBX_DB_DEFAULTS, &dbi) == MDBX_SUCCESS);
++   REQUIRE(mdbx_txn_commit(tx) == MDBX_SUCCESS);
++   for (uint64_t begin = 0; begin < 128; begin += 32)
++   {
++      REQUIRE(mdbx_txn_begin(raw, nullptr, MDBX_TXN_READWRITE, &tx) == MDBX_SUCCESS);
++      for (uint64_t i = begin; i < begin + 32; ++i)
++      {
++         INFO("loading binary account " << i);
++         auto key = be_u64(i), value = be_u64(1'000'000'000'000ULL);
++         MDBX_val k{key.data(), key.size()}, v{value.data(), value.size()};
++         REQUIRE(mdbx_put(tx, dbi, &k, &v, MDBX_UPSERT) == MDBX_SUCCESS);
++      }
++      REQUIRE(mdbx_txn_commit(tx) == MDBX_SUCCESS);
++   }
++   auto key = be_u64(0), changed = be_u64(999'999'999'999ULL);
++   MDBX_val k{key.data(), key.size()}, v{changed.data(), changed.size()}, got{};
++   REQUIRE(mdbx_txn_begin(raw, nullptr, MDBX_TXN_READWRITE, &tx) == MDBX_SUCCESS);
++   REQUIRE(mdbx_put(tx, dbi, &k, &v, MDBX_UPSERT) == MDBX_SUCCESS);
++   REQUIRE(mdbx_get(tx, dbi, &k, &got) == MDBX_SUCCESS);
++   REQUIRE(mdbx_bytes(got) == changed);
++   REQUIRE(mdbx_txn_abort(tx) == MDBX_SUCCESS);
++   REQUIRE(mdbx_txn_begin(raw, nullptr, MDBX_TXN_RDONLY, &tx) == MDBX_SUCCESS);
++   for (uint64_t i = 0; i < 128; ++i)
++   {
++      INFO("reading binary account " << i << " after abort");
++      key = be_u64(i);
++      k = {key.data(), key.size()};
++      REQUIRE(mdbx_get(tx, dbi, &k, &got) == MDBX_SUCCESS);
++      REQUIRE(from_be_u64(got) == 1'000'000'000'000ULL);
++   }
++   REQUIRE(mdbx_txn_abort(tx) == MDBX_SUCCESS);
++}
++
+ TEST_CASE("C API: named databases", "[mdbx][c-api]")
+ {
+    auto dir = make_temp_dir("c_named");
+diff --git a/libraries/sal_art_ref/include/sal_art_ref/paged.hpp b/libraries/sal_art_ref/include/sal_art_ref/paged.hpp
+index f196e3f..76b151a 100644
+--- a/libraries/sal_art_ref/include/sal_art_ref/paged.hpp
++++ b/libraries/sal_art_ref/include/sal_art_ref/paged.hpp
+@@ -112,7 +112,12 @@ namespace sal_art_ref
+          std::memcpy(dst, &saved, sizeof(sal::alloc_header));  // restore SAL header
+          auto*          out = static_cast<paged*>(dst);
+          const uint16_t tu  = tail_used();
+-         fast_copy(out->tail() - tu, this->tail() - tu, tu);   // tail: used heap only
++         // The ends of both allocations are cacheline-aligned; the beginning
++         // of the used heap is not. Copy its short prefix before the aligned
++         // suffix. An aligned AVX-512 load at tail()-tu faults for odd sizes.
++         const uint32_t bulk = tu & ~uint32_t(63);
++         std::memcpy(out->tail() - tu, this->tail() - tu, tu - bulk);
++         ucc::memcpy_aligned_64byte(out->tail() - bulk, this->tail() - bulk, bulk);
+          out->clear_checksum();
+       }
+    } __attribute__((packed));
+diff --git a/libraries/sal_art_ref/test/paged_tests.cpp b/libraries/sal_art_ref/test/paged_tests.cpp
+index 7de4a24..bafb871 100644
+--- a/libraries/sal_art_ref/test/paged_tests.cpp
++++ b/libraries/sal_art_ref/test/paged_tests.cpp
+@@ -1,6 +1,7 @@
+ #include <catch2/catch_test_macros.hpp>
+ #include <cstring>
+ #include <new>
++#include <array>
+ 
+ #include <sal_art_ref/paged.hpp>
+ 
+@@ -55,3 +56,31 @@ TEST_CASE("paged tail_ptr survives relocation", "[paged]")
+    REQUIRE((void*)moved->resolve(ref) == (void*)(buf2 + 256 - 8));
+    REQUIRE(moved->resolve(ref)[0] == (char)0xAB);
+ }
++
++TEST_CASE("paged clone copies every tail alignment without touching free space", "[paged][regression]")
++{
++   for (uint16_t used = 64; used < 128; ++used)
++   {
++      CAPTURE(used);
++      alignas(128) std::array<unsigned char, 512> source{};
++      alignas(128) std::array<unsigned char, 384> destination;
++      destination.fill(0xCD);
++      auto* src = new (source.data()) sal_art_ref::paged();
++      auto* dst = new (destination.data()) sal_art_ref::paged();
++      src->init_page(512, sal::header_type::start_user_type, sal::ptr_address_seq{});
++      dst->init_page(256, sal::header_type::start_user_type, sal::ptr_address_seq{});
++      auto* bytes = src->alloc_tail(used);
++      for (uint16_t i = 0; i < used; ++i) bytes[i] = char(i + 1);
++      std::memset(source.data() + sizeof(sal_art_ref::paged), 0xAB,
++                  80 - sizeof(sal_art_ref::paged));
++      src->blit_head_tail(dst, 80);
++      REQUIRE(dst->size() == 256);
++      REQUIRE(dst->tail_used() == used);
++      REQUIRE(std::memcmp(dst->tail_top(), bytes, used) == 0);
++      REQUIRE(std::memcmp(destination.data() + sizeof(sal::alloc_header),
++                          source.data() + sizeof(sal::alloc_header),
++                          80 - sizeof(sal::alloc_header)) == 0);
++      for (size_t i = 80; i < 256 - used; ++i) REQUIRE(destination[i] == 0xCD);
++      for (size_t i = 256; i < destination.size(); ++i) REQUIRE(destination[i] == 0xCD);
++   }
++}

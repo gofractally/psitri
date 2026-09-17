@@ -177,4 +177,56 @@ namespace psitri::dwal
       }
    };
 
+   /// Immutable root and range-deletion view. The caller retains the arena owner
+   /// and advances its COW generation while holding the root transaction lock.
+   struct btree_layer_view
+   {
+      struct map_view
+      {
+         art::arena* arena;
+         art::offset_t root;
+         const btree_layer::map_type* live_map = nullptr;
+         art::offset_t current_root() const { return live_map ? live_map->snapshot_root() : root; }
+         const btree_value* get(std::string_view key) const
+         { return art::get<btree_value>(*arena, current_root(), key); }
+         auto begin() const { return art::make_begin<btree_value>(*arena, current_root()); }
+         auto end() const { return art::make_end<btree_value>(*arena, current_root()); }
+         auto lower_bound(std::string_view key) const
+         { return art::make_lower_bound<btree_value>(*arena, current_root(), key); }
+         auto upper_bound(std::string_view key) const
+         {
+            auto it = lower_bound(key);
+            if (it != end() && it.key() == key) ++it;
+            return it;
+         }
+         bool empty() const { return current_root() == art::null_offset; }
+      };
+      struct tombstone_view
+      {
+         std::vector<range_tombstone_list::range> ranges;
+         const range_tombstone_list* live_tombstones = nullptr;
+         bool is_deleted(std::string_view key) const
+         {
+            if (live_tombstones) return live_tombstones->is_deleted(key);
+            auto it = std::upper_bound(ranges.begin(), ranges.end(), key,
+                [](auto k, const auto& range) { return k < range.low; });
+            return it != ranges.begin() && std::prev(it)->contains(key);
+         }
+      };
+      map_view map;
+      tombstone_view tombstones;
+      explicit btree_layer_view(const btree_layer& layer)
+          : map{const_cast<art::arena*>(&layer.map.get_arena()), layer.map.snapshot_root()},
+            tombstones{layer.tombstones.ranges()} {}
+      static btree_layer_view live(const btree_layer& layer)
+      {
+         return {layer, false};
+      }
+     private:
+      btree_layer_view(const btree_layer& layer, bool)
+          : map{const_cast<art::arena*>(&layer.map.get_arena()), art::null_offset, &layer.map},
+            tombstones{{}, &layer.tombstones} {}
+
+   };
+
 }  // namespace psitri::dwal

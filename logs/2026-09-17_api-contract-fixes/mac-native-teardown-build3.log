@@ -1,0 +1,6 @@
+[1/6] Building CXX object CMakeFiles/api-storage-regressions.dir/Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/test/paged_tests.cpp.o
+[2/6] Building CXX object CMakeFiles/api-storage-regressions.dir/Users/dlarimer/gofractally/psitri/libraries/sal/test/allocator_session_tests.cpp.o
+[3/6] Linking CXX static library psitri/libraries/psitrimdbx/libpsitrimdbx.a
+[4/6] Linking CXX executable bin/api-contract-psitrimdbx
+[5/6] Building CXX object CMakeFiles/api-storage-regressions.dir/Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/test/leaf_page_tests.cpp.o
+[6/6] Linking CXX executable bin/api-storage-regressions

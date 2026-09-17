@@ -6,8 +6,10 @@ durability cohort. ARM versus x86 also changes the CPU, OS, page size and storag
 the architecture selector is a machine selector, not an isolated ISA experiment.
 
 The packaged MDBX shim and the separate RocksDB/SQLite integration source use
-separate build directories to avoid conflicting library symbols. Pin every
-source revision. The latter integrations are not the maintained engine profiles.
+separate build directories to avoid conflicting library symbols. The tested
+source pins are in [`sources.json`](sources.json). Fetch the integration branch
+from the psitri repository and check out the exact pinned commit in a separate
+worktree; pass that path as `API_BANK_INTEGRATIONS`. Pin every source revision. The latter integrations are not the maintained engine profiles.
 
 ```sh
 cmake -S benchmarks/api_bank -B build/api-mdbx -G Ninja \
@@ -70,3 +72,18 @@ Record machine, OS, page size, source and dependency revisions, compiler flags,
 effective durability, every repetition, and failed attempts. Retain build logs
 alongside run evidence. Do not mix the April integration workload with this
 workload or treat smoke results as performance evidence.
+
+## Functional regression targets
+
+Configure with `-DAPI_BANK_BUILD_REGRESSION_TESTS=ON` to build
+`api-storage-regressions` (Catch2 3 required). It includes page-copy and allocator
+lifetime checks, DWAL snapshot/isolation/iteration checks, and the SQLite key and
+transaction regressions appropriate to that build directory.
+
+`api-contract-<engine>` targets run the same bank API correctness checks as the
+benchmark, including rollback, held snapshots, read-your-writes, exact balances,
+cardinality, concurrent readers, and reopen. They write `api-contract-v1` results
+without throughput metrics. Use these while debugging; they are functional tests,
+not performance evidence. Passing them does not establish complete API coverage.
+Performance collection still requires a clean source build, the idle gate, and
+exclusive sequential execution.

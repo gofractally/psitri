@@ -394,10 +394,9 @@ namespace psitri::dwal
    basic_dwal_database<LockPolicy, Engine>::ensure_root(uint32_t index)
    {
       assert(index < max_roots);
-      if (!_roots[index])
-      {
-         _roots[index] = std::make_unique<dwal_root_type>();
-      }
+      std::lock_guard registry_lock(_root_init_mutex);
+      if (_roots[index]) return *_roots[index];
+      _roots[index] = std::make_unique<dwal_root_type>();
       _roots[index]->status = _wal_status ? _wal_status->root(index) : nullptr;
       if (_roots[index]->status)
       {
@@ -462,6 +461,7 @@ namespace psitri::dwal
          throw std::runtime_error("dwal: direct transaction mode not yet implemented");
 
       auto& root = ensure_root(root_index);
+      std::unique_lock transaction_lock(root.tx_mutex);
 
       if (_cfg.max_rw_arena_bytes > 0 &&
           root.rw_layer->map.arena_capacity() >= _cfg.max_rw_arena_bytes)
@@ -472,7 +472,8 @@ namespace psitri::dwal
 
       ensure_wal(root_index);
 
-      return dwal_transaction_type(root, root.wal.get(), root_index, this);
+      return dwal_transaction_type(root, root.wal.get(), root_index, this, false,
+                                   root_mode::read_write, std::move(transaction_lock));
    }
 
    template <class LockPolicy, class Engine>

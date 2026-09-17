@@ -2,6 +2,7 @@
 #include <filesystem>
 
 #include <sal/allocator_session_impl.hpp>
+#include <sal/allocator_impl.hpp>
 #include <sal/mapping.hpp>
 #include <sal/mapped_memory/allocator_state.hpp>
 
@@ -134,5 +135,25 @@ TEST_CASE("allocator open resets stale session bitmap", "[sal][session][recovery
       CHECK(alloc.dump().active_sessions == 1);
    }
 
+   fs::remove_all(path);
+}
+
+TEST_CASE("allocator destroys its utility session before unmapping state", "[sal][session][teardown]")
+{
+   const auto path = temp_dir("sal_utility_session_teardown_test");
+   {
+      sal::allocator alloc(path, sal::runtime_config{}, false);
+      alloc.register_type_ops<tail_test_node>();
+      auto session = alloc.create_session();
+      auto object = session->smart_alloc<tail_test_node>(uint32_t(64), sal::alloc_hint{});
+      alloc.retain(object.address());
+      // Sessionless release lazily creates an allocator-owned utility session.
+      alloc.release(object.address());
+      CHECK(alloc.dump().active_sessions == 2);
+   }
+   {
+      sal::allocator reopened(path, sal::runtime_config{}, false);
+      CHECK(reopened.dump().active_sessions == 0);
+   }
    fs::remove_all(path);
 }

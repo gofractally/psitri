@@ -1,0 +1,106 @@
+Randomness seeded to: 2043178337
+[MERGE] root=0 entries=1  0 ms wall / 0 ms cpu  syscall=1%  33288 entries/sec  30.04 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=0  <100us=1  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (1% of wall)  0.0 ms/seg
+[MERGE] root=1 entries=1  0 ms wall / 0 ms cpu  syscall=4%  142857 entries/sec  7.00 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=100  0 ms wall / 0 ms cpu  syscall=1%  3883495 entries/sec  0.26 us/entry  max=0.0 ms
+        latency: <1us=98  <10us=2  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (3% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=50  0 ms wall / 0 ms cpu  syscall=1%  823045 entries/sec  1.22 us/entry  max=0.0 ms
+        latency: <1us=48  <10us=0  <100us=2  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+api-storage-regressions is a Catch2 v3.13.0 host application.
+Run with -? for options
+
+-------------------------------------------------------------------------------
+merge_cursor upper_bound with RO and Tri layers
+-------------------------------------------------------------------------------
+/Users/dlarimer/gofractally/psitri/libraries/psitri/tests/dwal_tests.cpp:3399
+...............................................................................
+
+/Users/dlarimer/gofractally/psitri/libraries/psitri/tests/dwal_tests.cpp:3428: FAILED:
+  CHECK( mc.key() == "b" )
+with expansion:
+  "a" == "b"
+
+[MERGE] root=0 entries=500  0 ms wall / 0 ms cpu  syscall=0%  3861004 entries/sec  0.26 us/entry  max=0.0 ms
+        latency: <1us=495  <10us=4  <100us=1  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (1% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=600  0 ms wall / 0 ms cpu  syscall=4%  2549579 entries/sec  0.39 us/entry  max=0.0 ms
+        latency: <1us=592  <10us=5  <100us=3  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=1  0 ms wall / 0 ms cpu  syscall=5%  54422 entries/sec  18.38 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (4% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=2  0 ms wall / 0 ms cpu  syscall=2%  82051 entries/sec  12.19 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=1  <100us=1  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (3% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=2  0 ms wall / 0 ms cpu  syscall=5%  163814 entries/sec  6.10 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=2  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+batch=1 baseline: alloc=10096 db=414MB
+[MERGE] root=0 entries=1  0 ms wall / 0 ms cpu  syscall=4%  60452 entries/sec  16.54 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (4% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=8  0 ms wall / 0 ms cpu  syscall=3%  384782 entries/sec  2.60 us/entry  max=0.0 ms
+        latency: <1us=6  <10us=2  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (3% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=1  0 ms wall / 0 ms cpu  syscall=42%  39279 entries/sec  25.46 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (3% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=1  0 ms wall / 0 ms cpu  syscall=4%  92311 entries/sec  10.83 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (4% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=1  0 ms wall / 0 ms cpu  syscall=2%  117069 entries/sec  8.54 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (4% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=1  0 ms wall / 0 ms cpu  syscall=6%  127665 entries/sec  7.83 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=1  0 ms wall / 0 ms cpu  syscall=2%  112145 entries/sec  8.92 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (4% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=1  0 ms wall / 0 ms cpu  syscall=3%  88230 entries/sec  11.33 us/entry  max=0.0 ms
+        latency: <1us=0  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=200  0 ms wall / 0 ms cpu  syscall=1%  5755396 entries/sec  0.17 us/entry  max=0.0 ms
+        latency: <1us=198  <10us=2  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (1% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=209  0 ms wall / 0 ms cpu  syscall=0%  654916 entries/sec  1.53 us/entry  max=0.0 ms
+        latency: <1us=176  <10us=26  <100us=7  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=442  0 ms wall / 0 ms cpu  syscall=0%  3002554 entries/sec  0.33 us/entry  max=0.0 ms
+        latency: <1us=419  <10us=23  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=483  0 ms wall / 0 ms cpu  syscall=2%  1927182 entries/sec  0.52 us/entry  max=0.0 ms
+        latency: <1us=398  <10us=85  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=50  0 ms wall / 0 ms cpu  syscall=2%  2169951 entries/sec  0.46 us/entry  max=0.0 ms
+        latency: <1us=48  <10us=2  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (2% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=50  0 ms wall / 0 ms cpu  syscall=2%  3234571 entries/sec  0.31 us/entry  max=0.0 ms
+        latency: <1us=49  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=50  0 ms wall / 0 ms cpu  syscall=1%  3488453 entries/sec  0.29 us/entry  max=0.0 ms
+        latency: <1us=49  <10us=1  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=50  0 ms wall / 0 ms cpu  syscall=1%  1837695 entries/sec  0.54 us/entry  max=0.0 ms
+        latency: <1us=49  <10us=0  <100us=1  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=50  0 ms wall / 0 ms cpu  syscall=1%  1775127 entries/sec  0.56 us/entry  max=0.0 ms
+        latency: <1us=47  <10us=2  <100us=1  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=3  3 ms wall / 0 ms cpu  syscall=99%  929 entries/sec  1076.11 us/entry  max=3.2 ms
+        latency: <1us=0  <10us=2  <100us=0  <1ms=0  <10ms=1  >=10ms=0  |  stalls(>=1ms): 1 entries, 3 ms total (100% of wall)
+        segments: 1 new segs, 3 ms total (100% of wall)  3.2 ms/seg
+[MERGE] root=0 entries=3  0 ms wall / 0 ms cpu  syscall=2%  259000 entries/sec  3.86 us/entry  max=0.0 ms
+        latency: <1us=1  <10us=2  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (3% of wall)  0.0 ms/seg
+===============================================================================
+test cases:   173 |   172 passed | 1 failed
+assertions: 24655 | 24654 passed | 1 failed
+

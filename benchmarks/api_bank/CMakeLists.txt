@@ -38,11 +38,6 @@ if(API_BANK_INTEGRATIONS)
     add_subdirectory("${API_BANK_ABSEIL}" abseil EXCLUDE_FROM_ALL)
     add_subdirectory("${API_BANK_INTEGRATIONS}/libraries/psitrirocks" psitrirocks EXCLUDE_FROM_ALL)
     add_subdirectory("${API_BANK_INTEGRATIONS}/libraries/psitri-sqlite" psitri-sqlite EXCLUDE_FROM_ALL)
-    # This pinned integration's SQLite TU includes the database declaration only.
-    # Supply its template definitions without modifying the integration checkout.
-    target_compile_options(psitri-sqlite PRIVATE
-        "$<$<COMPILE_LANGUAGE:CXX>:-include>"
-        "$<$<COMPILE_LANGUAGE:CXX>:psitri/database_impl.hpp>")
     execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${API_BANK_INTEGRATIONS}"
                     OUTPUT_VARIABLE shim_revision OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
     find_path(FAIR_ROCKSDB_INCLUDE_DIR rocksdb/db.h REQUIRED)
@@ -74,6 +69,43 @@ else()
     target_compile_definitions(fair-bank-psitrimdbx PRIVATE FAIR_SHIM=1)
     set(dependencies "\"ucc\": \"${FETCHCONTENT_SOURCE_DIR_UCC}\"")
     set(libraries "\"${FAIR_MDBX_LIBRARY}\"")
+endif()
+option(API_BANK_BUILD_CONTRACT_TESTS "Build functional API contract regression targets" ON)
+if(API_BANK_BUILD_CONTRACT_TESTS)
+    foreach(engine mdbx psitrimdbx rocksdb psitrirocks sqlite psitri_sqlite)
+        if(TARGET fair-bank-${engine})
+            add_executable(api-contract-${engine} ../fair_bank/main.cpp)
+            get_target_property(libs fair-bank-${engine} LINK_LIBRARIES)
+            get_target_property(defs fair-bank-${engine} COMPILE_DEFINITIONS)
+            get_target_property(includes fair-bank-${engine} INCLUDE_DIRECTORIES)
+            target_link_libraries(api-contract-${engine} PRIVATE ${libs})
+            target_compile_definitions(api-contract-${engine} PRIVATE ${defs} FAIR_CONTRACT_ONLY=1)
+            if(includes)
+                target_include_directories(api-contract-${engine} PRIVATE ${includes})
+            endif()
+            set_target_properties(api-contract-${engine} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+        endif()
+    endforeach()
+endif()
+option(API_BANK_BUILD_REGRESSION_TESTS "Build storage regressions for the API pair backends" OFF)
+if(API_BANK_BUILD_REGRESSION_TESTS)
+    find_package(Catch2 3 REQUIRED)
+    if(API_BANK_INTEGRATIONS)
+        add_executable(api-storage-regressions
+            "${API_BANK_INTEGRATIONS}/libraries/psitri/tests/dwal_tests.cpp"
+            "${API_BANK_INTEGRATIONS}/libraries/psitri/tests/dwal_snapshot_tests.cpp"
+            "${API_BANK_INTEGRATIONS}/libraries/psitri-sqlite/tests/bank_regressions.cpp")
+        target_link_libraries(api-storage-regressions PRIVATE psitrirocks psitri-sqlite Catch2::Catch2WithMain)
+    else()
+        add_executable(api-storage-regressions
+            "${PSITRI_BENCH_SOURCE}/libraries/psitri/tests/dwal_tests.cpp"
+            "${PSITRI_BENCH_SOURCE}/libraries/psitri/tests/dwal_snapshot_tests.cpp"
+            "${PSITRI_BENCH_SOURCE}/libraries/sal/test/allocator_session_tests.cpp"
+            "${PSITRI_BENCH_SOURCE}/libraries/sal_art_ref/test/paged_tests.cpp"
+            "${PSITRI_BENCH_SOURCE}/libraries/sal_art_ref/test/leaf_page_tests.cpp")
+        target_link_libraries(api-storage-regressions PRIVATE psitri sal_art_ref Catch2::Catch2WithMain)
+    endif()
+    set_target_properties(api-storage-regressions PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endif()
 file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/fair-bank-build.json" CONTENT
 "{\n  \"compiler\": \"${CMAKE_CXX_COMPILER}\",\n  \"compiler_version\": \"${CMAKE_CXX_COMPILER_VERSION}\",\n  \"build_type\": \"${CMAKE_BUILD_TYPE}\",\n  \"native_dependencies\": {\"psio\": \"${FETCHCONTENT_SOURCE_DIR_PSIO}\", ${dependencies}},\n  \"libraries\": [${libraries}]\n}\n")

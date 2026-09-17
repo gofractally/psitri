@@ -90,13 +90,11 @@ on both architectures, retaining every repetition and checking the resulting
 state before admitting either side to the chart. Runs wait for an idle machine
 and execute one benchmark process at a time.
 
-The September 17 x86 validation of `api-bank-v1` passed for the original MDBX,
-RocksDB and SQLite libraries. The selected shim builds failed: the MDBX shim
-crashed, the RocksDB shim returned `NotFound`, and the SQLite integration did
-not report the requested WAL mode. These configurations have no new performance
-bars. See the [validation record and exact builds](https://github.com/gofractally/psitri/blob/sal2/logs/2026-09-17_api-bank-collection/README.md).
-The April RocksDB bars above use the separately identified workload and revision
-shown with that chart.
+The MDBX, RocksDB and SQLite shims pass the `api-bank-v1` functional contract
+checks on ARM64 macOS and x86-64 Linux: rollback, held snapshots, read-your-writes,
+exact balances, cardinality, concurrent readers and reopen. These functional runs
+do not supply performance bars. Fresh paired measurements require idle hosts and
+complete passing repetitions. See the [tested source pins and regression evidence](https://github.com/gofractally/psitri/blob/sal2/logs/2026-09-17_api-contract-fixes/README.md).
 
 ### Common native-engine workload
 

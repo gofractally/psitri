@@ -1,0 +1,94 @@
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+[New Thread 0x7f15cfdff6c0 (LWP 1494966)]
+[New Thread 0x7f15cf5fe6c0 (LWP 1494967)]
+[New Thread 0x7f15cedfd6c0 (LWP 1494968)]
+[New Thread 0x7f15ce5fc6c0 (LWP 1494969)]
+[New Thread 0x7f15cddfb6c0 (LWP 1494970)]
+
+Thread 1 "api-contract-ps" received signal SIGSEGV, Segmentation fault.
+0x00005555555a3c00 in sal_art_ref::leaf_page::leaf_page(unsigned int, sal::ptr_address_seq, sal_art_ref::leaf_page::clone_op const&) ()
+
+Thread 6 (Thread 0x7f15cddfb6c0 (LWP 1494970) "segment_provide"):
+#0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56
+#1  0x00007ffff78a00ac in __internal_syscall_cancel (a1=a1@entry=0, a2=a2@entry=0, a3=<optimized out>, a4=<optimized out>, a5=a5@entry=0, a6=a6@entry=0, nr=230) at ./nptl/cancellation.c:49
+#2  0x00007ffff78f6372 in __GI___clock_nanosleep (clock_id=<optimized out>, clock_id@entry=0, flags=flags@entry=0, req=<optimized out>, rem=<optimized out>) at ../sysdeps/unix/sysv/linux/clock_nanosleep.c:48
+#3  0x00007ffff7904057 in __GI___nanosleep (req=<optimized out>, rem=<optimized out>) at ../sysdeps/unix/sysv/linux/nanosleep.c:25
+#4  0x0000555555640feb in sal::segment_thread::yield(std::chrono::duration<long, std::ratio<1l, 1000l> >) ()
+#5  0x000055555562da5d in sal::allocator::provider_loop(sal::segment_thread&) ()
+#6  0x0000555555641434 in std::thread::_State_impl<std::thread::_Invoker<std::tuple<sal::segment_thread::start()::$_0> > >::_M_run() ()
+#7  0x00007ffff7cf2584 in ?? () from /lib/x86_64-linux-gnu/libstdc++.so.6
+#8  0x00007ffff78a3d64 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:448
+#9  0x00007ffff79373fc in __GI___clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+
+Thread 5 (Thread 0x7f15ce5fc6c0 (LWP 1494969) "compactor"):
+#0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56
+#1  0x00007ffff78a00ac in __internal_syscall_cancel (a1=a1@entry=0, a2=a2@entry=0, a3=a3@entry=139731633421248, a4=a4@entry=0, a5=a5@entry=0, a6=a6@entry=0, nr=230) at ./nptl/cancellation.c:49
+#2  0x00007ffff78f6372 in __GI___clock_nanosleep (clock_id=<optimized out>, clock_id@entry=0, flags=flags@entry=0, req=req@entry=0x7f15ce5fbbc0, rem=rem@entry=0x0) at ../sysdeps/unix/sysv/linux/clock_nanosleep.c:48
+#3  0x00007ffff7904057 in __GI___nanosleep (req=req@entry=0x7f15ce5fbbc0, rem=rem@entry=0x0) at ../sysdeps/unix/sysv/linux/nanosleep.c:25
+#4  0x00007ffff7936f6a in usleep (useconds=<optimized out>) at ../sysdeps/posix/usleep.c:31
+#5  0x000055555562b833 in sal::allocator::compact_pinned_segment(sal::allocator_session&, sal::segment_thread const*) ()
+#6  0x000055555562a6b7 in sal::allocator::compactor_loop(sal::segment_thread&) ()
+#7  0x0000555555641434 in std::thread::_State_impl<std::thread::_Invoker<std::tuple<sal::segment_thread::start()::$_0> > >::_M_run() ()
+#8  0x00007ffff7cf2584 in ?? () from /lib/x86_64-linux-gnu/libstdc++.so.6
+#9  0x00007ffff78a3d64 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:448
+#10 0x00007ffff79373fc in __GI___clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+
+Thread 4 (Thread 0x7f15cedfd6c0 (LWP 1494968) "release"):
+#0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56
+#1  0x00007ffff78a00ac in __internal_syscall_cancel (a1=a1@entry=0, a2=a2@entry=0, a3=<optimized out>, a4=<optimized out>, a5=a5@entry=0, a6=a6@entry=0, nr=230) at ./nptl/cancellation.c:49
+#2  0x00007ffff78f6372 in __GI___clock_nanosleep (clock_id=<optimized out>, clock_id@entry=0, flags=flags@entry=0, req=<optimized out>, rem=<optimized out>) at ../sysdeps/unix/sysv/linux/clock_nanosleep.c:48
+#3  0x00007ffff7904057 in __GI___nanosleep (req=<optimized out>, rem=<optimized out>) at ../sysdeps/unix/sysv/linux/nanosleep.c:25
+#4  0x000055555564123b in sal::segment_thread::yield(std::chrono::duration<long, std::ratio<1l, 1000l> >) ()
+#5  0x000055555562bd6c in sal::allocator::release_loop(sal::segment_thread&) ()
+#6  0x0000555555641434 in std::thread::_State_impl<std::thread::_Invoker<std::tuple<sal::segment_thread::start()::$_0> > >::_M_run() ()
+#7  0x00007ffff7cf2584 in ?? () from /lib/x86_64-linux-gnu/libstdc++.so.6
+#8  0x00007ffff78a3d64 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:448
+#9  0x00007ffff79373fc in __GI___clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+
+Thread 3 (Thread 0x7f15cf5fe6c0 (LWP 1494967) "read_bit_decay"):
+#0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56
+#1  0x00007ffff78a00ac in __internal_syscall_cancel (a1=a1@entry=0, a2=a2@entry=0, a3=<optimized out>, a4=<optimized out>, a5=a5@entry=0, a6=a6@entry=0, nr=230) at ./nptl/cancellation.c:49
+#2  0x00007ffff78f6372 in __GI___clock_nanosleep (clock_id=<optimized out>, clock_id@entry=0, flags=flags@entry=0, req=<optimized out>, rem=<optimized out>) at ../sysdeps/unix/sysv/linux/clock_nanosleep.c:48
+#3  0x00007ffff7904057 in __GI___nanosleep (req=<optimized out>, rem=<optimized out>) at ../sysdeps/unix/sysv/linux/nanosleep.c:25
+#4  0x0000555555640feb in sal::segment_thread::yield(std::chrono::duration<long, std::ratio<1l, 1000l> >) ()
+#5  0x000055555562a26f in sal::allocator::clear_read_bits_loop(sal::segment_thread&) ()
+#6  0x0000555555641434 in std::thread::_State_impl<std::thread::_Invoker<std::tuple<sal::segment_thread::start()::$_0> > >::_M_run() ()
+#7  0x00007ffff7cf2584 in ?? () from /lib/x86_64-linux-gnu/libstdc++.so.6
+#8  0x00007ffff78a3d64 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:448
+#9  0x00007ffff79373fc in __GI___clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+
+Thread 2 (Thread 0x7f15cfdff6c0 (LWP 1494966) "time_updater"):
+#0  __syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56
+#1  0x00007ffff78a00ac in __internal_syscall_cancel (a1=a1@entry=0, a2=a2@entry=0, a3=<optimized out>, a4=<optimized out>, a5=a5@entry=0, a6=a6@entry=0, nr=230) at ./nptl/cancellation.c:49
+#2  0x00007ffff78f6372 in __GI___clock_nanosleep (clock_id=<optimized out>, clock_id@entry=0, flags=flags@entry=0, req=<optimized out>, rem=<optimized out>) at ../sysdeps/unix/sysv/linux/clock_nanosleep.c:48
+#3  0x00007ffff7904057 in __GI___nanosleep (req=<optimized out>, rem=<optimized out>) at ../sysdeps/unix/sysv/linux/nanosleep.c:25
+#4  0x000055555559f7fb in std::thread::_State_impl<std::thread::_Invoker<std::tuple<sal::time_manager::time_manager()::{lambda()#1}> > >::_M_run() ()
+#5  0x00007ffff7cf2584 in ?? () from /lib/x86_64-linux-gnu/libstdc++.so.6
+#6  0x00007ffff78a3d64 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:448
+#7  0x00007ffff79373fc in __GI___clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:78
+
+Thread 1 (Thread 0x7ffff7e97800 (LWP 1494963) "api-contract-ps"):
+#0  0x00005555555a3c00 in sal_art_ref::leaf_page::leaf_page(unsigned int, sal::ptr_address_seq, sal_art_ref::leaf_page::clone_op const&) ()
+#1  0x00005555555a39f1 in std::pair<sal::location, sal_art_ref::leaf_page*> sal::allocator_session::alloc_data<sal_art_ref::leaf_page, sal::ptr_address_seq&, sal_art_ref::leaf_page::clone_op>(unsigned int, sal::ptr_address_seq&, sal_art_ref::leaf_page::clone_op&&) ()
+#2  0x00005555555a0b62 in ucc::typed_int<unsigned int, sal::ptr_address_tag> sal::allocator_session::alloc<sal_art_ref::leaf_page, sal_art_ref::leaf_page::clone_op>(std::span<ucc::typed_int<unsigned int, sal::ptr_address_tag> const, 18446744073709551615ul>, sal_art_ref::leaf_page::clone_op&&) ()
+#3  0x000055555559c349 in sal_art_ref::radix::radix_tree::page_apply_upsert(ucc::typed_int<unsigned int, sal::ptr_address_tag>, bool, std::span<unsigned char const, 18446744073709551615ul>, std::span<unsigned char const, 18446744073709551615ul>) ()
+#4  0x00005555555a65e3 in ucc::typed_int<unsigned int, sal::ptr_address_tag> sal_art_ref::radix::radix_tree::page_router_mut<sal_art_ref::radix::upsert_mode{(sal_art_ref::radix::upsert_mode::kind)1}, sal_art_ref::setlist_node<unsigned char>, sal_art_ref::radix::radix_tree::page_upsert_step(ucc::typed_int<unsigned int, sal::ptr_address_tag>, std::span<unsigned char const, 18446744073709551615ul>, std::span<unsigned char const, 18446744073709551615ul>)::{lambda(ucc::typed_int<unsigned int, sal::ptr_address_tag>, bool)#1}>(ucc::typed_int<unsigned int, sal::ptr_address_tag>, std::span<unsigned char const, 18446744073709551615ul>, unsigned int, sal_art_ref::radix::radix_tree::page_upsert_step(ucc::typed_int<unsigned int, sal::ptr_address_tag>, std::span<unsigned char const, 18446744073709551615ul>, std::span<unsigned char const, 18446744073709551615ul>)::{lambda(ucc::typed_int<unsigned int, sal::ptr_address_tag>, bool)#1}&&) ()
+#5  0x00005555555a4506 in ucc::typed_int<unsigned int, sal::ptr_address_tag> sal_art_ref::radix::radix_tree::page_router_mut<sal_art_ref::radix::upsert_mode{}, sal_art_ref::setlist_node<unsigned char>, sal_art_ref::radix::radix_tree::page_upsert_step(ucc::typed_int<unsigned int, sal::ptr_address_tag>, std::span<unsigned char const, 18446744073709551615ul>, std::span<unsigned char const, 18446744073709551615ul>)::{lambda(ucc::typed_int<unsigned int, sal::ptr_address_tag>, bool)#1}>(ucc::typed_int<unsigned int, sal::ptr_address_tag>, std::span<unsigned char const, 18446744073709551615ul>, unsigned int, sal_art_ref::radix::radix_tree::page_upsert_step(ucc::typed_int<unsigned int, sal::ptr_address_tag>, std::span<unsigned char const, 18446744073709551615ul>, std::span<unsigned char const, 18446744073709551615ul>)::{lambda(ucc::typed_int<unsigned int, sal::ptr_address_tag>, bool)#1}&&) ()
+#6  0x000055555559ca6c in ucc::typed_int<unsigned int, sal::ptr_address_tag> sal_art_ref::radix::radix_tree::page_path_mut<sal_art_ref::radix::upsert_mode{}, sal_art_ref::radix::radix_tree::page_upsert_step(ucc::typed_int<unsigned int, sal::ptr_address_tag>, std::span<unsigned char const, 18446744073709551615ul>, std::span<unsigned char const, 18446744073709551615ul>)::{lambda(ucc::typed_int<unsigned int, sal::ptr_address_tag>, bool)#1}>(ucc::typed_int<unsigned int, sal::ptr_address_tag>, std::span<unsigned char const, 18446744073709551615ul>, unsigned int, sal_art_ref::radix::radix_tree::page_upsert_step(ucc::typed_int<unsigned int, sal::ptr_address_tag>, std::span<unsigned char const, 18446744073709551615ul>, std::span<unsigned char const, 18446744073709551615ul>)::{lambda(ucc::typed_int<unsigned int, sal::ptr_address_tag>, bool)#1}&&) ()
+#7  0x000055555559b3d1 in sal_art_ref::radix::radix_tree::page_upsert_step(ucc::typed_int<unsigned int, sal::ptr_address_tag>, std::span<unsigned char const, 18446744073709551615ul>, std::span<unsigned char const, 18446744073709551615ul>) ()
+#8  0x000055555559afb6 in sal_art_ref::radix::radix_tree::upsert_step(ucc::typed_int<unsigned int, sal::ptr_address_tag>, std::span<unsigned char const, 18446744073709551615ul>, std::span<unsigned char const, 18446744073709551615ul>) ()
+#9  0x00005555555f6728 in void sal_art_ref::radix::radix_tree::mutate_root<sal_art_ref::radix::radix_tree::tree_handle::upsert(std::basic_string_view<char, std::char_traits<char> >, std::basic_string_view<char, std::char_traits<char> >)::{lambda(ucc::typed_int<unsigned int, sal::ptr_address_tag>)#1}>(sal::smart_ptr<sal::alloc_header>&, sal_art_ref::radix::radix_tree::tree_handle::upsert(std::basic_string_view<char, std::char_traits<char> >, std::basic_string_view<char, std::char_traits<char> >)::{lambda(ucc::typed_int<unsigned int, sal::ptr_address_tag>)#1}&&) ()
+#10 0x00005555555773cd in txn_upsert_physical_value(MDBX_txn*, std::basic_string_view<char, std::char_traits<char> >, std::basic_string_view<char, std::char_traits<char> >, bool) ()
+#11 0x000055555556d24a in txn_upsert_value(MDBX_txn*, unsigned int, std::basic_string_view<char, std::char_traits<char> >, std::basic_string_view<char, std::char_traits<char> >, bool) ()
+#12 0x000055555556ff91 in mdbx_put_impl(MDBX_txn*, unsigned int, bool, bool, MDBX_val const*, MDBX_val*, MDBX_put_flags_t) ()
+#13 0x000055555556fce0 in mdbx_put ()
+#14 0x000055555555ed8c in main ()
+   0x5555555a3bf0 <_ZN11sal_art_ref9leaf_pageC2EjN3sal15ptr_address_seqERKNS0_8clone_opE+304>:	sub    %eax,%eax
+   0x5555555a3bf2 <_ZN11sal_art_ref9leaf_pageC2EjN3sal15ptr_address_seqERKNS0_8clone_opE+306>:	data16 data16 data16 data16 cs nopw 0x0(%rax,%rax,1)
+=> 0x5555555a3c00 <_ZN11sal_art_ref9leaf_pageC2EjN3sal15ptr_address_seqERKNS0_8clone_opE+320>:	vmovaps -0x40(%rsi,%r8,1),%zmm0
+   0x5555555a3c08 <_ZN11sal_art_ref9leaf_pageC2EjN3sal15ptr_address_seqERKNS0_8clone_opE+328>:	vmovaps (%rsi,%r8,1),%zmm1
+   0x5555555a3c0f <_ZN11sal_art_ref9leaf_pageC2EjN3sal15ptr_address_seqERKNS0_8clone_opE+335>:	lea    0x2(%r9),%rdx
+   0x5555555a3c13 <_ZN11sal_art_ref9leaf_pageC2EjN3sal15ptr_address_seqERKNS0_8clone_opE+339>:	add    $0x4,%r9
+   0x5555555a3c17 <_ZN11sal_art_ref9leaf_pageC2EjN3sal15ptr_address_seqERKNS0_8clone_opE+343>:	vmovaps %zmm0,-0x40(%rdi,%r8,1)
+   0x5555555a3c1f <_ZN11sal_art_ref9leaf_pageC2EjN3sal15ptr_address_seqERKNS0_8clone_opE+351>:	vmovaps %zmm1,(%rdi,%r8,1)

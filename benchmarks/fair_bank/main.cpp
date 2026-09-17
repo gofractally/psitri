@@ -122,7 +122,9 @@ void model_apply(const Config &c, std::vector<uint64_t> &model, uint64_t count, 
 }
 uint64_t validate(Store &store, const Config &c, const std::vector<uint64_t> &model)
 {
-   require(store.count() == c.accounts, "Account cardinality changed");
+   auto count = store.count();
+   require(count == c.accounts, "Account cardinality changed: expected " +
+                std::to_string(c.accounts) + ", observed " + std::to_string(count));
    Store::Reader reader(store);
    uint64_t hash = 14695981039346656037ULL;
    unsigned __int128 sum = 0;
@@ -463,6 +465,7 @@ int main(int argc, char **argv)
                    tx.put(encode(i), encode(initial_balance, c.value_bytes));
              });
       add("load", c.accounts / seconds(start), "accounts/s");
+      std::cerr << "contract checks\n";
       contract_check(*store, c);
       validate(*store, c, model);
       std::cerr << "warmup\n";
@@ -509,7 +512,15 @@ int main(int argc, char **argv)
               1024,
 #endif
           "bytes", "lower");
+#ifdef FAIR_CONTRACT_ONLY
+      // Functional regression target: exercise the same contracts, but produce
+      // no throughput or latency evidence from a potentially busy developer host.
+      std::ofstream result(c.result);
+      result << "{\"workload\":\"api-contract-v1\",\"status\":\"passed\","
+             << "\"engine\":\"" << engine_name << "\",\"final_hash\":" << hash << "}\n";
+#else
       write_result(c, metrics, hash, solo, mixed, read);
+#endif
       std::cout << "PASS " << engine_name << " final_hash=" << hash << "\n";
       return 0;
    }

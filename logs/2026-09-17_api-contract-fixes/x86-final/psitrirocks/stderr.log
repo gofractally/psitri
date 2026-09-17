@@ -1,0 +1,11 @@
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+psitrirocks psitrirocks e4c5ebbddd5b179f0f15abec9e890f386a94d104
+WAL=true; sync=false; platform_sync=unknown; compression=none; write_buffer_size=64MiB; max_write_buffer_number=2; block_cache_mib=64
+load
+contract checks
+warmup
+write
+mixed
+read
+close/reopen validation
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m

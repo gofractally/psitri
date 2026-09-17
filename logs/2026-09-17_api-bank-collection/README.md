@@ -32,7 +32,11 @@ No performance repetitions ran because no complete API pair passed smoke.
 These results apply to the exact recorded builds and workload, not every shim
 configuration. Failed databases remain on the cloud runner for diagnosis;
 generated database files are excluded from the committed evidence.
-The Mac matrix was still waiting for an idle window at this record's update.
+The Mac matrix was stopped while waiting for idle so the failures could be fixed.
+It produced no timing samples. Its interruption also exposed a collector bug
+that continued to the next pair; cancellation now stops the whole matrix.
+The corrections and functional regressions are retained in
+[`../2026-09-17_api-contract-fixes/README.md`](../2026-09-17_api-contract-fixes/README.md).
 
 No fresh performance claim is supported by this collection. Review completed
 matrices and all raw errors, preserve their metadata and repetitions, and curate

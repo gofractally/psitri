@@ -1,0 +1,12 @@
+{
+  "kind": "correctness-only",
+  "commands": [
+    [
+      "build-mdbx/bin/api-storage-regressions"
+    ],
+    [
+      "build-mdbx/bin/psitrimdbx-tests",
+      "[bank-regression]"
+    ]
+  ]
+}

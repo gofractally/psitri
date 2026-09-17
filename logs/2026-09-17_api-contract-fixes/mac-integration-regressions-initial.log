@@ -1,0 +1,64 @@
+Randomness seeded to: 3828616407
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/sqlite_bank_regression_29373/data/dead_versions.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=16536[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4342906880, size=16536[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/sqlite_bank_regression_29373/data/ptrs/header.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4342939648, size=4224[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/sqlite_bank_regression_29373/data/iref/header.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4342956032, size=4224[0m
+allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (7449 GB) — capping[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/sqlite_bank_regression_29373/data/header[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/sqlite_bank_regression_29373/data/roots[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/sqlite_bank_regression_29373/data/session_ops.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=93650944[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=5500846080, size=93650944[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4342972416, size=32768[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4343005184, size=32768[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/sqlite_bank_regression_29373/data/dbfile.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4184[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4343037952, size=4184[0m
+mapping.cpp:94             (null)     mapping               [33mMapped file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/sqlite_bank_regression_29373/data/dead_versions.bin, size=16536, addr=4342906880[0m
+mapping.cpp:94             (null)     mapping               [33mMapped file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/sqlite_bank_regression_29373/data/ptrs/header.bin, size=4224, addr=4342939648[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+mapping.cpp:94             (null)     mapping               [33mMapped file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/sqlite_bank_regression_29373/data/iref/header.bin, size=4224, addr=4342956032[0m
+allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (7449 GB) — capping[0m
+mapping.cpp:94             (null)     mapping               [33mMapped file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/sqlite_bank_regression_29373/data/header, size=93650944, addr=5500846080[0m
+mapping.cpp:94             (null)     mapping               [33mMapped file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/sqlite_bank_regression_29373/data/roots, size=32768, addr=4342972416[0m
+mapping.cpp:94             (null)     mapping               [33mMapped file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/sqlite_bank_regression_29373/data/session_ops.bin, size=32768, addr=4343005184[0m
+mapping.cpp:94             (null)     mapping               [33mMapped file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/sqlite_bank_regression_29373/data/dbfile.bin, size=4184, addr=4343037952[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/dwal_snapshot_29373/db/dead_versions.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=16536[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4342906880, size=16536[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/dwal_snapshot_29373/db/ptrs/header.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4342939648, size=4224[0m
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/dwal_snapshot_29373/db/iref/header.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4342956032, size=4224[0m
+allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (7449 GB) — capping[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/dwal_snapshot_29373/db/header[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/dwal_snapshot_29373/db/roots[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/dwal_snapshot_29373/db/session_ops.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=93650944[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=5500846080, size=93650944[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4342972416, size=32768[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4343005184, size=32768[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/dwal_snapshot_29373/db/dbfile.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4184[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4343037952, size=4184[0m
+[MERGE] root=0 entries=8  0 ms wall / 0 ms cpu  syscall=2%  611481 entries/sec  1.64 us/entry  max=0.0 ms
+        latency: <1us=6  <10us=2  <100us=0  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 1 new segs, 0 ms total (3% of wall)  0.0 ms/seg
+===============================================================================
+All tests passed (167 assertions in 2 test cases)
+

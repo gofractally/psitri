@@ -8,6 +8,7 @@ on:
       - "docs/api/**"
       - "examples/api/**"
       - "scripts/build_site.py"
+      - "scripts/benchmark_charts.py"
       - "scripts/benchmark.py"
       - "scripts/fair_bank.py"
       - "benchmarks/fair_bank/**"

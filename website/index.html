@@ -700,60 +700,7 @@
             ><span>Apple M5 Max · 18 cores · Release</span
             ><a href="data/benchmarks.json" download>Download data ↓</a>
           </div>
-          <div class="benchmark-panel">
-            <div class="benchmark-title">
-              <div>
-                <p class="eyebrow">
-                  Bank transfer workload / Same workload, native engines
-                </p>
-                <h3>psitri vs. libmdbx</h3>
-              </div>
-              <label class="research-toggle"
-                ><input type="checkbox" id="show-research" /> Include
-                experimental engines</label
-              >
-            </div>
-            <div
-              class="metric-tabs"
-              role="group"
-              aria-label="Select benchmark metric"
-            >
-              <button data-metric="write" aria-pressed="true">
-                Write throughput</button
-              ><button data-metric="read" aria-pressed="false">
-                Read throughput</button
-              ><button data-metric="mixed_write" aria-pressed="false">
-                Writes + readers</button
-              ><button data-metric="mixed_read" aria-pressed="false">
-                Reads + writer</button
-              ><button data-metric="load" aria-pressed="false">Bulk load</button
-              ><button data-metric="disk" aria-pressed="false">
-                Disk high-water
-              </button>
-            </div>
-            <div class="chart-caption">
-              <span id="metric-description"
-                >Transfers per second · higher is better</span
-              ><span>Baseline = libmdbx</span>
-            </div>
-            <div id="benchmark-bars" class="benchmark-bars" aria-live="polite">
-              <p>
-                psitri Large Engine: 551,010 transfers/s. psitri Small Engine:
-                874,524 transfers/s. libmdbx: 77,214 transfers/s.
-                <a href="docs/benchmarks.html">All results and methodology →</a>
-              </p>
-            </div>
-            <div class="benchmark-footnote">
-              <strong id="benchmark-insight"
-                >7.14× the write throughput for the Large Engine in this
-                measured configuration.</strong
-              >
-              <p id="benchmark-tradeoff">
-                The same run recorded 542 MB disk high-water for the Large
-                Engine versus 64 MB for MDBX. Explore every metric above.
-              </p>
-            </div>
-          </div>
+          <!-- BANK_CHART -->
           <div class="conditions-grid">
             <p>
               <strong>The workload</strong>1 million accounts. 2 million

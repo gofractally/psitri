@@ -28,20 +28,12 @@ without per-commit fsync. libmdbx uses `WRITEMAP | SAFE_NOSYNC`, also without
 per-commit fsync. These settings do not establish identical crash semantics.
 They do not measure per-commit synchronous durability performance.
 
-| Measured configuration | Load accounts/s | Transfers/s | Reads/s with writer | Transfers/s with readers | Reads/s alone | Disk high-water MB |
-|---|---:|---:|---:|---:|---:|---:|
-| libmdbx | 588,685 | 77,214 | 10,431,636 | 67,695 | 11,624,799 | 64 |
-| psitri Large Engine: sal_art_ref | 3,005,255 | 551,010 | 15,233,451 | 479,190 | 22,483,905 | 542 |
-| psitri Small Engine: start_ref | 6,747,858 | 874,524 | 46,403,149 | 520,717 | 48,631,120 | 457 |
-| Experimental: delta_art(sv→sar) | 1,002,327 | 97,167 | 47,025,679 | 80,570 | 45,759,946 | 675 |
-| Experimental: delta_art(sr→sar) | 3,210,994 | 464,275 | 42,691,076 | 466,937 | 45,095,819 | 839 |
-| Experimental: start_ver | 10,008,858 | 2,268,805 | 49,750,317 | 2,085,093 | 52,199,001 | 293 |
-| Experimental: gcart | 3,405,586 | 1,143,136 | 55,639,758 | 522,395 | 63,810,691 | 186 |
-| Experimental: gcart_spec | 2,869,963 | 1,138,597 | 36,102,343 | 553,568 | 42,982,589 | 154 |
+<!-- BANK_CHART -->
 
-Balance conservation passed for every row. The Large Engine and Small Engine chart labels
+Balance conservation passed for every measured engine. Use the checkboxes to choose
+the engines shown and the metric buttons to compare throughput or storage. The Large Engine and Small Engine chart labels
 identify the `sal_art_ref` and `start_ref` configurations at revision `7a3c8a5`.
-Experimental rows describe optional configurations, separate from the public
+Experimental bars describe optional configurations, separate from the public
 shared engine API contract.
 
 ### How to read the result
@@ -129,17 +121,10 @@ for a 32-bit process. The supplied Small Engine profile uses five-byte handles; 
 ratios below do not measure that profile and the four-byte layout is not exposed
 as a selectable public engine type.
 
-| Case | psitri latency / libart latency | Interpretation |
-|---|---:|---|
-| Integer hit | 0.87× | 13% lower latency |
-| Integer miss | 0.82× | 18% lower latency |
-| Dictionary hit | 0.92× | 8% lower latency |
-| Dictionary miss | 0.73× | 27% lower latency |
-| Integer insert | 1.12× | 12% higher latency |
-| Dictionary insert | 1.20× | 20% higher latency |
+<!-- ART_CHART -->
 
 The record says runs were back-to-back with one process at a time. It does not
-preserve absolute timings, an exact measured revision for this table, or a repeat
+preserve absolute timings, an exact measured revision for these ratios, or a repeat
 count. We publish the ratios as recorded and do not invent confidence intervals.
 This is evidence of competitive point-read performance, not a claim to win every
 ART operation. [Source measurement excerpt](../evidence/start_ref-art-excerpt.txt).
@@ -173,7 +158,7 @@ is retained in the downloadable data.
 
 The bank comparison measures native engines without per-commit fsync. Match
 those settings when reproducing it, or choose a synchronous policy on both sides
-when that is your application's requirement. The ART table measures the
+when that is your application's requirement. The ART chart measures the
 four-byte configuration identified above. The tiered scale test uses 128 GB RAM.
 
 The RocksDB and SQLite integration runs above are separate from the native

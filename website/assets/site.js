@@ -75,95 +75,54 @@ document.querySelector("#copy-code")?.addEventListener("click", async () => {
   }
 });
 
-async function loadBenchmarks() {
-  const chart = document.querySelector("#benchmark-bars");
-  if (!chart) return;
-  try {
-    const response = await fetch("data/benchmarks.json");
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json();
-    let metric = "write";
-    const research = document.querySelector("#show-research");
-    const metrics = data.bank.metrics;
-    const format = new Intl.NumberFormat("en-US");
-    function render() {
-      const rows = data.bank.engines.filter(
-        (e) => research.checked || e.status !== "research",
-      );
-      const spec = metrics[metric];
-      const baseline = data.bank.engines.find((e) => e.id === "mdbx").values[
-        metric
-      ];
-      const largest = Math.max(...rows.map((e) => e.values[metric]));
-      document.querySelector("#metric-description").textContent =
-        `${spec.label} · ${spec.direction === "higher" ? "higher" : "lower"} is better`;
-      chart.replaceChildren();
-      rows.forEach((engine) => {
-        const value = engine.values[metric];
-        const ratio = value / baseline;
-        const worse = spec.direction === "lower" ? ratio > 1 : ratio < 1;
-        const row = document.createElement("div");
-        row.className = `bench-row ${engine.id === "mdbx" ? "baseline" : engine.status}`;
-        const label = document.createElement("div");
-        label.className = "bench-label";
-        label.textContent = engine.name;
-        const detail = document.createElement("small");
-        detail.textContent = engine.detail;
-        label.append(detail);
-        const track = document.createElement("div");
-        track.className = "bar-track";
-        track.setAttribute("aria-hidden", "true");
-        const fill = document.createElement("div");
-        fill.className = "bar-fill";
-        fill.style.setProperty(
-          "--bar-width",
-          `${((value / largest) * 100).toFixed(2)}%`,
-        );
-        track.append(fill);
-        const number = document.createElement("div");
-        number.className = "bench-value";
-        const amount = document.createElement("span");
-        amount.textContent = `${format.format(value)}${metric === "disk" ? " MB" : ""}`;
-        const multiple = document.createElement("b");
-        multiple.className = worse ? "worse" : "";
-        multiple.textContent =
-          engine.id === "mdbx" ? "1.00×" : `${ratio.toFixed(2)}×`;
-        multiple.title = `${ratio.toFixed(2)} times the libmdbx ${spec.short}; ${spec.direction === "higher" ? "higher" : "lower"} is better`;
-        number.append(amount, multiple);
-        row.append(label, track, number);
-        chart.append(row);
-      });
-      const big = data.bank.engines.find((e) => e.id === "sal_art_ref").values[
-        metric
-      ];
-      const ratio = (big / baseline).toFixed(2);
-      document.querySelector("#benchmark-insight").textContent =
-        metric === "disk"
-          ? `A visible tradeoff: ${ratio}× the disk high-water for the Large Engine in this measured configuration.`
-          : `${ratio}× the ${spec.short} for the Large Engine in this measured configuration.`;
-      document.querySelector("#benchmark-tradeoff").textContent =
-        metric === "disk"
-          ? "Lower is better here. This measures on-disk high-water after the workload, including allocation and retained copy-on-write storage; it is not settled live payload."
-          : "The same run recorded 542 MB disk high-water for the Large Engine versus 64 MB for MDBX. Explore every metric above.";
-      all("[data-metric]").forEach((b) =>
-        b.setAttribute("aria-pressed", String(b.dataset.metric === metric)),
-      );
-    }
-    all("[data-metric]").forEach((button) =>
-      button.addEventListener("click", () => {
-        metric = button.dataset.metric;
-        render();
-      }),
-    );
-    research.addEventListener("change", render);
-    render();
-  } catch {
-    // The HTML contains real values and a methodology link, even offline.
-    all("[data-metric], #show-research").forEach((control) => {
-      control.disabled = true;
+// Values and bars are generated from curated JSON at build time. No data fetch is
+// needed, and the complete charts remain readable without JavaScript.
+all("[data-comparison-chart]").forEach((chart) => {
+  const within = (selector) => Array.from(chart.querySelectorAll(selector));
+  const choices = within("[data-chart-choice]");
+  const panels = within("[data-chart-panel]");
+  const buttons = within("[data-chart-metric]");
+  const research = chart.querySelector("[data-chart-research]");
+  let metric = "write";
+  function render() {
+    const selected = new Set(choices.filter((c) => c.checked).map((c) => c.value));
+    panels.forEach((panel) => {
+      panel.hidden = selected.size === 0 || (buttons.length > 0 && panel.dataset.chartPanel !== metric);
     });
-    document.querySelector("#metric-description").textContent =
-      "Static write-throughput summary · interactive data unavailable";
+    const rows = within("[data-chart-engine]");
+    rows.forEach((row) => { row.hidden = !selected.has(row.dataset.chartEngine); });
+    const shown = rows.filter((row) => !row.hidden && !row.closest("[data-chart-panel]").hidden);
+    const largest = Math.max(0, ...shown.map((row) => Number(row.dataset.value)));
+    shown.forEach((row) => {
+      row.querySelector(".bar-fill").style.setProperty("--bar-width", `${largest ? 100 * Number(row.dataset.value) / largest : 0}%`);
+    });
+    buttons.forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.chartMetric === metric)));
+    if (research) {
+      const experiments = choices.filter((c) => c.dataset.status === "research");
+      research.checked = experiments.every((c) => c.checked);
+      research.indeterminate = experiments.some((c) => c.checked) && !research.checked;
+    }
+    chart.querySelector("[data-chart-empty]").hidden = selected.size !== 0;
+    const reference = selected.has(chart.dataset.baseline) ? "reference shown" : "reference hidden; ratios unchanged";
+    chart.querySelector("[data-chart-status]").textContent = `${selected.size} engine${selected.size === 1 ? "" : "s"} selected · ${chart.dataset.baselineName} ${reference}`;
   }
-}
-loadBenchmarks();
+  choices.forEach((choice) => choice.addEventListener("change", render));
+  buttons.forEach((button) => button.addEventListener("click", () => {
+    metric = button.dataset.chartMetric;
+    render();
+  }));
+  research?.addEventListener("change", () => {
+    choices.filter((c) => c.dataset.status === "research").forEach((c) => { c.checked = research.checked; });
+    render();
+  });
+  chart.querySelector("[data-chart-reset]").addEventListener("click", () => {
+    choices.forEach((c) => { c.checked = c.dataset.default === "true"; });
+    render();
+  });
+  chart.querySelector("[data-chart-clear]").addEventListener("click", () => {
+    choices.forEach((c) => { c.checked = false; });
+    render();
+  });
+  within("input, button").forEach((control) => { control.disabled = false; });
+  render();
+});

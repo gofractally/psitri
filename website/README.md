@@ -18,7 +18,8 @@ Open `http://localhost:8080/site/`. Relative links also work at the project Page
 path `https://gofractally.github.io/psitri/`. The builder checks local links,
 fragments, duplicate IDs, image alt attributes, and root-relative asset paths.
 For visual review, check desktop and mobile, every benchmark metric, the experimental-engine
-toggle, the snapshot illustration, example switching/copy, menu, and details.
+toggle, individual engine checkboxes (including hiding the baseline), empty/reset
+selections, ART latency bars, the snapshot illustration, example switching/copy, menu, and details.
 
 ## Publication boundary
 
@@ -57,9 +58,11 @@ visibility as an incidental deployment workaround.
 ## Updating evidence
 
 `website/data/benchmarks.json` retains curated numeric data, provenance, and
-unknown fields explicitly. The bank chart reads it directly. Keep the static
-fallback, methodology tables, ART cases, and scale summary consistent when
-updating it. Do not promote research measurements as current engine results.
+unknown fields explicitly. The builder generates bank charts for the landing
+page and evidence guide, plus ART latency charts for the evidence guide. JavaScript filters the existing bars; the full
+charts work without JavaScript or a data fetch. Keep the methodology, ART cases,
+and scale summary consistent when updating it. Do not promote research
+measurements as current engine results.
 The recorder is documented in [the benchmark guide](content/benchmarking.md).
 
 Claims that must remain explicit until evidence changes:

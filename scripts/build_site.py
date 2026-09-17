@@ -14,6 +14,8 @@ from urllib.parse import unquote, urlsplit
 
 import markdown
 
+from benchmark_charts import art_chart, bank_chart
+
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "website"
 API_NAMES = ("README", "quickstart", "reference", "operations", "engines", "conformance", "chunked-values", "range-reads")
@@ -139,6 +141,7 @@ def build(output: Path) -> None:
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     index = (SOURCE / "index.html").read_text()
     data = json.loads((SOURCE / "data/benchmarks.json").read_text())
+    index = index.replace("<!-- BANK_CHART -->", bank_chart(data, "home-bank"))
     points = [p for p in data["scale"]["points"] if p["keys"] == 10000000 or p["keys"] % 100000000 == 0]
     min_keys, max_keys = points[0]["keys"], points[-1]["keys"]
     max_rss = max(p["rss_gb"] for p in points)
@@ -161,6 +164,8 @@ def build(output: Path) -> None:
     for name in CONTENT_NAMES:
         text = (SOURCE / "content" / f"{name}.md").read_text()
         title = text.splitlines()[0].lstrip("# ")
+        text = text.replace("<!-- BANK_CHART -->", bank_chart(data, "evidence-bank"))
+        text = text.replace("<!-- ART_CHART -->", art_chart(data))
         body = markdown.markdown(text, extensions=["fenced_code", "tables", "toc", "sane_lists"])
         (output / "docs" / f"{name}.html").write_text(template(title, body, name, revision))
     (output / "examples").mkdir()

@@ -8,6 +8,8 @@ from pathlib import Path
 import sys
 import time
 
+LOCK_PATH = Path("/tmp/psitri-benchmark.lock")
+
 
 def linux_ticks():
     values = list(map(int, Path("/proc/stat").read_text().splitlines()[0].split()[1:9]))
@@ -43,8 +45,7 @@ def busy_percent():
 def exclusive():
     # Do not use TMPDIR: two runners with different temporary directories must
     # still coordinate on the same host (notably macOS per-user temp paths).
-    path = Path("/tmp/psitri-benchmark.lock")
-    with path.open("a+") as lock:
+    with LOCK_PATH.open("a+") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:

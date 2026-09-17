@@ -11,7 +11,10 @@ on:
       - "scripts/benchmark_charts.py"
       - "scripts/benchmark.py"
       - "scripts/fair_bank.py"
+      - "scripts/benchmark_idle.py"
+      - "scripts/api_bank_matrix.py"
       - "benchmarks/fair_bank/**"
+      - "benchmarks/api_bank/**"
       - "tests/website/**"
       - "logs/2026-06-17_gcart_spec-bank-vs-mdbx/**"
       - "logs/2026-06-13_delta_art-1B/**"
@@ -23,6 +26,7 @@ on:
       - "docs/api/**"
       - "scripts/**"
       - "benchmarks/fair_bank/**"
+      - "benchmarks/api_bank/**"
       - "tests/website/**"
       - ".github/workflows/pages.yml"
   workflow_dispatch:

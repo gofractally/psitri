@@ -1,0 +1,400 @@
+{
+  "schema_version": 1,
+  "workload": "api-bank-v1",
+  "profile": "smoke",
+  "status": "failed",
+  "started_at": "2026-09-17T19:21:03.141037+00:00",
+  "machine_id": "vultr-epyc",
+  "hardware": {
+    "system": "Linux",
+    "release": "6.17.0-22-generic",
+    "architecture": "x86_64",
+    "cpu": "AMD EPYC-Turin Processor",
+    "memory": "MemTotal:       127438796 kB",
+    "logical_cpus": 16
+  },
+  "config": {
+    "accounts": 128,
+    "transfers": 256,
+    "warmup": 64,
+    "batch": 32,
+    "readers": 2,
+    "reads_per_snapshot": 16,
+    "read_batches": 2,
+    "seed": 12345,
+    "value_bytes": 8,
+    "cache_mib": 64,
+    "map_gib": 64,
+    "durability": "none"
+  },
+  "engines": [
+    "rocksdb",
+    "psitrirocks"
+  ],
+  "repeats": 1,
+  "order_seed": 20260917,
+  "revision": "230e49b0b1f40aa71135a3be0fe2f9da6d92745a",
+  "source_status": "",
+  "dirty": false,
+  "command": [
+    "psitri/scripts/api_bank_matrix.py",
+    "--machine",
+    "vultr-epyc",
+    "--build-mdbx",
+    "/home/dlarimer/psitri-api-bench-20260917/build-mdbx",
+    "--build-integrations",
+    "/home/dlarimer/psitri-api-bench-20260917/build-integrations",
+    "--output",
+    "/home/dlarimer/psitri-api-bench-20260917/results",
+    "--repeats",
+    "5",
+    "--idle-timeout",
+    "3600"
+  ],
+  "records": [
+    {
+      "engine": "psitrirocks",
+      "repetition": 1,
+      "directory": "r1-psitrirocks",
+      "command": [
+        "/home/dlarimer/psitri-api-bench-20260917/build-integrations/bin/fair-bank-psitrirocks",
+        "--path",
+        "/home/dlarimer/psitri-api-bench-20260917/results/2026-09-17T192039-api-matrix-99f63327/rocksdb/smoke/2026-09-17T192103-fair-bank-smoke-47aa0949/r1-psitrirocks/database",
+        "--result",
+        "/home/dlarimer/psitri-api-bench-20260917/results/2026-09-17T192039-api-matrix-99f63327/rocksdb/smoke/2026-09-17T192103-fair-bank-smoke-47aa0949/r1-psitrirocks/result.json",
+        "--accounts",
+        "128",
+        "--transfers",
+        "256",
+        "--warmup",
+        "64",
+        "--batch",
+        "32",
+        "--readers",
+        "2",
+        "--reads-per-snapshot",
+        "16",
+        "--read-batches",
+        "2",
+        "--seed",
+        "12345",
+        "--value-bytes",
+        "8",
+        "--cache-mib",
+        "64",
+        "--map-gib",
+        "64",
+        "--durability",
+        "none"
+      ],
+      "status": "failed",
+      "exit_code": 1,
+      "elapsed_seconds": 0.1137886606156826,
+      "error": "Process exited 1; see stderr.log"
+    },
+    {
+      "engine": "rocksdb",
+      "repetition": 1,
+      "directory": "r1-rocksdb",
+      "command": [
+        "/home/dlarimer/psitri-api-bench-20260917/build-integrations/bin/fair-bank-rocksdb",
+        "--path",
+        "/home/dlarimer/psitri-api-bench-20260917/results/2026-09-17T192039-api-matrix-99f63327/rocksdb/smoke/2026-09-17T192103-fair-bank-smoke-47aa0949/r1-rocksdb/database",
+        "--result",
+        "/home/dlarimer/psitri-api-bench-20260917/results/2026-09-17T192039-api-matrix-99f63327/rocksdb/smoke/2026-09-17T192103-fair-bank-smoke-47aa0949/r1-rocksdb/result.json",
+        "--accounts",
+        "128",
+        "--transfers",
+        "256",
+        "--warmup",
+        "64",
+        "--batch",
+        "32",
+        "--readers",
+        "2",
+        "--reads-per-snapshot",
+        "16",
+        "--read-batches",
+        "2",
+        "--seed",
+        "12345",
+        "--value-bytes",
+        "8",
+        "--cache-mib",
+        "64",
+        "--map-gib",
+        "64",
+        "--durability",
+        "none"
+      ],
+      "status": "passed",
+      "exit_code": 0,
+      "elapsed_seconds": 0.01568800024688244,
+      "result": {
+        "schema_version": 1,
+        "workload": "api-bank-v1",
+        "engine": "rocksdb",
+        "version": "9.9.3",
+        "settings": "WAL=true; sync=false; platform_sync=unknown; compression=none; write_buffer_size=64MiB; max_write_buffer_number=2; block_cache_mib=64",
+        "status": "passed",
+        "config": {
+          "accounts": 128,
+          "transfers": 256,
+          "warmup": 64,
+          "batch": 32,
+          "readers": 2,
+          "reads_per_snapshot": 16,
+          "read_batches": 2,
+          "seed": 12345,
+          "value_bytes": 8,
+          "cache_mib": 64,
+          "map_gib": 64,
+          "durability": "none"
+        },
+        "validation": {
+          "read_your_writes": true,
+          "rollback": true,
+          "snapshot": true,
+          "exact_accounts": true,
+          "balance": true,
+          "reopen": true,
+          "final_hash": "12150392390243270099"
+        },
+        "counts": {
+          "write_transfers": 256,
+          "write_commits": 8,
+          "mixed_transfers": 256,
+          "mixed_commits": 8,
+          "mixed_reads": 3232,
+          "read_only_reads": 64,
+          "reader_checksum": "3295999999999677"
+        },
+        "metrics": [
+          {
+            "engine": "rocksdb",
+            "name": "load",
+            "unit": "accounts/s",
+            "direction": "higher",
+            "value": 1543414.5635633583
+          },
+          {
+            "engine": "rocksdb",
+            "name": "write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 817496.9902698698
+          },
+          {
+            "engine": "rocksdb",
+            "name": "write_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 38.342
+          },
+          {
+            "engine": "rocksdb",
+            "name": "write_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 47.045
+          },
+          {
+            "engine": "rocksdb",
+            "name": "mixed_write_active",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 335214.5504065786
+          },
+          {
+            "engine": "rocksdb",
+            "name": "mixed_write_active_batch_p50",
+            "unit": "us",
+            "direction": "lower",
+            "value": 92.797
+          },
+          {
+            "engine": "rocksdb",
+            "name": "mixed_write_active_batch_p99",
+            "unit": "us",
+            "direction": "lower",
+            "value": 108.95
+          },
+          {
+            "engine": "rocksdb",
+            "name": "mixed_write",
+            "unit": "transfers/s",
+            "direction": "higher",
+            "value": 326206.48615724937
+          },
+          {
+            "engine": "rocksdb",
+            "name": "mixed_read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 4118356.887735273
+          },
+          {
+            "engine": "rocksdb",
+            "name": "read",
+            "unit": "reads/s",
+            "direction": "higher",
+            "value": 2002879.1387619704
+          },
+          {
+            "engine": "rocksdb",
+            "name": "disk_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 53164
+          },
+          {
+            "engine": "rocksdb",
+            "name": "allocated_before_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 78057472
+          },
+          {
+            "engine": "rocksdb",
+            "name": "close",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.000137228
+          },
+          {
+            "engine": "rocksdb",
+            "name": "disk_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 56556
+          },
+          {
+            "engine": "rocksdb",
+            "name": "allocated_after_close",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 73728
+          },
+          {
+            "engine": "rocksdb",
+            "name": "reopen",
+            "unit": "seconds",
+            "direction": "lower",
+            "value": 0.003002217
+          },
+          {
+            "engine": "rocksdb",
+            "name": "peak_rss",
+            "unit": "bytes",
+            "direction": "lower",
+            "value": 22470656
+          }
+        ]
+      }
+    }
+  ],
+  "dependencies": {
+    "/home/dlarimer/arbtrie/build/release/_deps/rocksdb-build/librocksdb.a": {
+      "resolved_path": "/home/dlarimer/arbtrie/build/release/_deps/rocksdb-build/librocksdb.a",
+      "sha256": "4544017e83bb84fd3fecf94cd577d7dfde67b8ceb5932cd85cc84b5592c6b526",
+      "compiler_and_build_flags": "prebuilt dependency; inspect its separate build provenance"
+    },
+    "/usr/lib/x86_64-linux-gnu/libsqlite3.so": {
+      "resolved_path": "/usr/lib/x86_64-linux-gnu/libsqlite3.so.0.8.6",
+      "sha256": "a19187db849e9a95b33f2e6fa6d7c3218f8de6f284865832409224bef741dd4a",
+      "compiler_and_build_flags": "prebuilt dependency; inspect its separate build provenance"
+    }
+  },
+  "binaries": {
+    "rocksdb": {
+      "path": "/home/dlarimer/psitri-api-bench-20260917/build-integrations/bin/fair-bank-rocksdb",
+      "sha256": "6dd8c1123dc7d035a3d352d2d637af4e9ff5be9da3fbc50e6c945ec5da3c1980",
+      "description": {
+        "engine": "rocksdb",
+        "version": "9.9.3",
+        "workload": "api-bank-v1",
+        "durability": [
+          "none"
+        ]
+      }
+    },
+    "psitrirocks": {
+      "path": "/home/dlarimer/psitri-api-bench-20260917/build-integrations/bin/fair-bank-psitrirocks",
+      "sha256": "adb18889d6a9f765682ae7686c9f3c0151f47364f4e9bf8ccf5c99c1c7b0e127",
+      "description": {
+        "engine": "psitrirocks",
+        "version": "psitrirocks e4c5ebbddd5b179f0f15abec9e890f386a94d104",
+        "workload": "api-bank-v1",
+        "durability": [
+          "none"
+        ]
+      }
+    }
+  },
+  "environment": {
+    "SAL_LOG_LEVEL": "ERROR"
+  },
+  "notes": "Same-API pair; no concurrent benchmarks; wait for idle before every process.",
+  "isolation": {
+    "machine_lock": true,
+    "idle_seconds": 10,
+    "max_cpu_busy_percent": 3,
+    "idle_timeout_seconds": 3600.0
+  },
+  "storage": {
+    "df": "Filesystem     1024-blocks      Used Available Capacity Mounted on\n/dev/vda2        943230904 803946836  98968936      90% /",
+    "total_bytes": 965868445696,
+    "free_bytes": 101344190464,
+    "filesystem_fragment_bytes": 4096
+  },
+  "build": {
+    "compiler": "/usr/bin/clang++-20",
+    "compiler_version": "20.1.8",
+    "build_type": "Release",
+    "native_dependencies": {
+      "psio": "/home/dlarimer/psitri-api-bench-20260917/psio",
+      "integrations": "/home/dlarimer/psitri-api-bench-20260917/integrations",
+      "abseil": "/home/dlarimer/arbtrie/build/release/_deps/abseil-src"
+    },
+    "libraries": [
+      "/home/dlarimer/arbtrie/build/release/_deps/rocksdb-build/librocksdb.a",
+      "/usr/lib/x86_64-linux-gnu/libsqlite3.so"
+    ]
+  },
+  "compiler_version_output": "Ubuntu clang version 20.1.8 (0ubuntu4)\nTarget: x86_64-pc-linux-gnu\nThread model: posix\nInstalledDir: /usr/lib/llvm-20/bin",
+  "native_dependencies": {
+    "psio": {
+      "path": "/home/dlarimer/psitri-api-bench-20260917/psio",
+      "revision": "ff114b6a8c9265e6b5da5ffb85df1617b2b43514",
+      "status": ""
+    },
+    "integrations": {
+      "path": "/home/dlarimer/psitri-api-bench-20260917/integrations",
+      "revision": "e4c5ebbddd5b179f0f15abec9e890f386a94d104",
+      "status": ""
+    },
+    "abseil": {
+      "path": "/home/dlarimer/arbtrie/build/release/_deps/abseil-src",
+      "revision": "4447c7562e3bc702ade25105912dce503f0c4010",
+      "status": ""
+    }
+  },
+  "source_sha256": {
+    "scripts/fair_bank.py": "fd8375a1b0ac30e3b4a59709d8538099bc52fc05c18066824e4b3a4b6a48314e",
+    "scripts/benchmark.py": "110039b585cc09e9705dfee02364e326e754cc20c567f1567a4eff2e9a565e29",
+    "scripts/benchmark_idle.py": "e96080ec56895a96eb5fe82c8e59022b06a14998f48d114309f650fc0dca9954",
+    "scripts/api_bank_matrix.py": "61173b15ce35f80cf61f7df402bf9a0948c71d87417a5f4fea7a511f1f14c661",
+    "benchmarks/fair_bank/CMakeLists.txt": "7a56689febeb08bc47bb69a29b1ed728cbab5c9f1a5e9759a3193c0f351c6fdf",
+    "benchmarks/fair_bank/README.md": "e56b8f446c0aea2548d259241e4741a33c9ad31c929a676dd3f3d0c5b22e7f6f",
+    "benchmarks/fair_bank/common.hpp": "4e9dbc912cce5fc88e9c8fcd739e676b86fa910e992dd29a6113c2a70d01f533",
+    "benchmarks/fair_bank/duckdb.hpp": "00da5db5a07f33db8020b1b387feb80621ba354c1c8b4d572221c75a3c12c951",
+    "benchmarks/fair_bank/main.cpp": "021a66cc49284d68852333de352a7d97ce3155018e24c364839e2d4b6135baa7",
+    "benchmarks/fair_bank/mdbx.hpp": "0d56517af0daae4e6fbacbced99aa5dd4889e30ab67e217310e9b1b6be17268e",
+    "benchmarks/fair_bank/psitri.hpp": "17b22486765808542988c5d7e0bfe135a69b5cd26abab60bb6de48a5a0e1750e",
+    "benchmarks/fair_bank/rocksdb.hpp": "afc9682fdf9f0e1f6abfaca00e7497ce1e5e8f2d4aa1d074b2bc950a1b183bc9",
+    "benchmarks/fair_bank/sqlite.hpp": "187536b28b02ca0bfd684b7df249c1f30b1144f7d48118510727add01aa445bd",
+    "benchmarks/api_bank/CMakeLists.txt": "eebd29b07aaa2f19d5c3cbbee4a387978005a20d8bc37a5f080c3b272d6ffc41",
+    "benchmarks/api_bank/README.md": "22653e7d1a09582d727122407f6df711ab14689494275f913bb797e4e89bf0d0"
+  },
+  "finished_at": "2026-09-17T19:21:25.393470+00:00"
+}

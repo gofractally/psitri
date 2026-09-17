@@ -1,0 +1,29 @@
+{
+  "workload": "api-bank-v1",
+  "status": "failed",
+  "machine": "vultr-epyc",
+  "revision": "230e49b0b1f40aa71135a3be0fe2f9da6d92745a",
+  "pairs": [
+    {
+      "api": "mdbx",
+      "status": "failed",
+      "runs": [
+        "mdbx/smoke/2026-09-17T192039-fair-bank-smoke-67a56c8b/manifest.json"
+      ]
+    },
+    {
+      "api": "rocksdb",
+      "status": "failed",
+      "runs": [
+        "rocksdb/smoke/2026-09-17T192103-fair-bank-smoke-47aa0949/manifest.json"
+      ]
+    },
+    {
+      "api": "sqlite",
+      "status": "failed",
+      "runs": [
+        "sqlite/smoke/2026-09-17T192125-fair-bank-smoke-2f9b2745/manifest.json"
+      ]
+    }
+  ]
+}

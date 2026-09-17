@@ -13,4 +13,4 @@ __pycache__/
 *.py[cod]
 
 # Failed/explicitly retained benchmark databases stay local; commit their evidence.
-logs/*-fair-bank-*/r*-*/database/
+logs/**/database/

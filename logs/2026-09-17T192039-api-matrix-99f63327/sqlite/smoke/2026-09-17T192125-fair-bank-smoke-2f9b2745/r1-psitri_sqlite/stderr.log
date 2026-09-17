@@ -1,0 +1,2 @@
+control_block_alloc.cpp:38  (null)     control_block_alloc   [1;31mfree_list.bit blocksize: 524288[0m
+FAIL: SQLite WAL mode was not enabled

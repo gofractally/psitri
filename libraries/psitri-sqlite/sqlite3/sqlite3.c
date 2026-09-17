@@ -103329,6 +103329,11 @@ case OP_JournalMode: {    /* out2 */
   assert( p->readOnly==0 );
 
   pBt = db->aDb[pOp->p1].pBt;
+#ifdef PSITRI_BTREE_STORAGE
+  /* The replacement storage engine owns its WAL; SQLite's dummy pager does
+  ** not. Ask that engine for its effective policy instead of probing the VFS. */
+  eNew = psitri_btree_journal_mode(pBt, eNew);
+#else
   pPager = sqlite3BtreePager(pBt);
   eOld = sqlite3PagerGetJournalMode(pPager);
   if( eNew==PAGER_JOURNALMODE_QUERY ) eNew = eOld;
@@ -103389,6 +103394,8 @@ case OP_JournalMode: {    /* out2 */
 
   if( rc ) eNew = eOld;
   eNew = sqlite3PagerSetJournalMode(pPager, eNew);
+
+#endif
 
   pOut->flags = MEM_Str|MEM_Static|MEM_Term;
   pOut->z = (char *)sqlite3JournalModename(eNew);

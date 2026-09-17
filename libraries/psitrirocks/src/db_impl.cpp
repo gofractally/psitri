@@ -4,6 +4,7 @@
 #include <psitri/dwal/dwal_database.hpp>
 #include <psitri/dwal/dwal_transaction.hpp>
 #include <psitri/dwal/merge_cursor.hpp>
+#include <psitri/dwal/read_snapshot.hpp>
 #include <psitri/read_session_impl.hpp>
 #include <psitri/write_session_impl.hpp>
 #include <psitri/transaction.hpp>
@@ -22,29 +23,27 @@ namespace rocksdb
    namespace
    {
 
-      // Snapshot backed by a psitri read_session + root snapshot
+      // Snapshots pin all layers, including committed writes not yet merged.
       class PsiTriSnapshot : public Snapshot
       {
         public:
-         PsiTriSnapshot(std::shared_ptr<psitri::read_session> rs, uint32_t root_index)
-             : rs_(std::move(rs)), root_(rs_->get_root(root_index)), seq_(next_seq())
+         PsiTriSnapshot(psitri::dwal::dwal_database& db, uint32_t roots)
+             : seq_(next_seq())
          {
+            for (uint32_t i = 0; i < roots; ++i)
+               roots_.push_back(std::make_unique<psitri::dwal::read_snapshot>(db, i));
          }
-
          SequenceNumber GetSequenceNumber() const override { return seq_; }
-
-         sal::smart_ptr<sal::alloc_header> root() const { return root_; }
-
+         const psitri::dwal::read_snapshot* root(uint32_t index) const
+         { return index < roots_.size() ? roots_[index].get() : nullptr; }
         private:
          static SequenceNumber next_seq()
          {
             static std::atomic<SequenceNumber> counter{0};
             return counter.fetch_add(1);
          }
-
-         std::shared_ptr<psitri::read_session> rs_;
-         sal::smart_ptr<sal::alloc_header>     root_;
-         SequenceNumber                        seq_;
+         std::vector<std::unique_ptr<psitri::dwal::read_snapshot>> roots_;
+         SequenceNumber seq_;
       };
 
       // Column family handle — maps to a psitri root index
@@ -332,7 +331,7 @@ namespace rocksdb
 
       const Snapshot* GetSnapshot() override
       {
-         return new PsiTriSnapshot(get_read_session(), 0);
+         return new PsiTriSnapshot(*dwal_db_, next_cf_id_.load());
       }
 
       void ReleaseSnapshot(const Snapshot* snap) override
@@ -519,65 +518,27 @@ namespace rocksdb
       Status GetImpl(const ReadOptions& options, uint32_t root_idx,
                      const Slice& key, std::string* value)
       {
-         // Snapshot reads still go through COW cursor for consistency
          if (options.snapshot)
          {
-            auto* snap = static_cast<const PsiTriSnapshot*>(options.snapshot);
-            auto  root = snap->root();
-            if (!root)
-               return Status::NotFound();
-            psitri::cursor c(std::move(root));
-            auto           result = c.get(std::string_view(key.data(), key.size()), value);
-            if (result < 0)
-               return Status::NotFound();
-            return Status::OK();
+            auto* root = static_cast<const PsiTriSnapshot*>(options.snapshot)->root(root_idx);
+            return root && root->get(std::string_view(key.data(), key.size()), value)
+                       ? Status::OK() : Status::NotFound();
          }
-
-         // Normal reads go through DWAL get_latest for full RW → RO → Tri visibility
-         auto result = dwal_db_->get_latest(root_idx, std::string_view(key.data(), key.size()));
-         if (!result.found)
-            return Status::NotFound();
-         if (value)
-         {
-            if (!result.owned_data.empty())
-               *value = std::move(result.owned_data);
-            else
-               value->assign(result.value.data.data(), result.value.data.size());
-         }
-         return Status::OK();
+         psitri::dwal::read_snapshot current(*dwal_db_, root_idx);
+         return current.get(std::string_view(key.data(), key.size()), value)
+                    ? Status::OK() : Status::NotFound();
       }
 
       Iterator* NewIteratorImpl(const ReadOptions& options, uint32_t root_idx)
       {
-         // Snapshot reads: COW cursor only (consistent point-in-time view)
          if (options.snapshot)
          {
-            auto* snap = static_cast<const PsiTriSnapshot*>(options.snapshot);
-            auto  root = snap->root();
-            if (!root)
-               root = get_read_session()->get_root(root_idx).copy_root();
-            return new PsiTriIterator(std::move(root));
+            auto* root = static_cast<const PsiTriSnapshot*>(options.snapshot)->root(root_idx);
+            if (!root) return new PsiTriIterator({});
+            return new DwalMergeIterator(root->create_cursor());
          }
-
-         // Non-snapshot: merge iterator via DWAL API (locking handled internally)
-         if (dwal_db_ && root_idx < 512)
-         {
-            auto mc = dwal_db_->create_cursor(root_idx, psitri::dwal::read_mode::latest);
-            return new DwalMergeIterator(std::move(mc));
-         }
-
-         // No DWAL layer — use PsiTri-only iterator
-         return new PsiTriIterator(get_read_session()->get_root(root_idx));
-      }
-
-      // Thread-local psitri read session (for snapshots/iterators)
-      std::shared_ptr<psitri::read_session>& get_read_session()
-      {
-         thread_local std::unordered_map<PsiTriDB*, std::shared_ptr<psitri::read_session>> sessions;
-         auto& rs = sessions[this];
-         if (!rs)
-            rs = db_->start_read_session();
-         return rs;
+         psitri::dwal::read_snapshot current(*dwal_db_, root_idx);
+         return new DwalMergeIterator(current.create_cursor());
       }
 
       std::shared_ptr<psitri::database>    db_;

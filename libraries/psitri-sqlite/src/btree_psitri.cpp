@@ -22,7 +22,7 @@
 extern "C" {
 int psitri_pack_record(UnpackedRecord *pRec, unsigned char *buf, int bufSize);
 int psitri_make_comparable_key(const unsigned char *pKey, int nKey,
-                               unsigned char *buf, int bufSize);
+                               unsigned char *buf, int bufSize, const KeyInfo *keyInfo);
 int psitri_make_comparable_key_from_unpacked(UnpackedRecord *pRec,
                                              unsigned char *buf, int bufSize);
 int psitri_sizeof_sqlite3_value(void);
@@ -32,6 +32,7 @@ struct Pager* psitri_get_dummy_pager(void);
 #include <psitri/dwal/dwal_database.hpp>
 #include <psitri/dwal/dwal_transaction.hpp>
 #include <psitri/dwal/merge_cursor.hpp>
+#include <psitri/dwal/read_snapshot.hpp>
 #include <psitri/database.hpp>
 #include <sal/config.hpp>
 
@@ -98,6 +99,9 @@ struct Btree {
    // Writer uses read_mode::latest (skip_rw_lock).
    // Non-writer uses read_mode::buffered.
    bool is_writer = false;
+   bool memory_database = false;
+   sal::sync_type sync_mode = sal::sync_type::none;
+   std::unique_ptr<psitri::dwal::read_snapshot> read_snapshot;
 
    // Single DWAL transaction for all tables (root 0).
    // Lazily created on first write, committed in CommitPhaseOne.
@@ -294,12 +298,12 @@ static std::string pack_index_key(UnpackedRecord* pRec) {
 // Convert a packed SQLite record to a byte-comparable key
 static std::string make_comparable_from_packed(const char* data, int len) {
    int sz = psitri_make_comparable_key(
-      (const unsigned char*)data, len, nullptr, 0);
+      (const unsigned char*)data, len, nullptr, 0, nullptr);
    if (sz <= 0) return {};
    std::string result(sz, '\0');
    int written = psitri_make_comparable_key(
       (const unsigned char*)data, len,
-      (unsigned char*)result.data(), sz);
+      (unsigned char*)result.data(), sz, nullptr);
    if (written > 0) result.resize(written);
    return result;
 }
@@ -343,6 +347,7 @@ int sqlite3BtreeOpen(
    pBtree->pBt = pBt;
 
    bool is_memory = (flags & BTREE_MEMORY) || !zFilename || zFilename[0] == 0;
+   pBtree->memory_database = is_memory;
    std::string path;
 
    if (is_memory) {
@@ -421,8 +426,9 @@ int sqlite3BtreeClose(Btree* p) {
       sqlite3BtreeCloseCursor(pBt->pCursor);
    }
 
-   // Commit any lingering DWAL transaction from autocommit mode
-   p->commit_tx();
+   // Closing a connection must never publish uncommitted writes.
+   p->abort_tx();
+   p->read_snapshot.reset();
 
    // Persist metadata and release global reference
    if (pBt->psitri && pBt->psitri->dwal_db) {
@@ -499,11 +505,11 @@ int sqlite3BtreeSetPagerFlags(Btree* p, unsigned pgFlags) {
    unsigned level = pgFlags & 0x07;
    bool fullfsync = (pgFlags & 0x08) != 0;  // PAGER_FULLFSYNC
    switch (level) {
-      case 0x01: p->pBt->psitri->sync_mode = sal::sync_type::none; break;
-      case 0x02: p->pBt->psitri->sync_mode = sal::sync_type::msync_async; break;
+      case 0x01: p->sync_mode = sal::sync_type::none; break;
+      case 0x02: p->sync_mode = sal::sync_type::msync_async; break;
       case 0x03: // fall through
       case 0x04:
-         p->pBt->psitri->sync_mode = fullfsync ? sal::sync_type::full
+         p->sync_mode = fullfsync ? sal::sync_type::full
                                                 : sal::sync_type::fsync;
          break;
       default:   break;
@@ -531,6 +537,15 @@ int sqlite3BtreeNewDb(Btree*) { return SQLITE_OK; }
 void sqlite3BtreeClearCache(Btree*) {}
 struct Pager* sqlite3BtreePager(Btree*) { return psitri_get_dummy_pager(); }
 
+int psitri_btree_journal_mode(Btree* p, int requested) {
+   // Persistent databases always use DWAL. Unsupported transitions leave the
+   // effective mode unchanged, as SQLite's PRAGMA contract permits. The pager
+   // remains disabled because it does not own these storage files.
+   (void)requested;
+   return p->memory_database ? 4 /* MEMORY */ : 5 /* WAL */;
+}
+
+
 // ============================================================================
 // Transactions
 // ============================================================================
@@ -545,7 +560,10 @@ int sqlite3BtreeBeginTrans(Btree* p, int wrflag, int* pSchemaVersion) {
    if (wrflag) {
       p->inTrans = TRANS_WRITE;
       p->is_writer = true;
+      p->read_snapshot.reset();
+      p->get_tx();
    } else if (p->inTrans == TRANS_NONE) {
+      p->read_snapshot = std::make_unique<psitri::dwal::read_snapshot>(*p->pBt->psitri->dwal_db, 0);
       p->inTrans = TRANS_READ;
    }
    p->pBt->inTransaction = p->inTrans;
@@ -566,8 +584,8 @@ int sqlite3BtreeCommitPhaseOne(Btree* p, const char*) {
          PTRACE("CommitPhaseOne: commit_tx THREW: %s\n", e.what());
          return SQLITE_ERROR;
       }
-      if (p->pBt->psitri->sync_mode >= sal::sync_type::fsync) {
-         p->pBt->psitri->dwal_db->flush_wal(p->pBt->psitri->sync_mode);
+      if (p->sync_mode >= sal::sync_type::fsync) {
+         p->pBt->psitri->dwal_db->flush_wal(p->sync_mode);
       }
    }
    return SQLITE_OK;
@@ -576,6 +594,8 @@ int sqlite3BtreeCommitPhaseOne(Btree* p, const char*) {
 int sqlite3BtreeCommitPhaseTwo(Btree* p, int) {
    PTRACE("CommitPhaseTwo: inTrans=%d\n", p ? (int)p->inTrans : -1);
    if (p) {
+      p->read_snapshot.reset();
+      p->is_writer = false;
       p->inTrans = TRANS_NONE;
       p->pBt->inTransaction = TRANS_NONE;
    }
@@ -592,6 +612,8 @@ int sqlite3BtreeRollback(Btree* p, int, int) {
       p->abort_tx();
    }
    if (p) {
+      p->read_snapshot.reset();
+      p->is_writer = false;
       p->inTrans = TRANS_NONE;
       p->pBt->inTransaction = TRANS_NONE;
    }
@@ -834,12 +856,11 @@ static void ensure_cursor(BtCursor* pCur) {
          if (pCur->pBtree && pCur->pBtree->active_tx
              && !pCur->pBtree->active_tx->is_committed()) {
             pCur->cursor.emplace(pCur->pBtree->active_tx->create_cursor());
-         } else if (pCur->pBtree && pCur->pBtree->is_writer) {
-            pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
-               0, psitri::dwal::read_mode::latest, /*skip_rw_lock=*/true));
+         } else if (pCur->pBtree && pCur->pBtree->read_snapshot) {
+            pCur->cursor.emplace(pCur->pBtree->read_snapshot->create_cursor());
          } else {
-            pCur->cursor.emplace(pCur->psitri_db->dwal_db->create_cursor(
-               0, psitri::dwal::read_mode::buffered));
+            psitri::dwal::read_snapshot current(*pCur->psitri_db->dwal_db, 0);
+            pCur->cursor.emplace(current.create_cursor());
          }
       } catch (...) {
          pCur->cursor.reset();
@@ -1112,7 +1133,7 @@ int sqlite3BtreeInsert(
       if (pPayload->pKey) {
          int comp_sz = psitri_make_comparable_key(
              (const unsigned char*)pPayload->pKey, (int)pPayload->nKey,
-             (unsigned char*)key_buf + 4, sizeof(key_buf) - 4);
+             (unsigned char*)key_buf + 4, sizeof(key_buf) - 4, pCur->pKeyInfo);
          if (comp_sz <= 0) comp_sz = 0;
          key_buf[0] = (char)((pCur->pgnoRoot >> 24) & 0xFF);
          key_buf[1] = (char)((pCur->pgnoRoot >> 16) & 0xFF);
@@ -1132,14 +1153,14 @@ int sqlite3BtreeInsert(
 
    psitri->data_version.fetch_add(1);
 
-   // Mark all cursors on this root as needing re-seek.
-   // Don't destroy the cursor objects — rebuilding owned_merge_cursor
-   // (shared_ptr copies + tri cursor creation) is expensive.
-   // The next seek (lower_bound, seek_begin) reinitializes the ART
-   // iterator from the root, which is safe after structural changes.
-   // Single ART map — any mutation invalidates all cursor positions
-   pCur->is_valid = false;
-   pCur->eState = CURSOR_INVALID;
+   // The writer's cursors pin a particular ART root. A mutation may replace
+   // that root, so recreate them on the next seek. Other connections retain
+   // their transaction snapshots and are deliberately unaffected.
+   for (auto* cur = pCur->pBt->pCursor; cur; cur = cur->pNext) {
+      cur->cursor.reset();
+      cur->is_valid = false;
+      cur->eState = CURSOR_INVALID;
+   }
 
    return SQLITE_OK;
 }
@@ -1159,7 +1180,12 @@ int sqlite3BtreeDelete(BtCursor* pCur, u8 flags) {
    }
 
    psitri->data_version.fetch_add(1);
-   pCur->is_valid = false;
+   for (auto* cur = pCur->pBt->pCursor; cur; cur = cur->pNext) {
+      cur->cursor.reset();
+      cur->is_valid = false;
+      cur->eState = CURSOR_INVALID;
+   }
+   ensure_cursor(pCur);
 
    if (flags & BTREE_SAVEPOSITION) {
       // Reposition cursor at the deleted key's location
@@ -1189,7 +1215,9 @@ int sqlite3BtreeCount(sqlite3*, BtCursor* pCur, i64* pnEntry) {
       *pnEntry = 0;
       return SQLITE_OK;
    }
-   *pnEntry = (i64)pCur->cursor->cursor().count_keys();
+   auto low = make_prefix(pCur->pgnoRoot);
+   auto high = make_prefix(pCur->pgnoRoot + 1);
+   *pnEntry = (i64)pCur->cursor->cursor().count_keys(low, high);
    return SQLITE_OK;
 }
 

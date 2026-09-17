@@ -17,13 +17,15 @@ namespace psitri::dwal
                                                               uint32_t        root_index,
                                                               database_type*  db,
                                                               bool            nested,
-                                                              root_mode       mode)
+                                                              root_mode       mode,
+                                                              transaction_lock lock)
        : _root(&root),
          _wal(wal),
          _db(db),
          _root_index(root_index),
          _nested(nested),
-         _mode(mode)
+         _mode(mode),
+         _transaction_lock(std::move(lock))
    {
       if (_mode == root_mode::read_write)
       {
@@ -61,6 +63,7 @@ namespace psitri::dwal
          _aborted(other._aborted),
          _nested(other._nested),
          _mode(other._mode),
+         _transaction_lock(std::move(other._transaction_lock)),
          _undo(std::move(other._undo))
    {
       other._committed = true;  // prevent double-abort in moved-from dtor
@@ -262,6 +265,7 @@ namespace psitri::dwal
    template <class LockPolicy, class Engine>
    void basic_dwal_transaction<LockPolicy, Engine>::commit()
    {
+      auto lock = std::move(_transaction_lock);
       assert(_root && !_committed && !_aborted);
       _committed = true;
 
@@ -368,6 +372,7 @@ namespace psitri::dwal
    template <class LockPolicy, class Engine>
    void basic_dwal_transaction<LockPolicy, Engine>::abort()
    {
+      auto lock = std::move(_transaction_lock);
       assert(_root && !_committed && !_aborted);
       _aborted = true;
 

@@ -13,7 +13,15 @@ namespace psitri::dwal
    basic_merge_cursor<Engine>::basic_merge_cursor(const btree_layer*            rw,
                               const btree_layer*            ro,
                               std::optional<cursor_t>  tri)
-       : _rw(rw), _ro(ro), _tri(std::move(tri))
+       : basic_merge_cursor(rw ? std::optional(btree_layer_view::live(*rw)) : std::nullopt,
+                            ro ? std::optional(btree_layer_view::live(*ro)) : std::nullopt,
+                            std::move(tri)) {}
+
+   template <class Engine>
+   basic_merge_cursor<Engine>::basic_merge_cursor(std::optional<btree_layer_view> rw,
+                              std::optional<btree_layer_view> ro,
+                              std::optional<cursor_t> tri)
+       : _rw(std::move(rw)), _ro(std::move(ro)), _tri(std::move(tri))
    {
       if (_rw)
       {
@@ -150,6 +158,16 @@ namespace psitri::dwal
    {
       if (_at_end)
          return false;
+      if (_at_rend)
+         return seek_begin();
+      if (_backward)
+      {
+         // Reposition every layer when changing direction; exhausted layers
+         // may still contain keys on the other side of the current position.
+         std::string after(_current_key);
+         after.push_back('\0');
+         return lower_bound(after);
+      }
 
       // Advance the source(s) that produced the current key.
       std::string_view cur = _current_key;
@@ -196,6 +214,29 @@ namespace psitri::dwal
             _tri->seek_last();
 
          _at_end = false;
+         return advance_backward();
+      }
+
+      if (!_backward)
+      {
+         const std::string key(_current_key);
+         if (_rw)
+         {
+            _rw_it = _rw->map.lower_bound(key);
+            _rw_end = _rw->map.end();
+            if (!_rw->map.empty()) --_rw_it;
+         }
+         if (_ro)
+         {
+            _ro_it = _ro->map.lower_bound(key);
+            _ro_end = _ro->map.end();
+            if (!_ro->map.empty()) --_ro_it;
+         }
+         if (_tri)
+         {
+            if (_tri->lower_bound(key)) _tri->prev();
+            else _tri->seek_last();
+         }
          return advance_backward();
       }
 
@@ -285,6 +326,7 @@ namespace psitri::dwal
    template <class Engine>
    bool basic_merge_cursor<Engine>::advance_forward()
    {
+      _backward = false;
       // Find the smallest live key across all sources.
       for (;;)
       {
@@ -393,6 +435,7 @@ namespace psitri::dwal
    template <class Engine>
    bool basic_merge_cursor<Engine>::advance_backward()
    {
+      _backward = true;
       // Find the largest live key across all sources (backward merge).
       for (;;)
       {

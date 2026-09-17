@@ -7,6 +7,9 @@
  * Must be compiled as C, not C++.
  */
 #define SQLITE_CORE 1
+#define PSITRI_BTREE_STORAGE 1
+struct Btree;
+int psitri_btree_journal_mode(struct Btree*, int);
 #include "../sqlite3/sqlite3.c"  /* Get all internal definitions (with btree.c #if 0'd) */
 
 #include <string.h>
@@ -166,7 +169,7 @@ int psitri_sizeof_sqlite3_value(void) {
  * Returns bytes written, or -1 on error.
  */
 int psitri_make_comparable_key(const unsigned char *pKey, int nKey,
-                               unsigned char *buf, int bufSize) {
+                               unsigned char *buf, int bufSize, const KeyInfo *keyInfo) {
    if (nKey < 1) return 0;
 
    u32 szHdr;
@@ -176,8 +179,12 @@ int psitri_make_comparable_key(const unsigned char *pKey, int nKey,
 
    u32 d = szHdr; /* data offset */
    int out = 0;
+   int fields = 0;
+   /* WITHOUT ROWID payload columns are stored in the value, not the key.
+    * Ordinary non-unique indexes include their rowid in nKeyField. */
+   int max_fields = keyInfo ? keyInfo->nKeyField : 0x7fffffff;
 
-   while (idx < szHdr) {
+   while (idx < szHdr && fields++ < max_fields) {
       u32 serial_type;
       idx += getVarint32(&pKey[idx], serial_type);
       u32 data_len = sqlite3VdbeSerialTypeLen(serial_type);

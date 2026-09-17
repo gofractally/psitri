@@ -201,6 +201,7 @@ namespace psitri::dwal
 
       static constexpr uint32_t       max_roots = 512;
       std::unique_ptr<dwal_root_type> _roots[max_roots];
+      typename LockPolicy::mutex_type _root_init_mutex;
 
       dwal_root_type& ensure_root(uint32_t index);
 

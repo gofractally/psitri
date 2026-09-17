@@ -437,6 +437,9 @@ namespace sal
    allocator::~allocator()
    {
       stop_background_threads();
+      // The utility session releases its session slot through mapped state.
+      // Destroy it before member teardown unmaps that state.
+      _utility_ses = allocator_session_ptr(nullptr);
       truncate_free_tail_stopped();
       free_allocator_index(_allocator_index);
    }

@@ -19,6 +19,7 @@
 #include <psitri/dwal/wal_writer.hpp>
 
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -35,11 +36,10 @@ namespace
       std::filesystem::path path;
       temp_dir()
       {
-         path = std::filesystem::temp_directory_path() / "dwal_test_XXXXXX";
-         // Make unique dir name
-         path = std::filesystem::temp_directory_path() /
-                ("dwal_test_" + std::to_string(reinterpret_cast<uintptr_t>(this)));
-         std::filesystem::create_directories(path);
+         auto pattern = (std::filesystem::temp_directory_path() / "dwal_test_XXXXXX").string();
+         auto* created = ::mkdtemp(pattern.data());
+         REQUIRE(created != nullptr);
+         path = created;
       }
       ~temp_dir() { std::filesystem::remove_all(path); }
    };

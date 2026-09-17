@@ -2,7 +2,7 @@
 
 Historical pre-implementation assessment, 2026-09-17. The original analysis
 below describes the former 65,535-byte Big limit and the proposed 24-bit change.
-It is superseded by [implemented large-value storage](chunked-values.md):
+It is superseded by [implemented large-value storage](../api/chunked-values.md):
 32-bit logical lengths, 16-bit continuation counts, 8-byte directory entries
 inside the first chunk, and tests through 512 MiB in both Small and Big.
 Small retains its 2 MiB physical allocator and uses direct-index continuations;
@@ -20,7 +20,7 @@ then fewer total chunks, then less unused tail space. This supersedes the
 intermediate quarter-segment ceiling and unconditional tail filling.
 The header/descriptor records each child's logical range so reads can locate
 the correct chunk despite unequal sizes. See the
-[chunked-value design](chunked-values.md) for allocation, offset indexing,
+[chunked-value design](../api/chunked-values.md) for allocation, offset indexing,
 ownership, compaction, and control-block costs.
 
 A 24-bit field can represent a contiguous value below 16 MiB, but cannot
@@ -158,7 +158,7 @@ visitors for both formats. Merely changing `sizeof` is not a migration plan.
   preserving existing calls. Callback reads borrow a range within one chunk or
   assemble only the selected bytes when it crosses boundaries, keeping the
   one-callback contract. Native scoped holders need the same owned fallback.
-  See the [range-read contract](range-reads.md). Streaming needs a separate
+  See the [range-read contract](../api/range-reads.md). Streaming needs a separate
   extension; native signed 32-bit size helpers require an audit for multi-gigabyte
   logical values. Keep payload limits distinct from physical allocation limits.
 

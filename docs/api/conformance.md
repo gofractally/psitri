@@ -6,7 +6,7 @@ The standard-only [adb concepts](../../libraries/adb/include/adb/concepts.hpp)
 separate cursor, transaction, session, snapshot, database, and optional feature
 requirements. `adb::openable_engine<E, Mode>` combines them with construction
 and exact role relationships. `<psitri/concepts.hpp>` binds the mode to SAL and
-provides `psitri::engine<E>` as the public gate.
+provides `psitri::engine<E>` as the public contract.
 
 An engine must declare these roles:
 
@@ -30,7 +30,7 @@ boolean, and transactions provide explicit abort. The engine config must
 support the common `sync_mode` setting. The complete operation semantics are
 in [the reference](reference.md), including the non-STL floor bound convention.
 
-Keep legacy adb concepts unchanged when adding capabilities. Range reads use
+Preserve the existing adb concepts when adding optional capabilities. Range reads use
 the optional `adb::range_reader`, `adb::range_cursor`, and `adb::range_engine`
 concepts, exposed for public profiles as `psitri::range_engine`. Existing
 experimental engines do not need to implement those methods to keep satisfying
@@ -79,7 +79,7 @@ The experimental tiered alias is intentionally asserted *not* to pass.
 
 Range tests additionally cover offset/length and EOF behavior, overload
 selection, borrowed addresses, callback exceptions, and snapshot stability in
-both profiles. The adb self-check includes an unchanged legacy engine without
+both profiles. The adb self-check includes a byte-only engine without
 range methods and verifies that it still meets the original engine concept.
 
 Big's large-value tests exercise full and range reads through 512 MiB, mixing
@@ -97,8 +97,8 @@ failure cleanup. It checks the same 4 GiB rejection before reading input bytes.
 
 The revision example verifies persisted owned subtrees and restore, rather than
 claiming that all optional subtree/undo semantics follow from the base concept.
-The broad historical `kv-compat-test` also exercises research engines; its GC
-failures must not be mistaken for a passing release gate for every engine.
+The broader `kv-compat-test` includes experimental engines. Evaluate those
+results separately from conformance of the maintained public profiles.
 
 ## Source compatibility policy
 
@@ -110,10 +110,9 @@ capability check and a test demonstrating its lifetime and failure semantics.
 Do not make an engine's private layout, allocator pointer, test helper, or
 benchmark switch a common requirement.
 
-The historical `psitri::database` and DWAL types remain available. New applications
-use the named profile headers and `database_for<E>`. The old DWAL concept remains
-for its existing implementations and cannot be used as evidence that they
-satisfy version 1. The source compatibility target does not promise a stable
+Use the named profile headers and `database_for<E>` in generic applications.
+The separate `psitri::database` implementation and DWAL composition interfaces
+do not establish conformance to `psitri::engine` version 1. The source compatibility target does not promise a stable
 C++ ABI, serialized raw C++ objects, or storage-format interchangeability.
 
 The API target links only maintained engine dependencies. Experimental headers

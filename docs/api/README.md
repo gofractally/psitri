@@ -1,10 +1,10 @@
 # The psitri C++ API
 
-Use `psitri::big_engine` for storage expected to outgrow RAM. Use
-`psitri::small_engine` when the database and its retained versions fit in RAM.
-Both implement the same C++23 byte-database contract and have compiling examples.
-`big_engine` is the recommended **Psibase integration candidate**; API
-conformance is not a claim of completed crash or beyond-RAM release qualification.
+psitri is a standalone embedded database library for transactional key-value
+storage, inexpensive snapshots, and ordered traversal. Choose
+`psitri::small_engine` when your data and retained versions fit in RAM, or
+`psitri::big_engine` for disk-backed storage expected to outgrow memory.
+Both implement the same C++23 byte-database contract.
 
 ```cpp
 #include <psitri/api.hpp>
@@ -13,44 +13,43 @@ static_assert(psitri::engine<Engine>);
 using Database = psitri::database_for<Engine>;
 ```
 
-The public CMake target is `psitri::api`. There are no test-directory includes,
-required adapter objects, virtual dispatch, or experimental engine dependencies
-on this target. `psitri::default_engine` currently aliases `big_engine`.
-Applications that own persistent data should select the engine explicitly.
+Link the public CMake target `psitri::api`. Engine selection happens at compile
+time, with no adapter object or virtual dispatch. The target includes only
+maintained engine dependencies. `psitri::default_engine` aliases Big;
+applications that own persisted data should select an explicit engine.
 
-## Read in this order
+## Start here
 
-1. [Build and first database](quickstart.md): third-party CMake, transactions,
+1. [Build and first database](quickstart.md): CMake integration, transactions,
    reads, snapshots, and executable examples.
-2. [API reference](reference.md): exact return values, cursor bounds, byte
-   encoding, open modes, limits, and error handling.
-3. [Lifetimes, concurrency, and durability](operations.md): the rules that
-   make a correct application, including configuration and shutdown.
-4. [Engine selection and Psibase](engines.md): concrete types, capabilities,
-   capacity, experimental namespaces, and migration requirements.
+2. [API reference](reference.md): return values, cursor bounds, byte encoding,
+   open modes, limits, and error handling.
+3. [Lifetimes, concurrency, and durability](operations.md): ownership, mutex-free
+   snapshot traversal, synchronization boundaries, configuration, and shutdown.
+4. [Choose an engine](engines.md): concrete types, capabilities, capacity,
+   optional configurations, and data migration.
 5. [Implementing and validating an engine](conformance.md): the concept,
-   runtime checks, compatibility policy, and extending the API.
-6. [Large-value impact assessment](large-values.md): proposed 24-bit lengths,
-   Psibase/Triedent requirements, format compatibility, and allocation limits.
-7. [Large values in Small and Big](chunked-values.md): storage diagrams,
-   direct-address and segment-aware chunks, ownership, and tests through 512 MiB.
-8. [Range reads](range-reads.md): optional offset/length capability, EOF semantics,
-   borrowed views, and transparent owned fallback across chunks.
+   behavioral checks, compatibility policy, and optional capabilities.
+6. [Large values in Small and Big](chunked-values.md): storage layouts,
+   segment-aware chunks, ownership, and allocation tests through 512 MiB.
+7. [Range reads](range-reads.md): offsets and lengths, EOF semantics, borrowed
+   views, and transparent owned fallback across chunks.
 
-## What is stable here?
+## The source contract
 
-`psitri::engine<E>` is the version 1 **source interface** to target in new
-code. It builds on the canonical `adb::openable_engine<E, sal::open_mode>`
-concept and requires a writable sync setting, with engine role types, construction, rollback, owned snapshots, and
-bidirectional reads checked together. `adb` remains independently usable and
-standard-library-only. `psitri::api_version` is `1`.
+`psitri::engine<E>` is the version 1 source interface. It builds on
+`adb::openable_engine<E, sal::open_mode>` and checks engine role types,
+construction, sync configuration, rollback, owned snapshots, and bidirectional
+reads. `adb` is independently usable and standard-library-only.
+`psitri::api_version` is `1`.
 
-The maintained profiles are Small and Big in their default layouts. The
-existing `psitri::database` name still denotes the legacy implementation; use
-`database_for<Engine>` for new generic code. Disk formats, C++ ABI compatibility,
-allocator internals, experimental types, and legacy layout switches are outside
-this source contract. Changing an alias does not convert database files.
+Use `database_for<Engine>` for generic application code. The separate
+`psitri::database` implementation is not the generic engine alias. The source
+contract covers Small and Big in their supplied layouts; it does not promise
+C++ ABI stability, interchangeable disk formats, or experimental internals.
 
-The [basic example](../../examples/api/basic.cpp) is built for both profiles.
+The [basic example](../../examples/api/basic.cpp) builds for both profiles.
 The [revision example](../../examples/api/revisions.cpp) demonstrates Big's
 additional subtree ownership API, including close, reopen, and restore.
+See [durability](operations.md#durability) for validation coverage and deployment
+considerations.

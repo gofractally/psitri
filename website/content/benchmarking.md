@@ -1,7 +1,6 @@
 # Benchmarks that can be compared later
 
-The repository already retains human-readable benchmark archives in `logs/`.
-New runs should also use `scripts/benchmark.py`, a Python 3.10+ standard-library
+Keep each benchmark run in `logs/`. Use `scripts/benchmark.py`, a Python 3.10+ standard-library
 tool that writes structured metadata beside raw stdout and stderr. Every run
 gets a unique directory; rerunning never overwrites earlier evidence.
 
@@ -55,7 +54,7 @@ publication. Capture does not automatically upload or commit a result.
 ## Parse other workloads
 
 `--parser bank` understands the existing bank table, including its correctness
-column. Missing live-byte instrumentation (`0` in historical adapters) is omitted,
+column. Missing live-byte instrumentation (`0` in the bank output) is omitted,
 not treated as zero storage. Record repetitions separately.
 
 `--parser json` expects stdout to be one JSON list:

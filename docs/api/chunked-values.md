@@ -36,7 +36,7 @@ All external values use one packed `key_val_node` format, defined in
 [key_val_node.hpp](../../libraries/sal_art_ref/include/sal_art_ref/key_val_node.hpp).
 Only continuation payloads use a second type, `value_chunk`, defined in
 [large_value.hpp](../../libraries/sal_art_ref/include/sal_art_ref/large_value.hpp).
-There are no legacy-format readers or separate wide-value/descriptor types.
+The head stores the key, value length, and chunk directory in one allocation.
 
 ```text
 key_val_node (29-byte fixed header)
@@ -141,7 +141,7 @@ typed-object IDs are 1 through 65,534; IDs zero and 65,535 are reserved. Native
 crossing-range assembly until its next byte read or destruction. Copies share
 an existing assembly buffer. The transaction must still protect the underlying
 slot for subsequent reads. Chunking applies to the maintained radix layout;
-the gated `PART_CBUCKET` layout remains experimental and rejects large values.
+the optional `PART_CBUCKET` layout remains experimental and rejects large values.
 
 ## Limits shared by both profiles
 
@@ -159,8 +159,8 @@ and displaced-value size returns, use signed 64-bit results to accommodate the
 full unsigned-32-bit range while preserving negative sentinels. Range offsets and lengths remain 64-bit. The
 required public concept and its owning/callback result types are unchanged.
 
-This is the new library's storage format; compatibility with development-era
-files is not retained. Big and Small do not share serialized formats or raw IDs.
+Big and Small have distinct serialized formats and raw IDs. Use logical
+export/import when moving values between engines.
 
 ## Big segment placement
 
@@ -246,10 +246,10 @@ Ordinary compaction relocates a whole immutable allocation behind the same
 control block. The head's directory moves with its first payload; continuations
 move independently. Compaction preserves chunk boundaries and ownership. Re-chunking,
 partial writes, deduplication, and streaming writes are not implemented.
-`upsert` still requires a contiguous caller-owned input, and a full owning read
+`upsert` requires a contiguous caller-owned input, and a full owning read
 requires memory for the entire result. Use ranges to bound read memory.
 
-## Validation and remaining qualification
+## Validation coverage
 
 [Big's large-value tests](../../tests/api/large_values.cpp) cover:
 
@@ -279,5 +279,5 @@ requires memory for the entire result. Use ranges to bound read memory.
 
 The Big tests' 128 MiB setting bounds the requested pinned cache; it is not a measurement
 or bound on process RSS or the OS page cache. These tests do not establish power-loss
-atomicity, disk-full behavior, performance versus other engines, or production
-beyond-RAM qualification. Those remain release qualification work for Psibase.
+atomicity, disk-full behavior, performance versus other engines, or sustained
+beyond-RAM behavior. Validate these requirements for your deployment.

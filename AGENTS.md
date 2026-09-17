@@ -23,3 +23,12 @@ a workload the recorder cannot parse.
 Website validation: `python3 -m unittest discover -s tests/website -v`, then
 `python3 scripts/build_site.py`. The Pages workflow publishes only the generated
 site artifact. See `website/README.md` for its publication allowlist.
+
+# Public documentation
+
+Write the site and API guides for developers evaluating psitri as a standalone
+library. Focus on present capabilities and operating requirements. Keep internal
+development history and application-specific adoption plans out of public copy.
+Retain benchmark revisions, dates, and configuration limits in methodology.
+Use “practically lock-free” with accurate synchronization boundaries, and explain
+compatibility-layer overhead alongside “Keep the API. Rethink the engine.”

@@ -56,8 +56,9 @@
             Keep a version. Branch a tree. Let readers run.<br
               class="desktop-break"
             />
-            psitri makes evolving application state inexpensive—with one C++ API
-            and room to grow beyond RAM.
+            psitri is an embedded, transactional key-value database with cheap
+            snapshots, composable trees, and one C++ API for data in RAM and
+            beyond.
           </p>
           <div class="actions">
             <a class="button primary" href="docs/quickstart.html"
@@ -313,15 +314,15 @@
           </article>
           <article class="feature">
             <div class="feature-index">05 <span>Both engines</span></div>
-            <h3>Readers keep<br />their own view.</h3>
+            <h3>Practically<br />lock-free.</h3>
             <p>
-              Readers traverse stable snapshots while the writer creates the
-              next version. No transaction-wide reader lock holds the writer
-              hostage.
+              Parallel readers traverse stable snapshots without node mutexes
+              while the writer builds the next version. Atomic coordination
+              keeps the read path independent of the writer’s tree work.
             </p>
             <small
-              >Use a separate session on each reader thread. Brief publication
-              locks and residency pins still exist.</small
+              >Root acquisition and publication synchronize. Active reads do not
+              wait for the writer; residency pins defer storage reuse.</small
             >
           </article>
           <article class="feature">
@@ -332,8 +333,8 @@
               tables. It is the foundation for parallel work on disjoint state.
             </p>
             <small
-              >The current portable API requires one serialized writer.
-              Parallel-root integration is still being qualified.</small
+              >Native SAL supports a writer per root. The portable Small/Big API
+              requires one serialized writer.</small
             >
           </article>
         </div>
@@ -417,11 +418,10 @@
               <div class="engine-foot">
                 <strong>Capacity, precisely.</strong>
                 <p>
-                  The historical 32-bit-handle layout addresses a 32 GiB arena.
-                  Today’s five-byte profile defaults to a 32 GiB ordinary arena
-                  and can address just under 512 GiB. Metadata, retained
-                  versions, and allocation overhead consume capacity; large
-                  values have a separate arena.
+                  Small defaults to a 32 GiB ordinary arena and can address just
+                  under 512 GiB with five-byte handles. Nodes, metadata, and
+                  retained versions consume capacity. Large values use a
+                  separate arena; size your working set to fit available RAM.
                 </p>
               </div>
             </article>
@@ -445,12 +445,12 @@
                 <li>Segment-aware large values with range reads</li>
               </ul>
               <div class="engine-foot">
-                <strong>The Psibase integration candidate.</strong>
+                <strong>Storage that can grow with your application.</strong>
                 <p>
-                  Big is the default public engine. Sustained beyond-RAM
-                  operation and crash/power-loss recovery remain
-                  release-qualification gates. A configured capacity ceiling is
-                  not a demonstrated scale result.
+                  Big is the default engine for disk-backed storage. Use
+                  compaction and hot-object promotion to manage locality as your
+                  dataset grows, with snapshots and the same core API as Small.
+                  See the operating guide for durability and validation status.
                 </p>
               </div>
             </article>
@@ -508,16 +508,22 @@
           <div class="compat-copy">
             <h3>A familiar<br />way in.</h3>
             <p>
-              The MDBX C/C++ compatibility implementation is in this repository.
-              RocksDB, SQLite, LevelDB, and DuckDB integrations exist in earlier
-              project work and have not yet been migrated to the maintained
-              engine API here.
+              The MDBX C/C++ compatibility implementation is included. SQLite,
+              RocksDB, LevelDB, and DuckDB have separate integration
+              implementations; versions targeting this repository’s shared
+              Small/Big API are not available.
             </p>
             <p>
-              Compatibility means matching the calls and semantics your
-              application uses. It does not mean sharing on-disk formats,
-              supporting every extension, or automatically exposing every native
-              psitri feature.
+              <strong>Compatibility has a performance cost.</strong> Another API
+              imposes its own transaction, cursor, and ownership workflow.
+              Translating that workflow adds overhead and can limit optimization
+              paths available through psitri’s native interface.
+            </p>
+            <p>
+              Use a compatible API to reduce migration work. Use the native API
+              for direct access to owned snapshots, composable trees, and
+              engine-specific capabilities. Benchmark the interface your
+              application will actually use.
             </p>
             <a class="text-link" href="docs/compatibility.html"
               >Integration status and evaluation guide ↗</a
@@ -617,13 +623,13 @@
               <h2>Evidence you<br />can interrogate.</h2>
             </div>
             <p>
-              There is no single “fastest database.” Explore archived workloads,
-              including the tradeoffs. Historical results describe the measured
-              revisions—not a guarantee for today’s build.
+              Compare throughput and storage costs on the same workload. Every
+              result identifies its tested revision, hardware, and durability
+              settings, so you can judge what matters for your application.
             </p>
           </div>
           <div class="benchmark-topline">
-            <span class="pill">Archived · 17 Jun 2026</span
+            <span class="pill">Measured · 17 Jun 2026</span
             ><span>Apple M5 Max · 18 cores · Release</span
             ><a href="data/benchmarks.json" download>Download data ↓</a>
           </div>
@@ -633,11 +639,11 @@
                 <p class="eyebrow">
                   Bank transfer workload / Same workload, native engines
                 </p>
-                <h3>psitri lineages vs. real libmdbx</h3>
+                <h3>psitri vs. libmdbx</h3>
               </div>
               <label class="research-toggle"
-                ><input type="checkbox" id="show-research" /> Include research
-                engines</label
+                ><input type="checkbox" id="show-research" /> Include
+                experimental engines</label
               >
             </div>
             <div
@@ -665,15 +671,15 @@
             </div>
             <div id="benchmark-bars" class="benchmark-bars" aria-live="polite">
               <p>
-                Big lineage: 551,010 transfers/s. Small lineage: 874,524
+                psitri Big: 551,010 transfers/s. psitri Small: 874,524
                 transfers/s. libmdbx: 77,214 transfers/s.
                 <a href="docs/benchmarks.html">All results and methodology →</a>
               </p>
             </div>
             <div class="benchmark-footnote">
               <strong id="benchmark-insight"
-                >7.14× the write throughput for the Big lineage in this
-                run.</strong
+                >7.14× the write throughput for Big in this measured
+                configuration.</strong
               >
               <p id="benchmark-tradeoff">
                 The same run recorded 542 MB disk high-water for Big versus 64
@@ -693,9 +699,10 @@
               is not a synchronous-durability comparison.
             </p>
             <p>
-              <strong>The scope</strong>Historical <code>sal_art_ref</code> and
-              <code>start_ref</code> profiles. One archived run; no error bars
-              or exact MDBX revision recorded. Not an API-shim comparison.
+              <strong>The configuration</strong>psitri revision
+              <code>7a3c8a5</code>, using native Big and Small implementations.
+              One recorded run per command. Configuration details and
+              reproducibility limits are in the methodology.
             </p>
           </div>
           <a class="text-link" href="docs/benchmarks.html"
@@ -703,46 +710,34 @@
           >
           <div class="evidence-grid">
             <article class="evidence-card">
-              <p class="eyebrow">Fixed memory / Historical 32-bit handles</p>
-              <h3>Point reads<br />ahead of libart.</h3>
+              <p class="eyebrow">Small / In-memory adaptive radix tree</p>
+              <h3>Direct addresses.<br />Less indirection.</h3>
               <p>
-                The 32 GiB fixed-address design recorded
-                <strong>8–27% lower lookup latency</strong> across four
-                in-memory cases. Inserts were <strong>12–20% slower</strong>.
+                Small follows fixed arena addresses without a movable-object
+                control-block lookup. It combines an in-memory ART with
+                transactions, ordered scans, and inexpensive snapshots.
               </p>
-              <div
-                class="art-bars"
-                aria-label="Latency relative to libart, lower is better"
-              >
+              <div class="scale-stats">
                 <div>
-                  <span>Integer hit</span><i style="--width: 87%"></i
-                  ><b>0.87×</b>
-                </div>
-                <div>
-                  <span>Integer miss</span><i style="--width: 82%"></i
-                  ><b>0.82×</b>
-                </div>
-                <div>
-                  <span>Dictionary hit</span><i style="--width: 92%"></i
-                  ><b>0.92×</b>
-                </div>
-                <div>
-                  <span>Dictionary miss</span><i style="--width: 73%"></i
-                  ><b>0.73×</b>
+                  <strong>4.18×</strong><span>MDBX read throughput</span>
                 </div>
               </div>
+              <p>
+                <strong>48.6 million reads/second</strong> in the bank workload
+                above, compared with 11.6 million for MDBX. Read-only phase;
+                four reader threads.
+              </p>
               <small
-                >Apple M5 · June 2026 · latency relative to libart. Historical
-                four-byte handles, not the current five-byte default. Raw
-                timings and repeat count were not retained in this
-                record.</small
-              ><a class="text-link" href="docs/benchmarks.html#art-lookups"
-                >See all six cases ↗</a
+                >Apple M5 Max · measured revision 7a3c8a5 · June 17, 2026. See
+                the same run’s write and storage results above.</small
+              >
+              <a class="text-link" href="docs/engines.html"
+                >Explore the Small engine ↗</a
               >
             </article>
             <article class="evidence-card scale-card">
-              <p class="eyebrow">Research / Tiered engine</p>
-              <h3>A billion keys.<br />An archived milestone.</h3>
+              <p class="eyebrow">Experimental / Tiered engine</p>
+              <h3>A billion keys.<br />58 GB resident.</h3>
               <div class="scale-stats">
                 <div><strong>1B</strong><span>keys inserted</span></div>
                 <div>
@@ -767,12 +762,12 @@
                 ><span>1B keys / 58.08 GB RSS</span>
               </div>
               <small
-                >Experimental hot-delta / cold-base engine on a 128 GB M5 Max.
-                This run fit in RAM. It is not proof of sustained beyond-RAM
-                behavior for Big.</small
+                >Tiered hot-delta / cold-base configuration, measured on a 128
+                GB M5 Max. This is a RAM-resident scale test of the experimental
+                tiered engine.</small
               ><a
                 class="text-link"
-                href="docs/benchmarks.html#billion-key-research-run"
+                href="docs/benchmarks.html#billion-key-scale-test"
                 >Inspect the scale run ↗</a
               >
             </article>
@@ -853,12 +848,12 @@ auto saved = writer-&gt;get_root(0); // retain a version</code></pre>
           <details>
             <summary>Is psitri ready for production?</summary>
             <p>
-              The public source interface is defined and both maintained
-              profiles pass the common API tests. Big is the recommended Psibase
-              integration candidate. Crash/power-loss testing, sustained
-              beyond-RAM qualification, and workload-specific validation remain
-              before a broad production recommendation. GC and tiered research
-              configurations stay explicitly experimental.
+              Small and Big implement the public C++ API and pass its behavioral
+              tests, including snapshots, rollback, range reads, and clean
+              durable reopen. Comprehensive crash/power-loss and sustained
+              beyond-RAM validation is incomplete. Evaluate those requirements
+              against your workload before production deployment. GC and tiered
+              configurations are explicitly experimental.
             </p>
             <a href="docs/operations.html">Read the operating contract ↗</a>
           </details>
@@ -875,12 +870,12 @@ auto saved = writer-&gt;get_root(0); // retain a version</code></pre>
           <details>
             <summary>Is this faster than MDBX or RocksDB?</summary>
             <p>
-              Some archived workloads show a substantial advantage over MDBX;
-              the same runs expose storage tradeoffs. The in-memory ART results
-              show both wins and slower inserts. We do not have a controlled,
-              current RocksDB comparison in this repository to publish. Ethereum
-              sync through the MDBX abstraction motivated further experiments;
-              these microbenchmarks do not establish an end-to-end sync win.
+              The published bank workload shows higher throughput than MDBX,
+              along with a higher disk high-water mark. The result depends on
+              the tested configuration and durability settings. A controlled
+              RocksDB comparison is not available. Measure your own workload and
+              include storage, memory, latency, and recovery requirements in the
+              comparison.
             </p>
           </details>
           <details>
@@ -893,14 +888,30 @@ auto saved = writer-&gt;get_root(0); // retain a version</code></pre>
             </p>
           </details>
           <details>
+            <summary>What does “practically lock-free” mean?</summary>
+            <p>
+              The read path avoids node mutexes, allowing readers to traverse
+              snapshots in parallel with the writer’s tree work. Big uses atomic
+              residency markers so readers can continue while objects are
+              relocated; Small reads fixed addresses protected by its snapshot.
+              Acquiring or publishing roots can synchronize, and allocation,
+              storage I/O, and maintenance have their own coordination. This is
+              a mutex-free read path, not a formal lock-free guarantee for every
+              database operation.
+            </p>
+            <a href="docs/operations.html#read-path-and-synchronization"
+              >See the synchronization boundaries ↗</a
+            >
+          </details>
+          <details>
             <summary>Can multiple threads write at once?</summary>
             <p>
               The underlying SAL architecture supports independent root writers.
               The maintained portable database API currently requires a single
               serialized writer, with separate reader sessions on their own
               threads. The MDBX shim also preserves MDBX’s one-writer semantics.
-              Do not infer concurrent portable writes from the allocator’s
-              capabilities.
+              Use separate reader sessions to keep reads independent of the
+              writer’s tree updates.
             </p>
           </details>
           <details>

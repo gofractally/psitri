@@ -1,100 +1,85 @@
 # psitri
 
-Persistent, transactional key-value engines, a shared C++ database interface,
-and common behavioral tests and benchmarks.
+A standalone embedded database library built around copy-on-write adaptive radix
+trees. Retain snapshots without copying the database, let readers traverse a
+stable view while writes proceed, and choose a storage engine for resident or
+disk-backed data through one C++23 source interface.
 
-The [psitri website](https://gofractally.github.io/psitri/) explains the architecture,
-engine choices, compatibility-layer status, and historical benchmark evidence.
-Its [source and deployment guide](website/README.md) live in this repository.
-For new performance measurements, use the [benchmark recorder](scripts/benchmark.py)
-and [comparison workflow](website/content/benchmarking.md) to retain reproducible
-results and detect regressions.
+The **practically lock-free** design keeps node mutexes off snapshot traversal.
+Atomic residency and lifetime tracking let readers operate in parallel with the
+writer's tree work. Synchronization is concentrated at root acquisition and
+publication, writer coordination, and allocator/maintenance boundaries.
 
-The product goal is a reliable database that scales beyond RAM. Psibase must
-be able to adopt faster implementations through a stable API while preserving
-revision, snapshot, ownership, rollback, and durability semantics. Ethereum
-sync through the MDBX compatibility layer is a useful integration workload;
-winning that benchmark is not a prerequisite for the Psibase API.
+See the [website](https://gofractally.github.io/psitri/),
+[developer guide](docs/api/README.md), and [quickstart](docs/api/quickstart.md).
 
-## Public C++ API
+## One API, two storage profiles
 
-Link `psitri::api` and include `<psitri/api.hpp>`. The version 1 contract is
-`psitri::engine<E>`; use `psitri::big_engine` for the beyond-RAM integration
-candidate or `psitri::small_engine` for resident data. `default_engine` aliases
-Big. `database_for<E>` names the database without changing the legacy
-`psitri::database` type.
+```cpp
+#include <psitri/api.hpp>
+using Engine = psitri::big_engine; // or psitri::small_engine
+static_assert(psitri::engine<Engine>);
+```
 
-Start with the [developer guide](docs/api/README.md),
-[compiling quickstart](docs/api/quickstart.md), and
-[engine/Psibase recommendation](docs/api/engines.md). Both maintained profiles
-pass the common API suite. Crash recovery and sustained beyond-RAM release
-qualification remain separate gates. Both profiles support values up to
-4 GiB − 1 byte, with mixed allocation/free tests through 512 MiB. Big uses
-segment-aware chunks; Small uses fixed-address chunks. The write-oriented
-tiered alias is explicitly experimental.
+Link `psitri::api`. Use `database_for<Engine>` for a database type selected at
+compile time, without virtual dispatch.
+
+- **Small** follows fixed addresses for data and retained versions that fit in
+  RAM. Its default ordinary arena is 32 GiB; five-byte handles address just under
+  512 GiB. Nodes, metadata, fragmentation, and snapshots consume capacity. Large
+  values use a separate arena.
+- **Big** uses movable reference-counted storage, segment compaction, and optional
+  access-frequency-based hot-object promotion. Choose it for disk-backed data
+  expected to outgrow RAM, owned subtrees, and native savepoints.
+
+Both profiles provide byte CRUD, ordered scans, commit/abort, owned snapshots,
+and range reads. Logical values may be up to 4 GiB − 1 byte; mixed allocation/free
+is tested through 512 MiB. Big packs values into segment-aware chunks; Small uses
+fixed-address chunks. The shared API permits parallel readers and one serialized
+writer. Native SAL supports independent root writers.
+
+Read the [capability matrix](docs/api/engines.md) and
+[operating contract](docs/api/operations.md) for exact limits. The common API and
+clean-reopen suites pass; comprehensive crash/power-loss and sustained beyond-RAM
+validation is incomplete. Choose durability explicitly and validate your
+application's workload and failure model.
+
+## Keep the API. Rethink the engine.
+
+The MDBX C/C++ compatibility layer lets existing applications evaluate psitri
+through a familiar interface. Translating a foreign API's transaction, cursor,
+and ownership workflow adds overhead and can restrict optimization paths exposed
+by the native interface. Use native psitri for direct access to its ownership and
+tree operations; measure compatible APIs through your actual application.
+
+See [integration status and tradeoffs](website/content/compatibility.md).
+API compatibility does not imply interchangeable database files. Migrate stored
+data through logical export/import or a validated converter.
+
+## Benchmarks
+
+The [published methodology](website/content/benchmarks.md) identifies each
+measurement's revision, hardware, workload, durability, and configuration.
+Use the [benchmark recorder](scripts/benchmark.py) and
+[comparison workflow](website/content/benchmarking.md) to retain raw output and
+metadata and detect regressions under matched conditions. Keep results in `logs/`.
 
 ## Repository layout
 
 | Directory | Role |
 |---|---|
-| `libraries/adb` | C++ database concepts and shared behavioral checks; the foundation of the public API. |
-| `libraries/psitri_api` | Public profile names, API contract, and consumer CMake targets. |
-| `libraries/sal` | Movable, refcounted storage and compaction. |
-| `libraries/sal_art_ref` | Heart: refcounted ART with packed pages on SAL; the primary engine to qualify for Psibase's beyond-RAM storage. |
-| `libraries/start_ref` | Part: fixed-address ART with refcounts; the RAM-resident performance option and a candidate hot tier. |
-| `libraries/delta_art` | Reusable hot-delta/base composition for sustained writes. The chosen component engines determine whether a configuration is experimental. |
-| `libraries/psitri` | Existing psitri implementation and DWAL API, retained for compatibility. |
-| `libraries/art` | ART write-set machinery used by DWAL. |
-| `libraries/psitrimdbx`, `shims/` | Foreign-API integrations. |
-| `experimental/` | Research engines and allocators retained for benchmarks and reference. |
-| `tests/`, `benchmarks/`, `logs/` | Shared checks, comparison workloads, and historical evidence. |
+| `libraries/adb` | C++ database concepts and shared behavioral checks |
+| `libraries/psitri_api` | Public profile names and consumer CMake targets |
+| `libraries/sal` | Movable, refcounted storage and compaction |
+| `libraries/sal_art_ref` | Big: refcounted ART with packed pages on SAL |
+| `libraries/start_ref` | Small: fixed-address, refcounted ART |
+| `libraries/delta_art` | Hot-delta/base composition; supplied tiered profiles are experimental |
+| `libraries/psitri`, `libraries/art` | DWAL implementation and write-set machinery |
+| `libraries/psitrimdbx`, `shims/` | Foreign-API integration code and integration directory |
+| `experimental/` | Optional engines and allocators for evaluation and benchmarks |
+| `tests/`, `benchmarks/`, `logs/` | Behavioral checks, comparison workloads, and retained evidence |
+| `website/` | Public website source and deployment guide |
 
-Placement in `libraries/` identifies the code being maintained toward the
-supported API; it does not certify every configuration as release-qualified.
-The experimental inventory and unchanged build behavior are documented in
-[experimental/README.md](experimental/README.md).
-
-## Small-memory performance and capacity
-
-The historical fixed-address, **32-bit-handle** configuration beat libart on
-measured in-RAM point lookups. The recorded M5 results include u64 hit/miss
-latencies of 0.87x/0.82x libart and dictionary hit/miss latencies of
-0.92x/0.73x. These are workload-specific read results; the same record reports
-slower inserts. See the [original measurements](libraries/start_ref/STATUS.md).
-
-That layout uses a 28-bit index plus a four-bit tag, addressing **32 GiB** of
-128-byte allocation lines. This is an arena limit, not 32 GiB of user payload
-or a requirement to run a 32-bit process. Current `start_ref` uses five-byte
-handles, retains a 32 GiB default ordinary arena, and its allocator permits
-just under 512 GiB in that arena. Large values have a separate arena. Neither
-the historical result nor the representable limit is a new benchmark or scale
-qualification of the current wider-handle implementation. RAM sizing must
-include metadata, fragmentation, retained snapshots, and pending reclamation.
-
-## Compatibility during reorganization
-
-The layout move preserves engine targets, public include spellings, backend
-selections, and database formats. A subsequent naming cleanup gives the
-experimental allocators descriptive names, `sal_hybrid` and `sal_gc`, while
-`sal` remains the canonical maintained library. See the
-[allocator rename map](experimental/README.md#allocator-names) for research
-namespace, header, and target changes. Experimental engines remain in the
-existing build and comparison suite. In particular, the MDBX
-shim's existing `delta_art` default still uses experimental `start_ver` over
-`sal_art_ref`; the directory move does not switch existing users' engines.
-
-The API normalization adds public Heart headers and the checked factory,
-transaction, cursor, and owned-snapshot contract over
-[adb](libraries/adb/include/adb/concepts.hpp). It normalizes callback miss
-behavior, forwards Big's allocator configuration, and rejects values that
-would overflow its persisted length field. Big uses a unified external-value
-format with an embedded continuation directory and a 4 GiB − 1 byte value limit;
-its development-era disk layouts are not retained.
-The older DWAL concept remains an internal composition protocol; experimental
-engines do not acquire public API status merely by satisfying it.
-
-Migrated from psitri-merge at tag `reorg-baseline`. The earlier rename map and
-carried TODO ledger remain in [docs/reorg_plan.md](docs/reorg_plan.md). Historical
-documents and logs retain their original paths; for the six research modules,
-read `libraries/<name>` as `experimental/<name>` in the current checkout,
-then apply the allocator rename map above.
+The public API target includes only maintained Small/Big dependencies. Optional
+configurations require explicit experimental headers and targets; their interface
+and validation status are separate from the public engine contract.

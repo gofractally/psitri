@@ -27,8 +27,9 @@ revision records; Big can store their owned subtrees in a manifest.
 
 Use one writer thread, with the database opened and write session created on
 that thread. Serialize write transactions and scope each to completion before
-starting another. Native engine internals support differing concurrency
-patterns; those are not promises of the portable API.
+starting another. Native SAL supports separate writers for independent root
+tables; the portable Small/Big API uses one serialized writer. The Big database
+adapter shares an engine write session across its write-session handles.
 
 Each reader thread creates, uses, and destroys its own read session and cursor.
 Keep sessions, snapshots, and cursors on their creating thread. The database
@@ -44,11 +45,44 @@ cursor. Do not pass a writer's owned snapshot to another thread; use that
 thread's read session to acquire its own snapshot. This contract does not
 promise a shared snapshot transfer API between threads.
 
-A callback's byte view is borrowed only for the call. Big holds a residency
-lock while the callback runs; a long callback can delay compaction. Copy data
-before queueing it to another thread, doing slow I/O, or awaiting anything.
-Similarly, native `pinned_value()` locks are for short scopes; they are outside
-the common API.
+### Read path and synchronization
+
+**Practically lock-free:** once a snapshot is acquired, tree traversal does
+not take node mutexes.
+Readers follow immutable snapshot data while the writer changes private paths.
+A reader does not wait for the writer's transaction to finish.
+
+Big's `sal::read_lock` is an **atomic residency marker**, not a blocking
+reader-writer mutex. Entering the read scope publishes the session's recycling
+position; leaving clears it. The compactor can relocate objects while retaining
+their old storage until readers finish. Long read scopes defer segment reuse,
+and can eventually limit compaction progress; they do not make the reader wait
+for a compactor lock. Node resolution loads the object's location atomically.
+
+Small follows fixed addresses. Its read-session cursor acquires a snapshot by
+publishing an atomic hazard slot and validating the root, retrying if publication
+races with a commit. No relocation pin is needed during traversal.
+
+| Boundary | Synchronization |
+|---|---|
+| Big: acquire a published snapshot | Shared per-root mutex protects loading and retaining the root |
+| Big: publish a root | Per-root writer mutex and exclusive root-publication mutex |
+| Small: acquire a read-session cursor | Atomic hazard publication and root validation |
+| Small: acquire an owned root / publish roots | Root-publication mutex |
+| Small: start a write transaction | Per-root writer mutex held until commit or abort |
+| Allocation and maintenance | Atomic fast paths plus locks or waits on some segment-claim, growth, sync, and release paths |
+
+Root acquisition can therefore wait behind publication, even though an already
+acquired snapshot can continue reading. Writer serialization and publication
+are separate from reading the tree. **Mutex-free snapshot traversal** is the basis of the
+practically lock-free design; the whole database does not promise formal lock-free
+or wait-free progress. Page faults, storage I/O, and allocation can also wait.
+
+A callback's byte view is borrowed only for the call. Big retains the atomic
+residency marker for a borrowed view; a long callback can delay storage reuse.
+Copy data before queueing it to another thread, doing slow I/O, or awaiting
+anything. Native `pinned_value()` also holds a residency marker and is intended
+for short scopes; it is outside the common API.
 
 Do not mix multiple writable opens of the same directory or assume a shared
 multi-process writer protocol. Big read-only opens use a shared advisory
@@ -70,9 +104,8 @@ Choose `Engine::config`, not another engine's config type. Set it before open.
 | Big: `max_database_size` | Address-space/storage ceiling, default 32 TiB; platform/filesystem constraints apply |
 
 Both profiles default to `sync_mode::none`. Big's profile defaults disable
-`write_protect_on_commit` and `enable_read_cache`, preserving its historical
-baseline. It otherwise inherits SAL's runtime settings. The factory now forwards
-all fields to SAL; previously it forwarded only sync mode. The explicit
+`write_protect_on_commit` and `enable_read_cache`. Other SAL runtime settings
+are configurable through the profile config and forwarded by the factory. The explicit
 `open_mode` controls read-only operation and overrides `cfg.read_only`.
 
 For example, before opening a Big database:
@@ -91,7 +124,7 @@ budget to platform limits; for diagnostics inspect
 `db->underlying_allocator().get_runtime_config()` with no concurrent config
 mutation. This is a Big-specific diagnostic, not the generic API.
 
-Historical benchmark overrides `HEART_READ_CACHE=1`, `HEART_READ_CACHE_SEC`,
+Environment overrides `HEART_READ_CACHE=1`, `HEART_READ_CACHE_SEC`,
 and `HEART_PINNED_MB` take precedence over these respective fields when set.
 Clear them when validating application configuration. Layout experiments and
 `engine_for_testing()` are not supported application tuning APIs.
@@ -120,13 +153,13 @@ Small transactions sync their companion arena's heads and continuations before
 the ordinary arena and root publication, using the configured policy. This
 ordering also covers contiguous values in the companion arena.
 
-The API suite verifies **clean close/reopen** with `fsync`, not power failure or
-arbitrary process-kill recovery. Neither engine is certified for those scenarios
-by this API change. Release qualification must still cover interrupted commits,
-allocator/refcount reconstruction, reuse after recovery, disk-full/I/O failures,
-and prolonged compaction with data beyond RAM. Small exposes low-level rebuild
-machinery but the database factory does not perform a complete root walk/rebuild.
-Do not turn a passing C++ concept or clean-reopen test into a stronger claim.
+The API suite verifies **clean close/reopen** with `fsync`. Big's large-value
+suite also exercises refcount reconstruction and explicit full recovery.
+Comprehensive power-loss, arbitrary process-kill, disk-full/I/O failure, and
+sustained beyond-RAM validation is incomplete. Select the library against your
+application's failure model and test recovery on the target storage stack.
+Small exposes low-level rebuild machinery, but its database factory does not
+perform a complete root walk/rebuild.
 
 Use `create_only` for new databases and `open_existing` for expected existing
 ones so missing data is not mistaken for a fresh successful open. Keep external

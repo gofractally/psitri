@@ -139,8 +139,8 @@ async function loadBenchmarks() {
       const ratio = (big / baseline).toFixed(2);
       document.querySelector("#benchmark-insight").textContent =
         metric === "disk"
-          ? `A visible tradeoff: ${ratio}× the disk high-water for the Big lineage.`
-          : `${ratio}× the ${spec.short} for the Big lineage in this run.`;
+          ? `A visible tradeoff: ${ratio}× the disk high-water for Big in this measured configuration.`
+          : `${ratio}× the ${spec.short} for Big in this measured configuration.`;
       document.querySelector("#benchmark-tradeoff").textContent =
         metric === "disk"
           ? "Lower is better here. This measures on-disk high-water after the workload, including allocation and retained copy-on-write storage; it is not settled live payload."

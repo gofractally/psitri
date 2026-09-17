@@ -3,7 +3,7 @@
 Small and Big implement offset/length byte reads over contiguous and chunked
 values. Both transparently assemble ranges that cross chunk boundaries.
 The optional `psitri::range_engine` concept detects ranges without changing
-`psitri::engine` or the legacy adb concepts.
+`psitri::engine` or the core adb concepts.
 
 ## Calls
 
@@ -99,9 +99,9 @@ Both preserve their view across copy/move. A view extracted from a temporary
 holder expires with it. An invalid/subtree position returns an empty holder;
 use optional/callback reads when the found/missing distinction matters.
 
-The legacy native `value(read_lock&)` overload borrows contiguous storage under
+The native `value(read_lock&)` overload borrows contiguous storage under
 the caller's lock. For a crossing value it uses cursor-owned scratch, valid until
-the next raw-view read or cursor destruction. Legacy direct-tree view reads use
+the next raw-view read or cursor destruction. Direct-tree view reads use
 tree-owned scratch with the same next-read restriction. Prefer the portable
 callback/owning forms or `pinned_value()` for explicit lifetime management.
 

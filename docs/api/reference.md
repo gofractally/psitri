@@ -136,7 +136,8 @@ Native `value_size()` in both profiles and Big's other size-returning methods
 use signed 64-bit results, preserving negative miss/subtree sentinels. The
 required concept's owning, callback, and remove return types are unchanged.
 Each profile embeds its continuation directory and first payload in its head;
-their physical formats differ. Development-era disk formats are not retained.
+their physical formats differ. Pin an engine and compatible format when opening
+persisted data.
 
 `adb::multi_root_transaction` adds `primary()` and `open_root(index)` editors,
 with `upsert`, `remove`, `get`, and `set_root(tree)`. The latter assigns a tree
@@ -147,6 +148,6 @@ spanning roots is a common guarantee. For atomic revision manifests, put
 related subtrees beneath a single Big root.
 
 Native subtrees, detached editors, and savepoints are Big extensions.
-Registered typed values in Small and the historical Heart typed test adapter
-are not part of the common byte contract. Detect optional capabilities
+Registered typed values and typed test adapters are outside the common byte
+contract. Detect optional capabilities
 explicitly; never assume they follow from `psitri::engine<E>`.

@@ -79,8 +79,8 @@
       },
       {
         "id": "sal_art_ref",
-        "name": "Big lineage",
-        "detail": "sal_art_ref \u00b7 historical",
+        "name": "psitri Big",
+        "detail": "Movable storage",
         "status": "maintained",
         "values": {
           "load": 3005255,
@@ -95,8 +95,8 @@
       },
       {
         "id": "start_ref",
-        "name": "Small lineage",
-        "detail": "start_ref \u00b7 historical",
+        "name": "psitri Small",
+        "detail": "Fixed-address storage",
         "status": "maintained",
         "values": {
           "load": 6747858,
@@ -112,7 +112,7 @@
       {
         "id": "delta_art(sv\u2192sar)",
         "name": "Tiered / versioned",
-        "detail": "delta_art \u00b7 research",
+        "detail": "delta_art \u00b7 experimental",
         "status": "research",
         "values": {
           "load": 1002327,
@@ -128,7 +128,7 @@
       {
         "id": "delta_art(sr\u2192sar)",
         "name": "Tiered / refcounted",
-        "detail": "delta_art \u00b7 research",
+        "detail": "delta_art \u00b7 experimental",
         "status": "research",
         "values": {
           "load": 3210994,
@@ -144,7 +144,7 @@
       {
         "id": "start_ver",
         "name": "Versioned ART",
-        "detail": "start_ver \u00b7 research",
+        "detail": "start_ver \u00b7 experimental",
         "status": "research",
         "values": {
           "load": 10008858,
@@ -160,7 +160,7 @@
       {
         "id": "gcart",
         "name": "GC ART",
-        "detail": "gcart \u00b7 research",
+        "detail": "gcart \u00b7 experimental",
         "status": "research",
         "values": {
           "load": 3405586,
@@ -176,7 +176,7 @@
       {
         "id": "gcart_spec",
         "name": "GC ART / spec",
-        "detail": "gcart_spec \u00b7 research",
+        "detail": "gcart_spec \u00b7 experimental",
         "status": "research",
         "values": {
           "load": 2869963,
@@ -189,11 +189,12 @@
         },
         "balance": "PASS"
       }
-    ]
+    ],
+    "configuration_note": "Measured at revision 7a3c8a5; Big and Small label the sal_art_ref and start_ref implementations in that build."
   },
   "art": {
     "date": "2026-06-11",
-    "profile": "Historical four-byte, 32-bit direct-address handles; 32 GiB arena",
+    "profile": "four-byte, 32-bit direct-address handles; 32 GiB arena",
     "machine": "Apple M5",
     "source": "libraries/start_ref/STATUS.md",
     "baseline": "libart",

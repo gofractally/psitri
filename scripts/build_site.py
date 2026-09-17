@@ -16,7 +16,7 @@ import markdown
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "website"
-API_NAMES = ("README", "quickstart", "reference", "operations", "engines", "conformance", "large-values", "chunked-values", "range-reads")
+API_NAMES = ("README", "quickstart", "reference", "operations", "engines", "conformance", "chunked-values", "range-reads")
 CONTENT_NAMES = ("compatibility", "benchmarks", "benchmarking")
 EVIDENCE = {
     "bank_compare.log": "logs/2026-06-17_gcart_spec-bank-vs-mdbx/bank_compare.log",
@@ -112,7 +112,7 @@ def template(title: str, content: str, page: str, revision: str) -> str:
 <button class="menu-toggle" aria-expanded="false" aria-controls="navigation">Menu <span aria-hidden="true">＋</span></button>
 <nav id="navigation" aria-label="Main navigation"><a href="../#architecture">Why psitri</a><a href="../#engines">Engines</a><a href="../#benchmarks">Benchmarks</a><a href="quickstart.html">Documentation ↗</a></nav></header>
 <div class="docs-layout section-wrap"><aside class="docs-nav" aria-label="Documentation"><p class="eyebrow">Developer guide</p>{navigation}</aside>
-<main id="main" class="prose">{content}<div class="doc-meta">Built from psitri revision {escape(revision[:12])}. Source links may require repository access. Engine capability and qualification boundaries apply.</div></main></div>
+<main id="main" class="prose">{content}<div class="doc-meta">Built from psitri revision {escape(revision[:12])}. Source links may require repository access. C++ source API version 1.</div></main></div>
 <footer class="site-footer section-wrap"><a class="brand" href="../"><img src="../assets/mark.svg" alt="" width="26" height="26">psitri<span class="brand-dot">.</span></a><nav aria-label="Footer"><a href="index.html">API guide</a><a href="benchmarks.html">Evidence</a><a href="https://github.com/gofractally/psitri">Repository ↗</a></nav></footer></body></html>'''
 
 

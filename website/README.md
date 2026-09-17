@@ -17,7 +17,7 @@ python3 -m http.server 8080 --directory build
 Open `http://localhost:8080/site/`. Relative links also work at the project Pages
 path `https://gofractally.github.io/psitri/`. The builder checks local links,
 fragments, duplicate IDs, image alt attributes, and root-relative asset paths.
-For visual review, check desktop and mobile, every benchmark metric, the research
+For visual review, check desktop and mobile, every benchmark metric, the experimental-engine
 toggle, the snapshot illustration, example switching/copy, menu, and details.
 
 ## Publication boundary
@@ -28,7 +28,7 @@ toggle, the snapshot illustration, example switching/copy, menu, and details.
 - the listed API Markdown guides, rendered as public HTML;
 - the three curated methodology/integration guides in `website/content`;
 - `examples/api/basic.cpp` and `examples/api/revisions.cpp`;
-- three raw logs and a benchmark-only excerpt of the historical ART status record.
+- three raw logs and a benchmark-only excerpt of the ART measurement record.
 
 It does **not** upload the checkout, all source code, all raw logs, private runner
 metadata, or newly recorded benchmark runs. Review each new public asset. A
@@ -64,12 +64,32 @@ The recorder is documented in [the benchmark guide](content/benchmarking.md).
 Claims that must remain explicit until evidence changes:
 
 - The portable API has one serialized writer; independent-root writes are a
-  native storage capability under integration qualification.
+  native SAL capability, while the Big adapter shares its write session.
 - Big’s nested savepoints have a narrower scope than arbitrary nested subtree
   transactions. Read-driven hot-object promotion is opt-in.
-- Big is the beyond-RAM integration candidate, not a fully release-qualified
-  claim. The billion-key archived run fit in its 128 GB machine’s RAM.
-- The libart result used historical four-byte handles; current Small defaults
-  to five bytes. The archived inserts were slower.
-- The MDBX bank comparison has no per-commit fsync, is historical, and has a
+- Big is the disk-backed profile. Comprehensive crash/power-loss and sustained
+  beyond-RAM validation is incomplete. The billion-key tiered run fit in RAM.
+- The libart result measures four-byte handles, not the supplied five-byte Small
+  profile; keep it in configuration-specific methodology, not current-profile
+  marketing. Inserts were slower in that measurement.
+- The MDBX bank comparison identifies its measured revision, uses no per-commit
+  fsync, and has a
   larger psitri disk high-water. No current RocksDB speedup is asserted.
+
+## Public audience and terminology
+
+Write for developers evaluating a standalone database library. Describe present
+capabilities, operating limits, and integration tradeoffs. Keep internal project
+history, renaming rationale, and application-specific adoption plans out of the
+landing page and public API guides. Benchmark dates, revisions, and tested
+configurations belong in the methodology because they are necessary evidence.
+
+Use **practically lock-free** for the concurrency design, with the precise
+boundary in the operating guide: acquired snapshots traverse without node
+mutexes; root publication/acquisition and some allocator/maintenance paths
+synchronize. SAL's read lock is an atomic residency marker, not a blocking mutex.
+
+Keep **“Keep the API. Rethink the engine.”** and explain the cost alongside it:
+foreign API workflows add translation overhead and can limit optimization paths
+available through the native API. Do not apply native benchmark results directly
+to a compatibility layer.

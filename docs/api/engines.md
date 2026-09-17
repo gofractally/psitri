@@ -1,128 +1,128 @@
-# Engine profiles and Psibase
+# Choose an engine
 
-## Concrete types
+Use **Small** when your data and retained versions fit in RAM. Use **Big** for
+persistent data expected to outgrow RAM, or when you need owned subtrees and
+native savepoints. Both implement the same C++23 byte-database interface.
 
-| Type | Implementation | Intended use | Current API status |
-|---|---|---|---|
-| `psitri::small_engine` | `start_ref::kv::engine` | Resident data, direct-address read performance | Version 1 contract and shared behavioral suite |
-| `psitri::big_engine` | `sal_art_ref::radix::engine` | Data beyond RAM; movable, compactable storage with refcounts | Version 1 contract and shared behavioral suite; Psibase integration candidate |
-| `psitri::default_engine` | Alias of Big | Default for new generic examples | Source alias, not disk migration |
-| `psitri::experimental::tiered_engine<Hot, Base>` | `delta_art::engine<Hot, Base>` | Hot/warm delta rotation and background base merging | Experimental; missing the common owned composite snapshot contract |
-| `psitri::experimental::write_engine` | `tiered_engine<small_engine, big_engine>` | Refcount-only write-throughput candidate | Experimental; not `psitri::engine` |
+## Public types
 
-The names describe the workload: **Small** is intended for data that fits in
-RAM; **Big** is intended to scale beyond RAM. They do not specify pointer width,
-a fixed payload threshold, or the maximum size of an individual value. The
-current Small implementation uses five-byte handles, while Big addresses SAL
-control blocks with 32-bit IDs. `engine32` and `engine64` would therefore
-misdescribe these profiles. The historical 32-bit fixed layout remains a
-separate benchmark result, not the current Small profile.
+| Type | Intended use | Include / CMake target |
+|---|---|---|
+| `psitri::small_engine` | Resident data; direct-address ART | `<psitri/engines/small.hpp>` / `psitri::small` |
+| `psitri::big_engine` | Disk-backed, movable, compactable ART | `<psitri/engines/big.hpp>` / `psitri::big` |
+| `psitri::default_engine` | Alias of Big | `<psitri/api.hpp>` / `psitri::api` |
+| `psitri::database_for<E>` | Database type for a selected engine | `<psitri/api.hpp>` / `psitri::api` |
 
-The initial `fixed_engine` and `compact_engine` spellings remain compatibility
-aliases of `small_engine` and `big_engine`. Their old profile headers and CMake
-targets (`psitri::fixed`, `psitri::compact`) also forward to the new names.
-New applications use `psitri::small` / `<psitri/engines/small.hpp>` and
-`psitri::big` / `<psitri/engines/big.hpp>`.
+```cpp
+#include <psitri/api.hpp>
+using Engine = psitri::big_engine;
+static_assert(psitri::engine<Engine>);
+using Database = psitri::database_for<Engine>;
+```
 
-The tiered aliases are opt-in: include `<psitri/experimental/tiered.hpp>` and link
-`psitri::experimental`. There is intentionally no supported `psitri::write_engine`
-alias yet. Its transaction removal result and root semantics differ, it lacks
-`write_session::get_root`, and coordinated durability/recovery requires separate
-qualification. The strong common concept has not been weakened to admit it.
-
-Header names, CMake targets, and source namespaces for historical code remain
-available. `sal_art_ref::radix::dwal_engine` is a compatibility alias for the
-public native `engine`. `<radix_engine.hpp>` and `<heart_dwal_engine.hpp>` in the
-old test include directory forward to public headers; new consumers use
-`<psitri/api.hpp>` or `<sal_art_ref/engine.hpp>`.
+The engine is selected at compile time, without virtual dispatch. Pin an
+explicit engine type for persistent application data. The Small and Big names
+identify their storage model, not a limit on the size of an individual value.
 
 ## Capabilities and limits
 
 | Property | Small | Big |
 |---|---|---|
-| Liveness | Refcount + deferred release | Refcount + deferred release |
+| Storage ownership | Reference counting + deferred release | Reference counting + deferred release |
 | Object location | Fixed allocation-line position | Movable through SAL control blocks |
+| Snapshot tree traversal | No node mutexes | No node mutexes; atomic residency tracking |
 | Committed snapshots / byte CRUD | Yes | Yes |
-| Native reverse traversal | Forward rescan; reverse operations are O(n) | Yes |
+| Reverse traversal | Forward rescan; reverse operations are O(n) | Native reverse traversal |
 | Root slots | 8 | 1,024 |
 | Native subtree ownership | No | Yes |
-| Primary-root savepoints | No common extension | Native `sub_transaction()`; restrictions below |
+| Primary-root savepoints | No | Native `sub_transaction()`; scope below |
 | Read-only open | Rejected | Supported with separate-process locking restrictions |
-| Ordinary arena | Default 32 GiB; representable ceiling just under 512 GiB | SAL default storage ceiling 32 TiB, subject to platform limits |
-| Logical value limit | 4 GiB − 1 byte; tested through 512 MiB | 4 GiB − 1 byte; tested through 512 MiB |
+| Ordinary arena | Default 32 GiB; addressable ceiling just under 512 GiB | Default storage ceiling 32 TiB, subject to platform limits |
+| Logical value limit | 4 GiB − 1 byte | 4 GiB − 1 byte |
+| Tested allocated value size | Through 512 MiB | Through 512 MiB |
 | Large-value storage | Fixed-address chunks, at most 2 MiB per allocation | Segment-aware chunks, almost 32 MiB per allocation |
-| Clean reopen test | Passing | Passing |
-| Full crash / beyond-RAM release gate | Not established by this pass | Not established by this pass |
+| Read-driven hot-object promotion | Not applicable | Optional; disabled by default |
 
-The Small arena ceiling counts nodes and metadata, not payload. Current handles
-are five bytes; the ordinary allocator uses 128-byte lines and a 32-bit line
-index with reserved high indices. A separate large-value arena adds its own
-reservation: up to `min(max_segments, 512)` segments of 2 GiB. That is
-address-space capacity, with data pages touched as needed. The 2 MiB physical
-allocation ceiling no longer limits logical value size; see
-[chunked-value storage](chunked-values.md). Capacity and address-space reservation are not
-RAM usage; keep the actual working set, snapshots, fragmentation, and release
-backlog within the available memory for this profile's intended performance.
+Both engines support parallel snapshot readers. The **portable API uses one
+serialized writer**. Native SAL supports independent root writers, but the Big
+API adapter shares a write session. See the
+[concurrency contract](operations.md#concurrency-contract) before sharing objects
+between threads.
 
-The historical **32-bit-handle** fixed implementation beat libart in published
-in-RAM point lookup measurements: u64 hit/miss ratios 0.87/0.82 and dictionary
-hit/miss 0.92/0.73. The same record shows slower inserts. That layout had a
-28-bit line index plus a four-bit tag and a **32 GiB** ordinary arena ceiling.
-See [the recorded results](../../libraries/start_ref/STATUS.md). These results
-are not a new measurement of the current five-byte layout, and the current API
-does not invent a `fixed32_engine` alias for an implementation it no longer
-selects. Recovering that precise profile would require a separate supported
-configuration and benchmarks.
+## Small: budget for the whole working set
 
-## What Psibase should use
+Small follows fixed arena addresses without resolving movable-object control
+blocks. Its five-byte handles use a 32-bit index of 128-byte allocation lines,
+with high indices reserved. The addressable ceiling counts nodes and metadata,
+not just application payload.
 
-Target **`psitri::big_engine`**, with an explicit durable sync policy, as the
-first native integration. It matches the capacity requirement and supplies
-owned subtrees and copy-on-write snapshots needed for revision history. Keep
-Psibase's revision/rollback adapter independent of the concrete engine where
-the portable contract suffices; express the extra subtree requirements
-explicitly. Small cannot supply those native subtree semantics by merely
-changing the type alias.
+The default ordinary arena reserves 32 GiB. A separate large-value arena
+reserves up to `min(max_segments, 512)` segments of 2 GiB each. These are virtual
+address reservations; data pages are touched as needed. The 2 MiB allocation
+size does not limit a logical value: [large values](chunked-values.md) span
+multiple owned chunks.
 
-Represent a revision's related database trees beneath **one manifest root**.
-Attach owned subtree handles to that manifest and publish it once. Avoid
-placing parts of one atomic revision in independently published root slots.
-The [revision example](../../examples/api/revisions.cpp) demonstrates saving an
-old state subtree, updating the active state, reopening, and restoring the old
-state. Handles belong to their originating database and must never be copied
-as raw bytes or installed into another database.
+For resident-data performance, budget for live data, snapshots, metadata,
+fragmentation, and the release backlog within available RAM. A large address
+reservation does not make Small a substitute for Big's relocation and compaction.
 
-Big's savepoint frames snapshot the primary working root and the count of
-opened children. They are not a general nested transaction over all roots or
-all already-open child editors. Until that stronger behavior is verified, build
-rollback around owned roots/manifest replacement and test Psibase's exact
-nested-session semantics. Do not assume a `sub_transaction()` spelling alone
-matches Psibase's undo stack.
+## Big: keep the working set close
 
-Before replacing the deployed database, validate Psibase's value-size needs
-with its own configured limits, revision retention and deletion, forks and
-rollback, exceptions and allocation failure, process-kill recovery, and a
-sustained workload exceeding physical RAM. Logical API portability does not
-make on-disk formats interchangeable or remove the need to qualify an upgrade.
-No Psibase backend is switched by this change. The MDBX shim also retains its
-existing `start_ver`/Heart tiered default.
+Big uses stable 32-bit object IDs with movable storage. Background compaction
+reclaims and rearranges segments. Optional access-frequency tracking promotes
+hot objects and groups them together, improving locality without requiring the
+entire dataset to remain resident.
 
-## Experimental inventory
+Configure `max_pinned_cache_size_mb` and `enable_read_cache` before opening the
+database. The pinned-segment budget is one part of process memory; allow for
+metadata, writer buffers, retained versions, OS cache, and application memory.
+See [configuration](operations.md#configuration) for an example.
 
-| Source directory / namespace | Status |
-|---|---|
-| `experimental/gcart`, `gcart::*` | GC research; reference/benchmarks, not a release profile |
-| `experimental/sal_gc`, `sal_gc::*` | GC allocator research |
-| `experimental/rcart`, `rcart::*` | Hybrid refcount research using sal_hybrid |
-| `experimental/sal_hybrid`, `sal_hybrid::*` | Research fixed/movable allocator |
-| `experimental/start_ver`, `start_ver::*` | Version/stamp liveness and reclamation experiments |
-| `experimental/walart`, `walart::*` | WAL/write-set research |
-| `psitri::experimental::*` | New opt-in experiment aliases, currently tiered/write |
+Big's configured capacity ceiling is an address-space/storage limit, not a
+measured throughput or scale guarantee. Both profiles pass the shared API and
+clean-reopen tests; comprehensive crash/power-loss and sustained beyond-RAM
+validation is incomplete. The [durability guide](operations.md#durability)
+describes the supported policies and current validation coverage.
 
-The directory move deliberately preserved native namespaces to avoid an
-unnecessary source rewrite. A namespace without the word `experimental` is not
-a release endorsement. `delta_art` remains reusable library machinery, but its
-current tiered profiles are experimental. The legacy DWAL concept is an
-internal composition protocol, not an alternative public conformance standard.
-GC is still a research direction. Ethereum/MDBX sync remains a useful benchmark;
-API semantics, recovery, and scalable storage determine the release decision.
+## Model application revisions with owned trees
+
+Big can store a tree as a value in another tree. Put a revision's related tables
+beneath **one manifest root**, attach owned subtree handles, and publish that
+manifest once. Publishing independent root slots is not an atomic multi-root
+transaction.
+
+The [revision example](../../examples/api/revisions.cpp) saves a state subtree,
+updates the active state, closes and reopens the database, and restores the
+saved version. Handles belong to their originating database; do not copy their
+raw IDs into another database.
+
+Big's `sub_transaction()` saves the primary working root and the count of opened
+children. Aborting restores that root and discards children opened in the frame.
+It does not rewind all other roots or every child editor already open when the
+frame began. Use an owned manifest replacement when your rollback boundary
+covers a complete hierarchy of application state.
+
+## Optional configurations
+
+Experimental engines are separate from the supported Small/Big source contract:
+
+| Configuration | Purpose | Availability |
+|---|---|---|
+| `psitri::experimental::tiered_engine<Hot, Base>` | Hot delta with background merging into a base engine | `<psitri/experimental/tiered.hpp>`, target `psitri::experimental` |
+| `psitri::experimental::write_engine` | Refcounted Small/Big tiering | Same explicit experimental target |
+| `gcart`, `sal_gc` | Garbage-collected storage | `experimental/` sources |
+| `rcart`, `sal_hybrid` | Hybrid reference-counted storage and allocation | `experimental/` sources |
+| `start_ver`, `walart` | Version-based reclamation and write-set storage | `experimental/` sources |
+
+The tiered aliases do not satisfy `psitri::engine`: their removal results and root
+semantics differ, and they lack its owned composite snapshot interface. Use the
+maintained Small/Big profiles for applications targeting the shared contract.
+A source namespace alone does not establish API support or production readiness.
+
+## Data portability
+
+The common API is a **source contract**. Changing engine types does not convert
+files, and raw object IDs are not portable between databases. Move data through
+logical export/import or a separately validated converter. Validate snapshot
+retention, rollback, errors, recovery, and your workload's memory requirements
+when adopting a different engine or upgrading a persisted format.

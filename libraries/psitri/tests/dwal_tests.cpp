@@ -1660,27 +1660,30 @@ TEST_CASE("DWAL cursor refresh releases old tree", "[dwal][leak]")
    // Create a dwal_read_session.
    auto reader = dwal_db.start_read_session();
 
-   // Do several rounds of DWAL writes that trigger swaps.
+   // Keep the key set and value lengths fixed so allocation growth measures
+   // retained versions, not legitimate growth of the database. Each round
+   // changes every value and refreshes the reader after the merge publishes.
    for (int round = 0; round < 10; ++round)
    {
       auto tx = dwal_db.start_write_transaction(0);
-      for (int i = 0; i < 200; ++i)
+      for (int i = 0; i < 500; ++i)
       {
-         auto key = std::to_string(round * 200 + 500 + i);
-         auto val = std::string(100, 'e');
+         auto key = std::to_string(i);
+         auto val = std::string(100, char('e' + round));
          tx.upsert(std::string_view(key), std::string_view(val));
       }
       tx.commit();
 
+      for (int i = 0; i < 100 && !root.merge_complete.load(); ++i)
+         std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      REQUIRE(root.merge_complete.load());
+
       // Read through the session — triggers refresh on gen change.
       auto key = std::to_string(round);
-      reader.get(0, key, psitri::dwal::read_mode::buffered);
+      auto value = reader.get(0, key, psitri::dwal::read_mode::buffered);
+      REQUIRE(value.found);
+      CHECK(value.value == std::string(100, char('e' + round)));
    }
-
-   // Force final swap + wait for merge.
-   dwal_db.swap_rw_to_ro(0);
-   for (int i = 0; i < 100 && !root.merge_complete.load(); ++i)
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
    db->wait_for_compactor();
 
@@ -1689,8 +1692,9 @@ TEST_CASE("DWAL cursor refresh releases old tree", "[dwal][leak]")
    INFO("DWAL after 10 rounds: allocated=" << after << " pending=" << pending
         << " baseline=" << baseline);
 
-   // Should not have unbounded growth.
-   REQUIRE(after < baseline * 5);
+   // Only the current tree remains; every old reader root was refreshed.
+   REQUIRE(pending == 0);
+   REQUIRE(after <= baseline);
 }
 
 TEST_CASE("write-only batch=1 doesn't leak", "[dwal][leak]")

@@ -42,8 +42,9 @@ namespace psitri::dwal
 
    /// Per-root DWAL state.
    ///
-   /// Reader/writer coordination is handled lock-free by cow_coordinator.
-   /// The only mutex is tx_mutex for per-root transaction serialization.
+   /// COW readers coordinate through cow_coordinator. Committed snapshot
+   /// capture and transactions share tx_mutex, with FIFO admission under the
+   /// default lock policy. Captured snapshots do not retain this lock.
    template <class LockPolicy = std_lock_policy>
    struct basic_dwal_root
    {
@@ -67,7 +68,8 @@ namespace psitri::dwal
       std::atomic<bool> merge_complete{true};
 
       /// Per-root transaction-level read/write exclusion.
-      /// Writers take exclusive, readers take shared.
+      /// Writers and committed-snapshot capture take exclusive; multi-root
+      /// read transactions take shared. Captures release it before reading.
       /// Acquired in sorted root-index order to prevent deadlocks.
       shared_mutex_type tx_mutex;
 

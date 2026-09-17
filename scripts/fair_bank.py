@@ -203,7 +203,7 @@ def run(args) -> int:
             shutil.copyfile(build / name, archive / name)
         diff = subprocess.check_output(["git", "diff", "HEAD", "--binary"], cwd=ROOT)
         (archive / "source.patch").write_bytes(diff)
-        source_files = [ROOT / "scripts/fair_bank.py", ROOT / "scripts/benchmark.py", ROOT / "scripts/benchmark_idle.py", *sorted((ROOT / "benchmarks/fair_bank").glob("*")), *sorted((ROOT / "benchmarks/api_bank").glob("*"))]
+        source_files = [ROOT / "scripts/fair_bank.py", ROOT / "scripts/benchmark.py", ROOT / "scripts/benchmark_idle.py", ROOT / "scripts/api_bank_matrix.py", *sorted((ROOT / "benchmarks/fair_bank").glob("*")), *sorted((ROOT / "benchmarks/api_bank").glob("*"))]
         manifest["source_sha256"] = {str(p.relative_to(ROOT)): digest(p) for p in source_files if p.is_file()}
         # Preserve uncommitted benchmark source too, not merely its hash.
         for path in source_files:

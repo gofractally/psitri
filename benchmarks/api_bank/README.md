@@ -40,6 +40,15 @@ python3 scripts/fair_bank.py --suite api --build build/api-integrations \
 ```
 
 After smoke validation, use `--profile performance --repeats 5` for each pair.
+Or collect all three pairs in sequence, measuring only the pairs that pass smoke:
+
+```sh
+python3 scripts/api_bank_matrix.py --machine my-runner \
+  --build-mdbx build/api-mdbx --build-integrations build/api-integrations \
+  --output logs --repeats 5 --idle-timeout 1800
+```
+
+The matrix retains failures and all repetitions. It does not publish results.
 Finish all builds first. The runner takes a machine-wide advisory lock and
 requires ten consecutive seconds below 3% aggregate CPU activity before each
 process. Linux I/O wait counts as busy. Idle samples are archived. A timeout fails

@@ -102,6 +102,7 @@ def api_chart(data, chart_id, evidence_prefix):
             for pair in platform["pairs"]:
                 body = ''
                 if pair["status"] == "passed":
+                    cohort = pair.get("cohort", platform)
                     native, shim = pair["native"]["values"][metric], pair["shim"]["values"][metric]
                     if native <= 0 or shim < 0:
                         raise ValueError("Paired chart requires positive reference and nonnegative result")
@@ -110,23 +111,45 @@ def api_chart(data, chart_id, evidence_prefix):
                     for role, value in (("native", native), ("shim", shim)):
                         engine = pair[role]
                         number = f'{value:,.1f}' if info["unit"] == "MB" else f'{value:,.0f}'
-                        columns.append(f'''<div class="api-bar-column {role}"><strong>{number}</strong>
+                        evidence = (evidence_prefix.replace("evidence/", "data/")
+                                    if engine.get("evidence_kind") == "data" else evidence_prefix)
+                        span = engine.get("ranges", {}).get(metric)
+                        spread = (f'<small class="api-range">{span["minimum"]:,.0f}–{span["maximum"]:,.0f} range</small>' if span else '')
+                        columns.append(f'''<div class="api-bar-column {role}"><strong>{number}</strong>{spread}
 <div class="api-bar-track" aria-hidden="true"><div class="api-bar" style="height:{100 * value / largest:.4f}%"></div></div>
-<span>{escape(engine["name"])}</span><a href="{evidence_prefix}{escape(engine["evidence"])}">Raw result ↗</a></div>''')
+<span>{escape(engine["name"])}</span><a href="{evidence}{escape(engine["evidence"])}">{'All repetitions' if span else 'Raw result'} ↗</a></div>''')
                     ratio = shim / native
                     body = f'<div class="api-bars">{"".join(columns)}</div><p class="api-ratio">{ratio:.2f}× {"file size" if info["direction"] == "lower" else "throughput"} · shim / original</p>'
                 else:
                     body = '<p class="api-unavailable">Comparison unavailable</p>'
                     links = [f'<a href="{evidence_prefix}{escape(name)}">{"Original library" if i == 0 else "psitri shim"} log ↗</a>' for i, name in enumerate(pair.get("evidence", []))]
                     body += f'<div class="api-evidence-links">{" · ".join(links)}</div>'
+                cohort_info = ''
+                if any("cohort" in p for p in platform["pairs"]):
+                    cohort = pair.get("cohort", platform)
+                    if cohort.get("date"):
+                        cohort_info = f'<p class="api-cohort">{escape(cohort["date"])} · {escape(cohort["revision"][:12])}'
+                        if cohort.get("repeats"):
+                            cohort_info += f' · median of {cohort["repeats"]} runs'
+                        cohort_info += f'</p><p class="api-pair-note">{escape(cohort["workload"])}</p>'
+                    label = cohort.get("metric_labels", {}).get(metric)
+                    if metric == "disk" and not label:
+                        label = f'{info["label"]} ({info["unit"]})'
+                    if label: cohort_info += f'<p class="api-pair-note">{escape(label)}</p>'
                 pairs.append(f'''<section class="api-pair" data-api-pair="{pair["id"]}" aria-label="{escape(names[pair["id"]])}">
-<h4>{escape(names[pair["id"]])}</h4>{body}<p class="api-pair-note">{escape(pair["note"])}</p></section>''')
-            panels.append(f'''<div data-api-metric-panel="{metric}"><p class="chart-caption">{escape(info["label"])} ({escape(info["unit"])}) · {info["direction"]} is better</p>
+<h4>{escape(names[pair["id"]])}</h4>{cohort_info}{body}<p class="api-pair-note">{escape(pair["note"])}</p></section>''')
+            caption = f'{escape(info["label"])} ({escape(info["unit"])})'
+            if metric == "disk" and any("cohort" in p for p in platform["pairs"]):
+                caption = 'Storage footprint · definition and units shown per pair'
+            panels.append(f'''<div data-api-metric-panel="{metric}"><p class="chart-caption">{caption} · {info["direction"]} is better</p>
 <div class="api-pairs">{''.join(pairs)}</div></div>''')
-        provenance = (f'<p class="chart-caption">{platform["date"]} · revision {platform["revision"][:12]}</p>' if platform["date"] else '')
+        mixed_cohorts = any("cohort" in p for p in platform["pairs"])
+        workload = 'Dates, settings, and repetitions are shown with each API pair.' if mixed_cohorts else platform["workload"]
+        limits = 'Ranges show the full minimum–maximum spread; every repetition is retained.' if mixed_cohorts else platform["limits"]
+        provenance = (f'<p class="chart-caption">{platform["date"]} · revision {platform["revision"][:12]}</p>' if platform["date"] and not mixed_cohorts else '')
         platforms.append(f'''<section data-api-platform="{platform["id"]}" aria-label="{escape(platform["label"])}">
 <h3>{escape(platform["label"])}</h3><p class="api-machine">{escape(platform["machine"])}</p>{provenance}
-<p>{escape(platform["workload"])}</p>{''.join(panels)}<p class="chart-caption">{escape(platform["limits"])}</p></section>''')
+<p>{escape(workload)}</p>{''.join(panels)}<p class="chart-caption">{escape(limits)}</p></section>''')
     arches = ''.join(f'<button type="button" data-api-arch="{p["id"]}" aria-pressed="{str(p["id"] == spec["default_architecture"]).lower()}" disabled>{escape(p["label"])}</button>' for p in spec["platforms"])
     metrics = ''.join(f'<button type="button" data-api-metric="{metric}" aria-pressed="{str(metric == "write").lower()}" disabled>{"File size" if metric == "disk" else METRIC_TITLES[metric]}</button>' for metric in spec["metrics"])
     choices = ''.join(f'<label class="engine-choice"><input type="checkbox" value="{i["id"]}" data-api-choice checked disabled><span>{escape(i["name"])}</span></label>' for i in spec["interfaces"])

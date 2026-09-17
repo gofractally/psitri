@@ -1246,7 +1246,7 @@
         "direction": "higher"
       },
       "mixed_write": {
-        "label": "Transfer attempts per second, with one reader",
+        "label": "Transfer attempts per second, with readers",
         "short": "write throughput with readers",
         "unit": "transfers/s",
         "direction": "higher"

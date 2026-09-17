@@ -89,6 +89,22 @@ Claims that must remain explicit until evidence changes:
   tests native DuckDB with the maintained engines and other competitors; its
   smoke results are not public performance evidence.
 
+### Publishing a repeated API pair
+
+Retain the complete performance archive under `logs/`, then run:
+
+```sh
+python3 scripts/api_bank_evidence.py --archive logs/<performance-archive> \
+  --api mdbx --architecture x86_64
+```
+
+The curator requires a clean, passing, repeated `api-bank-v1` pair and retained
+idle samples. It checks the raw results against the manifest and preserves every
+repetition in the explicitly curated `website/data/api-bank` downloads. Bars use
+medians and display the minimum–maximum range. Each pair retains its own date,
+revision and workload, so different cohorts are not silently mixed. Review the
+new public data files, run website tests, and build the site before publishing.
+
 ## Public audience and terminology
 
 Write for developers evaluating a standalone database library. Describe present

@@ -12,6 +12,7 @@ benchmark = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(benchmark)
 sys.path.insert(0, str(ROOT / "scripts"))
 import benchmark_charts
+import api_bank_evidence
 
 
 class PublicEvidenceTest(unittest.TestCase):
@@ -23,6 +24,20 @@ class PublicEvidenceTest(unittest.TestCase):
                 if pair["status"] != "passed":
                     self.assertNotIn("native", pair)
                     self.assertNotIn("shim", pair)
+                    continue
+                if pair.get("native", {}).get("evidence_kind") == "data":
+                    archive = ROOT / pair["cohort"]["source_directory"]
+                    manifest = json.loads((archive / "manifest.json").read_text())
+                    summary = api_bank_evidence.validated_series(manifest, pair["id"])
+                    for role in ("native", "shim"):
+                        engine = pair[role]
+                        public = json.loads((ROOT / "website/data" / engine["evidence"]).read_text())
+                        for key, (metric, divisor) in api_bank_evidence.METRICS.items():
+                            stats = summary["metrics"][engine["engine"]][metric]
+                            self.assertEqual(engine["values"][key], stats["median"] / divisor)
+                            self.assertEqual(engine["ranges"][key]["minimum"], stats["minimum"] / divisor)
+                            self.assertEqual(engine["ranges"][key]["maximum"], stats["maximum"] / divisor)
+                        self.assertEqual(public["repetitions"], [dict(repetition=r["repetition"], result=r["result"]) for r in manifest["records"] if r["engine"] == engine["engine"]])
                     continue
                 logs = []
                 for role in ("native", "shim"):
@@ -41,7 +56,8 @@ class PublicEvidenceTest(unittest.TestCase):
                     self.assertEqual(re.search(rf"{field}:\s+(.+)", logs[0])[1], re.search(rf"{field}:\s+(.+)", logs[1])[1])
                 self.assertEqual(re.findall(r"Successful:.*", logs[0]), re.findall(r"Successful:.*", logs[1]))
         html = benchmark_charts.api_chart(data, "test-api", "../evidence/")
-        self.assertEqual(html.count('class="api-bars"'), 5)
+        expected_pairs = sum(p["status"] == "passed" for platform in api["platforms"] for p in platform["pairs"])
+        self.assertEqual(html.count('class="api-bars"'), expected_pairs * len(api["metrics"]))
         self.assertEqual(html.count('data-api-arch='), 2)
 
     def test_bank_chart_matches_archived_rows(self):

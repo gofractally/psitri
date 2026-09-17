@@ -1,10 +1,10 @@
-# Large values in Small and Big
+# Large values in Small Engine and Large Engine
 
 `psitri::small_engine` and `psitri::big_engine` store byte values up to
 **4,294,967,295 bytes (4 GiB − 1 byte)** using the existing `upsert` and `get`
 API. Both expose this limit as `Engine::max_value_size`. Unit tests allocate,
 read, replace, and free values through **512 MiB** interleaved with smaller
-records. Big uses segment-aware chunks; Small uses fixed-address allocations
+records. The Large Engine uses segment-aware chunks; the Small Engine uses fixed-address allocations
 of at most 2 MiB. The required engine concept is unchanged, so experimental
 engines keep their existing interfaces and limits.
 
@@ -20,7 +20,7 @@ cursor.get("file", [](std::string_view part) {
     consume(part); // one contiguous view, valid during this callback
 }, offset, length);
 
-// Big's native holder; the owning and callback calls above work on both engines.
+// Large Engine's native holder; the owning and callback calls above work on both engines.
 cursor.find("file");
 auto held = cursor.pinned_value(offset, length);
 consume(held.view()); // borrowed or assembled; valid while held lives
@@ -30,7 +30,7 @@ Omitting offset reads from zero; omitting length reads the remainder. Reads
 clamp at EOF and distinguish an empty range from a missing key. See
 [range reads](range-reads.md) for the complete contract.
 
-## Big's storage format
+## Large Engine's storage format
 
 All external values use one packed `key_val_node` format, defined in
 [key_val_node.hpp](../../libraries/sal_art_ref/include/sal_art_ref/key_val_node.hpp).
@@ -65,7 +65,7 @@ Zero continuations means a contiguous value. Otherwise, the first directory
 entry's logical start is the first payload's length; adjacent starts and the
 logical total determine continuation lengths. Each entry occupies **8 bytes**.
 Subtree records have no continuations and contain their nested root reference.
-Byte records small enough to fit inside Big leaf pages keep the existing inline
+Byte records small enough to fit inside the Large Engine’s leaf pages keep the existing inline
 representation.
 
 A page owns the head. The head owns one reference to each continuation, with no
@@ -81,9 +81,9 @@ bytes of control blocks**, excluding the owning page/root. There is no separate
 directory allocation. Directory metadata can still require an additional chunk
 at a payload-capacity boundary.
 
-## Small's storage format
+## Small Engine's storage format
 
-Small keeps its existing allocator: a run occupies at most one 64-bit freeset
+The Small Engine keeps its existing allocator: a run occupies at most one 64-bit freeset
 word, with **64 × 32 KiB = 2 MiB** of physical storage. Logical values larger
 than a leaf allocation are split across runs in the same large-value arena.
 Live allocations never relocate, so directory entries contain direct 32-bit
@@ -124,7 +124,7 @@ entry is **8 bytes**; adjacent starts and the logical total determine payload
 lengths. The head fills its remaining space with data; continuations hold up to
 2 MiB each. A **512 MiB value uses 257 allocations**: the head plus 256
 continuations, with a 2,048-byte directory embedded in the head. This is why
-an 8-bit continuation count is insufficient for Small.
+an 8-bit continuation count is insufficient for the Small Engine.
 
 Snapshots share the head. When a tree edit copies the head, its continuations
 are retained independently. A continuation at the allocator's writer refcount
@@ -154,15 +154,15 @@ mapping verifies that a 4 GiB input is rejected without reading its bytes.
 Available disk, address space, configuration, and input/output memory still
 constrain practical capacity.
 
-Native `value_size()` in both profiles, plus Big's `get(key, std::string*)`
+Native `value_size()` in both profiles, plus the Large Engine's `get(key, std::string*)`
 and displaced-value size returns, use signed 64-bit results to accommodate the
 full unsigned-32-bit range while preserving negative sentinels. Range offsets and lengths remain 64-bit. The
 required public concept and its owning/callback result types are unchanged.
 
-Big and Small have distinct serialized formats and raw IDs. Use logical
+The two engines have distinct serialized formats and raw IDs. Use logical
 export/import when moving values between engines.
 
-## Big segment placement
+## Large Engine segment placement
 
 SAL uses 32 MiB segments, 128-byte allocation grains, a 64-byte footer, and a
 terminal-marker reserve. A fresh allocation can occupy **32 MiB minus 256 bytes**.
@@ -221,7 +221,7 @@ add free bytes, invent a freed object, or duplicate terminal-marker accounting.
 The freed tail contributes to normal compaction eligibility. Tests check exact
 free-byte totals after rollover and repeated sync, including already-synced tails.
 
-## Reading chunks and Big relocation
+## Reading chunks and Large Engine relocation
 
 Each directory entry stores a continuation's logical start. Binary search finds
 the selected continuation, or selects the head when the offset precedes the
@@ -229,14 +229,14 @@ first entry. Only intersecting payloads are resolved and copied. A range ending
 at a boundary does not read the next child. Ranges inside the head borrow its
 payload directly, just as ranges inside a continuation do.
 
-A range inside one allocation is borrowed directly. Big protects its address
-with a residency lock; Small relies on its fixed address and the owning
+A range inside one allocation is borrowed directly. The Large Engine protects its address
+with a residency lock; the Small Engine relies on its fixed address and the owning
 snapshot or transaction. In both profiles, a crossing range assembles exactly the requested bytes into one owned string. Owning string
 reads take that buffer without a second full copy; callback reads call once.
-Big's `pinned_value()` holds either the borrowed pin or shared ownership of the buffer,
+The Large Engine's `pinned_value()` holds either the borrowed pin or shared ownership of the buffer,
 so holder copies and moves preserve the view.
 
-The root/snapshot keeps the logical value alive. Big crossing reads copy the needed
+The root/snapshot keeps the logical value alive. The Large Engine’s crossing reads copy the needed
 directory entries while pinned, release that pin, then resolve and protect each
 chunk separately while copying. No raw directory pointer survives across an
 unlock. A positioned page cursor also re-resolves its stable page/child IDs on
@@ -251,7 +251,7 @@ requires memory for the entire result. Use ranges to bound read memory.
 
 ## Validation coverage
 
-[Big's large-value tests](../../tests/api/large_values.cpp) cover:
+[Large Engine's large-value tests](../../tests/api/large_values.cpp) cover:
 
 - 65,536 bytes; 2 MiB − 1, exact, and + 1; 3, 8, 15, and 16 MiB;
   fresh contiguous capacity − 1, exact, and + 1; 64, 128, and 512 MiB.
@@ -266,7 +266,7 @@ requires memory for the entire result. Use ranges to bound read memory.
 - Repeated 3 MiB packing, tail-first/fresh-first decisions, final-tail reuse,
   and exact skipped-tail accounting.
 
-[Small's large-value tests](../../tests/api/small_large_values.cpp) cover:
+[Small Engine's large-value tests](../../tests/api/small_large_values.cpp) cover:
 
 - The exact contiguous-leaf boundary and adjacent sizes; 2, 3, 4, 16, 64,
   128, and 512 MiB values among smaller records, followed by full reclamation.
@@ -277,7 +277,7 @@ requires memory for the entire result. Use ranges to bound read memory.
 - Arena exhaustion during continuation preparation and head allocation, with
   no leaked chunks or change to the prior value.
 
-The Big tests' 128 MiB setting bounds the requested pinned cache; it is not a measurement
+The Large Engine tests' 128 MiB setting bounds the requested pinned cache; it is not a measurement
 or bound on process RSS or the OS page cache. These tests do not establish power-loss
 atomicity, disk-full behavior, performance versus other engines, or sustained
 beyond-RAM behavior. Validate these requirements for your deployment.

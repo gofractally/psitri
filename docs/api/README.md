@@ -1,9 +1,9 @@
 # The psitri C++ API
 
 psitri is a standalone embedded database library for transactional key-value
-storage, inexpensive snapshots, and ordered traversal. Choose
-`psitri::small_engine` when your data and retained versions fit in RAM, or
-`psitri::big_engine` for disk-backed storage expected to outgrow memory.
+storage, inexpensive snapshots, and ordered traversal. Choose the Small Engine
+(`psitri::small_engine`) when your data and retained versions fit in RAM, or the
+Large Engine (`psitri::big_engine`) for disk-backed storage expected to outgrow memory.
 Both implement the same C++23 byte-database contract.
 
 ```cpp
@@ -15,7 +15,7 @@ using Database = psitri::database_for<Engine>;
 
 Link the public CMake target `psitri::api`. Engine selection happens at compile
 time, with no adapter object or virtual dispatch. The target includes only
-maintained engine dependencies. `psitri::default_engine` aliases Big;
+maintained engine dependencies. `psitri::default_engine` aliases the Large Engine;
 applications that own persisted data should select an explicit engine.
 
 ## Start here
@@ -30,7 +30,7 @@ applications that own persisted data should select an explicit engine.
    optional configurations, and data migration.
 5. [Implementing and validating an engine](conformance.md): the concept,
    behavioral checks, compatibility policy, and optional capabilities.
-6. [Large values in Small and Big](chunked-values.md): storage layouts,
+6. [Large values in Small Engine and Large Engine](chunked-values.md): storage layouts,
    segment-aware chunks, ownership, and allocation tests through 512 MiB.
 7. [Range reads](range-reads.md): offsets and lengths, EOF semantics, borrowed
    views, and transparent owned fallback across chunks.
@@ -45,11 +45,11 @@ reads. `adb` is independently usable and standard-library-only.
 
 Use `database_for<Engine>` for generic application code. The separate
 `psitri::database` implementation is not the generic engine alias. The source
-contract covers Small and Big in their supplied layouts; it does not promise
+contract covers both engines in their supplied layouts; it does not promise
 C++ ABI stability, interchangeable disk formats, or experimental internals.
 
 The [basic example](../../examples/api/basic.cpp) builds for both profiles.
-The [revision example](../../examples/api/revisions.cpp) demonstrates Big's
+The [revision example](../../examples/api/revisions.cpp) demonstrates the Large Engine's
 additional subtree ownership API, including close, reopen, and restore.
 See [durability](operations.md#durability) for validation coverage and deployment
 considerations.

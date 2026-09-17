@@ -31,23 +31,23 @@ They do not measure per-commit synchronous durability performance.
 | Measured configuration | Load accounts/s | Transfers/s | Reads/s with writer | Transfers/s with readers | Reads/s alone | Disk high-water MB |
 |---|---:|---:|---:|---:|---:|---:|
 | libmdbx | 588,685 | 77,214 | 10,431,636 | 67,695 | 11,624,799 | 64 |
-| psitri Big: sal_art_ref | 3,005,255 | 551,010 | 15,233,451 | 479,190 | 22,483,905 | 542 |
-| psitri Small: start_ref | 6,747,858 | 874,524 | 46,403,149 | 520,717 | 48,631,120 | 457 |
+| psitri Large Engine: sal_art_ref | 3,005,255 | 551,010 | 15,233,451 | 479,190 | 22,483,905 | 542 |
+| psitri Small Engine: start_ref | 6,747,858 | 874,524 | 46,403,149 | 520,717 | 48,631,120 | 457 |
 | Experimental: delta_art(sv→sar) | 1,002,327 | 97,167 | 47,025,679 | 80,570 | 45,759,946 | 675 |
 | Experimental: delta_art(sr→sar) | 3,210,994 | 464,275 | 42,691,076 | 466,937 | 45,095,819 | 839 |
 | Experimental: start_ver | 10,008,858 | 2,268,805 | 49,750,317 | 2,085,093 | 52,199,001 | 293 |
 | Experimental: gcart | 3,405,586 | 1,143,136 | 55,639,758 | 522,395 | 63,810,691 | 186 |
 | Experimental: gcart_spec | 2,869,963 | 1,138,597 | 36,102,343 | 553,568 | 42,982,589 | 154 |
 
-Balance conservation passed for every row. The Big and Small chart labels
+Balance conservation passed for every row. The Large Engine and Small Engine chart labels
 identify the `sal_art_ref` and `start_ref` configurations at revision `7a3c8a5`.
 Experimental rows describe optional configurations, separate from the public
-Small/Big API contract.
+shared engine API contract.
 
 ### How to read the result
 
-`551010 / 77214 = 7.14`: Big’s write throughput is 7.14× MDBX in this
-run. Its disk high-water is `542 / 64 = 8.47×`. Small records 11.33×
+`551010 / 77214 = 7.14`: the Large Engine’s write throughput is 7.14× MDBX in this
+run. Its disk high-water is `542 / 64 = 8.47×`. The Small Engine records 11.33×
 write throughput and 7.14× disk high-water. Higher throughput is preferable;
 lower disk high-water is preferable. The chart’s ratios always mean **the
 reported value divided by MDBX**, including storage metrics.
@@ -78,7 +78,7 @@ Raw outputs: [psitri engines](../evidence/bank_compare.log),
 
 **Measured configuration:** four-byte / 32-bit direct-address handles, a 32 GiB
 ordinary arena, Apple M5, June 11, 2026. This is a handle width, not a requirement
-for a 32-bit process. The supplied Small profile uses five-byte handles; the
+for a 32-bit process. The supplied Small Engine profile uses five-byte handles; the
 ratios below do not measure that profile and the four-byte layout is not exposed
 as a selectable public engine type.
 
@@ -105,7 +105,7 @@ splitmix64 u64 keys and u64 values in **10.7 minutes**, with 100% probe hits.
 
 The M5 Max machine had **128 GB RAM**. Final sampled RSS was **58.08 GB**.
 The dataset was **RAM-resident**. This is a scale measurement of the experimental
-tiered configuration, separate from the native Big engine and beyond-RAM testing.
+tiered configuration, separate from the native Large Engine and beyond-RAM testing.
 
 - Release, clang `-O3 -DNDEBUG -march=native`.
 - Batch 1,000; delta high-water trigger 256 MB.

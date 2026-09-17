@@ -2,7 +2,7 @@
 
 Include `<psitri/api.hpp>` and constrain generic code with `template
 <psitri::engine E>`. This page specifies the common byte-value contract of the
-Small and Big profiles in their default layouts. A concept checks C++
+Small Engine and Large Engine profiles in their default layouts. A concept checks C++
 expressions; the [behavioral tests](../../tests/api/conformance.cpp) check their
 meaning. Backend extensions are described separately.
 
@@ -10,8 +10,8 @@ meaning. Backend extensions are described separately.
 
 | Public name | Meaning |
 |---|---|
-| `psitri::small_engine` | `start_ref::kv::engine` |
-| `psitri::big_engine` | `sal_art_ref::radix::engine` |
+| `psitri::small_engine` | Small Engine: `start_ref::kv::engine` |
+| `psitri::big_engine` | Large Engine: `sal_art_ref::radix::engine` |
 | `psitri::default_engine` | `big_engine` in API version 1 |
 | `psitri::database_for<E>` | `E::database` |
 | `psitri::config_for<E>` | `E::config` |
@@ -38,12 +38,12 @@ engine registry. Returned session handles are `std::shared_ptr`s, but they do
 
 `create_only` rejects an existing engine database; `open_existing` rejects a
 missing database; `create_or_open` does either. All preserve existing content.
-`read_only` is available in Big and explicitly rejected by Small. Never
+`read_only` is available in the Large Engine and explicitly rejected by the Small Engine. Never
 open another engine's files as a conversion mechanism. Existence checks use
 engine marker files and do not provide a universal format detector or an atomic
 multi-process create protocol.
 
-Root indices `0..7` form the portable range; Small has eight roots and Big
+Root indices `0..7` form the portable range; the Small Engine has eight roots and the Large Engine
 has 1,024. A root index is a slot, not a revision number. Use root `0` unless you
 need the multi-root extension. Supplying out-of-range indices is a caller error.
 A default-constructed empty tree may be assigned with `set_root({})`; it is not
@@ -106,19 +106,19 @@ encoding, record serializer, prefix index, or duplicate-value convention.
 Callbacks receive `std::string_view`, valid only during the callback. Keep them
 short; do not mutate the same database, save a view, or wait for a writer from a
 callback. `get_value` does not invoke its callback on a native subtree; use
-Big's subtree operations to read that entry. Small's typed-value extension
+the Large Engine's subtree operations to read that entry. The Small Engine's typed-value extension
 may throw `invalid_type` if a typed value is read as bytes. The common API does
 not interpret application bytes as backend ownership handles.
 
 The optional [range-read capability](range-reads.md), detected by
-`psitri::range_engine<E>`, is implemented by both Small and Big. Use
+`psitri::range_engine<E>`, is implemented by both engines. Use
 `get<std::string>(key, offset, length)`, `get(key, callback, offset, length)`,
 `value<std::string>(offset, length)`, or `get_value(callback, offset, length)`.
 Omitting offset keeps the original full read; omitting length reads the
 remainder (`psitri::read_all`). Ranges stop at EOF and preserve the distinction
 between an empty result and a missing key. Callback reads borrow the selected
 bytes without copying when the range fits one allocation. Both profiles
-assemble crossing ranges and invoke the callback once. Big also supports
+assemble crossing ranges and invoke the callback once. The Large Engine also supports
 `pinned_value(offset, length)` with the same transparent fallback.
 
 ## Size and feature boundaries
@@ -127,12 +127,12 @@ The common key envelope is at most **1,024 bytes**, with roots **0..7**.
 Both maintained profiles support a **4 GiB − 1 byte** logical value limit,
 exposed as `Engine::max_value_size`, with allocation tests through **512 MiB**.
 Practical database and memory limits may be lower. Oversized values throw
-`std::invalid_argument` before input bytes are read or the tree changes. Big
-also checks its 1,024-byte key limit before mutation. Small uses fixed-address
-chunks of at most 2 MiB; Big uses segment-aware chunks of almost 32 MiB.
+`std::invalid_argument` before input bytes are read or the tree changes. The Large Engine
+also checks its 1,024-byte key limit before mutation. The Small Engine uses fixed-address
+chunks of at most 2 MiB; the Large Engine uses segment-aware chunks of almost 32 MiB.
 See [large-value storage](chunked-values.md) for layouts and ownership.
 
-Native `value_size()` in both profiles and Big's other size-returning methods
+Native `value_size()` in both profiles and the Large Engine's other size-returning methods
 use signed 64-bit results, preserving negative miss/subtree sentinels. The
 required concept's owning, callback, and remove return types are unchanged.
 Each profile embeds its continuation directory and first payload in its head;
@@ -145,9 +145,9 @@ and returns the displaced owned tree. Open distinct additional roots in
 ascending order. Keep all trees in the same database. Publication across root
 slots is **not promised atomic**; neither publication order nor savepoints
 spanning roots is a common guarantee. For atomic revision manifests, put
-related subtrees beneath a single Big root.
+related subtrees beneath a single Large Engine root.
 
-Native subtrees, detached editors, and savepoints are Big extensions.
+Native subtrees, detached editors, and savepoints are Large Engine extensions.
 Registered typed values and typed test adapters are outside the common byte
 contract. Detect optional capabilities
 explicitly; never assume they follow from `psitri::engine<E>`.

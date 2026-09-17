@@ -1,6 +1,6 @@
 # Value ranges and borrowed-or-owned reads
 
-Small and Big implement offset/length byte reads over contiguous and chunked
+The Small Engine and Large Engine implement offset/length byte reads over contiguous and chunked
 values. Both transparently assemble ranges that cross chunk boundaries.
 The optional `psitri::range_engine` concept detects ranges without changing
 `psitri::engine` or the core adb concepts.
@@ -20,7 +20,7 @@ bool positioned = cursor.get_value([](std::string_view bytes) {
     consume(bytes);
 }, offset, length);
 
-// Big's native holder also supports ranges.
+// Large Engine's native holder also supports ranges.
 auto held = cursor.pinned_value(offset, length);
 consume(held.view()); // valid while held lives
 ```
@@ -32,7 +32,7 @@ argument, so `get(key, 0)` selects a range, not the native output-pointer overlo
 Callback arguments must be callable with `std::string_view`.
 
 The same semantics apply to transactions, cursor point and positioned reads,
-and native tree/root/editor convenience methods. Small's registered typed-object
+and native tree/root/editor convenience methods. The Small Engine's registered typed-object
 decoding is separate from this byte API. Engines without ranges continue to
 satisfy their original concepts; select capabilities using `if constexpr`.
 
@@ -75,23 +75,23 @@ output memory. This is not a streaming API.
 | Empty | Return an empty view without visiting payload chunks |
 
 A 4 KiB crossing range uses a 4 KiB payload buffer regardless of total value size.
-Both binary-search continuation starts. Big copies the needed metadata while
+Both binary-search continuation starts. The Large Engine copies the needed metadata while
 pinned, and protects each intersecting chunk separately while copying. The
 owning root retains the same logical version throughout. Assembly-only residency
 locks are released before invoking a callback with owned bytes. An outer lock
-explicitly held by the caller remains the caller's responsibility. Small uses
+explicitly held by the caller remains the caller's responsibility. The Small Engine uses
 direct arena indices; the cursor's snapshot or write transaction keeps its
 fixed allocations alive, so no residency lock is needed.
 
-Use owning `std::string` results or callbacks for portable reads. Small's native
+Use owning `std::string` results or callbacks for portable reads. The Small Engine's native
 `get<std::string_view>()` and `value<std::string_view>()` can borrow within one
 chunk, but throw `std::invalid_argument` for crossing ranges: a bare view cannot
-own the fallback buffer. Small's `get_any().bytes(offset, length)` keeps that
+own the fallback buffer. The Small Engine's `get_any().bytes(offset, length)` keeps that
 buffer in the `any_value` holder until its next byte read or destruction. Keep
 the holder alive and its transaction valid; a view from a temporary holder is
 unsafe. The callback API handles both paths transparently.
 
-Big's `value_ref` preserves `view()`, `data()`, `size()`, `empty()`, `str()`, and
+The Large Engine's `value_ref` preserves `view()`, `data()`, `size()`, `empty()`, `str()`, and
 implicit conversion to the value view. `is_borrowed()` reports which path was
 used. Borrowed holders should remain short-lived because they delay reclamation.
 Owned holders share their assembly buffer on copy and hold no residency lock.
@@ -109,7 +109,7 @@ callback/owning forms or `pinned_value()` for explicit lifetime management.
 
 Ordinary calls keep full-value defaults, owning/callback result types, one-callback
 behavior, and missing/empty semantics. The required concepts are unchanged.
-Native `value_size()` in both profiles and Big size-returning methods use
+Native `value_size()` in both profiles and the Large Engine’s size-returning methods use
 signed 64-bit results; code naming exact
 member-function pointer signatures must be updated. Defaulted range parameters
 also mean that exact native member-function types are not frozen. This is a
@@ -117,10 +117,10 @@ source API, not a binary ABI or a promise that holder layout never changes.
 
 The former 65,536-byte rejection test now verifies a successful round trip.
 The [shared conformance tests](../../tests/api/conformance.cpp) cover ranges on
-both profiles. The [Big](../../tests/api/large_values.cpp) and
-[Small](../../tests/api/small_large_values.cpp) large-value tests cover
+both profiles. The [Large Engine](../../tests/api/large_values.cpp) and
+[Small Engine](../../tests/api/small_large_values.cpp) large-value tests cover
 whole values through 512 MiB, every actual chunk boundary, callback counts,
-borrowed/owned holders, exceptions, and old snapshots. Big additionally tests
-relocation under reads; Small tests saturated refcounts and allocation failures.
+borrowed/owned holders, exceptions, and old snapshots. The Large Engine additionally tests
+relocation under reads; the Small Engine tests saturated refcounts and allocation failures.
 Storage placement, capacity, and qualification limits are documented in
 [large values](chunked-values.md).

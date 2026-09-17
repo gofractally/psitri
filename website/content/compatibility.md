@@ -13,7 +13,7 @@ Foreign-API integrations translate another database’s semantics into psitri.
 
 | Interface | Current status | What to evaluate |
 |---|---|---|
-| Native C++23 | Maintained Small and Big profiles in this repository | Shared byte API, lifetime rules, sync policy, engine-specific extensions |
+| Native C++23 | Maintained Small Engine and Large Engine profiles in this repository | Shared byte API, lifetime rules, sync policy, engine-specific extensions |
 | MDBX C / C++ | Implementation in `libraries/psitrimdbx` | The calls, flags, comparators, duplicate handling, cursor and transaction semantics your application uses |
 | SQLite | Separate storage-engine implementation; not included here | Replaces SQLite’s B-tree layer while retaining its SQL parser and virtual machine; port and revalidate against the maintained engines |
 | RocksDB | Separate API wrapper; not included here | Supported API subset, snapshots, batches, transactions, options, and migration |
@@ -21,7 +21,7 @@ Foreign-API integrations translate another database’s semantics into psitri.
 | DuckDB | Separate storage extension; not included here | Catalog, scan, insert, and transactional integration |
 
 The packaged integration in this repository is MDBX. SQLite, RocksDB, LevelDB,
-and DuckDB implementations do not currently target its maintained Small/Big
+and DuckDB implementations do not currently target its maintained engine
 engine API and are not available as packages from this checkout. Evaluate the
 supported subset before choosing an integration.
 
@@ -41,7 +41,7 @@ implementation preserves one-writer-per-environment behavior. Its current
 backend-specific value budget is approximately 512 KiB for non-GC/RC paths,
 separate from the maintained native engines’ 4 GiB − 1 byte logical value limit.
 The shim selects its own tiered/backend configurations; its behavior
-must be validated independently of the native Small/Big conformance suite.
+must be validated independently of the shared engine conformance suite.
 
 ## Compatibility and performance
 
@@ -52,7 +52,7 @@ Translating that workflow adds overhead and can restrict optimization paths
 available through the native interface.
 
 For example, the MDBX layer preserves MDBX's one-writer-per-environment semantics.
-Foreign byte-oriented APIs also do not automatically expose Big's owned subtrees,
+Foreign byte-oriented APIs also do not automatically expose the Large Engine's owned subtrees,
 manifest-root publication, or native tree operations. Applications can miss those
 opportunities even when individual key-value calls are fast.
 
@@ -81,7 +81,7 @@ independently.
 ## Choose an integration path
 
 For a new application, the native C++ API exposes owned snapshots and backend
-selection directly. Big adds owned subtrees and savepoints. For an existing
+selection directly. The Large Engine adds owned subtrees and savepoints. For an existing
 application, an API compatibility layer can reduce code changes while you test
 whether psitri's storage model improves its workload.
 

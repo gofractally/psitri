@@ -70,7 +70,7 @@ read-your-writes, empty and
 binary keys/values, 65,535-byte records, explicit/implicit rollback,
 remove status, snapshot copies across publication, readers using their own
 thread sessions, both scan directions, floor/inclusive bounds, callback hit/miss
-behavior, and clean reopen. Additional checks cover Big config forwarding
+behavior, and clean reopen. Additional checks cover Large Engine config forwarding
 and rejection of oversized keys without changing existing values. Negative
 compile assertions reject role mismatches, missing factories, absent abort, and
 configurations without the common sync setting. The multi-root extension tests
@@ -82,14 +82,14 @@ selection, borrowed addresses, callback exceptions, and snapshot stability in
 both profiles. The adb self-check includes a byte-only engine without
 range methods and verifies that it still meets the original engine concept.
 
-Big's large-value tests exercise full and range reads through 512 MiB, mixing
+The Large Engine's large-value tests exercise full and range reads through 512 MiB, mixing
 small objects with allocation, replacement, deletion, snapshots, and rollback.
 They verify exact segment packing/free-space totals, the embedded directory and
 first payload, reference-count rebuild, explicit recovery, and actual relocation
 during concurrent snapshot reads. Placement arithmetic covers `UINT32_MAX`; an
 inaccessible 4 GiB virtual mapping verifies rejection before input bytes are read.
 A 128 MiB pinned-cache setting does not bound process RSS or the OS page cache.
-Small's separate large-value suite exercises mixed allocation/free through
+The Small Engine's separate large-value suite exercises mixed allocation/free through
 512 MiB, exact physical-allocation boundaries, direct borrowing and crossing
 reads, holder lifetimes, single-leaf snapshots, saturated continuation refcounts,
 concurrent readers, multi-root reads, rollback, durable reopen, and allocation
@@ -127,12 +127,12 @@ On 2026-09-17, macOS arm64 with Homebrew LLVM 22, Debug assertions enabled:
 | Check | Result |
 |---|---|
 | `adb-concept-check` | Passed |
-| `api-conformance-tests` | 21 cases passed, including both profiles through 512 MiB, embedded first payloads, 4 GiB rejection, and Small allocation-failure cleanup |
+| `api-conformance-tests` | 21 cases passed, including both profiles through 512 MiB, embedded first payloads, 4 GiB rejection, and Small Engine allocation-failure cleanup |
 | `start_ref-tests` | 38 cases, 1,098,714 assertions passed |
 | `sal_art_ref-tests` | 104 cases, 2,279,600 assertions passed |
 | `sal-tests` | 49 cases, 101,634,787 assertions passed |
 | `delta_art-tests` | 6 cases, 55,632 assertions passed |
-| Standalone consumer examples | Small, Big, and revision reopen/restore passed |
+| Standalone consumer examples | Small Engine, Large Engine, and revision reopen/restore passed |
 | Existing consumer compilation | MDBX shim, WAL compile check, shared compatibility driver, bank and scan benchmarks built |
 
 This records API and regression evidence for the current checkout, not a new

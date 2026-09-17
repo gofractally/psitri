@@ -79,7 +79,7 @@
       },
       {
         "id": "sal_art_ref",
-        "name": "psitri Big",
+        "name": "psitri Large Engine",
         "detail": "Movable storage",
         "status": "maintained",
         "values": {
@@ -95,7 +95,7 @@
       },
       {
         "id": "start_ref",
-        "name": "psitri Small",
+        "name": "psitri Small Engine",
         "detail": "Fixed-address storage",
         "status": "maintained",
         "values": {
@@ -190,7 +190,7 @@
         "balance": "PASS"
       }
     ],
-    "configuration_note": "Measured at revision 7a3c8a5; Big and Small label the sal_art_ref and start_ref implementations in that build."
+    "configuration_note": "Measured at revision 7a3c8a5; Large Engine and Small Engine label the sal_art_ref and start_ref implementations in that build."
   },
   "art": {
     "date": "2026-06-11",

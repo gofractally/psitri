@@ -1,4 +1,4 @@
-// Big-engine extension: persist revisions as owned subtrees under one
+// Large Engine extension: persist revisions as owned subtrees under one
 // published manifest root. This is not part of the portable byte-only API.
 #include <psitri/engines/big.hpp>
 

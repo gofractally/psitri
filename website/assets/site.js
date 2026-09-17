@@ -139,12 +139,12 @@ async function loadBenchmarks() {
       const ratio = (big / baseline).toFixed(2);
       document.querySelector("#benchmark-insight").textContent =
         metric === "disk"
-          ? `A visible tradeoff: ${ratio}× the disk high-water for Big in this measured configuration.`
-          : `${ratio}× the ${spec.short} for Big in this measured configuration.`;
+          ? `A visible tradeoff: ${ratio}× the disk high-water for the Large Engine in this measured configuration.`
+          : `${ratio}× the ${spec.short} for the Large Engine in this measured configuration.`;
       document.querySelector("#benchmark-tradeoff").textContent =
         metric === "disk"
           ? "Lower is better here. This measures on-disk high-water after the workload, including allocation and retained copy-on-write storage; it is not settled live payload."
-          : "The same run recorded 542 MB disk high-water for Big versus 64 MB for MDBX. Explore every metric above.";
+          : "The same run recorded 542 MB disk high-water for the Large Engine versus 64 MB for MDBX. Explore every metric above.";
       all("[data-metric]").forEach((b) =>
         b.setAttribute("aria-pressed", String(b.dataset.metric === metric)),
       );

@@ -32,3 +32,8 @@ development history and application-specific adoption plans out of public copy.
 Retain benchmark revisions, dates, and configuration limits in methodology.
 Use “practically lock-free” with accurate synchronization boundaries, and explain
 compatibility-layer overhead alongside “Keep the API. Rethink the engine.”
+
+Use **Small Engine** and **Large Engine** as the public display names in prose,
+headings, charts, and controls. Keep C++ identifiers such as
+`psitri::small_engine` and `psitri::big_engine` unchanged unless an API rename is
+explicitly requested.

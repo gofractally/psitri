@@ -64,12 +64,12 @@ The recorder is documented in [the benchmark guide](content/benchmarking.md).
 Claims that must remain explicit until evidence changes:
 
 - The portable API has one serialized writer; independent-root writes are a
-  native SAL capability, while the Big adapter shares its write session.
-- Big’s nested savepoints have a narrower scope than arbitrary nested subtree
+  native SAL capability, while the Large Engine adapter shares its write session.
+- The Large Engine’s nested savepoints have a narrower scope than arbitrary nested subtree
   transactions. Read-driven hot-object promotion is opt-in.
-- Big is the disk-backed profile. Comprehensive crash/power-loss and sustained
+- The Large Engine is the disk-backed profile. Comprehensive crash/power-loss and sustained
   beyond-RAM validation is incomplete. The billion-key tiered run fit in RAM.
-- The libart result measures four-byte handles, not the supplied five-byte Small
+- The libart result measures four-byte handles, not the supplied five-byte Small Engine
   profile; keep it in configuration-specific methodology, not current-profile
   marketing. Inserts were slower in that measurement.
 - The MDBX bank comparison identifies its measured revision, uses no per-commit

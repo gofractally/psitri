@@ -21,14 +21,14 @@ A snapshot remains frozen across subsequent commits. Copying it retains the
 same version, not a deep copy of all data. Long-lived snapshots retain old
 nodes and can increase disk usage, allocation pressure, and reclamation work.
 Drop obsolete revisions deliberately. In-memory snapshots are not persistent
-revision records; Big can store their owned subtrees in a manifest.
+revision records; the Large Engine can store their owned subtrees in a manifest.
 
 ## Concurrency contract
 
 Use one writer thread, with the database opened and write session created on
 that thread. Serialize write transactions and scope each to completion before
 starting another. Native SAL supports separate writers for independent root
-tables; the portable Small/Big API uses one serialized writer. The Big database
+tables; the shared engine API uses one serialized writer. The Large Engine database
 adapter shares an engine write session across its write-session handles.
 
 Each reader thread creates, uses, and destroys its own read session and cursor.
@@ -38,7 +38,7 @@ before database destruction. Opening a read session does not freeze the root;
 creating a cursor does. A new cursor sees a new committed snapshot; an existing
 cursor never silently advances to a newer commit.
 
-For portable use, keep **one live cursor per read session**. Small currently
+For portable use, keep **one live cursor per read session**. The Small Engine currently
 uses one hazard slot per read session: creating a second cursor overwrites the
 first cursor's protection. Use another read session if you need another live
 cursor. Do not pass a writer's owned snapshot to another thread; use that
@@ -52,24 +52,24 @@ not take node mutexes.
 Readers follow immutable snapshot data while the writer changes private paths.
 A reader does not wait for the writer's transaction to finish.
 
-Big's `sal::read_lock` is an **atomic residency marker**, not a blocking
+The Large Engine's `sal::read_lock` is an **atomic residency marker**, not a blocking
 reader-writer mutex. Entering the read scope publishes the session's recycling
 position; leaving clears it. The compactor can relocate objects while retaining
 their old storage until readers finish. Long read scopes defer segment reuse,
 and can eventually limit compaction progress; they do not make the reader wait
 for a compactor lock. Node resolution loads the object's location atomically.
 
-Small follows fixed addresses. Its read-session cursor acquires a snapshot by
+The Small Engine follows fixed addresses. Its read-session cursor acquires a snapshot by
 publishing an atomic hazard slot and validating the root, retrying if publication
 races with a commit. No relocation pin is needed during traversal.
 
 | Boundary | Synchronization |
 |---|---|
-| Big: acquire a published snapshot | Shared per-root mutex protects loading and retaining the root |
-| Big: publish a root | Per-root writer mutex and exclusive root-publication mutex |
-| Small: acquire a read-session cursor | Atomic hazard publication and root validation |
-| Small: acquire an owned root / publish roots | Root-publication mutex |
-| Small: start a write transaction | Per-root writer mutex held until commit or abort |
+| Large Engine: acquire a published snapshot | Shared per-root mutex protects loading and retaining the root |
+| Large Engine: publish a root | Per-root writer mutex and exclusive root-publication mutex |
+| Small Engine: acquire a read-session cursor | Atomic hazard publication and root validation |
+| Small Engine: acquire an owned root / publish roots | Root-publication mutex |
+| Small Engine: start a write transaction | Per-root writer mutex held until commit or abort |
 | Allocation and maintenance | Atomic fast paths plus locks or waits on some segment-claim, growth, sync, and release paths |
 
 Root acquisition can therefore wait behind publication, even though an already
@@ -78,15 +78,15 @@ are separate from reading the tree. **Mutex-free snapshot traversal** is the bas
 practically lock-free design; the whole database does not promise formal lock-free
 or wait-free progress. Page faults, storage I/O, and allocation can also wait.
 
-A callback's byte view is borrowed only for the call. Big retains the atomic
+A callback's byte view is borrowed only for the call. The Large Engine retains the atomic
 residency marker for a borrowed view; a long callback can delay storage reuse.
 Copy data before queueing it to another thread, doing slow I/O, or awaiting
 anything. Native `pinned_value()` also holds a residency marker and is intended
 for short scopes; it is outside the common API.
 
 Do not mix multiple writable opens of the same directory or assume a shared
-multi-process writer protocol. Big read-only opens use a shared advisory
-lock and refuse while an exclusive writer owns the database. Small rejects
+multi-process writer protocol. Read-only opens in the Large Engine use a shared advisory
+lock and refuse while an exclusive writer owns the database. The Small Engine rejects
 read-only opens. Open only a matching engine and compatible disk format.
 
 ## Configuration
@@ -96,19 +96,19 @@ Choose `Engine::config`, not another engine's config type. Set it before open.
 
 | Profile / field | Meaning |
 |---|---|
-| Small: `max_segments` | Ordinary arena reservation in 8 MiB segments; default 4,096 = 32 GiB. Companion large arena reserves up to `min(max_segments, 512)` segments of 2 GiB. |
-| Small: `background_release` | Use the release thread (default true), or reclaim inline |
-| Big: `max_pinned_cache_size_mb` | Budget for pinned SAL segments; not a total RSS cap |
-| Big: `enable_read_cache` | Enable read-driven hot object promotion; profile default false |
-| Big: `read_cache_window_sec` | Access-decay interval used for hot object promotion |
-| Big: `max_database_size` | Address-space/storage ceiling, default 32 TiB; platform/filesystem constraints apply |
+| Small Engine: `max_segments` | Ordinary arena reservation in 8 MiB segments; default 4,096 = 32 GiB. Companion large arena reserves up to `min(max_segments, 512)` segments of 2 GiB. |
+| Small Engine: `background_release` | Use the release thread (default true), or reclaim inline |
+| Large Engine: `max_pinned_cache_size_mb` | Budget for pinned SAL segments; not a total RSS cap |
+| Large Engine: `enable_read_cache` | Enable read-driven hot object promotion; profile default false |
+| Large Engine: `read_cache_window_sec` | Access-decay interval used for hot object promotion |
+| Large Engine: `max_database_size` | Address-space/storage ceiling, default 32 TiB; platform/filesystem constraints apply |
 
-Both profiles default to `sync_mode::none`. Big's profile defaults disable
+Both profiles default to `sync_mode::none`. The Large Engine's profile defaults disable
 `write_protect_on_commit` and `enable_read_cache`. Other SAL runtime settings
 are configurable through the profile config and forwarded by the factory. The explicit
 `open_mode` controls read-only operation and overrides `cfg.read_only`.
 
-For example, before opening a Big database:
+For example, before opening a database using the Large Engine:
 
 ```cpp
 psitri::big_engine::config cfg;
@@ -122,7 +122,7 @@ application memory, and temporary compaction space as well as this pinned
 budget. Do not set it equal to all available RAM. SAL may clamp the effective
 budget to platform limits; for diagnostics inspect
 `db->underlying_allocator().get_runtime_config()` with no concurrent config
-mutation. This is a Big-specific diagnostic, not the generic API.
+mutation. This is a diagnostic specific to the Large Engine, not the generic API.
 
 Environment overrides `HEART_READ_CACHE=1`, `HEART_READ_CACHE_SEC`,
 and `HEART_PINNED_MB` take precedence over these respective fields when set.
@@ -146,19 +146,19 @@ storage is flushed; it does not by itself prove recovery correctness.
 
 Select policy for the deployment's failure model and storage hardware. There
 is no universal power-loss guarantee across devices. Do not treat `db->sync()`
-as a portable replacement for configured transaction durability: Small's
+as a portable replacement for configured transaction durability: the Small Engine's
 standalone `sync()` is currently a no-op, so it is not part of the core concept.
 
-Small transactions sync their companion arena's heads and continuations before
+Transactions in the Small Engine sync their companion arena's heads and continuations before
 the ordinary arena and root publication, using the configured policy. This
 ordering also covers contiguous values in the companion arena.
 
-The API suite verifies **clean close/reopen** with `fsync`. Big's large-value
+The API suite verifies **clean close/reopen** with `fsync`. The Large Engine's large-value
 suite also exercises refcount reconstruction and explicit full recovery.
 Comprehensive power-loss, arbitrary process-kill, disk-full/I/O failure, and
 sustained beyond-RAM validation is incomplete. Select the library against your
 application's failure model and test recovery on the target storage stack.
-Small exposes low-level rebuild machinery, but its database factory does not
+The Small Engine exposes low-level rebuild machinery, but its database factory does not
 perform a complete root walk/rebuild.
 
 Use `create_only` for new databases and `open_existing` for expected existing

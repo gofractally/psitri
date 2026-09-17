@@ -83,6 +83,21 @@ class FairBankTest(unittest.TestCase):
         self.assertEqual(result["status"], "passed")
         self.assertFalse(result["performance_series_complete"])
 
+    def test_diagnostic_is_one_run_and_never_a_performance_series(self):
+        self.assertEqual(fair_bank.repetition_count("diagnostic", None), 1)
+        self.assertEqual(fair_bank.repetition_count("diagnostic", 1), 1)
+        with self.assertRaisesRegex(ValueError, "exactly one repetition"):
+            fair_bank.repetition_count("diagnostic", 5)
+        for records in (self.records()[:1], self.records()):
+            result = fair_bank.summarize(records, ["small"], len(records), "diagnostic")
+            self.assertEqual(result["status"], "passed")
+            self.assertFalse(result["performance_series_complete"])
+
+    def test_performance_still_requires_repetitions(self):
+        self.assertEqual(fair_bank.repetition_count("performance", None), 3)
+        with self.assertRaisesRegex(ValueError, "at least three repetitions"):
+            fair_bank.repetition_count("performance", 1)
+
     def test_library_or_adapter_changes_reject_series(self):
         for key in ("version", "settings"):
             records = self.records()

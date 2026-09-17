@@ -1,11 +1,12 @@
 #pragma once
+#include <psitri/detail/fifo_shared_mutex.hpp>
 #include <mutex>
 #include <shared_mutex>
 
 namespace psitri
 {
    /**
-    * @brief Default lock policy using std::mutex / std::shared_mutex.
+    * @brief Thread lock policy with FIFO shared/exclusive transaction admission.
     *
     * A lock policy is a trivial traits struct that tells psitri which mutex
     * types to use for internal synchronization (per-root modify locks,
@@ -31,7 +32,11 @@ namespace psitri
    struct std_lock_policy
    {
       using mutex_type        = std::mutex;
-      using shared_mutex_type = std::shared_mutex;
+      // std::shared_mutex permits a committing writer to repeatedly overtake
+      // queued snapshot captures. FIFO admission bounds that wait by the
+      // requests already queued, without giving either readers or writers
+      // permanent priority. Custom fiber policies retain their own mutex type.
+      using shared_mutex_type = detail::fifo_shared_mutex;
    };
 
 }  // namespace psitri

@@ -1,0 +1,37 @@
+diff --git a/libraries/psitri-sqlite/src/btree_psitri.cpp b/libraries/psitri-sqlite/src/btree_psitri.cpp
+index 293b0f51..292fccf2 100644
+--- a/libraries/psitri-sqlite/src/btree_psitri.cpp
++++ b/libraries/psitri-sqlite/src/btree_psitri.cpp
+@@ -322,7 +322,7 @@ static std::string make_comparable_from_unpacked(UnpackedRecord* pRec) {
+ // Btree lifecycle
+ // ============================================================================
+ 
+-#define PSITRI_TRACE 0
++#define PSITRI_TRACE 1
+ #if PSITRI_TRACE
+ #define PTRACE(...) std::fprintf(stderr, "[psitri-btree] " __VA_ARGS__)
+ #else
+@@ -849,6 +849,7 @@ int sqlite3BtreeCursorHasHint(BtCursor* pCur, unsigned mask) {
+ 
+ static void ensure_cursor(BtCursor* pCur) {
+    if (!pCur->cursor) {
++      PTRACE("ConstructMergeCursor: pCur=%p\n", (void*)pCur);
+       try {
+          // All tables share root 0.  Use the active write transaction's
+          // cursor if one exists (sees uncommitted writes), otherwise
+@@ -1157,6 +1158,7 @@ int sqlite3BtreeInsert(
+    // that root, so recreate them on the next seek. Other connections retain
+    // their transaction snapshots and are deliberately unaffected.
+    for (auto* cur = pCur->pBt->pCursor; cur; cur = cur->pNext) {
++      PTRACE("MutationResetCursor: pCur=%p exists=%d\n", (void*)cur, (int)cur->cursor.has_value());
+       cur->cursor.reset();
+       cur->is_valid = false;
+       cur->eState = CURSOR_INVALID;
+@@ -1181,6 +1183,7 @@ int sqlite3BtreeDelete(BtCursor* pCur, u8 flags) {
+ 
+    psitri->data_version.fetch_add(1);
+    for (auto* cur = pCur->pBt->pCursor; cur; cur = cur->pNext) {
++      PTRACE("MutationResetCursor: pCur=%p exists=%d\n", (void*)cur, (int)cur->cursor.has_value());
+       cur->cursor.reset();
+       cur->is_valid = false;
+       cur->eState = CURSOR_INVALID;

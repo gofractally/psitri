@@ -1,0 +1,33 @@
+diff --git a/libraries/psitri-sqlite/src/btree_psitri.cpp b/libraries/psitri-sqlite/src/btree_psitri.cpp
+index 293b0f51..c998692d 100644
+--- a/libraries/psitri-sqlite/src/btree_psitri.cpp
++++ b/libraries/psitri-sqlite/src/btree_psitri.cpp
+@@ -322,7 +322,7 @@ static std::string make_comparable_from_unpacked(UnpackedRecord* pRec) {
+ // Btree lifecycle
+ // ============================================================================
+ 
+-#define PSITRI_TRACE 0
++#define PSITRI_TRACE 1
+ #if PSITRI_TRACE
+ #define PTRACE(...) std::fprintf(stderr, "[psitri-btree] " __VA_ARGS__)
+ #else
+@@ -563,7 +563,9 @@ int sqlite3BtreeBeginTrans(Btree* p, int wrflag, int* pSchemaVersion) {
+       p->read_snapshot.reset();
+       p->get_tx();
+    } else if (p->inTrans == TRANS_NONE) {
++      PTRACE("SnapshotRequest: connection=%p\n", (void*)p);
+       p->read_snapshot = std::make_unique<psitri::dwal::read_snapshot>(*p->pBt->psitri->dwal_db, 0);
++      PTRACE("SnapshotAcquired: connection=%p\n", (void*)p);
+       p->inTrans = TRANS_READ;
+    }
+    p->pBt->inTransaction = p->inTrans;
+@@ -579,7 +581,9 @@ int sqlite3BtreeCommitPhaseOne(Btree* p, const char*) {
+           p ? (int)p->active_tx.has_value() : 0, p ? (int)p->inTrans : -1);
+    if (p && p->pBt && p->pBt->psitri) {
+       try {
++         const bool wrote = p->active_tx.has_value();
+          p->commit_tx();
++         if (wrote) PTRACE("WriterCommitted: connection=%p\n", (void*)p);
+       } catch (const std::exception& e) {
+          PTRACE("CommitPhaseOne: commit_tx THREW: %s\n", e.what());
+          return SQLITE_ERROR;

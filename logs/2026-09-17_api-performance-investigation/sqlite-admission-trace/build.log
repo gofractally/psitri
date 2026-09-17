@@ -1,0 +1,3 @@
+[1/3] Building CXX object psitri-sqlite/CMakeFiles/psitri-sqlite.dir/src/btree_psitri.cpp.o
+[2/3] Linking CXX static library psitri-sqlite/libpsitri-sqlite.a
+[3/3] Linking CXX executable bin/api-contract-psitri_sqlite

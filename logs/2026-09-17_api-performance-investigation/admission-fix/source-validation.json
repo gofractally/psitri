@@ -1,0 +1,20 @@
+{
+  "integration_commit": "e62126d5aa2d4c73d1c7f244eb7911190efc85e8",
+  "cloud_and_local_sources_identical": true,
+  "sha256": {
+    "psitri": {
+      "libraries/psitri/include/psitri/detail/fifo_shared_mutex.hpp": "ce19ee3505f94a97ad50967c8b54bb0314360281b753de0672ba3d340348ec1d",
+      "libraries/psitri/include/psitri/lock_policy.hpp": "e18edd58457d04c006eb61d8261281b8fabaf3e7a814077e6a74759348cea712",
+      "libraries/psitri/include/psitri/dwal/dwal_root.hpp": "b627e6b396f5d93eefeb15919b9d4c8e8c9a80c8e767c3259929b37701f0e57b",
+      "libraries/psitri/tests/dwal_snapshot_tests.cpp": "1c49c3551880e47daf877751b485f61cc26cbb4c66dfccba404ab7073fa79cc0",
+      "libraries/psitri/tests/dwal_tests.cpp": "b92a7f43469eee2f1900dba1b5b5b48c6e1bcd3631a81a233ff208ec18a4489a"
+    },
+    "integrations": {
+      "libraries/psitri/include/psitri/detail/fifo_shared_mutex.hpp": "ce19ee3505f94a97ad50967c8b54bb0314360281b753de0672ba3d340348ec1d",
+      "libraries/psitri/include/psitri/lock_policy.hpp": "e18edd58457d04c006eb61d8261281b8fabaf3e7a814077e6a74759348cea712",
+      "libraries/psitri/include/psitri/dwal/dwal_root.hpp": "b627e6b396f5d93eefeb15919b9d4c8e8c9a80c8e767c3259929b37701f0e57b",
+      "libraries/psitri/tests/dwal_snapshot_tests.cpp": "1c49c3551880e47daf877751b485f61cc26cbb4c66dfccba404ab7073fa79cc0",
+      "libraries/psitri/tests/dwal_tests.cpp": "52be5dcfedefd3f325b715cade1b80b09d9e4027cba641faa94635b7bac012ad"
+    }
+  }
+}

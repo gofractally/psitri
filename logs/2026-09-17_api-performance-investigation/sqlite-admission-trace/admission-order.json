@@ -1,0 +1,601 @@
+{
+  "snapshot_acquisitions": 180,
+  "mixed_snapshot_acquisitions": 148,
+  "max_intervening_commits": 2,
+  "admissions_with_intervening_commits": [
+    {
+      "phase": "mixed",
+      "commits_at_request": 0,
+      "commits_at_acquisition": 1,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 3,
+      "commits_at_acquisition": 4,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 3,
+      "commits_at_acquisition": 4,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 3,
+      "commits_at_acquisition": 4,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 6,
+      "commits_at_acquisition": 7,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 6,
+      "commits_at_acquisition": 7,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 9,
+      "commits_at_acquisition": 10,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 9,
+      "commits_at_acquisition": 10,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 9,
+      "commits_at_acquisition": 10,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 10,
+      "commits_at_acquisition": 11,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 12,
+      "commits_at_acquisition": 13,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 12,
+      "commits_at_acquisition": 13,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 12,
+      "commits_at_acquisition": 13,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 12,
+      "commits_at_acquisition": 13,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 15,
+      "commits_at_acquisition": 16,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 15,
+      "commits_at_acquisition": 16,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 15,
+      "commits_at_acquisition": 16,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 15,
+      "commits_at_acquisition": 16,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 18,
+      "commits_at_acquisition": 19,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 18,
+      "commits_at_acquisition": 19,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 18,
+      "commits_at_acquisition": 19,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 18,
+      "commits_at_acquisition": 20,
+      "intervening_commits": 2
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 20,
+      "commits_at_acquisition": 21,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 20,
+      "commits_at_acquisition": 21,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 21,
+      "commits_at_acquisition": 22,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 22,
+      "commits_at_acquisition": 23,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 23,
+      "commits_at_acquisition": 24,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 25,
+      "commits_at_acquisition": 26,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 26,
+      "commits_at_acquisition": 27,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 26,
+      "commits_at_acquisition": 27,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 26,
+      "commits_at_acquisition": 27,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 27,
+      "commits_at_acquisition": 28,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 29,
+      "commits_at_acquisition": 30,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 29,
+      "commits_at_acquisition": 30,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 30,
+      "commits_at_acquisition": 31,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 32,
+      "commits_at_acquisition": 33,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 32,
+      "commits_at_acquisition": 33,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 32,
+      "commits_at_acquisition": 33,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 35,
+      "commits_at_acquisition": 36,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 35,
+      "commits_at_acquisition": 36,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 35,
+      "commits_at_acquisition": 36,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 38,
+      "commits_at_acquisition": 39,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 38,
+      "commits_at_acquisition": 39,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 39,
+      "commits_at_acquisition": 40,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 41,
+      "commits_at_acquisition": 42,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 41,
+      "commits_at_acquisition": 42,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 44,
+      "commits_at_acquisition": 45,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 44,
+      "commits_at_acquisition": 45,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 44,
+      "commits_at_acquisition": 45,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 44,
+      "commits_at_acquisition": 45,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 47,
+      "commits_at_acquisition": 48,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 47,
+      "commits_at_acquisition": 48,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 47,
+      "commits_at_acquisition": 48,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 47,
+      "commits_at_acquisition": 48,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 49,
+      "commits_at_acquisition": 50,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 49,
+      "commits_at_acquisition": 50,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 50,
+      "commits_at_acquisition": 51,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 50,
+      "commits_at_acquisition": 51,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 52,
+      "commits_at_acquisition": 53,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 56,
+      "commits_at_acquisition": 57,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 56,
+      "commits_at_acquisition": 57,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 57,
+      "commits_at_acquisition": 58,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 59,
+      "commits_at_acquisition": 60,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 59,
+      "commits_at_acquisition": 60,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 60,
+      "commits_at_acquisition": 61,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 61,
+      "commits_at_acquisition": 62,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 62,
+      "commits_at_acquisition": 63,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 64,
+      "commits_at_acquisition": 65,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 65,
+      "commits_at_acquisition": 66,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 66,
+      "commits_at_acquisition": 67,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 68,
+      "commits_at_acquisition": 69,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 69,
+      "commits_at_acquisition": 70,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 71,
+      "commits_at_acquisition": 72,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 72,
+      "commits_at_acquisition": 73,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 73,
+      "commits_at_acquisition": 74,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 73,
+      "commits_at_acquisition": 74,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 74,
+      "commits_at_acquisition": 75,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 75,
+      "commits_at_acquisition": 76,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 76,
+      "commits_at_acquisition": 77,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 79,
+      "commits_at_acquisition": 80,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 79,
+      "commits_at_acquisition": 80,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 80,
+      "commits_at_acquisition": 81,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 81,
+      "commits_at_acquisition": 82,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 83,
+      "commits_at_acquisition": 84,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 85,
+      "commits_at_acquisition": 86,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 85,
+      "commits_at_acquisition": 86,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 88,
+      "commits_at_acquisition": 89,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 88,
+      "commits_at_acquisition": 89,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 89,
+      "commits_at_acquisition": 90,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 91,
+      "commits_at_acquisition": 92,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 91,
+      "commits_at_acquisition": 92,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 92,
+      "commits_at_acquisition": 93,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 92,
+      "commits_at_acquisition": 93,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 94,
+      "commits_at_acquisition": 95,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 95,
+      "commits_at_acquisition": 96,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 95,
+      "commits_at_acquisition": 96,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 97,
+      "commits_at_acquisition": 98,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 98,
+      "commits_at_acquisition": 99,
+      "intervening_commits": 1
+    },
+    {
+      "phase": "mixed",
+      "commits_at_request": 99,
+      "commits_at_acquisition": 100,
+      "intervening_commits": 1
+    }
+  ]
+}

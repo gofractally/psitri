@@ -1,0 +1,22 @@
+Filters: [admission-regression]
+Randomness seeded to: 1419226543
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+api-storage-regressions is a Catch2 v3.7.1 host application.
+Run with -? for options
+
+-------------------------------------------------------------------------------
+DWAL admission serves a queued snapshot before the next writer
+-------------------------------------------------------------------------------
+/home/dlarimer/psitri-api-bench-20260917/integrations/libraries/psitri/tests/dwal_snapshot_tests.cpp:11
+...............................................................................
+
+/home/dlarimer/psitri-api-bench-20260917/integrations/libraries/psitri/tests/dwal_snapshot_tests.cpp:37: FAILED:
+  CHECK( queued )
+with expansion:
+  false
+
+===============================================================================
+test cases: 2 | 1 passed | 1 failed
+assertions: 6 | 5 passed | 1 failed
+

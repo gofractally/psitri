@@ -1,0 +1,53 @@
+diff --git a/libraries/psitri-sqlite/src/btree_psitri.cpp b/libraries/psitri-sqlite/src/btree_psitri.cpp
+index 293b0f5..b10aa3f 100644
+--- a/libraries/psitri-sqlite/src/btree_psitri.cpp
++++ b/libraries/psitri-sqlite/src/btree_psitri.cpp
+@@ -579,7 +579,9 @@ int sqlite3BtreeCommitPhaseOne(Btree* p, const char*) {
+           p ? (int)p->active_tx.has_value() : 0, p ? (int)p->inTrans : -1);
+    if (p && p->pBt && p->pBt->psitri) {
+       try {
++         const bool wrote = p->active_tx.has_value();
+          p->commit_tx();
++         if (wrote) psitri::dwal::diagnostic_commits.fetch_add(1, std::memory_order_relaxed);
+       } catch (const std::exception& e) {
+          PTRACE("CommitPhaseOne: commit_tx THREW: %s\n", e.what());
+          return SQLITE_ERROR;
+diff --git a/libraries/psitri/include/psitri/dwal/read_snapshot.hpp b/libraries/psitri/include/psitri/dwal/read_snapshot.hpp
+index c3aefa5..6f4e075 100644
+--- a/libraries/psitri/include/psitri/dwal/read_snapshot.hpp
++++ b/libraries/psitri/include/psitri/dwal/read_snapshot.hpp
+@@ -4,9 +4,12 @@
+ #include <psitri/dwal/merge_cursor.hpp>
+ #include <psitri/read_session_impl.hpp>
+ #include <mutex>
++#include <chrono>
++#include <cstdio>
+ 
+ namespace psitri::dwal
+ {
++   inline std::atomic<uint64_t> diagnostic_commits{0};
+    /// A committed byte-value snapshot across RW, frozen RO, and the base tree.
+    /// Capturing advances COW once under the root transaction lock; reads retain
+    /// their arena owners and fixed roots without holding a writer lock.
+@@ -17,7 +20,11 @@ namespace psitri::dwal
+           : session_(db.underlying_db()->start_read_session())
+       {
+          auto& state = db.root(index);
++         const auto before = diagnostic_commits.load(std::memory_order_relaxed);
++         const auto requested = std::chrono::steady_clock::now();
+          std::unique_lock lock(state.tx_mutex);
++         const auto waited_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - requested).count();
++         const auto passed = diagnostic_commits.load(std::memory_order_relaxed) - before;
+          rw_ = state.rw_layer;
+          if (rw_)
+          {
+@@ -30,6 +37,9 @@ namespace psitri::dwal
+          }
+          if (ro_) ro_view_.emplace(*ro_);
+          root_ = session_->get_root(index).copy_root();
++         lock.unlock();
++         if (passed > 1)
++            std::fprintf(stderr, "[snapshot-admission] intervening_commits=%llu lock_wait_us=%lld\n", (unsigned long long)passed, (long long)waited_us);
+       }
+ 
+       bool get(std::string_view key, std::string* value) const

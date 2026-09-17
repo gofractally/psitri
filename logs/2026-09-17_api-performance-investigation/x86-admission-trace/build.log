@@ -1,0 +1,4 @@
+[1/4] Building CXX object CMakeFiles/api-contract-psitri_sqlite.dir/home/dlarimer/psitri-api-bench-20260917/psitri/benchmarks/fair_bank/main.cpp.o
+[2/4] Building CXX object psitri-sqlite/CMakeFiles/psitri-sqlite.dir/src/btree_psitri.cpp.o
+[3/4] Linking CXX static library psitri-sqlite/libpsitri-sqlite.a
+[4/4] Linking CXX executable bin/api-contract-psitri_sqlite

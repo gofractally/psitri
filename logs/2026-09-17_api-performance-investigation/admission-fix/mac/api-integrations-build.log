@@ -1,0 +1,16 @@
+[1/16] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/database.cpp.o
+[2/16] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_transaction.cpp.o
+[3/16] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/dwal/transaction.cpp.o
+[4/16] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_read_session.cpp.o
+[5/16] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_database.cpp.o
+[6/16] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/dwal/merge_cursor.cpp.o
+[7/16] Building CXX object integrations/psitri/CMakeFiles/psitri.dir/src/dwal/merge_pool.cpp.o
+[8/16] Linking CXX static library integrations/psitri/libpsitri.a
+[9/16] Building CXX object psitrirocks/CMakeFiles/psitrirocks.dir/src/db_impl.cpp.o
+[10/16] Building CXX object psitri-sqlite/CMakeFiles/psitri-sqlite.dir/src/btree_psitri.cpp.o
+[11/16] Building CXX object CMakeFiles/api-storage-regressions.dir/Users/dlarimer/psitri-merge/build/bench-sources/integrations/libraries/psitri/tests/dwal_snapshot_tests.cpp.o
+[12/16] Linking CXX static library psitrirocks/libpsitrirocks.a
+[13/16] Linking CXX static library psitri-sqlite/libpsitri-sqlite.a
+[14/16] Linking CXX executable bin/api-contract-psitri_sqlite
+[15/16] Building CXX object CMakeFiles/api-storage-regressions.dir/Users/dlarimer/psitri-merge/build/bench-sources/integrations/libraries/psitri/tests/dwal_tests.cpp.o
+[16/16] Linking CXX executable bin/api-storage-regressions

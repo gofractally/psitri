@@ -41,8 +41,33 @@ python3 scripts/fair_bank.py --suite api --build build/api-integrations \
   --machine my-runner --profile smoke --engines sqlite psitri_sqlite --durability none
 ```
 
-After smoke validation, use `--profile performance --repeats 5` for each pair.
-Or collect all three pairs in sequence, measuring only the pairs that pass smoke:
+The example explicitly selects the direct `sal_art_ref` MDBX backend. The shim's
+CMake default is the tiered `delta_art` backend; these are different engine
+configurations, not interchangeable measurements of a single shim. Use separate
+build directories and retain the backend choice with each comparison.
+
+After smoke validation, investigate unexpected results with `--profile diagnostic`.
+It uses the performance workload but runs each selected engine exactly once,
+retains correctness checks and the idle gate, and never qualifies as a publishable
+performance series. Change one variable at a time; for example, compare the
+default 1,000-transfer batch with `--batch 1` before attributing a difference to
+the engine. This does not recreate the April workload, which also used different
+keys, account selection, transfer logging, and SQLite schema.
+
+```sh
+python3 scripts/fair_bank.py --suite api --build build/api-mdbx \
+  --machine my-runner --profile diagnostic --engines mdbx psitrimdbx \
+  --durability none --batch 1
+```
+
+Inspect reader progress as well as throughput. In particular, a mixed phase with
+only one read batch per reader can pass data-correctness checks while exposing
+reader starvation; it does not establish useful concurrent progress. Diagnose
+snapshot admission and cursor work before collecting more repetitions.
+
+Once the workload, backend selection, and any anomalies are understood, use
+`--profile performance --repeats 5` for each pair. Or collect all three pairs in
+sequence, measuring only the pairs that pass smoke:
 
 ```sh
 python3 scripts/api_bank_matrix.py --machine my-runner \

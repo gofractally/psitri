@@ -1,0 +1,61 @@
+{
+  "kind": "functional lock-admission diagnostic, not performance evidence",
+  "command": [
+    "/home/dlarimer/psitri-api-bench-20260917/build-integrations/bin/api-contract-psitri_sqlite",
+    "--path",
+    "/home/dlarimer/psitri-api-bench-20260917/diagnostics/sqlite-admission-20260917/database",
+    "--result",
+    "/home/dlarimer/psitri-api-bench-20260917/diagnostics/sqlite-admission-20260917/result.json",
+    "--accounts",
+    "100000",
+    "--transfers",
+    "100000",
+    "--warmup",
+    "10000",
+    "--batch",
+    "1000",
+    "--readers",
+    "4",
+    "--reads-per-snapshot",
+    "100",
+    "--read-batches",
+    "100",
+    "--seed",
+    "12345",
+    "--value-bytes",
+    "8",
+    "--cache-mib",
+    "256",
+    "--map-gib",
+    "64",
+    "--durability",
+    "none"
+  ],
+  "config": {
+    "accounts": 100000,
+    "transfers": 100000,
+    "warmup": 10000,
+    "batch": 1000,
+    "readers": 4,
+    "reads-per-snapshot": 100,
+    "read-batches": 100,
+    "seed": 12345,
+    "value-bytes": 8,
+    "cache-mib": 256,
+    "map-gib": 64,
+    "durability": "none"
+  },
+  "main_revision": "5ba8186a9bb6c99f92262b9cc3cf77bc13c92e5b",
+  "integration_revision": "cb3eccaa9af41b6606680fbe59359537b2f4ab20",
+  "instrumentation_patch": "instrumentation.patch",
+  "binary_sha256": "0a279f250512ebd308753f69693576e9b3d40acf56ebfb7992981925b23e735d",
+  "environment": {
+    "SAL_LOG_LEVEL": "ERROR"
+  },
+  "isolation": {
+    "machine_lock": true,
+    "idle_seconds": 10,
+    "max_cpu_busy_percent": 3
+  },
+  "exit_code": 0
+}

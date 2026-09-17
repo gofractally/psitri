@@ -1,0 +1,7 @@
+{
+  "compiler": "/usr/bin/clang++-20",
+  "compiler_version": "20.1.8",
+  "build_type": "Release",
+  "native_dependencies": {"psio": "/home/dlarimer/psitri-api-bench-20260917/psio", "integrations": "/home/dlarimer/psitri-api-bench-20260917/integrations", "abseil": "/home/dlarimer/arbtrie/build/release/_deps/abseil-src"},
+  "libraries": ["/home/dlarimer/arbtrie/build/release/_deps/rocksdb-build/librocksdb.a", "/usr/lib/x86_64-linux-gnu/libsqlite3.so"]
+}

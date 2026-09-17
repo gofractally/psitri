@@ -1,0 +1,1 @@
+cmake --build /home/dlarimer/psitri-api-bench-20260917/build-integrations --target api-contract-psitri_sqlite -j 2

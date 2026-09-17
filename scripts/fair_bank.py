@@ -145,6 +145,15 @@ def capture_run(command: list[str], directory: Path, timeout: float) -> tuple[in
     return code, time.monotonic() - start
 
 
+def repetition_count(profile: str, requested: int | None) -> int:
+    repeats = requested if requested is not None else (3 if profile == "performance" else 1)
+    if repeats < 1 or (profile == "performance" and repeats < 3):
+        raise ValueError("Performance comparisons require at least three repetitions")
+    if profile == "diagnostic" and repeats != 1:
+        raise ValueError("Diagnostic runs require exactly one repetition; investigate before collecting a series")
+    return repeats
+
+
 def run(args) -> int:
     config = dict(SMOKE if args.profile == "smoke" else PERFORMANCE)
     for key in config:
@@ -153,9 +162,7 @@ def run(args) -> int:
     engines = args.engines
     if not engines or len(set(engines)) != len(engines):
         raise ValueError("Choose unique engines")
-    repeats = args.repeats if args.repeats is not None else (1 if args.profile == "smoke" else 3)
-    if repeats < 1 or (args.profile == "performance" and repeats < 3):
-        raise ValueError("Performance comparisons require at least three repetitions")
+    repeats = repetition_count(args.profile, args.repeats)
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         raise ValueError("timeout must be finite and positive")
 
@@ -292,7 +299,8 @@ def main():
     parser.add_argument("--build", type=Path, default=ROOT / "build/fair")
     parser.add_argument("--output", type=Path, default=ROOT / "logs")
     parser.add_argument("--machine", required=True, help="Stable physical runner identity")
-    parser.add_argument("--profile", choices=("smoke", "performance"), default="smoke")
+    parser.add_argument("--profile", choices=("smoke", "diagnostic", "performance"), default="smoke",
+                        help="diagnostic uses the performance workload once per engine, without qualifying as a performance series")
     parser.add_argument("--suite", choices=("native", "api"), default="native")
     parser.add_argument("--engines", nargs="+", choices=tuple(dict.fromkeys(ENGINES + API_ENGINES)))
     parser.add_argument("--repeats", type=int)

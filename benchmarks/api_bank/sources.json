@@ -2,7 +2,7 @@
   "integrations": {
     "repository": "https://github.com/gofractally/psitri.git",
     "branch": "codex/api-compatibility-fixes",
-    "revision": "cb3eccaa9af41b6606680fbe59359537b2f4ab20"
+    "revision": "e62126d5aa2d4c73d1c7f244eb7911190efc85e8"
   },
   "psio": {
     "revision": "ff114b6a8c9265e6b5da5ffb85df1617b2b43514"

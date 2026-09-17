@@ -1,0 +1,1 @@
+["cmake", "--build", "/home/dlarimer/psitri-api-bench-20260917/build-mdbx", "--target", "api-storage-regressions", "-j", "2"]

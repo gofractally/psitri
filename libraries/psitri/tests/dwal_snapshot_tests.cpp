@@ -8,6 +8,63 @@
 #include <latch>
 #include <unistd.h>
 
+TEST_CASE("DWAL admission serves a queued snapshot before the next writer", "[dwal][admission-regression]")
+{
+   psitri::std_lock_policy::shared_mutex_type mutex;
+   std::atomic<bool> snapshot_acquired{false};
+   mutex.lock_shared();
+   auto snapshot = std::async(std::launch::async, [&] {
+      std::unique_lock lock(mutex);
+      snapshot_acquired.store(true);
+   });
+   // A pending exclusive capture must close admission to later shared owners.
+   // Probe on a separate thread: recursive shared locking is not required.
+   auto queued = std::async(std::launch::async, [&] {
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      while (std::chrono::steady_clock::now() < deadline)
+      {
+         if (!mutex.try_lock_shared()) return true;
+         mutex.unlock_shared();
+         std::this_thread::yield();
+      }
+      return false;
+   }).get();
+   mutex.unlock_shared();
+   mutex.lock(); // A new writer may not overtake the already queued capture.
+   const bool served_first = snapshot_acquired.load();
+   mutex.unlock();
+   snapshot.get(); // Release all owners before reporting a test failure.
+   CHECK(queued);
+   CHECK(served_first);
+}
+
+TEST_CASE("DWAL admission allows shared owners and excludes writers", "[dwal][admission-regression]")
+{
+   psitri::std_lock_policy::shared_mutex_type mutex;
+   mutex.lock_shared();
+   auto shared = std::async(std::launch::async, [&] {
+      const bool read = mutex.try_lock_shared();
+      if (read) mutex.unlock_shared();
+      const bool write = mutex.try_lock();
+      if (write) mutex.unlock();
+      return std::pair{read, write};
+   }).get();
+   mutex.unlock_shared();
+   CHECK(shared.first);
+   CHECK_FALSE(shared.second);
+   mutex.lock();
+   auto exclusive = std::async(std::launch::async, [&] {
+      const bool read = mutex.try_lock_shared();
+      if (read) mutex.unlock_shared();
+      const bool write = mutex.try_lock();
+      if (write) mutex.unlock();
+      return std::pair{read, write};
+   }).get();
+   mutex.unlock();
+   CHECK_FALSE(exclusive.first);
+   CHECK_FALSE(exclusive.second);
+}
+
 TEST_CASE("DWAL snapshots retain values and range deletes across arena rotation", "[dwal][snapshot-regression]")
 {
    auto path = std::filesystem::temp_directory_path() /

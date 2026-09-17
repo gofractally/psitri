@@ -1,0 +1,108 @@
+{
+  "event_counts_by_phase": {
+    "startup": {
+      "BtreeOpen": 3,
+      "BeginTrans": 4,
+      "GetMeta": 6,
+      "BtreeCursor": 4,
+      "BtreeFirst": 4,
+      "ConstructMergeCursor": 4,
+      "CommitPhaseTwo": 3,
+      "CommitPhaseOne": 2,
+      "CreateTable": 1,
+      "Insert": 2,
+      "MutationResetCursor": 2
+    },
+    "load": {
+      "BeginTrans": 34,
+      "BtreeCursor": 32,
+      "IndexMoveto": 32,
+      "ConstructMergeCursor": 32,
+      "Insert": 32,
+      "MutationResetCursor": 32,
+      "CommitPhaseOne": 2,
+      "CommitPhaseTwo": 2
+    },
+    "contract checks": {
+      "BeginTrans": 55,
+      "BtreeCursor": 48,
+      "IndexMoveto": 129,
+      "ConstructMergeCursor": 48,
+      "Insert": 5,
+      "MutationResetCursor": 5,
+      "BtreeOpen": 4,
+      "GetMeta": 20,
+      "BtreeFirst": 8,
+      "CommitPhaseTwo": 16,
+      "CommitPhaseOne": 6,
+      "BtreeClose": 8
+    },
+    "warmup": {
+      "BeginTrans": 100,
+      "BtreeCursor": 98,
+      "IndexMoveto": 288,
+      "ConstructMergeCursor": 98,
+      "Insert": 32,
+      "MutationResetCursor": 32,
+      "CommitPhaseOne": 2,
+      "CommitPhaseTwo": 6,
+      "BtreeOpen": 1,
+      "GetMeta": 5,
+      "BtreeFirst": 2,
+      "BtreeClose": 2
+    },
+    "write": {
+      "BeginTrans": 295,
+      "BtreeCursor": 290,
+      "IndexMoveto": 864,
+      "ConstructMergeCursor": 290,
+      "Insert": 128,
+      "MutationResetCursor": 128,
+      "CommitPhaseOne": 5,
+      "CommitPhaseTwo": 9,
+      "BtreeOpen": 1,
+      "GetMeta": 5,
+      "BtreeFirst": 2,
+      "BtreeClose": 2
+    },
+    "mixed": {
+      "BtreeOpen": 3,
+      "BeginTrans": 411,
+      "GetMeta": 15,
+      "BtreeCursor": 404,
+      "BtreeFirst": 6,
+      "ConstructMergeCursor": 404,
+      "CommitPhaseTwo": 20,
+      "CommitPhaseOne": 7,
+      "IndexMoveto": 1200,
+      "Insert": 128,
+      "MutationResetCursor": 128,
+      "BtreeClose": 6
+    },
+    "read": {
+      "BtreeOpen": 2,
+      "BeginTrans": 68,
+      "GetMeta": 10,
+      "BtreeCursor": 66,
+      "BtreeFirst": 4,
+      "ConstructMergeCursor": 66,
+      "CommitPhaseTwo": 8,
+      "CommitPhaseOne": 2,
+      "IndexMoveto": 192,
+      "BtreeClose": 4
+    },
+    "close/reopen validation": {
+      "BtreeClose": 14,
+      "BtreeOpen": 4,
+      "BeginTrans": 37,
+      "GetMeta": 10,
+      "BtreeCursor": 35,
+      "BtreeFirst": 4,
+      "ConstructMergeCursor": 35,
+      "CommitPhaseTwo": 7,
+      "CommitPhaseOne": 2,
+      "IndexMoveto": 96
+    }
+  },
+  "cursor_constructions_after_mutation_reset": {}
+}

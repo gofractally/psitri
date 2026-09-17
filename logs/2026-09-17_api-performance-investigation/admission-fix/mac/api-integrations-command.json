@@ -1,0 +1,1 @@
+["cmake", "--build", "build/api-integrations", "--target", "api-storage-regressions", "api-contract-psitri_sqlite", "-j", "2"]

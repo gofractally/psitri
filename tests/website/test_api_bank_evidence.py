@@ -36,7 +36,7 @@ class ApiEvidenceTest(unittest.TestCase):
         self.assertEqual(s['metrics']['psitrimdbx']['write']['maximum'], 600)
 
     def test_smoke_dirty_failed_and_unisolated_runs_cannot_be_published(self):
-        for key, value in [('profile','smoke'),('dirty',True),('status','failed'),('repeats',1)]:
+        for key, value in [('profile','smoke'),('profile','diagnostic'),('dirty',True),('status','failed'),('repeats',1)]:
             with self.subTest(key=key):
                 manifest = self.series(); manifest[key] = value
                 with self.assertRaises(ValueError): api_bank_evidence.validated_series(manifest, 'mdbx')

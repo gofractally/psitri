@@ -1,0 +1,1 @@
+["cmake", "--build", "build/api-mdbx", "--target", "api-storage-regressions", "-j", "2"]

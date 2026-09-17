@@ -22,6 +22,13 @@ EVIDENCE = {
     "bank_compare.log": "logs/2026-06-17_gcart_spec-bank-vs-mdbx/bank_compare.log",
     "mdbx.log": "logs/2026-06-17_gcart_spec-bank-vs-mdbx/mdbx.log",
     "scale-1b.log": "logs/2026-06-13_delta_art-1B/run.log",
+    "integration-bank-rocksdb.log": "logs/2026-04-06_integration-bank/rocksdb.log",
+    "integration-bank-psitrirocks.log": "logs/2026-04-06_integration-bank/psitrirocks.log",
+    "integration-bank-psitri-sqlite.log": "logs/2026-04-06_integration-bank/psitri-sqlite.log",
+    "integration-bank-system-sqlite.log": "logs/2026-04-06_integration-bank/system-sqlite.log",
+    "integration-bank-machine.json": "logs/2026-04-06_integration-bank/machine.json",
+    "integration-bank-progress.txt": "logs/2026-04-06_integration-bank/progress.txt",
+    "integration-bank-provenance.json": "logs/2026-04-06_integration-bank/provenance.json",
 }
 NAV = (("index", "API overview"), ("quickstart", "Quickstart"), ("reference", "API reference"),
        ("operations", "Lifetimes & durability"), ("engines", "Choose an engine"),

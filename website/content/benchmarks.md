@@ -74,6 +74,48 @@ through the MDBX compatibility layer require a separate measurement.
 Raw outputs: [psitri engines](../evidence/bank_compare.log),
 [real libmdbx](../evidence/mdbx.log).
 
+## Additional benchmark backends
+
+The integration benchmark suite also implements **RocksDB and SQLite bank
+backends**, each with a real-database build and a psitri-backed build. DuckDB
+has a separate **TATP telecom workload** comparing its native storage with the
+psitri storage extension.
+
+| Interface | Benchmark targets | Retained evidence |
+|---|---|---|
+| RocksDB | `bank-bench-rocksdb`, `bank-bench-psitrirocks` | April 6 bank logs; both passed balance conservation |
+| SQLite | `bank-bench-system-sqlite`, `bank-bench-psitri-sqlite` | April 6 bank logs; psitri-backed run passed, system SQLite run failed balance conservation |
+| DuckDB | `tatp-bench --engine duckdb`, `tatp-bench --engine psitri` | Benchmark implementation exists; no retained result is included here |
+
+These integrations use a separate source configuration from the maintained
+Small Engine and Large Engine profiles. Their measurements do not belong in the
+June native-engine chart: the April workload uses one million accounts, one
+million transfer attempts, batch size 1, one concurrent reader, and no per-commit
+sync on AMD EPYC-Turin. The June workload uses different hardware, keys,
+transaction work, batching, and reader counts.
+
+The April machine record identifies revision `ec383f2`, a clean Release build
+with `clang++-20`, 16 logical CPUs, 121 GB RAM, Linux, and ext4. Full compiler and
+dependency versions, repeated measurements, and variability are not recorded in
+this archive. The throughput counters include skipped transfer attempts.
+
+RocksDB and PsiTriRocks both passed this run's final balance check. The system
+SQLite result **failed validation**, so its timings do not support a SQLite
+speedup claim. The failure's cause is not established by the saved output.
+The cohort status also records failed or incomplete runs for other configurations.
+
+Raw evidence: [RocksDB](../evidence/integration-bank-rocksdb.log),
+[PsiTriRocks](../evidence/integration-bank-psitrirocks.log),
+[psitri-backed SQLite](../evidence/integration-bank-psitri-sqlite.log),
+[system SQLite, failed](../evidence/integration-bank-system-sqlite.log),
+[machine settings](../evidence/integration-bank-machine.json),
+[cohort status](../evidence/integration-bank-progress.txt), and
+[archive provenance and checksums](../evidence/integration-bank-provenance.json).
+
+The [bank driver](https://github.com/gofractally/arbtrie/blob/ec383f2b976586d15c8e0000fd1b23614caa9329/programs/bank_bench.cpp)
+and [DuckDB TATP driver](https://github.com/gofractally/arbtrie/blob/ec383f2b976586d15c8e0000fd1b23614caa9329/libraries/psitri-duckdb/benchmarks/tatp_bench.cpp)
+identify the tested interfaces. Source access may be restricted.
+
 ## ART lookups
 
 **Measured configuration:** four-byte / 32-bit direct-address handles, a 32 GiB
@@ -129,7 +171,7 @@ those settings when reproducing it, or choose a synchronous policy on both sides
 when that is your application's requirement. The ART table measures the
 four-byte configuration identified above. The tiered scale test uses 128 GB RAM.
 
-A controlled RocksDB comparison is not available in this dataset. Neither an
-API-compatibility claim nor a point-read result predicts end-to-end application
-performance. Test your calls, data distribution, snapshot lifetimes, and failure
+The RocksDB and SQLite integration runs above are separate from the native
+Small Engine/Large Engine comparison. Neither an API-compatibility claim nor a
+point-read result predicts end-to-end application performance. Test your calls, data distribution, snapshot lifetimes, and failure
 model using the [recording workflow](benchmarking.html).

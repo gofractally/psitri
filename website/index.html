@@ -517,7 +517,9 @@
               The MDBX C/C++ compatibility implementation is included. SQLite,
               RocksDB, LevelDB, and DuckDB have separate integration
               implementations; versions targeting this repository’s shared
-              engine API are not available.
+              engine API are not available. The separate integration suite
+              includes bank benchmarks for RocksDB and SQLite, and a TATP
+              benchmark for DuckDB.
             </p>
             <p>
               <strong>Compatibility has a performance cost.</strong> Another API
@@ -881,13 +883,18 @@ auto saved = writer-&gt;get_root(0); // retain a version</code></pre>
           <details>
             <summary>Is this faster than MDBX or RocksDB?</summary>
             <p>
-              The published bank workload shows higher throughput than MDBX,
-              along with a higher disk high-water mark. The result depends on
-              the tested configuration and durability settings. A controlled
-              RocksDB comparison is not available. Measure your own workload and
+              The published native bank workload shows higher throughput than
+              MDBX, along with a higher disk high-water mark. Separate RocksDB
+              and SQLite integration bank results are also available; their
+              configurations and correctness status are documented in the
+              evidence guide. Results depend on the tested engine, interface,
+              workload, and durability settings. Measure your own workload and
               include storage, memory, latency, and recovery requirements in the
               comparison.
             </p>
+            <a href="docs/benchmarks.html#additional-benchmark-backends"
+              >Explore the integration benchmarks ↗</a
+            >
           </details>
           <details>
             <summary>Can I switch engines without migrating data?</summary>

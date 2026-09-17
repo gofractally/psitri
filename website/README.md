@@ -28,7 +28,8 @@ toggle, the snapshot illustration, example switching/copy, menu, and details.
 - the listed API Markdown guides, rendered as public HTML;
 - the three curated methodology/integration guides in `website/content`;
 - `examples/api/basic.cpp` and `examples/api/revisions.cpp`;
-- three raw logs and a benchmark-only excerpt of the ART measurement record.
+- the curated native bank and scale logs, integration bank logs with their
+  correctness status and provenance, and a benchmark-only ART measurement excerpt.
 
 It does **not** upload the checkout, all source code, all raw logs, private runner
 metadata, or newly recorded benchmark runs. Review each new public asset. A
@@ -74,7 +75,10 @@ Claims that must remain explicit until evidence changes:
   marketing. Inserts were slower in that measurement.
 - The MDBX bank comparison identifies its measured revision, uses no per-commit
   fsync, and has a
-  larger psitri disk high-water. No current RocksDB speedup is asserted.
+  larger psitri disk high-water. Separate RocksDB/SQLite bank records use a
+  different configuration and workload; do not merge them into that chart. The
+  retained system SQLite run failed validation and cannot support a speedup claim.
+  DuckDB has a TATP driver, without a retained result in the public dataset.
 
 ## Public audience and terminology
 

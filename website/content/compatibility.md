@@ -15,15 +15,22 @@ Foreign-API integrations translate another database’s semantics into psitri.
 |---|---|---|
 | Native C++23 | Maintained Small Engine and Large Engine profiles in this repository | Shared byte API, lifetime rules, sync policy, engine-specific extensions |
 | MDBX C / C++ | Implementation in `libraries/psitrimdbx` | The calls, flags, comparators, duplicate handling, cursor and transaction semantics your application uses |
-| SQLite | Separate storage-engine implementation; not included here | Replaces SQLite’s B-tree layer while retaining its SQL parser and virtual machine; port and revalidate against the maintained engines |
-| RocksDB | Separate API wrapper; not included here | Supported API subset, snapshots, batches, transactions, options, and migration |
+| SQLite | Separate storage-engine implementation with a bank benchmark; not packaged in this checkout | Replaces SQLite’s B-tree layer while retaining its SQL parser and virtual machine; port and revalidate against the maintained engines |
+| RocksDB | Separate API wrapper with a bank benchmark; not packaged in this checkout | Supported API subset, snapshots, batches, transactions, options, and migration |
 | LevelDB | Separate API wrapper; not included here | Supported byte API and batch/snapshot behavior |
-| DuckDB | Separate storage extension; not included here | Catalog, scan, insert, and transactional integration |
+| DuckDB | Separate storage extension with a TATP benchmark; not packaged in this checkout | Catalog, scan, insert, and transactional integration |
 
 The packaged integration in this repository is MDBX. SQLite, RocksDB, LevelDB,
 and DuckDB implementations do not currently target its maintained engine
-engine API and are not available as packages from this checkout. Evaluate the
+API and are not available as packages from this checkout. Evaluate the
 supported subset before choosing an integration.
+
+Benchmark adapters are available in the separate integration suite: RocksDB and
+SQLite run the bank workload through both their real databases and psitri-backed
+implementations. DuckDB has a TATP telecom benchmark. See the
+[backend inventory and retained results](benchmarks.html#additional-benchmark-backends)
+for source links and correctness status. These adapters do not establish support
+for the maintained `psitri::engine` contract.
 
 ## What “near drop-in” does and does not mean
 

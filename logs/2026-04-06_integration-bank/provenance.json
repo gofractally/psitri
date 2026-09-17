@@ -1,0 +1,21 @@
+{
+  "source_repository": "https://github.com/gofractally/arbtrie",
+  "archive_commit": "666a6e04165cf5367291e351d038af18083d0dd6",
+  "source_directory": "docs/data/bank_tpcb/2026-04-06/vultr",
+  "measured_revision_from_machine_metadata": "ec383f2b976586d15c8e0000fd1b23614caa9329",
+  "notes": [
+    "Copied byte-for-byte from the committed integration benchmark archive; these are not new runs.",
+    "These configurations are separate from the maintained Small Engine and Large Engine profiles and the June bank comparison.",
+    "System SQLite failed balance conservation; retain its failed result and do not use it for a speedup claim.",
+    "The cohort progress file also records failed and incomplete runs for other configurations.",
+    "Exact commands, complete compiler/dependency versions, repetitions, and variance are not recorded in this subset."
+  ],
+  "sha256": {
+    "rocksdb.log": "157a2009b85e53dbfe2ef17f72d3af328f6bf85f130302725b60424ea9192b84",
+    "psitrirocks.log": "42c7da825d572788c1da8c3b39ba7929fb804ed2530a2ccfc06a629ece9a2f56",
+    "psitri-sqlite.log": "c78967a979fc20c9fd3041f1ff692ee5e05050ed441a654b194f9774f4794667",
+    "system-sqlite.log": "868ec15c73b5b3617372ed41a7e93dbf6db37b8b865ca783c5fada7133f4f13a",
+    "machine.json": "4899f19a8d13479d115aa339651fcd7e4565ad7450de76bbab991b834aa58748",
+    "progress.txt": "728ec9694dcbf7fffe4b379eac99fb0fcfbaccc6fe32690a3471caa734d44405"
+  }
+}

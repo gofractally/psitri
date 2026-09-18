@@ -1,0 +1,7 @@
+{
+  "compiler": "/usr/bin/clang++-20",
+  "compiler_version": "20.1.8",
+  "build_type": "Release",
+  "native_dependencies": {"psio": "/home/dlarimer/psitri-api-bench-20260917/psio", "ucc": "/home/dlarimer/psitri-api-bench-20260917/ucc"},
+  "libraries": ["/home/dlarimer/arbtrie/build/release/_deps/libmdbx-build/libmdbx.a"]
+}

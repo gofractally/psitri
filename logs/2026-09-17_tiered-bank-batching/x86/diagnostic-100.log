@@ -1,0 +1,5 @@
+Archive: /home/dlarimer/psitri-api-bench-20260917/tiered-evidence/x86/batch-100/2026-09-18T040637-fair-bank-diagnostic-d7085929
+[1/1] tiered
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (4.62s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/tiered-evidence/x86/batch-100/2026-09-18T040637-fair-bank-diagnostic-d7085929/manifest.json

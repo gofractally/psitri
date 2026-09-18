@@ -1,0 +1,46 @@
+{
+  "purpose": "availability only; no timing run",
+  "threshold_percent": 3,
+  "samples": [
+    {
+      "time": 1789704447.309498,
+      "cpu_busy_percent": 18.886
+    },
+    {
+      "time": 1789704448.312374,
+      "cpu_busy_percent": 21.734
+    },
+    {
+      "time": 1789704449.314519,
+      "cpu_busy_percent": 17.085
+    },
+    {
+      "time": 1789704450.314857,
+      "cpu_busy_percent": 18.172
+    },
+    {
+      "time": 1789704451.315476,
+      "cpu_busy_percent": 16.444
+    },
+    {
+      "time": 1789704452.32063,
+      "cpu_busy_percent": 17.899
+    },
+    {
+      "time": 1789704453.322772,
+      "cpu_busy_percent": 15.484
+    },
+    {
+      "time": 1789704454.323019,
+      "cpu_busy_percent": 18.479
+    },
+    {
+      "time": 1789704455.326564,
+      "cpu_busy_percent": 16.062
+    },
+    {
+      "time": 1789704456.326741,
+      "cpu_busy_percent": 21.944
+    }
+  ]
+}

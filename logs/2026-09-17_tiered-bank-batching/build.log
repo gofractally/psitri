@@ -1,0 +1,9 @@
+[1/9] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/mapping.cpp.o
+[2/9] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/block_allocator.cpp.o
+[3/9] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/control_block_alloc.cpp.o
+[4/9] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/segment_thread.cpp.o
+[5/9] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/allocator_session.cpp.o
+[6/9] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/allocator.cpp.o
+[7/9] Linking CXX static library psitri/libraries/sal/libsal.a
+[8/9] Building CXX object CMakeFiles/fair-bank-tiered.dir/home/dlarimer/psitri-api-bench-20260917/tiered-source/benchmarks/fair_bank/main.cpp.o
+[9/9] Linking CXX executable bin/fair-bank-tiered

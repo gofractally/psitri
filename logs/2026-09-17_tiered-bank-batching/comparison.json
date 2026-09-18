@@ -1,0 +1,1885 @@
+{
+  "machines": {
+    "x86": {
+      "status": "passed",
+      "rows": [
+        {
+          "batch": 1,
+          "records": {
+            "native_dwal": {
+              "metrics": {
+                "load": 1735117.3046007624,
+                "write": 998402.5529201201,
+                "write_batch_p50": 0.791,
+                "write_batch_p99": 2.093,
+                "mixed_write_active": 50819.845633016426,
+                "mixed_write_active_batch_p50": 20.529,
+                "mixed_write_active_batch_p99": 45.513000000000005,
+                "mixed_write": 50819.49895245792,
+                "mixed_read": 8652736.25159119,
+                "read": 10532668.65172362,
+                "disk_before_close": 454592477,
+                "allocated_before_close": 175792128,
+                "close": 0.132494767,
+                "disk_after_close": 186157021,
+                "allocated_after_close": 179625984,
+                "reopen": 0.011216532,
+                "peak_rss": 1430695936
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 1000000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 1000000,
+                "mixed_reads": 170264100,
+                "read_only_reads": 40000,
+                "reader_checksum": "4283403336614052310"
+              },
+              "settings": "base=Large Engine; base_sync=none; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; enable_read_cache=false; max_pinned_cache_size_mb=256",
+              "version": "DWAL over Large Engine; WAL format 2"
+            },
+            "mdbx": {
+              "metrics": {
+                "load": 126989.26476820924,
+                "write": 36224.68245066355,
+                "write_batch_p50": 23.102,
+                "write_batch_p99": 45.323,
+                "mixed_write_active": 15592.594764969064,
+                "mixed_write_active_batch_p50": 14.600000000000001,
+                "mixed_write_active_batch_p99": 416.473,
+                "mixed_write": 15592.557164914977,
+                "mixed_read": 6544465.993353769,
+                "read": 7452140.953520065,
+                "disk_before_close": 65431146496,
+                "allocated_before_close": 65431158784,
+                "close": 4.672534634,
+                "disk_after_close": 65431142400,
+                "allocated_after_close": 65431158784,
+                "reopen": 0.000890574,
+                "peak_rss": 65436348416
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 1000000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 1000000,
+                "mixed_reads": 419717300,
+                "read_only_reads": 40000,
+                "reader_checksum": "13928930378390045409"
+              },
+              "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=MDBX_DEBUG=0 MDBX_WORDBITS=64 BYTE_ORDER=LITTLE_ENDIAN MDBX_ENABLE_BIGFOOT=1 MDBX_ENV_CHECKPID=AUTO=0 MDBX_TXN_CHECKOWNER=1 MDBX_64BIT_ATOMIC=AUTO=1 MDBX_64BIT_CAS=AUTO=1 MDBX_TRUST_RTC=AUTO=0 MDBX_AVOID_MSYNC=0 MDBX_ENABLE_REFUND=1 MDBX_USE_MINCORE=1 MDBX_ENABLE_PGOP_STAT=1 MDBX_ENABLE_PROFGC=0 _GNU_SOURCE=YES MDBX_LOCKING=AUTO=2008 MDBX_USE_OFDLOCKS=AUTO=1 MDBX_USE_FALLOCATE=AUTO=1 MDBX_CACHELINE_SIZE=64 MDBX_CPU_WRITEBACK_INCOHERENT=0 MDBX_MMAP_INCOHERENT_CPU_CACHE=0 MDBX_MMAP_INCOHERENT_FILE_WRITE=0 MDBX_UNALIGNED_OK=8 MDBX_PNL_ASCENDING=0; compiler=Ubuntu clang version 20.1.8 (0ubuntu4); build_flags=-O3 -DNDEBUG MDBX_BUILD_SHARED_LIBRARY=0 -march=native -ffast-math -fvisibility=hidden",
+              "version": "v0.13.11-0-gb862eb08"
+            },
+            "shim_dwal": {
+              "metrics": {
+                "load": 1255657.7111233368,
+                "write": 105180.15552858124,
+                "write_batch_p50": 9.253,
+                "write_batch_p99": 14.89,
+                "mixed_write_active": 29856.916144229093,
+                "mixed_write_active_batch_p50": 33.135,
+                "mixed_write_active_batch_p99": 56.257,
+                "mixed_write": 29856.436739729244,
+                "mixed_read": 6123522.333238054,
+                "read": 11053687.20607555,
+                "disk_before_close": 458040647,
+                "allocated_before_close": 179253248,
+                "close": 0.151962224,
+                "disk_after_close": 189605191,
+                "allocated_after_close": 183087104,
+                "reopen": 0.017779719,
+                "peak_rss": 1436102656
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 1000000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 1000000,
+                "mixed_reads": 205098900,
+                "read_only_reads": 40000,
+                "reader_checksum": "2224715189194951765"
+              },
+              "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=psitrimdbx; compiler=clang; build_flags=; backend=DWAL over Large Engine; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; read cache controlled by recorded environment",
+              "version": "psitrimdbx-0.1"
+            },
+            "shim_direct": {
+              "metrics": {
+                "load": 158217.20524043293,
+                "write": 49076.113905072045,
+                "write_batch_p50": 16.943,
+                "write_batch_p99": 36.77,
+                "mixed_write_active": 40123.564577621524,
+                "mixed_write_active_batch_p50": 21.199,
+                "mixed_write_active_batch_p99": 41.967,
+                "mixed_write": 40123.26103480089,
+                "mixed_read": 7176815.6026860075,
+                "read": 8291277.555283648,
+                "disk_before_close": 602231089,
+                "allocated_before_close": 195649536,
+                "close": 0.015283848,
+                "disk_after_close": 400904497,
+                "allocated_after_close": 195624960,
+                "reopen": 0.029032266,
+                "peak_rss": 407076864
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 1000000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 1000000,
+                "mixed_reads": 178869200,
+                "read_only_reads": 40000,
+                "reader_checksum": "12888503336614034420"
+              },
+              "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=psitrimdbx; compiler=clang; build_flags=",
+              "version": "psitrimdbx-0.1"
+            },
+            "native_direct": {
+              "metrics": {
+                "load": 165161.6880404499,
+                "write": 91487.54335800526,
+                "write_batch_p50": 8.261,
+                "write_batch_p99": 19.355999999999998,
+                "mixed_write_active": 69841.37341757865,
+                "mixed_write_active_batch_p50": 11.605,
+                "mixed_write_active_batch_p99": 23.282,
+                "mixed_write": 69840.75640839027,
+                "mixed_read": 6822282.54454335,
+                "read": 9667451.744310403,
+                "disk_before_close": 602231064,
+                "allocated_before_close": 246579200,
+                "close": 0.019938052,
+                "disk_after_close": 333795608,
+                "allocated_after_close": 246554624,
+                "reopen": 0.017583497,
+                "peak_rss": 406749184
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 1000000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 1000000,
+                "mixed_reads": 97683400,
+                "read_only_reads": 40000,
+                "reader_checksum": "5489679631452323752"
+              },
+              "settings": "sync_mode=none; enable_read_cache=false; max_pinned_cache_size_mb=256",
+              "version": "psitri API 1"
+            },
+            "small_direct": {
+              "metrics": {
+                "load": 1019334.585517916,
+                "write": 361122.72974341246,
+                "write_batch_p50": 2.693,
+                "write_batch_p99": 4.035,
+                "mixed_write_active": 212065.60896837673,
+                "mixed_write_active_batch_p50": 3.905,
+                "mixed_write_active_batch_p99": 10.594000000000001,
+                "mixed_write": 212061.42280394316,
+                "mixed_read": 11188721.171554808,
+                "read": 24284768.047073595,
+                "disk_before_close": 72257856,
+                "allocated_before_close": 67772416,
+                "close": 0.004181335,
+                "disk_after_close": 72257856,
+                "allocated_after_close": 67772416,
+                "reopen": 0.000336822,
+                "peak_rss": 90378240
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 1000000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 1000000,
+                "mixed_reads": 52761700,
+                "read_only_reads": 40000,
+                "reader_checksum": "15908211852580955604"
+              },
+              "settings": "sync_mode=none; fixed arena; default max_segments=4096; background release enabled",
+              "version": "psitri API 1"
+            },
+            "small_dwal": {
+              "metrics": {
+                "load": 1785870.6131740317,
+                "write": 1022640.7027055136,
+                "write_batch_p50": 0.781,
+                "write_batch_p99": 2.022,
+                "mixed_write_active": 49426.96234602777,
+                "mixed_write_active_batch_p50": 20.168,
+                "mixed_write_active_batch_p99": 47.154,
+                "mixed_write": 49426.56305398265,
+                "mixed_read": 9407056.244029889,
+                "read": 11741495.708043013,
+                "disk_before_close": 93217224,
+                "allocated_before_close": 68464640,
+                "close": 0.097943277,
+                "disk_after_close": 93217224,
+                "allocated_after_close": 81870848,
+                "reopen": 0.000446914,
+                "peak_rss": 1144320000
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 1000000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 1000000,
+                "mixed_reads": 190323900,
+                "read_only_reads": 40000,
+                "reader_checksum": "5896459262904492834"
+              },
+              "settings": "base=Small Engine; base_sync=none; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; fixed arena; default max_segments=4096; background release enabled",
+              "version": "DWAL over Small Engine; WAL format 2"
+            },
+            "tiered": {
+              "metrics": {
+                "load": 986845.2443399713,
+                "write": 356663.4519127426,
+                "write_batch_p50": 2.723,
+                "write_batch_p99": 4.276,
+                "mixed_write_active": 199625.9765781377,
+                "mixed_write_active_batch_p50": 4.096,
+                "mixed_write_active_batch_p99": 11.827,
+                "mixed_write": 199621.90712491958,
+                "mixed_read": 10489352.693976736,
+                "read": 10486879.602757,
+                "disk_before_close": 506716760,
+                "allocated_before_close": 219688960,
+                "close": 0.02779012,
+                "disk_after_close": 238281304,
+                "allocated_after_close": 219656192,
+                "reopen": 0.012277307,
+                "peak_rss": 425054208
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 1000000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 1000000,
+                "mixed_reads": 52546100,
+                "read_only_reads": 40000,
+                "reader_checksum": "15692611852580957504"
+              },
+              "settings": "sync_mode=none; tiered Small Engine -> Large Engine; latest view; no WAL; background flush enabled; hi_water_bytes=16777216; lo_water_bytes=4194304; flush_chunk=10000000; Small Engine default max_segments=4096; background release enabled; Large Engine enable_read_cache=false; max_pinned_cache_size_mb=256",
+              "version": "psitri API 1",
+              "base_commits": 4,
+              "base_commits_at_validation": {
+                "after_load": 0,
+                "after_warmup": 0,
+                "after_solo_writes": 2,
+                "after_mixed_writes": 4,
+                "after_reopen": 0
+              }
+            }
+          },
+          "prior_mdbx": {
+            "metrics": {
+              "load": 127485.01975483006,
+              "write": 39398.852359552526,
+              "write_batch_p50": 10.924999999999999,
+              "write_batch_p99": 47.285,
+              "mixed_write_active": 26484.260061539102,
+              "mixed_write_active_batch_p50": 18.936,
+              "mixed_write_active_batch_p99": 40.064,
+              "mixed_write": 26484.171808265335,
+              "mixed_read": 8884586.851340793,
+              "read": 8205823.38565298,
+              "disk_before_close": 65431146496,
+              "allocated_before_close": 65431162880,
+              "close": 4.999837697,
+              "disk_after_close": 65431142400,
+              "allocated_after_close": 65431158784,
+              "reopen": 0.00109909,
+              "peak_rss": 65363947520
+            },
+            "counts": {
+              "write_transfers": 1000000,
+              "write_commits": 1000000,
+              "mixed_transfers": 1000000,
+              "mixed_commits": 1000000,
+              "mixed_reads": 335467800,
+              "read_only_reads": 40000,
+              "reader_checksum": "3466406673228236679"
+            },
+            "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=MDBX_DEBUG=0 MDBX_WORDBITS=64 BYTE_ORDER=LITTLE_ENDIAN MDBX_ENABLE_BIGFOOT=1 MDBX_ENV_CHECKPID=AUTO=0 MDBX_TXN_CHECKOWNER=1 MDBX_64BIT_ATOMIC=AUTO=1 MDBX_64BIT_CAS=AUTO=1 MDBX_TRUST_RTC=AUTO=0 MDBX_AVOID_MSYNC=0 MDBX_ENABLE_REFUND=1 MDBX_USE_MINCORE=1 MDBX_ENABLE_PGOP_STAT=1 MDBX_ENABLE_PROFGC=0 _GNU_SOURCE=YES MDBX_LOCKING=AUTO=2008 MDBX_USE_OFDLOCKS=AUTO=1 MDBX_USE_FALLOCATE=AUTO=1 MDBX_CACHELINE_SIZE=64 MDBX_CPU_WRITEBACK_INCOHERENT=0 MDBX_MMAP_INCOHERENT_CPU_CACHE=0 MDBX_MMAP_INCOHERENT_FILE_WRITE=0 MDBX_UNALIGNED_OK=8 MDBX_PNL_ASCENDING=0; compiler=Ubuntu clang version 20.1.8 (0ubuntu4); build_flags=-O3 -DNDEBUG MDBX_BUILD_SHARED_LIBRARY=0 -march=native -ffast-math -fvisibility=hidden",
+            "version": "v0.13.11-0-gb862eb08"
+          },
+          "previous_manifest": "../2026-09-17_dwal-bank-batching/x86/batch-1/2026-09-18T032111-fair-bank-diagnostic-695843f1/manifest.json",
+          "small_manifest": "../2026-09-17_small-bank-batching/x86/batch-1/2026-09-18T035329-fair-bank-diagnostic-a4b421c9/manifest.json",
+          "tiered_manifest": "x86/batch-1/2026-09-18T040601-fair-bank-diagnostic-9d01176e/manifest.json"
+        },
+        {
+          "batch": 10,
+          "records": {
+            "shim_dwal": {
+              "metrics": {
+                "load": 3583181.7916174117,
+                "write": 600004.1604288485,
+                "write_batch_p50": 15.851,
+                "write_batch_p99": 24.184,
+                "mixed_write_active": 160726.6064132086,
+                "mixed_write_active_batch_p50": 58.239999999999995,
+                "mixed_write_active_batch_p99": 92.336,
+                "mixed_write": 160723.43448824526,
+                "mixed_read": 4668067.503620043,
+                "read": 10039187.970241837,
+                "disk_before_close": 455553914,
+                "allocated_before_close": 173023232,
+                "close": 0.139360789,
+                "disk_after_close": 187118458,
+                "allocated_after_close": 176726016,
+                "reopen": 0.01809257,
+                "peak_rss": 1424355328
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 100000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 100000,
+                "mixed_reads": 29044100,
+                "read_only_reads": 40000,
+                "reader_checksum": "10637355926290504272"
+              },
+              "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=psitrimdbx; compiler=clang; build_flags=; backend=DWAL over Large Engine; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; read cache controlled by recorded environment",
+              "version": "psitrimdbx-0.1"
+            },
+            "mdbx": {
+              "metrics": {
+                "load": 1256321.6535203075,
+                "write": 201173.46445268265,
+                "write_batch_p50": 36.109,
+                "write_batch_p99": 841.437,
+                "mixed_write_active": 128845.40028045021,
+                "mixed_write_active_batch_p50": 60.574,
+                "mixed_write_active_batch_p99": 954.14,
+                "mixed_write": 128842.72670618577,
+                "mixed_read": 7551807.203338984,
+                "read": 6709279.537435432,
+                "disk_before_close": 22196260864,
+                "allocated_before_close": 22196264960,
+                "close": 3.823192759,
+                "disk_after_close": 22196256768,
+                "allocated_after_close": 22196260864,
+                "reopen": 0.000870286,
+                "peak_rss": 22195433472
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 100000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 100000,
+                "mixed_reads": 58612600,
+                "read_only_reads": 40000,
+                "reader_checksum": "3312367778871450532"
+              },
+              "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=MDBX_DEBUG=0 MDBX_WORDBITS=64 BYTE_ORDER=LITTLE_ENDIAN MDBX_ENABLE_BIGFOOT=1 MDBX_ENV_CHECKPID=AUTO=0 MDBX_TXN_CHECKOWNER=1 MDBX_64BIT_ATOMIC=AUTO=1 MDBX_64BIT_CAS=AUTO=1 MDBX_TRUST_RTC=AUTO=0 MDBX_AVOID_MSYNC=0 MDBX_ENABLE_REFUND=1 MDBX_USE_MINCORE=1 MDBX_ENABLE_PGOP_STAT=1 MDBX_ENABLE_PROFGC=0 _GNU_SOURCE=YES MDBX_LOCKING=AUTO=2008 MDBX_USE_OFDLOCKS=AUTO=1 MDBX_USE_FALLOCATE=AUTO=1 MDBX_CACHELINE_SIZE=64 MDBX_CPU_WRITEBACK_INCOHERENT=0 MDBX_MMAP_INCOHERENT_CPU_CACHE=0 MDBX_MMAP_INCOHERENT_FILE_WRITE=0 MDBX_UNALIGNED_OK=8 MDBX_PNL_ASCENDING=0; compiler=Ubuntu clang version 20.1.8 (0ubuntu4); build_flags=-O3 -DNDEBUG MDBX_BUILD_SHARED_LIBRARY=0 -march=native -ffast-math -fvisibility=hidden",
+              "version": "v0.13.11-0-gb862eb08"
+            },
+            "native_dwal": {
+              "metrics": {
+                "load": 5454778.81990115,
+                "write": 1920102.3374607735,
+                "write_batch_p50": 4.406,
+                "write_batch_p99": 11.065,
+                "mixed_write_active": 185454.67820435288,
+                "mixed_write_active_batch_p50": 51.190000000000005,
+                "mixed_write_active_batch_p99": 80.71199999999999,
+                "mixed_write": 185450.41454791013,
+                "mixed_read": 6536570.761570188,
+                "read": 13268749.90463086,
+                "disk_before_close": 454857644,
+                "allocated_before_close": 172322816,
+                "close": 0.14564222,
+                "disk_after_close": 186422188,
+                "allocated_after_close": 176025600,
+                "reopen": 0.010244736,
+                "peak_rss": 1419337728
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 100000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 100000,
+                "mixed_reads": 35247000,
+                "read_only_reads": 40000,
+                "reader_checksum": "16840255926290520866"
+              },
+              "settings": "base=Large Engine; base_sync=none; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; enable_read_cache=false; max_pinned_cache_size_mb=256",
+              "version": "DWAL over Large Engine; WAL format 2"
+            },
+            "shim_direct": {
+              "metrics": {
+                "load": 997146.4858443888,
+                "write": 126122.54617060401,
+                "write_batch_p50": 64.447,
+                "write_batch_p99": 144.058,
+                "mixed_write_active": 91857.46556286489,
+                "mixed_write_active_batch_p50": 93.419,
+                "mixed_write_active_batch_p99": 188.919,
+                "mixed_write": 91856.51940902049,
+                "mixed_read": 6731107.957513908,
+                "read": 7929173.4510657005,
+                "disk_before_close": 602231089,
+                "allocated_before_close": 154521600,
+                "close": 0.010317535,
+                "disk_after_close": 367350065,
+                "allocated_after_close": 154509312,
+                "reopen": 0.027617814,
+                "peak_rss": 407072768
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 100000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 100000,
+                "mixed_reads": 73278500,
+                "read_only_reads": 40000,
+                "reader_checksum": "17978267778871433056"
+              },
+              "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=psitrimdbx; compiler=clang; build_flags=",
+              "version": "psitrimdbx-0.1"
+            },
+            "native_direct": {
+              "metrics": {
+                "load": 1065667.6217428548,
+                "write": 143672.5459858885,
+                "write_batch_p50": 52.802,
+                "write_batch_p99": 145.64999999999998,
+                "mixed_write_active": 108045.97794466377,
+                "mixed_write_active_batch_p50": 77.216,
+                "mixed_write_active_batch_p99": 161.923,
+                "mixed_write": 108044.58356968996,
+                "mixed_read": 9996857.508160634,
+                "read": 8811393.660686888,
+                "disk_before_close": 602231064,
+                "allocated_before_close": 145190912,
+                "close": 0.009080426,
+                "disk_after_close": 233132312,
+                "allocated_after_close": 145158144,
+                "reopen": 0.014996953,
+                "peak_rss": 406749184
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 100000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 100000,
+                "mixed_reads": 92525300,
+                "read_only_reads": 40000,
+                "reader_checksum": "331579631452278855"
+              },
+              "settings": "sync_mode=none; enable_read_cache=false; max_pinned_cache_size_mb=256",
+              "version": "psitri API 1"
+            },
+            "small_dwal": {
+              "metrics": {
+                "load": 5945859.972024729,
+                "write": 2063489.2175146332,
+                "write_batch_p50": 4.1659999999999995,
+                "write_batch_p99": 10.915,
+                "mixed_write_active": 245308.94508434107,
+                "mixed_write_active_batch_p50": 39.414,
+                "mixed_write_active_batch_p99": 68.224,
+                "mixed_write": 245302.5770136388,
+                "mixed_read": 6826991.49060888,
+                "read": 13362177.821190009,
+                "disk_before_close": 58631924,
+                "allocated_before_close": 54153216,
+                "close": 0.111220338,
+                "disk_after_close": 58631924,
+                "allocated_after_close": 54153216,
+                "reopen": 0.000472809,
+                "peak_rss": 1119719424
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 100000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 100000,
+                "mixed_reads": 27830900,
+                "read_only_reads": 40000,
+                "reader_checksum": "9424155926290490136"
+              },
+              "settings": "base=Small Engine; base_sync=none; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; fixed arena; default max_segments=4096; background release enabled",
+              "version": "DWAL over Small Engine; WAL format 2"
+            },
+            "small_direct": {
+              "metrics": {
+                "load": 5262777.31284064,
+                "write": 511774.32877806737,
+                "write_batch_p50": 19.136000000000003,
+                "write_batch_p99": 25.554,
+                "mixed_write_active": 250406.6068050392,
+                "mixed_write_active_batch_p50": 39.855,
+                "mixed_write_active_batch_p99": 51.32,
+                "mixed_write": 250400.7611598203,
+                "mixed_read": 17981228.578734465,
+                "read": 10753725.964414308,
+                "disk_before_close": 72257856,
+                "allocated_before_close": 67772416,
+                "close": 0.004380118,
+                "disk_after_close": 72257856,
+                "allocated_after_close": 67772416,
+                "reopen": 0.000336833,
+                "peak_rss": 75898880
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 100000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 100000,
+                "mixed_reads": 71809800,
+                "read_only_reads": 40000,
+                "reader_checksum": "16509567778871365228"
+              },
+              "settings": "sync_mode=none; fixed arena; default max_segments=4096; background release enabled",
+              "version": "psitri API 1"
+            },
+            "tiered": {
+              "metrics": {
+                "load": 4629454.524798761,
+                "write": 508045.1595388025,
+                "write_batch_p50": 19.306,
+                "write_batch_p99": 26.767,
+                "mixed_write_active": 262916.0811306443,
+                "mixed_write_active_batch_p50": 38.143,
+                "mixed_write_active_batch_p99": 50.28,
+                "mixed_write": 262909.1856222684,
+                "mixed_read": 10815531.787210317,
+                "read": 35918862.88063893,
+                "disk_before_close": 506716760,
+                "allocated_before_close": 215920640,
+                "close": 0.030613749,
+                "disk_after_close": 238281304,
+                "allocated_after_close": 215887872,
+                "reopen": 0.012056494,
+                "peak_rss": 410456064
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 100000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 100000,
+                "mixed_reads": 41137900,
+                "read_only_reads": 40000,
+                "reader_checksum": "4284411852580951581"
+              },
+              "settings": "sync_mode=none; tiered Small Engine -> Large Engine; latest view; no WAL; background flush enabled; hi_water_bytes=16777216; lo_water_bytes=4194304; flush_chunk=10000000; Small Engine default max_segments=4096; background release enabled; Large Engine enable_read_cache=false; max_pinned_cache_size_mb=256",
+              "version": "psitri API 1",
+              "base_commits": 3,
+              "base_commits_at_validation": {
+                "after_load": 0,
+                "after_warmup": 0,
+                "after_solo_writes": 2,
+                "after_mixed_writes": 3,
+                "after_reopen": 0
+              }
+            }
+          },
+          "prior_mdbx": {
+            "metrics": {
+              "load": 1305452.0284955634,
+              "write": 188535.99837056483,
+              "write_batch_p50": 35.879,
+              "write_batch_p99": 850.829,
+              "mixed_write_active": 102641.57977621225,
+              "mixed_write_active_batch_p50": 81.31099999999999,
+              "mixed_write_active_batch_p99": 1214.498,
+              "mixed_write": 102639.303708044,
+              "mixed_read": 8165849.57191716,
+              "read": 7462988.706818914,
+              "disk_before_close": 22196260864,
+              "allocated_before_close": 22196264960,
+              "close": 4.488725325,
+              "disk_after_close": 22196256768,
+              "allocated_after_close": 22196260864,
+              "reopen": 0.001082408,
+              "peak_rss": 22195826688
+            },
+            "counts": {
+              "write_transfers": 1000000,
+              "write_commits": 100000,
+              "mixed_transfers": 1000000,
+              "mixed_commits": 100000,
+              "mixed_reads": 79558700,
+              "read_only_reads": 40000,
+              "reader_checksum": "5811723705161873126"
+            },
+            "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=MDBX_DEBUG=0 MDBX_WORDBITS=64 BYTE_ORDER=LITTLE_ENDIAN MDBX_ENABLE_BIGFOOT=1 MDBX_ENV_CHECKPID=AUTO=0 MDBX_TXN_CHECKOWNER=1 MDBX_64BIT_ATOMIC=AUTO=1 MDBX_64BIT_CAS=AUTO=1 MDBX_TRUST_RTC=AUTO=0 MDBX_AVOID_MSYNC=0 MDBX_ENABLE_REFUND=1 MDBX_USE_MINCORE=1 MDBX_ENABLE_PGOP_STAT=1 MDBX_ENABLE_PROFGC=0 _GNU_SOURCE=YES MDBX_LOCKING=AUTO=2008 MDBX_USE_OFDLOCKS=AUTO=1 MDBX_USE_FALLOCATE=AUTO=1 MDBX_CACHELINE_SIZE=64 MDBX_CPU_WRITEBACK_INCOHERENT=0 MDBX_MMAP_INCOHERENT_CPU_CACHE=0 MDBX_MMAP_INCOHERENT_FILE_WRITE=0 MDBX_UNALIGNED_OK=8 MDBX_PNL_ASCENDING=0; compiler=Ubuntu clang version 20.1.8 (0ubuntu4); build_flags=-O3 -DNDEBUG MDBX_BUILD_SHARED_LIBRARY=0 -march=native -ffast-math -fvisibility=hidden",
+            "version": "v0.13.11-0-gb862eb08"
+          },
+          "previous_manifest": "../2026-09-17_dwal-bank-batching/x86/batch-10/2026-09-18T032433-fair-bank-diagnostic-337ca6f7/manifest.json",
+          "small_manifest": "../2026-09-17_small-bank-batching/x86/batch-10/2026-09-18T035420-fair-bank-diagnostic-3052bbad/manifest.json",
+          "tiered_manifest": "x86/batch-10/2026-09-18T040620-fair-bank-diagnostic-a7854d5b/manifest.json"
+        },
+        {
+          "batch": 100,
+          "records": {
+            "mdbx": {
+              "metrics": {
+                "load": 6071641.3607738335,
+                "write": 284720.6833365872,
+                "write_batch_p50": 262.231,
+                "write_batch_p99": 1236.1390000000001,
+                "mixed_write_active": 210209.2744001837,
+                "mixed_write_active_batch_p50": 327.23,
+                "mixed_write_active_batch_p99": 1879.3519999999999,
+                "mixed_write": 210205.10406942127,
+                "mixed_read": 9630546.842940535,
+                "read": 7055868.365719769,
+                "disk_before_close": 14763954176,
+                "allocated_before_close": 14763958272,
+                "close": 3.04217147,
+                "disk_after_close": 14763950080,
+                "allocated_after_close": 14763954176,
+                "reopen": 0.000761416,
+                "peak_rss": 14768500736
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 10000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 10000,
+                "mixed_reads": 45815000,
+                "read_only_reads": 40000,
+                "reader_checksum": "8961511852580951826"
+              },
+              "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=MDBX_DEBUG=0 MDBX_WORDBITS=64 BYTE_ORDER=LITTLE_ENDIAN MDBX_ENABLE_BIGFOOT=1 MDBX_ENV_CHECKPID=AUTO=0 MDBX_TXN_CHECKOWNER=1 MDBX_64BIT_ATOMIC=AUTO=1 MDBX_64BIT_CAS=AUTO=1 MDBX_TRUST_RTC=AUTO=0 MDBX_AVOID_MSYNC=0 MDBX_ENABLE_REFUND=1 MDBX_USE_MINCORE=1 MDBX_ENABLE_PGOP_STAT=1 MDBX_ENABLE_PROFGC=0 _GNU_SOURCE=YES MDBX_LOCKING=AUTO=2008 MDBX_USE_OFDLOCKS=AUTO=1 MDBX_USE_FALLOCATE=AUTO=1 MDBX_CACHELINE_SIZE=64 MDBX_CPU_WRITEBACK_INCOHERENT=0 MDBX_MMAP_INCOHERENT_CPU_CACHE=0 MDBX_MMAP_INCOHERENT_FILE_WRITE=0 MDBX_UNALIGNED_OK=8 MDBX_PNL_ASCENDING=0; compiler=Ubuntu clang version 20.1.8 (0ubuntu4); build_flags=-O3 -DNDEBUG MDBX_BUILD_SHARED_LIBRARY=0 -march=native -ffast-math -fvisibility=hidden",
+              "version": "v0.13.11-0-gb862eb08"
+            },
+            "shim_dwal": {
+              "metrics": {
+                "load": 3741604.354299551,
+                "write": 1110708.364555762,
+                "write_batch_p50": 81.28099999999999,
+                "write_batch_p99": 157.09599999999998,
+                "mixed_write_active": 417675.10753740027,
+                "mixed_write_active_batch_p50": 214.33499999999998,
+                "mixed_write_active_batch_p99": 649.282,
+                "mixed_write": 417647.5024290525,
+                "mixed_read": 1670381.1859649953,
+                "read": 8848615.888441961,
+                "disk_before_close": 451989204,
+                "allocated_before_close": 169455616,
+                "close": 0.102919588,
+                "disk_after_close": 183553748,
+                "allocated_after_close": 173158400,
+                "reopen": 0.018735774,
+                "peak_rss": 1260019712
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 10000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 10000,
+                "mixed_reads": 3999500,
+                "read_only_reads": 40000,
+                "reader_checksum": "4039499999999992644"
+              },
+              "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=psitrimdbx; compiler=clang; build_flags=; backend=DWAL over Large Engine; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; read cache controlled by recorded environment",
+              "version": "psitrimdbx-0.1"
+            },
+            "native_dwal": {
+              "metrics": {
+                "load": 7855798.95439316,
+                "write": 2319407.8060156787,
+                "write_batch_p50": 36.57,
+                "write_batch_p99": 82.303,
+                "mixed_write_active": 519424.3328782281,
+                "mixed_write_active_batch_p50": 167.911,
+                "mixed_write_active_batch_p99": 605.071,
+                "mixed_write": 519388.63167211454,
+                "mixed_read": 2076256.0551092778,
+                "read": 11037893.08696756,
+                "disk_before_close": 451272179,
+                "allocated_before_close": 168734720,
+                "close": 0.112423505,
+                "disk_after_close": 182836723,
+                "allocated_after_close": 172437504,
+                "reopen": 0.009959234,
+                "peak_rss": 1255202816
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 10000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 10000,
+                "mixed_reads": 3997500,
+                "read_only_reads": 40000,
+                "reader_checksum": "4037499999999991976"
+              },
+              "settings": "base=Large Engine; base_sync=none; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; enable_read_cache=false; max_pinned_cache_size_mb=256",
+              "version": "DWAL over Large Engine; WAL format 2"
+            },
+            "shim_direct": {
+              "metrics": {
+                "load": 2062513.9735321705,
+                "write": 168535.4342743047,
+                "write_batch_p50": 479.89000000000004,
+                "write_batch_p99": 4359.559,
+                "mixed_write_active": 124474.29172879529,
+                "mixed_write_active_batch_p50": 669.5899999999999,
+                "mixed_write_active_batch_p99": 5481.452,
+                "mixed_write": 124473.24196738303,
+                "mixed_read": 6029782.576680755,
+                "read": 8690488.889970371,
+                "disk_before_close": 602231089,
+                "allocated_before_close": 194830336,
+                "close": 0.020192922,
+                "disk_after_close": 400904497,
+                "allocated_after_close": 194813952,
+                "reopen": 0.032749292,
+                "peak_rss": 409411584
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 10000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 10000,
+                "mixed_reads": 48442400,
+                "read_only_reads": 40000,
+                "reader_checksum": "11588911852580964195"
+              },
+              "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=psitrimdbx; compiler=clang; build_flags=",
+              "version": "psitrimdbx-0.1"
+            },
+            "native_direct": {
+              "metrics": {
+                "load": 2795362.471297218,
+                "write": 178044.52449585818,
+                "write_batch_p50": 447.525,
+                "write_batch_p99": 4350.407,
+                "mixed_write_active": 141848.5539229879,
+                "mixed_write_active_batch_p50": 585.4540000000001,
+                "mixed_write_active_batch_p99": 4934.379,
+                "mixed_write": 141846.30215589007,
+                "mixed_read": 8883720.42698167,
+                "read": 9591475.096933845,
+                "disk_before_close": 602231064,
+                "allocated_before_close": 186486784,
+                "close": 0.013916409,
+                "disk_after_close": 501567768,
+                "allocated_after_close": 186474496,
+                "reopen": 0.035874846,
+                "peak_rss": 440168448
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 10000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 10000,
+                "mixed_reads": 62629200,
+                "read_only_reads": 40000,
+                "reader_checksum": "7328967778871419648"
+              },
+              "settings": "sync_mode=none; enable_read_cache=false; max_pinned_cache_size_mb=256",
+              "version": "psitri API 1"
+            },
+            "small_direct": {
+              "metrics": {
+                "load": 8869471.44779664,
+                "write": 240669.98669726012,
+                "write_batch_p50": 416.693,
+                "write_batch_p99": 480.019,
+                "mixed_write_active": 258894.2022962829,
+                "mixed_write_active_batch_p50": 390.888,
+                "mixed_write_active_batch_p99": 463.156,
+                "mixed_write": 258888.9537814187,
+                "mixed_read": 26123396.99247708,
+                "read": 26713914.677092217,
+                "disk_before_close": 72257856,
+                "allocated_before_close": 67772416,
+                "close": 0.004598377,
+                "disk_after_close": 72257856,
+                "allocated_after_close": 67772416,
+                "reopen": 0.000312029,
+                "peak_rss": 74522624
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 10000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 10000,
+                "mixed_reads": 100905800,
+                "read_only_reads": 40000,
+                "reader_checksum": "8712079631452329931"
+              },
+              "settings": "sync_mode=none; fixed arena; default max_segments=4096; background release enabled",
+              "version": "psitri API 1"
+            },
+            "small_dwal": {
+              "metrics": {
+                "load": 8524323.646064626,
+                "write": 2245501.4001071737,
+                "write_batch_p50": 40.335,
+                "write_batch_p99": 88.94200000000001,
+                "mixed_write_active": 577281.0563441603,
+                "mixed_write_active_batch_p50": 149.926,
+                "mixed_write_active_batch_p99": 604.23,
+                "mixed_write": 577238.1478241057,
+                "mixed_read": 2308144.457889469,
+                "read": 11826251.084319396,
+                "disk_before_close": 55189019,
+                "allocated_before_close": 50708480,
+                "close": 0.080695853,
+                "disk_after_close": 55189019,
+                "allocated_after_close": 50708480,
+                "reopen": 0.000467963,
+                "peak_rss": 950087680
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 10000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 10000,
+                "mixed_reads": 3998600,
+                "read_only_reads": 40000,
+                "reader_checksum": "4038599999999992583"
+              },
+              "settings": "base=Small Engine; base_sync=none; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; fixed arena; default max_segments=4096; background release enabled",
+              "version": "DWAL over Small Engine; WAL format 2"
+            },
+            "tiered": {
+              "metrics": {
+                "load": 8341334.0629220195,
+                "write": 771560.959296925,
+                "write_batch_p50": 127.31400000000001,
+                "write_batch_p99": 180.749,
+                "mixed_write_active": 332056.04455999256,
+                "mixed_write_active_batch_p50": 285.553,
+                "mixed_write_active_batch_p99": 507.42699999999996,
+                "mixed_write": 332047.0912598269,
+                "mixed_read": 21058924.59833511,
+                "read": 10169027.024951996,
+                "disk_before_close": 506716760,
+                "allocated_before_close": 212152320,
+                "close": 0.027097787,
+                "disk_after_close": 238281304,
+                "allocated_after_close": 212119552,
+                "reopen": 0.011505076,
+                "peak_rss": 409071616
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 10000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 10000,
+                "mixed_reads": 63421500,
+                "read_only_reads": 40000,
+                "reader_checksum": "8121267778871380748"
+              },
+              "settings": "sync_mode=none; tiered Small Engine -> Large Engine; latest view; no WAL; background flush enabled; hi_water_bytes=16777216; lo_water_bytes=4194304; flush_chunk=10000000; Small Engine default max_segments=4096; background release enabled; Large Engine enable_read_cache=false; max_pinned_cache_size_mb=256",
+              "version": "psitri API 1",
+              "base_commits": 2,
+              "base_commits_at_validation": {
+                "after_load": 0,
+                "after_warmup": 0,
+                "after_solo_writes": 0,
+                "after_mixed_writes": 2,
+                "after_reopen": 0
+              }
+            }
+          },
+          "prior_mdbx": {
+            "metrics": {
+              "load": 6083960.726573359,
+              "write": 283048.2542880178,
+              "write_batch_p50": 265.686,
+              "write_batch_p99": 1261.304,
+              "mixed_write_active": 167010.33178721103,
+              "mixed_write_active_batch_p50": 443.9,
+              "mixed_write_active_batch_p99": 2022.2579999999998,
+              "mixed_write": 167006.68074520293,
+              "mixed_read": 6536390.974346125,
+              "read": 7868586.732972624,
+              "disk_before_close": 14763954176,
+              "allocated_before_close": 14763958272,
+              "close": 3.006966625,
+              "disk_after_close": 14763950080,
+              "allocated_after_close": 14763954176,
+              "reopen": 0.000913285,
+              "peak_rss": 14768467968
+            },
+            "counts": {
+              "write_transfers": 1000000,
+              "write_commits": 10000,
+              "mixed_transfers": 1000000,
+              "mixed_commits": 10000,
+              "mixed_reads": 39138500,
+              "read_only_reads": 40000,
+              "reader_checksum": "2285011852580979451"
+            },
+            "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=MDBX_DEBUG=0 MDBX_WORDBITS=64 BYTE_ORDER=LITTLE_ENDIAN MDBX_ENABLE_BIGFOOT=1 MDBX_ENV_CHECKPID=AUTO=0 MDBX_TXN_CHECKOWNER=1 MDBX_64BIT_ATOMIC=AUTO=1 MDBX_64BIT_CAS=AUTO=1 MDBX_TRUST_RTC=AUTO=0 MDBX_AVOID_MSYNC=0 MDBX_ENABLE_REFUND=1 MDBX_USE_MINCORE=1 MDBX_ENABLE_PGOP_STAT=1 MDBX_ENABLE_PROFGC=0 _GNU_SOURCE=YES MDBX_LOCKING=AUTO=2008 MDBX_USE_OFDLOCKS=AUTO=1 MDBX_USE_FALLOCATE=AUTO=1 MDBX_CACHELINE_SIZE=64 MDBX_CPU_WRITEBACK_INCOHERENT=0 MDBX_MMAP_INCOHERENT_CPU_CACHE=0 MDBX_MMAP_INCOHERENT_FILE_WRITE=0 MDBX_UNALIGNED_OK=8 MDBX_PNL_ASCENDING=0; compiler=Ubuntu clang version 20.1.8 (0ubuntu4); build_flags=-O3 -DNDEBUG MDBX_BUILD_SHARED_LIBRARY=0 -march=native -ffast-math -fvisibility=hidden",
+            "version": "v0.13.11-0-gb862eb08"
+          },
+          "previous_manifest": "../2026-09-17_dwal-bank-batching/x86/batch-100/2026-09-18T032540-fair-bank-diagnostic-5f50bbcc/manifest.json",
+          "small_manifest": "../2026-09-17_small-bank-batching/x86/batch-100/2026-09-18T035453-fair-bank-diagnostic-0beae76e/manifest.json",
+          "tiered_manifest": "x86/batch-100/2026-09-18T040637-fair-bank-diagnostic-d7085929/manifest.json"
+        },
+        {
+          "batch": 1000,
+          "records": {
+            "shim_dwal": {
+              "metrics": {
+                "load": 3312910.6746189333,
+                "write": 1164108.9915482823,
+                "write_batch_p50": 783.096,
+                "write_batch_p99": 1482.9470000000001,
+                "mixed_write_active": 830483.3594363388,
+                "mixed_write_active_batch_p50": 1091.87,
+                "mixed_write_active_batch_p99": 1808.124,
+                "mixed_write": 830414.7417656413,
+                "mixed_read": 478235.84978283284,
+                "read": 9806406.819767559,
+                "disk_before_close": 451852259,
+                "allocated_before_close": 169320448,
+                "close": 0.070743996,
+                "disk_after_close": 183416803,
+                "allocated_after_close": 173023232,
+                "reopen": 0.017986845,
+                "peak_rss": 627306496
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 1000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 1000,
+                "mixed_reads": 575900,
+                "read_only_reads": 40000,
+                "reader_checksum": "615899999999997037"
+              },
+              "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=psitrimdbx; compiler=clang; build_flags=; backend=DWAL over Large Engine; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; read cache controlled by recorded environment",
+              "version": "psitrimdbx-0.1"
+            },
+            "native_dwal": {
+              "metrics": {
+                "load": 5391263.683633747,
+                "write": 2239525.021467303,
+                "write_batch_p50": 385.31,
+                "write_batch_p99": 837.38,
+                "mixed_write_active": 1289114.0171253176,
+                "mixed_write_active_batch_p50": 700.454,
+                "mixed_write_active_batch_p99": 1198.496,
+                "mixed_write": 1288896.5720872816,
+                "mixed_read": 516331.96677816496,
+                "read": 10763839.741495624,
+                "disk_before_close": 451136234,
+                "allocated_before_close": 168599552,
+                "close": 0.07452488,
+                "disk_after_close": 182700778,
+                "allocated_after_close": 172302336,
+                "reopen": 0.010342731,
+                "peak_rss": 635928576
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 1000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 1000,
+                "mixed_reads": 400600,
+                "read_only_reads": 40000,
+                "reader_checksum": "440599999999995514"
+              },
+              "settings": "base=Large Engine; base_sync=none; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; enable_read_cache=false; max_pinned_cache_size_mb=256",
+              "version": "DWAL over Large Engine; WAL format 2"
+            },
+            "mdbx": {
+              "metrics": {
+                "load": 10209583.347924529,
+                "write": 602459.6459711799,
+                "write_batch_p50": 1376.5520000000001,
+                "write_batch_p99": 2996.127,
+                "mixed_write_active": 451841.0674565205,
+                "mixed_write_active_batch_p50": 1905.4479999999999,
+                "mixed_write_active_batch_p99": 3764.733,
+                "mixed_write": 451819.4081024696,
+                "mixed_read": 6723976.431380952,
+                "read": 7296310.274135146,
+                "disk_before_close": 5117054976,
+                "allocated_before_close": 5117059072,
+                "close": 1.14618498,
+                "disk_after_close": 5117050880,
+                "allocated_after_close": 5117054976,
+                "reopen": 0.001061898,
+                "peak_rss": 5113597952
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 1000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 1000,
+                "mixed_reads": 14882000,
+                "read_only_reads": 40000,
+                "reader_checksum": "14922000000000019116"
+              },
+              "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=MDBX_DEBUG=0 MDBX_WORDBITS=64 BYTE_ORDER=LITTLE_ENDIAN MDBX_ENABLE_BIGFOOT=1 MDBX_ENV_CHECKPID=AUTO=0 MDBX_TXN_CHECKOWNER=1 MDBX_64BIT_ATOMIC=AUTO=1 MDBX_64BIT_CAS=AUTO=1 MDBX_TRUST_RTC=AUTO=0 MDBX_AVOID_MSYNC=0 MDBX_ENABLE_REFUND=1 MDBX_USE_MINCORE=1 MDBX_ENABLE_PGOP_STAT=1 MDBX_ENABLE_PROFGC=0 _GNU_SOURCE=YES MDBX_LOCKING=AUTO=2008 MDBX_USE_OFDLOCKS=AUTO=1 MDBX_USE_FALLOCATE=AUTO=1 MDBX_CACHELINE_SIZE=64 MDBX_CPU_WRITEBACK_INCOHERENT=0 MDBX_MMAP_INCOHERENT_CPU_CACHE=0 MDBX_MMAP_INCOHERENT_FILE_WRITE=0 MDBX_UNALIGNED_OK=8 MDBX_PNL_ASCENDING=0; compiler=Ubuntu clang version 20.1.8 (0ubuntu4); build_flags=-O3 -DNDEBUG MDBX_BUILD_SHARED_LIBRARY=0 -march=native -ffast-math -fvisibility=hidden",
+              "version": "v0.13.11-0-gb862eb08"
+            },
+            "shim_direct": {
+              "metrics": {
+                "load": 2050567.906832365,
+                "write": 257829.04668264324,
+                "write_batch_p50": 3354.779,
+                "write_batch_p99": 14461.407000000001,
+                "mixed_write_active": 191966.73542664933,
+                "mixed_write_active_batch_p50": 4690.204,
+                "mixed_write_active_batch_p99": 17985.178,
+                "mixed_write": 191961.54201310757,
+                "mixed_read": 8065187.403063909,
+                "read": 7436699.741388766,
+                "disk_before_close": 602231089,
+                "allocated_before_close": 194650112,
+                "close": 0.01918668,
+                "disk_after_close": 468013361,
+                "allocated_after_close": 194633728,
+                "reopen": 0.031873249,
+                "peak_rss": 409260032
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 1000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 1000,
+                "mixed_reads": 42014600,
+                "read_only_reads": 40000,
+                "reader_checksum": "5161111852580936087"
+              },
+              "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=psitrimdbx; compiler=clang; build_flags=",
+              "version": "psitrimdbx-0.1"
+            },
+            "native_direct": {
+              "metrics": {
+                "load": 3162681.571921055,
+                "write": 288462.0042444651,
+                "write_batch_p50": 2851.748,
+                "write_batch_p99": 14656.656,
+                "mixed_write_active": 221956.83942851203,
+                "mixed_write_active_batch_p50": 3966.2100000000005,
+                "mixed_write_active_batch_p99": 17224.295000000002,
+                "mixed_write": 221950.2892210914,
+                "mixed_read": 8340026.2628006525,
+                "read": 8309298.686881528,
+                "disk_before_close": 602231064,
+                "allocated_before_close": 185188352,
+                "close": 0.012047992,
+                "disk_after_close": 434458904,
+                "allocated_after_close": 185167872,
+                "reopen": 0.023827616,
+                "peak_rss": 406958080
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 1000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 1000,
+                "mixed_reads": 37576100,
+                "read_only_reads": 40000,
+                "reader_checksum": "722611852580986723"
+              },
+              "settings": "sync_mode=none; enable_read_cache=false; max_pinned_cache_size_mb=256",
+              "version": "psitri API 1"
+            },
+            "small_dwal": {
+              "metrics": {
+                "load": 8854937.092313163,
+                "write": 2325808.7242206284,
+                "write_batch_p50": 368.977,
+                "write_batch_p99": 873.181,
+                "mixed_write_active": 1322781.0713277443,
+                "mixed_write_active_batch_p50": 656.8620000000001,
+                "mixed_write_active_batch_p99": 1273.55,
+                "mixed_write": 1322553.0150236455,
+                "mixed_read": 529550.2272154676,
+                "read": 10429352.996835474,
+                "disk_before_close": 55053074,
+                "allocated_before_close": 50573312,
+                "close": 0.045990134,
+                "disk_after_close": 55053074,
+                "allocated_after_close": 50573312,
+                "reopen": 0.00040709,
+                "peak_rss": 333901824
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 1000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 1000,
+                "mixed_reads": 400400,
+                "read_only_reads": 40000,
+                "reader_checksum": "440399999999995532"
+              },
+              "settings": "base=Small Engine; base_sync=none; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; fixed arena; default max_segments=4096; background release enabled",
+              "version": "DWAL over Small Engine; WAL format 2"
+            },
+            "small_direct": {
+              "metrics": {
+                "load": 9498909.715142896,
+                "write": 374205.6713761359,
+                "write_batch_p50": 2699.828,
+                "write_batch_p99": 2926.2599999999998,
+                "mixed_write_active": 395723.58975872525,
+                "mixed_write_active_batch_p50": 2105.082,
+                "mixed_write_active_batch_p99": 3253.521,
+                "mixed_write": 395707.08275775035,
+                "mixed_read": 14307937.127646461,
+                "read": 11952579.33673942,
+                "disk_before_close": 72257856,
+                "allocated_before_close": 67772416,
+                "close": 0.00412799,
+                "disk_after_close": 72257856,
+                "allocated_after_close": 67772416,
+                "reopen": 0.000338234,
+                "peak_rss": 74334208
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 1000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 1000,
+                "mixed_reads": 36157900,
+                "read_only_reads": 40000,
+                "reader_checksum": "17751155926290517098"
+              },
+              "settings": "sync_mode=none; fixed arena; default max_segments=4096; background release enabled",
+              "version": "psitri API 1"
+            },
+            "tiered": {
+              "metrics": {
+                "load": 8579063.447664797,
+                "write": 371524.32188691595,
+                "write_batch_p50": 2701.953,
+                "write_batch_p99": 2940.84,
+                "mixed_write_active": 401203.19699361303,
+                "mixed_write_active_batch_p50": 2319.497,
+                "mixed_write_active_batch_p99": 3596.311,
+                "mixed_write": 401190.7764297131,
+                "mixed_read": 22507444.462949194,
+                "read": 15450416.330781054,
+                "disk_before_close": 506716760,
+                "allocated_before_close": 212152320,
+                "close": 0.030844714,
+                "disk_after_close": 238281304,
+                "allocated_after_close": 212119552,
+                "reopen": 0.011722624,
+                "peak_rss": 408875008
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 1000,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 1000,
+                "mixed_reads": 56101600,
+                "read_only_reads": 40000,
+                "reader_checksum": "801367778871394480"
+              },
+              "settings": "sync_mode=none; tiered Small Engine -> Large Engine; latest view; no WAL; background flush enabled; hi_water_bytes=16777216; lo_water_bytes=4194304; flush_chunk=10000000; Small Engine default max_segments=4096; background release enabled; Large Engine enable_read_cache=false; max_pinned_cache_size_mb=256",
+              "version": "psitri API 1",
+              "base_commits": 2,
+              "base_commits_at_validation": {
+                "after_load": 0,
+                "after_warmup": 0,
+                "after_solo_writes": 0,
+                "after_mixed_writes": 2,
+                "after_reopen": 0
+              }
+            }
+          },
+          "prior_mdbx": {
+            "metrics": {
+              "load": 11057844.246725274,
+              "write": 593397.2128399941,
+              "write_batch_p50": 1395.036,
+              "write_batch_p99": 2998.108,
+              "mixed_write_active": 323336.4695041634,
+              "mixed_write_active_batch_p50": 2737.612,
+              "mixed_write_active_batch_p99": 4863.3820000000005,
+              "mixed_write": 323326.9483191015,
+              "mixed_read": 9993356.985951956,
+              "read": 7599127.772114317,
+              "disk_before_close": 5117054976,
+              "allocated_before_close": 5117059072,
+              "close": 1.023575553,
+              "disk_after_close": 5117050880,
+              "allocated_after_close": 5117054976,
+              "reopen": 0.001012032,
+              "peak_rss": 5113696256
+            },
+            "counts": {
+              "write_transfers": 1000000,
+              "write_commits": 1000,
+              "mixed_transfers": 1000000,
+              "mixed_commits": 1000,
+              "mixed_reads": 30907900,
+              "read_only_reads": 40000,
+              "reader_checksum": "12501155926290497490"
+            },
+            "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=MDBX_DEBUG=0 MDBX_WORDBITS=64 BYTE_ORDER=LITTLE_ENDIAN MDBX_ENABLE_BIGFOOT=1 MDBX_ENV_CHECKPID=AUTO=0 MDBX_TXN_CHECKOWNER=1 MDBX_64BIT_ATOMIC=AUTO=1 MDBX_64BIT_CAS=AUTO=1 MDBX_TRUST_RTC=AUTO=0 MDBX_AVOID_MSYNC=0 MDBX_ENABLE_REFUND=1 MDBX_USE_MINCORE=1 MDBX_ENABLE_PGOP_STAT=1 MDBX_ENABLE_PROFGC=0 _GNU_SOURCE=YES MDBX_LOCKING=AUTO=2008 MDBX_USE_OFDLOCKS=AUTO=1 MDBX_USE_FALLOCATE=AUTO=1 MDBX_CACHELINE_SIZE=64 MDBX_CPU_WRITEBACK_INCOHERENT=0 MDBX_MMAP_INCOHERENT_CPU_CACHE=0 MDBX_MMAP_INCOHERENT_FILE_WRITE=0 MDBX_UNALIGNED_OK=8 MDBX_PNL_ASCENDING=0; compiler=Ubuntu clang version 20.1.8 (0ubuntu4); build_flags=-O3 -DNDEBUG MDBX_BUILD_SHARED_LIBRARY=0 -march=native -ffast-math -fvisibility=hidden",
+            "version": "v0.13.11-0-gb862eb08"
+          },
+          "previous_manifest": "../2026-09-17_dwal-bank-batching/x86/batch-1000/2026-09-18T032632-fair-bank-diagnostic-f421a47a/manifest.json",
+          "small_manifest": "../2026-09-17_small-bank-batching/x86/batch-1000/2026-09-18T035526-fair-bank-diagnostic-dae6b9d3/manifest.json",
+          "tiered_manifest": "x86/batch-1000/2026-09-18T040653-fair-bank-diagnostic-3825add1/manifest.json"
+        },
+        {
+          "batch": 10000,
+          "records": {
+            "mdbx": {
+              "metrics": {
+                "load": 10662348.273451276,
+                "write": 1219720.4147839302,
+                "write_batch_p50": 7912.693,
+                "write_batch_p99": 9652.122000000001,
+                "mixed_write_active": 858537.7184681225,
+                "mixed_write_active_batch_p50": 11240.775,
+                "mixed_write_active_batch_p99": 13257.305,
+                "mixed_write": 858451.8129394457,
+                "mixed_read": 8260881.795916286,
+                "read": 15922793.558593094,
+                "disk_before_close": 536875008,
+                "allocated_before_close": 536879104,
+                "close": 0.141372292,
+                "disk_after_close": 536870912,
+                "allocated_after_close": 536875008,
+                "reopen": 0.000651895,
+                "peak_rss": 541736960
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 100,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 100,
+                "mixed_reads": 9623000,
+                "read_only_reads": 40000,
+                "reader_checksum": "9662999999999988939"
+              },
+              "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=MDBX_DEBUG=0 MDBX_WORDBITS=64 BYTE_ORDER=LITTLE_ENDIAN MDBX_ENABLE_BIGFOOT=1 MDBX_ENV_CHECKPID=AUTO=0 MDBX_TXN_CHECKOWNER=1 MDBX_64BIT_ATOMIC=AUTO=1 MDBX_64BIT_CAS=AUTO=1 MDBX_TRUST_RTC=AUTO=0 MDBX_AVOID_MSYNC=0 MDBX_ENABLE_REFUND=1 MDBX_USE_MINCORE=1 MDBX_ENABLE_PGOP_STAT=1 MDBX_ENABLE_PROFGC=0 _GNU_SOURCE=YES MDBX_LOCKING=AUTO=2008 MDBX_USE_OFDLOCKS=AUTO=1 MDBX_USE_FALLOCATE=AUTO=1 MDBX_CACHELINE_SIZE=64 MDBX_CPU_WRITEBACK_INCOHERENT=0 MDBX_MMAP_INCOHERENT_CPU_CACHE=0 MDBX_MMAP_INCOHERENT_FILE_WRITE=0 MDBX_UNALIGNED_OK=8 MDBX_PNL_ASCENDING=0; compiler=Ubuntu clang version 20.1.8 (0ubuntu4); build_flags=-O3 -DNDEBUG MDBX_BUILD_SHARED_LIBRARY=0 -march=native -ffast-math -fvisibility=hidden",
+              "version": "v0.13.11-0-gb862eb08"
+            },
+            "shim_dwal": {
+              "metrics": {
+                "load": 2838678.873175067,
+                "write": 1002534.7678029876,
+                "write_batch_p50": 9326.626,
+                "write_batch_p99": 16790.44,
+                "mixed_write_active": 931762.0407622915,
+                "mixed_write_active_batch_p50": 10134.897,
+                "mixed_write_active_batch_p99": 17993.684,
+                "mixed_write": 931634.1293229619,
+                "mixed_read": 396130.8317881234,
+                "read": 8126822.312922074,
+                "disk_before_close": 451456954,
+                "allocated_before_close": 168923136,
+                "close": 0.052401812,
+                "disk_after_close": 183021498,
+                "allocated_after_close": 172625920,
+                "reopen": 0.019451097,
+                "peak_rss": 448950272
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 100,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 100,
+                "mixed_reads": 425200,
+                "read_only_reads": 40000,
+                "reader_checksum": "465199999999995949"
+              },
+              "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=psitrimdbx; compiler=clang; build_flags=; backend=DWAL over Large Engine; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; read cache controlled by recorded environment",
+              "version": "psitrimdbx-0.1"
+            },
+            "native_dwal": {
+              "metrics": {
+                "load": 7355759.081236267,
+                "write": 2328148.5256134556,
+                "write_batch_p50": 3702.3759999999997,
+                "write_batch_p99": 9785.026,
+                "mixed_write_active": 2034388.0257287915,
+                "mixed_write_active_batch_p50": 4136.9839999999995,
+                "mixed_write_active_batch_p99": 10131.279999999999,
+                "mixed_write": 2033786.233122015,
+                "mixed_read": 101282.55440947635,
+                "read": 13721538.527507396,
+                "disk_before_close": 450756929,
+                "allocated_before_close": 168218624,
+                "close": 0.055319833,
+                "disk_after_close": 182321473,
+                "allocated_after_close": 171921408,
+                "reopen": 0.01213916,
+                "peak_rss": 446365696
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 100,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 100,
+                "mixed_reads": 49800,
+                "read_only_reads": 40000,
+                "reader_checksum": "89800000000000891"
+              },
+              "settings": "base=Large Engine; base_sync=none; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; enable_read_cache=false; max_pinned_cache_size_mb=256",
+              "version": "DWAL over Large Engine; WAL format 2"
+            },
+            "shim_direct": {
+              "metrics": {
+                "load": 1833487.1017849364,
+                "write": 558361.418465993,
+                "write_batch_p50": 17099.711,
+                "write_batch_p99": 27800.213,
+                "mixed_write_active": 327705.0814684975,
+                "mixed_write_active_batch_p50": 28293.331000000002,
+                "mixed_write_active_batch_p99": 44254.888999999996,
+                "mixed_write": 327694.5054445764,
+                "mixed_read": 9944971.159583637,
+                "read": 6240711.09158462,
+                "disk_before_close": 568676657,
+                "allocated_before_close": 168493056,
+                "close": 0.018693772,
+                "disk_after_close": 400904497,
+                "allocated_after_close": 168476672,
+                "reopen": 0.032061749,
+                "peak_rss": 481402880
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 100,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 100,
+                "mixed_reads": 30348300,
+                "read_only_reads": 40000,
+                "reader_checksum": "11941555926290501518"
+              },
+              "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=psitrimdbx; compiler=clang; build_flags=",
+              "version": "psitrimdbx-0.1"
+            },
+            "native_direct": {
+              "metrics": {
+                "load": 3237586.776633676,
+                "write": 847986.5134325415,
+                "write_batch_p50": 11029.623000000001,
+                "write_batch_p99": 22856.490999999998,
+                "mixed_write_active": 532823.5601466575,
+                "mixed_write_active_batch_p50": 17465.014,
+                "mixed_write_active_batch_p99": 32337.788,
+                "mixed_write": 532800.527974634,
+                "mixed_read": 11568857.704071619,
+                "read": 7756409.945656653,
+                "disk_before_close": 568676632,
+                "allocated_before_close": 170401792,
+                "close": 0.02044635,
+                "disk_after_close": 400904472,
+                "allocated_after_close": 170381312,
+                "reopen": 0.024023575,
+                "peak_rss": 440516608
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 100,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 100,
+                "mixed_reads": 21713300,
+                "read_only_reads": 40000,
+                "reader_checksum": "3306555926290497775"
+              },
+              "settings": "sync_mode=none; enable_read_cache=false; max_pinned_cache_size_mb=256",
+              "version": "psitri API 1"
+            },
+            "small_direct": {
+              "metrics": {
+                "load": 9707434.428949976,
+                "write": 953152.024227874,
+                "write_batch_p50": 10583.75,
+                "write_batch_p99": 11606.175,
+                "mixed_write_active": 930240.9467495236,
+                "mixed_write_active_batch_p50": 10058.839,
+                "mixed_write_active_batch_p99": 12124.869,
+                "mixed_write": 930157.0466925908,
+                "mixed_read": 10839120.065108761,
+                "read": 12531504.986755766,
+                "disk_before_close": 72257856,
+                "allocated_before_close": 67772416,
+                "close": 0.004580243,
+                "disk_after_close": 72257856,
+                "allocated_after_close": 67772416,
+                "reopen": 0.00037059,
+                "peak_rss": 74326016
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 100,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 100,
+                "mixed_reads": 11653000,
+                "read_only_reads": 40000,
+                "reader_checksum": "11692999999999991949"
+              },
+              "settings": "sync_mode=none; fixed arena; default max_segments=4096; background release enabled",
+              "version": "psitri API 1"
+            },
+            "small_dwal": {
+              "metrics": {
+                "load": 7594710.405717784,
+                "write": 2324064.0139541263,
+                "write_batch_p50": 3685.352,
+                "write_batch_p99": 9931.875,
+                "mixed_write_active": 2050565.245179227,
+                "mixed_write_active_batch_p50": 4082.128,
+                "mixed_write_active_batch_p99": 10267.226,
+                "mixed_write": 2049975.5545540059,
+                "mixed_read": 119103.57971958774,
+                "read": 10637995.142159518,
+                "disk_before_close": 54673769,
+                "allocated_before_close": 50192384,
+                "close": 0.040114141,
+                "disk_after_close": 54673769,
+                "allocated_after_close": 50192384,
+                "reopen": 0.000398117,
+                "peak_rss": 146563072
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 100,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 100,
+                "mixed_reads": 58100,
+                "read_only_reads": 40000,
+                "reader_checksum": "98100000000000966"
+              },
+              "settings": "base=Small Engine; base_sync=none; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; fixed arena; default max_segments=4096; background release enabled",
+              "version": "DWAL over Small Engine; WAL format 2"
+            },
+            "tiered": {
+              "metrics": {
+                "load": 8528538.066148877,
+                "write": 898051.8806619017,
+                "write_batch_p50": 11266.167000000001,
+                "write_batch_p99": 12054.230000000001,
+                "mixed_write_active": 950251.7558516756,
+                "mixed_write_active_batch_p50": 10139.25,
+                "mixed_write_active_batch_p99": 11959.079,
+                "mixed_write": 931444.7533384331,
+                "mixed_read": 19676584.12532373,
+                "read": 16199362.312102584,
+                "disk_before_close": 506716760,
+                "allocated_before_close": 208396288,
+                "close": 0.024098157,
+                "disk_after_close": 238281304,
+                "allocated_after_close": 208363520,
+                "reopen": 0.01185684,
+                "peak_rss": 408875008
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 100,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 100,
+                "mixed_reads": 21124800,
+                "read_only_reads": 40000,
+                "reader_checksum": "2718055926290489688"
+              },
+              "settings": "sync_mode=none; tiered Small Engine -> Large Engine; latest view; no WAL; background flush enabled; hi_water_bytes=16777216; lo_water_bytes=4194304; flush_chunk=10000000; Small Engine default max_segments=4096; background release enabled; Large Engine enable_read_cache=false; max_pinned_cache_size_mb=256",
+              "version": "psitri API 1",
+              "base_commits": 1,
+              "base_commits_at_validation": {
+                "after_load": 0,
+                "after_warmup": 0,
+                "after_solo_writes": 0,
+                "after_mixed_writes": 1,
+                "after_reopen": 0
+              }
+            }
+          },
+          "prior_mdbx": {
+            "metrics": {
+              "load": 10239516.629282191,
+              "write": 1220181.1385988272,
+              "write_batch_p50": 7871.164,
+              "write_batch_p99": 9649.787999999999,
+              "mixed_write_active": 765659.7474817096,
+              "mixed_write_active_batch_p50": 12675.113,
+              "mixed_write_active_batch_p99": 16263.001999999999,
+              "mixed_write": 765595.840906719,
+              "mixed_read": 6410027.737575595,
+              "read": 8602394.734646231,
+              "disk_before_close": 536875008,
+              "allocated_before_close": 536879104,
+              "close": 0.14375793,
+              "disk_after_close": 536870912,
+              "allocated_after_close": 536875008,
+              "reopen": 0.000637746,
+              "peak_rss": 541683712
+            },
+            "counts": {
+              "write_transfers": 1000000,
+              "write_commits": 100,
+              "mixed_transfers": 1000000,
+              "mixed_commits": 100,
+              "mixed_reads": 8372600,
+              "read_only_reads": 40000,
+              "reader_checksum": "8412600000000000806"
+            },
+            "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=MDBX_DEBUG=0 MDBX_WORDBITS=64 BYTE_ORDER=LITTLE_ENDIAN MDBX_ENABLE_BIGFOOT=1 MDBX_ENV_CHECKPID=AUTO=0 MDBX_TXN_CHECKOWNER=1 MDBX_64BIT_ATOMIC=AUTO=1 MDBX_64BIT_CAS=AUTO=1 MDBX_TRUST_RTC=AUTO=0 MDBX_AVOID_MSYNC=0 MDBX_ENABLE_REFUND=1 MDBX_USE_MINCORE=1 MDBX_ENABLE_PGOP_STAT=1 MDBX_ENABLE_PROFGC=0 _GNU_SOURCE=YES MDBX_LOCKING=AUTO=2008 MDBX_USE_OFDLOCKS=AUTO=1 MDBX_USE_FALLOCATE=AUTO=1 MDBX_CACHELINE_SIZE=64 MDBX_CPU_WRITEBACK_INCOHERENT=0 MDBX_MMAP_INCOHERENT_CPU_CACHE=0 MDBX_MMAP_INCOHERENT_FILE_WRITE=0 MDBX_UNALIGNED_OK=8 MDBX_PNL_ASCENDING=0; compiler=Ubuntu clang version 20.1.8 (0ubuntu4); build_flags=-O3 -DNDEBUG MDBX_BUILD_SHARED_LIBRARY=0 -march=native -ffast-math -fvisibility=hidden",
+            "version": "v0.13.11-0-gb862eb08"
+          },
+          "previous_manifest": "../2026-09-17_dwal-bank-batching/x86/batch-10000/2026-09-18T032715-fair-bank-diagnostic-d690d822/manifest.json",
+          "small_manifest": "../2026-09-17_small-bank-batching/x86/batch-10000/2026-09-18T035554-fair-bank-diagnostic-62e4814a/manifest.json",
+          "tiered_manifest": "x86/batch-10000/2026-09-18T040710-fair-bank-diagnostic-01b52fb4/manifest.json"
+        },
+        {
+          "batch": 100000,
+          "records": {
+            "native_dwal": {
+              "metrics": {
+                "load": 5519530.195252277,
+                "write": 1640357.790970122,
+                "write_batch_p50": 56293.799,
+                "write_batch_p99": 82947.463,
+                "mixed_write_active": 1673397.9349610163,
+                "mixed_write_active_batch_p50": 50995.891,
+                "mixed_write_active_batch_p99": 100099.099,
+                "mixed_write": 1672955.8150386608,
+                "mixed_read": 126977.34636143436,
+                "read": 11009781.365009207,
+                "disk_before_close": 439255739,
+                "allocated_before_close": 156721152,
+                "close": 0.045428992,
+                "disk_after_close": 170820283,
+                "allocated_after_close": 160423936,
+                "reopen": 0.011354431,
+                "peak_rss": 477958144
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 10,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 10,
+                "mixed_reads": 75900,
+                "read_only_reads": 40000,
+                "reader_checksum": "115900000000000018"
+              },
+              "settings": "base=Large Engine; base_sync=none; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; enable_read_cache=false; max_pinned_cache_size_mb=256",
+              "version": "DWAL over Large Engine; WAL format 2"
+            },
+            "mdbx": {
+              "metrics": {
+                "load": 10659071.722761808,
+                "write": 1359136.8859920222,
+                "write_batch_p50": 73323.129,
+                "write_batch_p99": 74673.89600000001,
+                "mixed_write_active": 970095.6133803293,
+                "mixed_write_active_batch_p50": 102717.46900000001,
+                "mixed_write_active_batch_p99": 105376.883,
+                "mixed_write": 970011.6268891637,
+                "mixed_read": 9250418.878665822,
+                "read": 9474223.243964564,
+                "disk_before_close": 67112960,
+                "allocated_before_close": 67112960,
+                "close": 0.016569017,
+                "disk_after_close": 67108864,
+                "allocated_after_close": 67108864,
+                "reopen": 0.000629094,
+                "peak_rss": 64098304
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 10,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 10,
+                "mixed_reads": 9536400,
+                "read_only_reads": 40000,
+                "reader_checksum": "9576399999999990884"
+              },
+              "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=MDBX_DEBUG=0 MDBX_WORDBITS=64 BYTE_ORDER=LITTLE_ENDIAN MDBX_ENABLE_BIGFOOT=1 MDBX_ENV_CHECKPID=AUTO=0 MDBX_TXN_CHECKOWNER=1 MDBX_64BIT_ATOMIC=AUTO=1 MDBX_64BIT_CAS=AUTO=1 MDBX_TRUST_RTC=AUTO=0 MDBX_AVOID_MSYNC=0 MDBX_ENABLE_REFUND=1 MDBX_USE_MINCORE=1 MDBX_ENABLE_PGOP_STAT=1 MDBX_ENABLE_PROFGC=0 _GNU_SOURCE=YES MDBX_LOCKING=AUTO=2008 MDBX_USE_OFDLOCKS=AUTO=1 MDBX_USE_FALLOCATE=AUTO=1 MDBX_CACHELINE_SIZE=64 MDBX_CPU_WRITEBACK_INCOHERENT=0 MDBX_MMAP_INCOHERENT_CPU_CACHE=0 MDBX_MMAP_INCOHERENT_FILE_WRITE=0 MDBX_UNALIGNED_OK=8 MDBX_PNL_ASCENDING=0; compiler=Ubuntu clang version 20.1.8 (0ubuntu4); build_flags=-O3 -DNDEBUG MDBX_BUILD_SHARED_LIBRARY=0 -march=native -ffast-math -fvisibility=hidden",
+              "version": "v0.13.11-0-gb862eb08"
+            },
+            "shim_dwal": {
+              "metrics": {
+                "load": 1595033.57585553,
+                "write": 699107.4249419953,
+                "write_batch_p50": 132541.139,
+                "write_batch_p99": 182368.25100000002,
+                "mixed_write_active": 701182.2070143156,
+                "mixed_write_active_batch_p50": 134390.278,
+                "mixed_write_active_batch_p99": 179807.824,
+                "mixed_write": 701124.1363764101,
+                "mixed_read": 391016.9308571239,
+                "read": 9463294.0117695,
+                "disk_before_close": 439455764,
+                "allocated_before_close": 156921856,
+                "close": 0.04616356,
+                "disk_after_close": 171020308,
+                "allocated_after_close": 160624640,
+                "reopen": 0.01852943,
+                "peak_rss": 499097600
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 10,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 10,
+                "mixed_reads": 557700,
+                "read_only_reads": 40000,
+                "reader_checksum": "597699999999994594"
+              },
+              "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=psitrimdbx; compiler=clang; build_flags=; backend=DWAL over Large Engine; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; read cache controlled by recorded environment",
+              "version": "psitrimdbx-0.1"
+            },
+            "shim_direct": {
+              "metrics": {
+                "load": 1504365.397598058,
+                "write": 662142.9646422404,
+                "write_batch_p50": 150941.119,
+                "write_batch_p99": 152228.117,
+                "mixed_write_active": 459149.2244401172,
+                "mixed_write_active_batch_p50": 216813.166,
+                "mixed_write_active_batch_p99": 230489.355,
+                "mixed_write": 459128.34681700234,
+                "mixed_read": 9731776.264802545,
+                "read": 8850442.566380532,
+                "disk_before_close": 535122225,
+                "allocated_before_close": 153894912,
+                "close": 0.026972426,
+                "disk_after_close": 266686769,
+                "allocated_after_close": 153862144,
+                "reopen": 0.017472365,
+                "peak_rss": 456769536
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 10,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 10,
+                "mixed_reads": 21196200,
+                "read_only_reads": 40000,
+                "reader_checksum": "2789455926290495722"
+              },
+              "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=psitrimdbx; compiler=clang; build_flags=",
+              "version": "psitrimdbx-0.1"
+            },
+            "native_direct": {
+              "metrics": {
+                "load": 3240477.766968624,
+                "write": 1202321.539576194,
+                "write_batch_p50": 83039.824,
+                "write_batch_p99": 84215.158,
+                "mixed_write_active": 690899.3048103487,
+                "mixed_write_active_batch_p50": 142219.747,
+                "mixed_write_active_batch_p99": 162516.712,
+                "mixed_write": 690864.6276655695,
+                "mixed_read": 7813057.160732693,
+                "read": 9693682.070008256,
+                "disk_before_close": 535122200,
+                "allocated_before_close": 153890816,
+                "close": 0.028829728,
+                "disk_after_close": 266686744,
+                "allocated_after_close": 153858048,
+                "reopen": 0.011677674,
+                "peak_rss": 440500224
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 10,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 10,
+                "mixed_reads": 11309100,
+                "read_only_reads": 40000,
+                "reader_checksum": "11349099999999998378"
+              },
+              "settings": "sync_mode=none; enable_read_cache=false; max_pinned_cache_size_mb=256",
+              "version": "psitri API 1"
+            },
+            "small_direct": {
+              "metrics": {
+                "load": 9425617.924659906,
+                "write": 2184493.4093593545,
+                "write_batch_p50": 46652.984000000004,
+                "write_batch_p99": 53974.063,
+                "mixed_write_active": 2087055.9454547095,
+                "mixed_write_active_batch_p50": 49670.11,
+                "mixed_write_active_batch_p99": 53701.907,
+                "mixed_write": 2086563.6990881693,
+                "mixed_read": 9356151.62671135,
+                "read": 8724560.816514198,
+                "disk_before_close": 72257856,
+                "allocated_before_close": 67772416,
+                "close": 0.004371905,
+                "disk_after_close": 72257856,
+                "allocated_after_close": 67772416,
+                "reopen": 0.000366934,
+                "peak_rss": 74203136
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 10,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 10,
+                "mixed_reads": 4484000,
+                "read_only_reads": 40000,
+                "reader_checksum": "4523999999999989810"
+              },
+              "settings": "sync_mode=none; fixed arena; default max_segments=4096; background release enabled",
+              "version": "psitri API 1"
+            },
+            "small_dwal": {
+              "metrics": {
+                "load": 6254211.429621422,
+                "write": 1692979.667713734,
+                "write_batch_p50": 53559.432,
+                "write_batch_p99": 85180.514,
+                "mixed_write_active": 1613577.128486533,
+                "mixed_write_active_batch_p50": 55860.404,
+                "mixed_write_active_batch_p99": 88997.5,
+                "mixed_write": 1613211.9451356104,
+                "mixed_read": 172774.99932402387,
+                "read": 10474810.045866575,
+                "disk_before_close": 43172579,
+                "allocated_before_close": 38694912,
+                "close": 0.034804056,
+                "disk_after_close": 43172579,
+                "allocated_after_close": 38694912,
+                "reopen": 0.000421489,
+                "peak_rss": 178081792
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 10,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 10,
+                "mixed_reads": 107100,
+                "read_only_reads": 40000,
+                "reader_checksum": "147100000000000680"
+              },
+              "settings": "base=Small Engine; base_sync=none; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; fixed arena; default max_segments=4096; background release enabled",
+              "version": "DWAL over Small Engine; WAL format 2"
+            },
+            "tiered": {
+              "metrics": {
+                "load": 9536173.854366986,
+                "write": 3704738.6155753373,
+                "write_batch_p50": 25571.11,
+                "write_batch_p99": 32756.200999999997,
+                "mixed_write_active": 2006807.3916937339,
+                "mixed_write_active_batch_p50": 53765.014,
+                "mixed_write_active_batch_p99": 57487.506,
+                "mixed_write": 2006372.5079391308,
+                "mixed_read": 10770408.259868048,
+                "read": 8385930.588813923,
+                "disk_before_close": 506716760,
+                "allocated_before_close": 212152320,
+                "close": 0.022669203,
+                "disk_after_close": 238281304,
+                "allocated_after_close": 212119552,
+                "reopen": 0.012051807,
+                "peak_rss": 408956928
+              },
+              "counts": {
+                "write_transfers": 1000000,
+                "write_commits": 10,
+                "mixed_transfers": 1000000,
+                "mixed_commits": 10,
+                "mixed_reads": 5368100,
+                "read_only_reads": 40000,
+                "reader_checksum": "5408099999999991439"
+              },
+              "settings": "sync_mode=none; tiered Small Engine -> Large Engine; latest view; no WAL; background flush enabled; hi_water_bytes=16777216; lo_water_bytes=4194304; flush_chunk=10000000; Small Engine default max_segments=4096; background release enabled; Large Engine enable_read_cache=false; max_pinned_cache_size_mb=256",
+              "version": "psitri API 1",
+              "base_commits": 1,
+              "base_commits_at_validation": {
+                "after_load": 0,
+                "after_warmup": 0,
+                "after_solo_writes": 0,
+                "after_mixed_writes": 1,
+                "after_reopen": 0
+              }
+            }
+          },
+          "prior_mdbx": {
+            "metrics": {
+              "load": 10520004.893906277,
+              "write": 1376041.2920709592,
+              "write_batch_p50": 71645.23000000001,
+              "write_batch_p99": 75582.706,
+              "mixed_write_active": 945173.928264518,
+              "mixed_write_active_batch_p50": 105734.773,
+              "mixed_write_active_batch_p99": 106899.372,
+              "mixed_write": 945092.4301625319,
+              "mixed_read": 9700995.758646324,
+              "read": 9481445.522221427,
+              "disk_before_close": 67112960,
+              "allocated_before_close": 67112960,
+              "close": 0.016865801,
+              "disk_after_close": 67108864,
+              "allocated_after_close": 67108864,
+              "reopen": 0.000694924,
+              "peak_rss": 64040960
+            },
+            "counts": {
+              "write_transfers": 1000000,
+              "write_commits": 10,
+              "mixed_transfers": 1000000,
+              "mixed_commits": 10,
+              "mixed_reads": 10264600,
+              "read_only_reads": 40000,
+              "reader_checksum": "10304599999999993412"
+            },
+            "settings": "WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=MDBX_DEBUG=0 MDBX_WORDBITS=64 BYTE_ORDER=LITTLE_ENDIAN MDBX_ENABLE_BIGFOOT=1 MDBX_ENV_CHECKPID=AUTO=0 MDBX_TXN_CHECKOWNER=1 MDBX_64BIT_ATOMIC=AUTO=1 MDBX_64BIT_CAS=AUTO=1 MDBX_TRUST_RTC=AUTO=0 MDBX_AVOID_MSYNC=0 MDBX_ENABLE_REFUND=1 MDBX_USE_MINCORE=1 MDBX_ENABLE_PGOP_STAT=1 MDBX_ENABLE_PROFGC=0 _GNU_SOURCE=YES MDBX_LOCKING=AUTO=2008 MDBX_USE_OFDLOCKS=AUTO=1 MDBX_USE_FALLOCATE=AUTO=1 MDBX_CACHELINE_SIZE=64 MDBX_CPU_WRITEBACK_INCOHERENT=0 MDBX_MMAP_INCOHERENT_CPU_CACHE=0 MDBX_MMAP_INCOHERENT_FILE_WRITE=0 MDBX_UNALIGNED_OK=8 MDBX_PNL_ASCENDING=0; compiler=Ubuntu clang version 20.1.8 (0ubuntu4); build_flags=-O3 -DNDEBUG MDBX_BUILD_SHARED_LIBRARY=0 -march=native -ffast-math -fvisibility=hidden",
+            "version": "v0.13.11-0-gb862eb08"
+          },
+          "previous_manifest": "../2026-09-17_dwal-bank-batching/x86/batch-100000/2026-09-18T032754-fair-bank-diagnostic-1193a6bd/manifest.json",
+          "small_manifest": "../2026-09-17_small-bank-batching/x86/batch-100000/2026-09-18T035620-fair-bank-diagnostic-cdf5cc39/manifest.json",
+          "tiered_manifest": "x86/batch-100000/2026-09-18T040723-fair-bank-diagnostic-aeb857b0/manifest.json"
+        }
+      ],
+      "revisions": [
+        "2f10f14f89560489cf8c7d7d969c232797d605a3"
+      ],
+      "hashes": [
+        "1346279285150323400"
+      ],
+      "direct_revision": "83cfcd044a6f0284127ba771016c933bdccdc850",
+      "hardware": {
+        "system": "Linux",
+        "release": "6.17.0-22-generic",
+        "architecture": "x86_64",
+        "cpu": "AMD EPYC-Turin Processor",
+        "memory": "MemTotal:       127438796 kB",
+        "logical_cpus": 16
+      },
+      "config": {
+        "accounts": 100000,
+        "transfers": 1000000,
+        "warmup": 10000,
+        "batch": 100000,
+        "readers": 4,
+        "reads_per_snapshot": 100,
+        "read_batches": 100,
+        "seed": 12345,
+        "value_bytes": 8,
+        "cache_mib": 256,
+        "map_gib": 64,
+        "durability": "none"
+      },
+      "small_revision": "43c9c05c20359688187d9613f80c06e148372ed6",
+      "tiered_revision": "87a63d029ccf6f6f2ccb0a4285b61986e084b703"
+    }
+  },
+  "engines": [
+    "mdbx",
+    "shim_direct",
+    "shim_dwal",
+    "native_direct",
+    "native_dwal",
+    "small_direct",
+    "small_dwal",
+    "tiered"
+  ],
+  "names": {
+    "mdbx": "Native MDBX",
+    "shim_direct": "MDBX shim \u00b7 direct",
+    "shim_dwal": "MDBX shim \u00b7 DWAL",
+    "native_direct": "Large Engine \u00b7 direct",
+    "native_dwal": "Large Engine \u00b7 DWAL",
+    "small_direct": "Small Engine \u00b7 direct",
+    "small_dwal": "Small Engine \u00b7 DWAL",
+    "tiered": "Tiered \u00b7 Small Engine + Large Engine"
+  },
+  "baseline": "../2026-09-17_small-bank-batching/comparison.json"
+}

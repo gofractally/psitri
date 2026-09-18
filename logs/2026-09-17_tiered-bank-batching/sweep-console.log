@@ -1,0 +1,42 @@
+Starting smoke, batch 32
+Archive: /home/dlarimer/psitri-api-bench-20260917/tiered-evidence/x86/smoke/2026-09-18T040549-fair-bank-smoke-2ea6f198
+[1/1] tiered
+Waiting for 10s idle (CPU busy 0.1%, limit 3.0%)
+  passed (0.16s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/tiered-evidence/x86/smoke/2026-09-18T040549-fair-bank-smoke-2ea6f198/manifest.json
+Starting diagnostic, batch 1
+Archive: /home/dlarimer/psitri-api-bench-20260917/tiered-evidence/x86/batch-1/2026-09-18T040601-fair-bank-diagnostic-9d01176e
+[1/1] tiered
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (8.27s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/tiered-evidence/x86/batch-1/2026-09-18T040601-fair-bank-diagnostic-9d01176e/manifest.json
+Starting diagnostic, batch 10
+Archive: /home/dlarimer/psitri-api-bench-20260917/tiered-evidence/x86/batch-10/2026-09-18T040620-fair-bank-diagnostic-a7854d5b
+[1/1] tiered
+Waiting for 10s idle (CPU busy 0.1%, limit 3.0%)
+  passed (6.07s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/tiered-evidence/x86/batch-10/2026-09-18T040620-fair-bank-diagnostic-a7854d5b/manifest.json
+Starting diagnostic, batch 100
+Archive: /home/dlarimer/psitri-api-bench-20260917/tiered-evidence/x86/batch-100/2026-09-18T040637-fair-bank-diagnostic-d7085929
+[1/1] tiered
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (4.62s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/tiered-evidence/x86/batch-100/2026-09-18T040637-fair-bank-diagnostic-d7085929/manifest.json
+Starting diagnostic, batch 1000
+Archive: /home/dlarimer/psitri-api-bench-20260917/tiered-evidence/x86/batch-1000/2026-09-18T040653-fair-bank-diagnostic-3825add1
+[1/1] tiered
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (5.52s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/tiered-evidence/x86/batch-1000/2026-09-18T040653-fair-bank-diagnostic-3825add1/manifest.json
+Starting diagnostic, batch 10000
+Archive: /home/dlarimer/psitri-api-bench-20260917/tiered-evidence/x86/batch-10000/2026-09-18T040710-fair-bank-diagnostic-01b52fb4
+[1/1] tiered
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (2.52s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/tiered-evidence/x86/batch-10000/2026-09-18T040710-fair-bank-diagnostic-01b52fb4/manifest.json
+Starting diagnostic, batch 100000
+Archive: /home/dlarimer/psitri-api-bench-20260917/tiered-evidence/x86/batch-100000/2026-09-18T040723-fair-bank-diagnostic-aeb857b0
+[1/1] tiered
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (1.01s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/tiered-evidence/x86/batch-100000/2026-09-18T040723-fair-bank-diagnostic-aeb857b0/manifest.json

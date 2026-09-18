@@ -1,0 +1,200 @@
+{
+  "engine": "tiered",
+  "repetition": 1,
+  "directory": "r1-tiered",
+  "command": [
+    "/home/dlarimer/psitri-api-bench-20260917/build-tiered/bin/fair-bank-tiered",
+    "--path",
+    "/home/dlarimer/psitri-api-bench-20260917/tiered-evidence/x86/batch-1/2026-09-18T040601-fair-bank-diagnostic-9d01176e/r1-tiered/database",
+    "--result",
+    "/home/dlarimer/psitri-api-bench-20260917/tiered-evidence/x86/batch-1/2026-09-18T040601-fair-bank-diagnostic-9d01176e/r1-tiered/result.json",
+    "--accounts",
+    "100000",
+    "--transfers",
+    "1000000",
+    "--warmup",
+    "10000",
+    "--batch",
+    "1",
+    "--readers",
+    "4",
+    "--reads-per-snapshot",
+    "100",
+    "--read-batches",
+    "100",
+    "--seed",
+    "12345",
+    "--value-bytes",
+    "8",
+    "--cache-mib",
+    "256",
+    "--map-gib",
+    "64",
+    "--durability",
+    "none"
+  ],
+  "status": "passed",
+  "exit_code": 0,
+  "elapsed_seconds": 8.274318614974618,
+  "result": {
+    "schema_version": 1,
+    "workload": "api-bank-v1",
+    "engine": "tiered",
+    "version": "psitri API 1",
+    "settings": "sync_mode=none; tiered Small Engine -> Large Engine; latest view; no WAL; background flush enabled; hi_water_bytes=16777216; lo_water_bytes=4194304; flush_chunk=10000000; Small Engine default max_segments=4096; background release enabled; Large Engine enable_read_cache=false; max_pinned_cache_size_mb=256",
+    "status": "passed",
+    "config": {
+      "accounts": 100000,
+      "transfers": 1000000,
+      "warmup": 10000,
+      "batch": 1,
+      "readers": 4,
+      "reads_per_snapshot": 100,
+      "read_batches": 100,
+      "seed": 12345,
+      "value_bytes": 8,
+      "cache_mib": 256,
+      "map_gib": 64,
+      "durability": "none"
+    },
+    "validation": {
+      "read_your_writes": true,
+      "rollback": true,
+      "snapshot": true,
+      "exact_accounts": true,
+      "balance": true,
+      "reopen": true,
+      "final_hash": "1346279285150323400"
+    },
+    "counts": {
+      "write_transfers": 1000000,
+      "write_commits": 1000000,
+      "mixed_transfers": 1000000,
+      "mixed_commits": 1000000,
+      "mixed_reads": 52546100,
+      "read_only_reads": 40000,
+      "reader_checksum": "15692611852580957504"
+    },
+    "metrics": [
+      {
+        "engine": "tiered",
+        "name": "load",
+        "unit": "accounts/s",
+        "direction": "higher",
+        "value": 986845.2443399713
+      },
+      {
+        "engine": "tiered",
+        "name": "write",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 356663.4519127426
+      },
+      {
+        "engine": "tiered",
+        "name": "write_batch_p50",
+        "unit": "us",
+        "direction": "lower",
+        "value": 2.723
+      },
+      {
+        "engine": "tiered",
+        "name": "write_batch_p99",
+        "unit": "us",
+        "direction": "lower",
+        "value": 4.276
+      },
+      {
+        "engine": "tiered",
+        "name": "mixed_write_active",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 199625.9765781377
+      },
+      {
+        "engine": "tiered",
+        "name": "mixed_write_active_batch_p50",
+        "unit": "us",
+        "direction": "lower",
+        "value": 4.096
+      },
+      {
+        "engine": "tiered",
+        "name": "mixed_write_active_batch_p99",
+        "unit": "us",
+        "direction": "lower",
+        "value": 11.827
+      },
+      {
+        "engine": "tiered",
+        "name": "mixed_write",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 199621.90712491958
+      },
+      {
+        "engine": "tiered",
+        "name": "mixed_read",
+        "unit": "reads/s",
+        "direction": "higher",
+        "value": 10489352.693976736
+      },
+      {
+        "engine": "tiered",
+        "name": "read",
+        "unit": "reads/s",
+        "direction": "higher",
+        "value": 10486879.602757
+      },
+      {
+        "engine": "tiered",
+        "name": "disk_before_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 506716760
+      },
+      {
+        "engine": "tiered",
+        "name": "allocated_before_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 219688960
+      },
+      {
+        "engine": "tiered",
+        "name": "close",
+        "unit": "seconds",
+        "direction": "lower",
+        "value": 0.02779012
+      },
+      {
+        "engine": "tiered",
+        "name": "disk_after_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 238281304
+      },
+      {
+        "engine": "tiered",
+        "name": "allocated_after_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 219656192
+      },
+      {
+        "engine": "tiered",
+        "name": "reopen",
+        "unit": "seconds",
+        "direction": "lower",
+        "value": 0.012277307
+      },
+      {
+        "engine": "tiered",
+        "name": "peak_rss",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 425054208
+      }
+    ]
+  }
+}

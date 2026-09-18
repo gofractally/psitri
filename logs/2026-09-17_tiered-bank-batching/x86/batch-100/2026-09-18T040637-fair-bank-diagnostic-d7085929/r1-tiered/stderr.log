@@ -1,0 +1,14 @@
+tiered psitri API 1
+sync_mode=none; tiered Small Engine -> Large Engine; latest view; no WAL; background flush enabled; hi_water_bytes=16777216; lo_water_bytes=4194304; flush_chunk=10000000; Small Engine default max_segments=4096; background release enabled; Large Engine enable_read_cache=false; max_pinned_cache_size_mb=256
+load
+contract checks
+tiered base commits: 0
+warmup
+tiered base commits: 0
+write
+tiered base commits: 0
+mixed
+tiered base commits: 2
+read
+close/reopen validation
+tiered base commits: 0

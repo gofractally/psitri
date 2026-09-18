@@ -1,0 +1,65 @@
+{
+  "revision": "87a63d029ccf6f6f2ccb0a4285b61986e084b703",
+  "measured_runs": 6,
+  "smoke_runs": 1,
+  "final_hash": "1346279285150323400",
+  "binary_sha256": "7525da3ddba78729e4e6130eb701b40af87a9380385d00696c70f68b05817810",
+  "base_commits_by_batch": {
+    "1": {
+      "after_load": 0,
+      "after_warmup": 0,
+      "after_solo_writes": 2,
+      "after_mixed_writes": 4,
+      "after_reopen": 0
+    },
+    "10": {
+      "after_load": 0,
+      "after_warmup": 0,
+      "after_solo_writes": 2,
+      "after_mixed_writes": 3,
+      "after_reopen": 0
+    },
+    "100": {
+      "after_load": 0,
+      "after_warmup": 0,
+      "after_solo_writes": 0,
+      "after_mixed_writes": 2,
+      "after_reopen": 0
+    },
+    "1000": {
+      "after_load": 0,
+      "after_warmup": 0,
+      "after_solo_writes": 0,
+      "after_mixed_writes": 2,
+      "after_reopen": 0
+    },
+    "10000": {
+      "after_load": 0,
+      "after_warmup": 0,
+      "after_solo_writes": 0,
+      "after_mixed_writes": 1,
+      "after_reopen": 0
+    },
+    "100000": {
+      "after_load": 0,
+      "after_warmup": 0,
+      "after_solo_writes": 0,
+      "after_mixed_writes": 1,
+      "after_reopen": 0
+    }
+  },
+  "validation": "All bank checks passed; migration verified; source clean, binary stable; ten final idle samples <=3%; one repetition.",
+  "baseline": "../2026-09-17_small-bank-batching/comparison.json",
+  "functional_checks": {
+    "pair_cases": 2,
+    "pair_assertions": 26,
+    "python_checks": 38
+  },
+  "arm_status": "Not measured; busy Mac. Local results are correctness evidence only.",
+  "configuration": "Native tiered Small Engine + Large Engine; 16 MiB bytes-written flush trigger, latest merged reads, both tiers sync=none.",
+  "lifecycle": "Close joins an active flush and retains unflushed committed hot data in Small Engine; does not force a full drain.",
+  "build_commands": [
+    "cmake -S /home/dlarimer/psitri-api-bench-20260917/tiered-source/benchmarks/api_bank -B /home/dlarimer/psitri-api-bench-20260917/build-tiered -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 -DFETCHCONTENT_SOURCE_DIR_PSIO=/home/dlarimer/psitri-api-bench-20260917/psio -DFETCHCONTENT_SOURCE_DIR_UCC=/home/dlarimer/psitri-api-bench-20260917/ucc -DFAIR_MDBX_INCLUDE_DIR=/home/dlarimer/arbtrie/build/release/_deps/libmdbx-src -DFAIR_MDBX_LIBRARY=/home/dlarimer/arbtrie/build/release/_deps/libmdbx-build/libmdbx.a -DPSITRIMDBX_BACKEND=dwal -DAPI_BANK_BUILD_CONTRACT_TESTS=OFF -DCMAKE_EXE_LINKER_FLAGS=-flto=thin",
+    "cmake --build /home/dlarimer/psitri-api-bench-20260917/build-tiered --target fair-bank-tiered -j4"
+  ]
+}

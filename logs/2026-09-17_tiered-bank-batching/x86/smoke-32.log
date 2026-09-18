@@ -1,0 +1,5 @@
+Archive: /home/dlarimer/psitri-api-bench-20260917/tiered-evidence/x86/smoke/2026-09-18T040549-fair-bank-smoke-2ea6f198
+[1/1] tiered
+Waiting for 10s idle (CPU busy 0.1%, limit 3.0%)
+  passed (0.16s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/tiered-evidence/x86/smoke/2026-09-18T040549-fair-bank-smoke-2ea6f198/manifest.json

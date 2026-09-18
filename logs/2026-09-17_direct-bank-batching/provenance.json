@@ -1,0 +1,35 @@
+{
+  "arm_mdbx_build": {
+    "source_sha256": {
+      "mdbx.h": "55130f2cd30bb7865848776b0c9f2ffcf0c3a5c13aaeb36ab7bfbb48f172bdfc",
+      "mdbx.c": "51e000f838b056341cbae3882a7dcd98471ceee2838e29f0ef81bc8d5adbaa4f"
+    },
+    "compile_commands": [
+      {
+        "directory": "/Users/dlarimer/psitri-merge/build/release",
+        "command": "/opt/homebrew/opt/llvm/bin/clang -DMDBX_BUILD_SHARED_LIBRARY=0 -DMDBX_CONFIG_H=\\\"/Users/dlarimer/psitri-merge/build/release/_deps/libmdbx-build/config-cmake.h\\\" -DPSITRI_PLATFORM_OPTIMIZATIONS=1 -O3 -DNDEBUG -std=gnu23 -flto=thin -arch arm64 -fPIC -march=native -ffast-math -fvisibility=hidden -o _deps/libmdbx-build/CMakeFiles/mdbx-static.dir/mdbx.c.o -c /Users/dlarimer/psitri-merge/build/release/_deps/libmdbx-src/mdbx.c",
+        "file": "/Users/dlarimer/psitri-merge/build/release/_deps/libmdbx-src/mdbx.c",
+        "output": "/Users/dlarimer/psitri-merge/build/release/_deps/libmdbx-build/CMakeFiles/mdbx-static.dir/mdbx.c.o"
+      }
+    ]
+  },
+  "x86_mdbx_build": {
+    "source_sha256": {
+      "mdbx.h": "55130f2cd30bb7865848776b0c9f2ffcf0c3a5c13aaeb36ab7bfbb48f172bdfc",
+      "mdbx.c": "51e000f838b056341cbae3882a7dcd98471ceee2838e29f0ef81bc8d5adbaa4f"
+    },
+    "compile_commands": [
+      {
+        "directory": "/home/dlarimer/arbtrie/build/release",
+        "command": "/usr/bin/clang-20 -DMDBX_BUILD_SHARED_LIBRARY=0 -DMDBX_CONFIG_H=\\\"/home/dlarimer/arbtrie/build/release/_deps/libmdbx-build/config-cmake.h\\\" -DPSITRI_PLATFORM_OPTIMIZATIONS=1 -O3 -DNDEBUG -std=gnu23 -flto=thin -fPIC -march=native -ffast-math -fvisibility=hidden -o _deps/libmdbx-build/CMakeFiles/mdbx-static.dir/mdbx.c.o -c /home/dlarimer/arbtrie/build/release/_deps/libmdbx-src/mdbx.c",
+        "file": "/home/dlarimer/arbtrie/build/release/_deps/libmdbx-src/mdbx.c",
+        "output": "_deps/libmdbx-build/CMakeFiles/mdbx-static.dir/mdbx.c.o"
+      }
+    ]
+  },
+  "mdbx_version": "v0.13.11-0-gb862eb08",
+  "x86_initial_link_failure": "Native MDBX static archive contains ThinLTO objects. Initial linking without -flto=thin failed: file format not recognized. Configured CMAKE_EXE_LINKER_FLAGS=-flto=thin, matching the existing x86 API benchmark build, before any timing.",
+  "python_checks": "38 benchmark/evidence tests passed before the sweep.",
+  "evidence_validation": "All 18 measured runs used clean revision 83cfcd044a6f0284127ba771016c933bdccdc850 and stable binary hashes, passed correctness, and had ten final idle samples <=3% CPU busy.",
+  "chart_validation": "18 rendered bars; engine checkbox filtering; all six metric selectors; no browser errors; desktop inspected; no horizontal overflow at 420px."
+}

@@ -1,0 +1,1 @@
+{"engine":"large","version":"psitri API 1","workload":"api-bank-v1","durability":["none","async","msync","fsync","full"]}

@@ -1,0 +1,9 @@
+large psitri API 1
+sync_mode=none; enable_read_cache=false; max_pinned_cache_size_mb=256
+load
+contract checks
+warmup
+write
+mixed
+read
+close/reopen validation

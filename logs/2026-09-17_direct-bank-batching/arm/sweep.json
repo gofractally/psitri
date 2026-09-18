@@ -1,0 +1,48 @@
+{
+  "status": "failed",
+  "started_at": "2026-09-18T01:36:40.058303+00:00",
+  "command": [
+    "scripts/direct_bank_sweep.py",
+    "--build",
+    "build/api-mdbx",
+    "--output",
+    "build/direct-bank-20260917/arm",
+    "--machine",
+    "mac-arm64"
+  ],
+  "machine": "mac-arm64",
+  "runs": [
+    {
+      "profile": "smoke",
+      "batch": 32,
+      "command": [
+        "/opt/homebrew/opt/python@3.14/bin/python3.14",
+        "/Users/dlarimer/gofractally/psitri/scripts/fair_bank.py",
+        "--suite",
+        "direct",
+        "--build",
+        "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+        "--output",
+        "/Users/dlarimer/gofractally/psitri/build/direct-bank-20260917/arm/smoke",
+        "--machine",
+        "mac-arm64",
+        "--profile",
+        "smoke",
+        "--durability",
+        "none",
+        "--batch",
+        "32",
+        "--order-seed",
+        "20260917",
+        "--idle-timeout",
+        "1800",
+        "--notes",
+        "Direct-engine batch sweep; one run per configuration; read cache disabled for both psitri paths; no per-commit sync; no persistent subtree creation."
+      ],
+      "status": "failed",
+      "exit_code": 130,
+      "manifest": "smoke/2026-09-18T013640-fair-bank-smoke-39484c9d/manifest.json"
+    }
+  ],
+  "finished_at": "2026-09-18T01:46:47.080053+00:00"
+}

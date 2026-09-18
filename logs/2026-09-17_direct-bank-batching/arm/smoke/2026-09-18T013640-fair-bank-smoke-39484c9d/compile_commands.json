@@ -1,0 +1,224 @@
+[
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DFAIR_API_PAIR=1 -DFAIR_mdbx=1 -I/Users/dlarimer/psitri-merge/build/release/_deps/libmdbx-src -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o CMakeFiles/fair-bank-mdbx.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o -c /Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/CMakeFiles/fair-bank-mdbx.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DFAIR_API_PAIR=1 -DFAIR_SHIM=1 -DFAIR_mdbx=1 -DPSITRIMDBX_BACKEND_SAL_ART_REF=1 -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitrimdbx/include -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -I/Users/dlarimer/gofractally/psitri/libraries/delta_art/include -I/Users/dlarimer/gofractally/psitri/libraries/adb/include -I/Users/dlarimer/gofractally/psitri/experimental/start_ver/include -I/Users/dlarimer/gofractally/psitri/libraries/start_ref/include -I/Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/include -I/Users/dlarimer/gofractally/psitri/experimental/gcart/include -I/Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/include -I/Users/dlarimer/gofractally/psitri/experimental/rcart/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o CMakeFiles/fair-bank-psitrimdbx.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o -c /Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/CMakeFiles/fair-bank-psitrimdbx.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DFAIR_API_PAIR=1 -DFAIR_large=1 -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitri_api/include -I/Users/dlarimer/gofractally/psitri/libraries/adb/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o CMakeFiles/fair-bank-large.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o -c /Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/CMakeFiles/fair-bank-large.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DFAIR_API_PAIR=1 -DFAIR_CONTRACT_ONLY=1 -DFAIR_mdbx=1 -I/Users/dlarimer/psitri-merge/build/release/_deps/libmdbx-src -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o CMakeFiles/api-contract-mdbx.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o -c /Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/CMakeFiles/api-contract-mdbx.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DFAIR_API_PAIR=1 -DFAIR_CONTRACT_ONLY=1 -DFAIR_SHIM=1 -DFAIR_mdbx=1 -DPSITRIMDBX_BACKEND_SAL_ART_REF=1 -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitrimdbx/include -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -I/Users/dlarimer/gofractally/psitri/libraries/delta_art/include -I/Users/dlarimer/gofractally/psitri/libraries/adb/include -I/Users/dlarimer/gofractally/psitri/experimental/start_ver/include -I/Users/dlarimer/gofractally/psitri/libraries/start_ref/include -I/Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/include -I/Users/dlarimer/gofractally/psitri/experimental/gcart/include -I/Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/include -I/Users/dlarimer/gofractally/psitri/experimental/rcart/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o CMakeFiles/api-contract-psitrimdbx.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o -c /Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/CMakeFiles/api-contract-psitrimdbx.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -I/Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/include -I/Users/dlarimer/gofractally/psitri/libraries/adb/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o CMakeFiles/api-storage-regressions.dir/Users/dlarimer/gofractally/psitri/libraries/psitri/tests/dwal_tests.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/psitri/tests/dwal_tests.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/psitri/tests/dwal_tests.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/CMakeFiles/api-storage-regressions.dir/Users/dlarimer/gofractally/psitri/libraries/psitri/tests/dwal_tests.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -I/Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/include -I/Users/dlarimer/gofractally/psitri/libraries/adb/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o CMakeFiles/api-storage-regressions.dir/Users/dlarimer/gofractally/psitri/libraries/psitri/tests/dwal_snapshot_tests.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/psitri/tests/dwal_snapshot_tests.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/psitri/tests/dwal_snapshot_tests.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/CMakeFiles/api-storage-regressions.dir/Users/dlarimer/gofractally/psitri/libraries/psitri/tests/dwal_snapshot_tests.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -I/Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/include -I/Users/dlarimer/gofractally/psitri/libraries/adb/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o CMakeFiles/api-storage-regressions.dir/Users/dlarimer/gofractally/psitri/libraries/sal/test/allocator_session_tests.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/sal/test/allocator_session_tests.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/sal/test/allocator_session_tests.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/CMakeFiles/api-storage-regressions.dir/Users/dlarimer/gofractally/psitri/libraries/sal/test/allocator_session_tests.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -I/Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/include -I/Users/dlarimer/gofractally/psitri/libraries/adb/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o CMakeFiles/api-storage-regressions.dir/Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/test/paged_tests.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/test/paged_tests.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/test/paged_tests.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/CMakeFiles/api-storage-regressions.dir/Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/test/paged_tests.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -I/Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/include -I/Users/dlarimer/gofractally/psitri/libraries/adb/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o CMakeFiles/api-storage-regressions.dir/Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/test/leaf_page_tests.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/test/leaf_page_tests.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/test/leaf_page_tests.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/CMakeFiles/api-storage-regressions.dir/Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/test/leaf_page_tests.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DPSIO_EXCEPTIONS_ENABLED=1 -DPSIO_HAVE_SIMDJSON=1 -DSIMDJSON_DEVELOPMENT_CHECKS -DSIMDJSON_THREADS_ENABLED=1 -I/Users/dlarimer/gofractally/psitri/build/bench-sources/psio/cpp/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/psio/cpp/external/xxhash -isystem /opt/homebrew/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o _deps/psio-build/CMakeFiles/psio.dir/src/stub.cpp.o -c /Users/dlarimer/gofractally/psitri/build/bench-sources/psio/cpp/src/stub.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/build/bench-sources/psio/cpp/src/stub.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/_deps/psio-build/CMakeFiles/psio.dir/src/stub.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -O3 -DNDEBUG -std=c++23 -arch arm64 -march=native -Wall -Wextra -Werror -Wno-vla-cxx-extension -o psitri/libraries/sal/CMakeFiles/sal.dir/src/block_allocator.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/sal/src/block_allocator.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/sal/src/block_allocator.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/libraries/sal/CMakeFiles/sal.dir/src/block_allocator.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -O3 -DNDEBUG -std=c++23 -arch arm64 -march=native -Wall -Wextra -Werror -Wno-vla-cxx-extension -o psitri/libraries/sal/CMakeFiles/sal.dir/src/allocator.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/sal/src/allocator.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/sal/src/allocator.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/libraries/sal/CMakeFiles/sal.dir/src/allocator.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -O3 -DNDEBUG -std=c++23 -arch arm64 -march=native -Wall -Wextra -Werror -Wno-vla-cxx-extension -o psitri/libraries/sal/CMakeFiles/sal.dir/src/mapping.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/sal/src/mapping.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/sal/src/mapping.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/libraries/sal/CMakeFiles/sal.dir/src/mapping.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -O3 -DNDEBUG -std=c++23 -arch arm64 -march=native -Wall -Wextra -Werror -Wno-vla-cxx-extension -o psitri/libraries/sal/CMakeFiles/sal.dir/src/control_block_alloc.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/sal/src/control_block_alloc.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/sal/src/control_block_alloc.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/libraries/sal/CMakeFiles/sal.dir/src/control_block_alloc.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -O3 -DNDEBUG -std=c++23 -arch arm64 -march=native -Wall -Wextra -Werror -Wno-vla-cxx-extension -o psitri/libraries/sal/CMakeFiles/sal.dir/src/allocator_session.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/sal/src/allocator_session.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/sal/src/allocator_session.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/libraries/sal/CMakeFiles/sal.dir/src/allocator_session.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -O3 -DNDEBUG -std=c++23 -arch arm64 -march=native -Wall -Wextra -Werror -Wno-vla-cxx-extension -o psitri/libraries/sal/CMakeFiles/sal.dir/src/segment_thread.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/sal/src/segment_thread.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/sal/src/segment_thread.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/libraries/sal/CMakeFiles/sal.dir/src/segment_thread.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -Wno-vla-cxx-extension -o psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/block_allocator.cpp.o -c /Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/src/block_allocator.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/src/block_allocator.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/block_allocator.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -Wno-vla-cxx-extension -o psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/allocator.cpp.o -c /Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/src/allocator.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/src/allocator.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/allocator.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -Wno-vla-cxx-extension -o psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/mapping.cpp.o -c /Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/src/mapping.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/src/mapping.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/mapping.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -Wno-vla-cxx-extension -o psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/control_block_alloc.cpp.o -c /Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/src/control_block_alloc.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/src/control_block_alloc.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/control_block_alloc.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -Wno-vla-cxx-extension -o psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/allocator_session.cpp.o -c /Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/src/allocator_session.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/src/allocator_session.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/allocator_session.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -Wno-vla-cxx-extension -o psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/segment_thread.cpp.o -c /Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/src/segment_thread.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/src/segment_thread.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/segment_thread.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/database.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/psitri/src/database.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/psitri/src/database.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/libraries/psitri/CMakeFiles/psitri.dir/src/database.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/node/leaf.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/psitri/src/node/leaf.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/psitri/src/node/leaf.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/libraries/psitri/CMakeFiles/psitri.dir/src/node/leaf.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/node/inner.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/psitri/src/node/inner.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/psitri/src/node/inner.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/libraries/psitri/CMakeFiles/psitri.dir/src/node/inner.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_writer.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/psitri/src/dwal/wal_writer.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/psitri/src/dwal/wal_writer.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_writer.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_status.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/psitri/src/dwal/wal_status.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/psitri/src/dwal/wal_status.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_status.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_reader.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/psitri/src/dwal/wal_reader.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/psitri/src/dwal/wal_reader.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_reader.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_transaction.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/psitri/src/dwal/dwal_transaction.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/psitri/src/dwal/dwal_transaction.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_transaction.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_database.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/psitri/src/dwal/dwal_database.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/psitri/src/dwal/dwal_database.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_database.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/transaction.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/psitri/src/dwal/transaction.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/psitri/src/dwal/transaction.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/transaction.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_read_session.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/psitri/src/dwal/dwal_read_session.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/psitri/src/dwal/dwal_read_session.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_read_session.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/merge_cursor.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/psitri/src/dwal/merge_cursor.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/psitri/src/dwal/merge_cursor.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/merge_cursor.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/merge_pool.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/psitri/src/dwal/merge_pool.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/psitri/src/dwal/merge_pool.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/merge_pool.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DPSITRIMDBX_BACKEND_SAL_ART_REF=1 -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitrimdbx/include -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -I/Users/dlarimer/gofractally/psitri/libraries/delta_art/include -I/Users/dlarimer/gofractally/psitri/libraries/adb/include -I/Users/dlarimer/gofractally/psitri/experimental/start_ver/include -I/Users/dlarimer/gofractally/psitri/libraries/start_ref/include -I/Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/include -I/Users/dlarimer/gofractally/psitri/experimental/gcart/include -I/Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/include -I/Users/dlarimer/gofractally/psitri/experimental/rcart/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o psitri/libraries/psitrimdbx/CMakeFiles/psitrimdbx.dir/src/mdbx_impl.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/psitrimdbx/src/mdbx_impl.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/psitrimdbx/src/mdbx_impl.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/libraries/psitrimdbx/CMakeFiles/psitrimdbx.dir/src/mdbx_impl.cpp.o"
+},
+{
+  "directory": "/Users/dlarimer/gofractally/psitri/build/api-mdbx",
+  "command": "/opt/homebrew/opt/llvm/bin/clang++ -DPSITRIMDBX_BACKEND_SAL_ART_REF=1 -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitrimdbx/include -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -I/Users/dlarimer/gofractally/psitri/libraries/delta_art/include -I/Users/dlarimer/gofractally/psitri/libraries/adb/include -I/Users/dlarimer/gofractally/psitri/experimental/start_ver/include -I/Users/dlarimer/gofractally/psitri/libraries/start_ref/include -I/Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/include -I/Users/dlarimer/gofractally/psitri/experimental/gcart/include -I/Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/include -I/Users/dlarimer/gofractally/psitri/experimental/rcart/include -isystem /opt/homebrew/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -o psitri/libraries/psitrimdbx/CMakeFiles/psitrimdbx-tests.dir/tests/mdbx_tests.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/psitrimdbx/tests/mdbx_tests.cpp",
+  "file": "/Users/dlarimer/gofractally/psitri/libraries/psitrimdbx/tests/mdbx_tests.cpp",
+  "output": "/Users/dlarimer/gofractally/psitri/build/api-mdbx/psitri/libraries/psitrimdbx/CMakeFiles/psitrimdbx-tests.dir/tests/mdbx_tests.cpp.o"
+}
+]

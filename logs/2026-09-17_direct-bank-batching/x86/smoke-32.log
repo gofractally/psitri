@@ -1,0 +1,11 @@
+Archive: /home/dlarimer/psitri-api-bench-20260917/diagnostics/direct-bank-x86/smoke/2026-09-18T013754-fair-bank-smoke-6206a5c2
+[1/1] psitrimdbx
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (0.11s)
+[1/1] mdbx
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (0.01s)
+[1/1] large
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (0.11s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/diagnostics/direct-bank-x86/smoke/2026-09-18T013754-fair-bank-smoke-6206a5c2/manifest.json

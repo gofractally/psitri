@@ -1,0 +1,5 @@
+[1/5] Linking CXX static library psitri/libraries/psitri/libpsitri.a
+[2/5] Linking CXX static library psitri/libraries/psitrimdbx/libpsitrimdbx.a
+[3/5] Linking CXX executable bin/fair-bank-large
+[4/5] Linking CXX executable bin/fair-bank-psitrimdbx
+[5/5] Linking CXX executable bin/fair-bank-mdbx

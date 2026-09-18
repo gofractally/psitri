@@ -1,0 +1,200 @@
+{
+  "engine": "large",
+  "repetition": 1,
+  "directory": "r1-large",
+  "command": [
+    "/home/dlarimer/psitri-api-bench-20260917/build-direct/bin/fair-bank-large",
+    "--path",
+    "/home/dlarimer/psitri-api-bench-20260917/diagnostics/direct-bank-x86/batch-1/2026-09-18T013827-fair-bank-diagnostic-f533b96f/r1-large/database",
+    "--result",
+    "/home/dlarimer/psitri-api-bench-20260917/diagnostics/direct-bank-x86/batch-1/2026-09-18T013827-fair-bank-diagnostic-f533b96f/r1-large/result.json",
+    "--accounts",
+    "100000",
+    "--transfers",
+    "1000000",
+    "--warmup",
+    "10000",
+    "--batch",
+    "1",
+    "--readers",
+    "4",
+    "--reads-per-snapshot",
+    "100",
+    "--read-batches",
+    "100",
+    "--seed",
+    "12345",
+    "--value-bytes",
+    "8",
+    "--cache-mib",
+    "256",
+    "--map-gib",
+    "64",
+    "--durability",
+    "none"
+  ],
+  "status": "passed",
+  "exit_code": 0,
+  "elapsed_seconds": 26.30728203803301,
+  "result": {
+    "schema_version": 1,
+    "workload": "api-bank-v1",
+    "engine": "large",
+    "version": "psitri API 1",
+    "settings": "sync_mode=none; enable_read_cache=false; max_pinned_cache_size_mb=256",
+    "status": "passed",
+    "config": {
+      "accounts": 100000,
+      "transfers": 1000000,
+      "warmup": 10000,
+      "batch": 1,
+      "readers": 4,
+      "reads_per_snapshot": 100,
+      "read_batches": 100,
+      "seed": 12345,
+      "value_bytes": 8,
+      "cache_mib": 256,
+      "map_gib": 64,
+      "durability": "none"
+    },
+    "validation": {
+      "read_your_writes": true,
+      "rollback": true,
+      "snapshot": true,
+      "exact_accounts": true,
+      "balance": true,
+      "reopen": true,
+      "final_hash": "1346279285150323400"
+    },
+    "counts": {
+      "write_transfers": 1000000,
+      "write_commits": 1000000,
+      "mixed_transfers": 1000000,
+      "mixed_commits": 1000000,
+      "mixed_reads": 97683400,
+      "read_only_reads": 40000,
+      "reader_checksum": "5489679631452323752"
+    },
+    "metrics": [
+      {
+        "engine": "large",
+        "name": "load",
+        "unit": "accounts/s",
+        "direction": "higher",
+        "value": 165161.6880404499
+      },
+      {
+        "engine": "large",
+        "name": "write",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 91487.54335800526
+      },
+      {
+        "engine": "large",
+        "name": "write_batch_p50",
+        "unit": "us",
+        "direction": "lower",
+        "value": 8.261
+      },
+      {
+        "engine": "large",
+        "name": "write_batch_p99",
+        "unit": "us",
+        "direction": "lower",
+        "value": 19.355999999999998
+      },
+      {
+        "engine": "large",
+        "name": "mixed_write_active",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 69841.37341757865
+      },
+      {
+        "engine": "large",
+        "name": "mixed_write_active_batch_p50",
+        "unit": "us",
+        "direction": "lower",
+        "value": 11.605
+      },
+      {
+        "engine": "large",
+        "name": "mixed_write_active_batch_p99",
+        "unit": "us",
+        "direction": "lower",
+        "value": 23.282
+      },
+      {
+        "engine": "large",
+        "name": "mixed_write",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 69840.75640839027
+      },
+      {
+        "engine": "large",
+        "name": "mixed_read",
+        "unit": "reads/s",
+        "direction": "higher",
+        "value": 6822282.54454335
+      },
+      {
+        "engine": "large",
+        "name": "read",
+        "unit": "reads/s",
+        "direction": "higher",
+        "value": 9667451.744310403
+      },
+      {
+        "engine": "large",
+        "name": "disk_before_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 602231064
+      },
+      {
+        "engine": "large",
+        "name": "allocated_before_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 246579200
+      },
+      {
+        "engine": "large",
+        "name": "close",
+        "unit": "seconds",
+        "direction": "lower",
+        "value": 0.019938052
+      },
+      {
+        "engine": "large",
+        "name": "disk_after_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 333795608
+      },
+      {
+        "engine": "large",
+        "name": "allocated_after_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 246554624
+      },
+      {
+        "engine": "large",
+        "name": "reopen",
+        "unit": "seconds",
+        "direction": "lower",
+        "value": 0.017583497
+      },
+      {
+        "engine": "large",
+        "name": "peak_rss",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 406749184
+      }
+    ]
+  }
+}

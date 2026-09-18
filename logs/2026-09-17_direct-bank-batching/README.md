@@ -41,4 +41,3 @@ With four concurrent readers, writer throughput (active writer interval), transf
 | 100,000 | 945,174 | 459,149 | 690,899 |
 
 Each run checks read-your-writes, rollback, held snapshot stability, exact account state, conservation of balances, account count, and clean-close/reopen state. Reopen validation does not establish power-failure recovery.
-

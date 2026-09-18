@@ -87,7 +87,7 @@ for machine, entry in machines.items():
     md += ['', 'Each run checks read-your-writes, rollback, held snapshot stability, exact account '
            'state, conservation of balances, account count, and clean-close/reopen state. '
            'Reopen validation does not establish power-failure recovery.', '']
-(root / 'README.md').write_text('\n'.join(md) + '\n')
+(root / 'README.md').write_text('\n'.join(md).rstrip() + '\n')
 
 html = '''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>psitri · Transfers per commit</title><style>

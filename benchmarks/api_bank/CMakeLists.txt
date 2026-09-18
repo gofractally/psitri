@@ -68,6 +68,7 @@ else()
     api_binary(psitrimdbx mdbx psitrimdbx)
     target_compile_definitions(fair-bank-psitrimdbx PRIVATE FAIR_SHIM=1)
     # Native API baseline, compiled with the same driver and compiler options.
+    api_binary(tiered tiered psitri::experimental)
     api_binary(small small psitri::small)
     api_binary(dwal_small dwal_small "psitri;start_ref")
     api_binary(large large psitri::big)
@@ -102,6 +103,9 @@ if(API_BANK_BUILD_REGRESSION_TESTS)
             "${API_BANK_INTEGRATIONS}/libraries/psitri-sqlite/tests/bank_regressions.cpp")
         target_link_libraries(api-storage-regressions PRIVATE psitrirocks psitri-sqlite Catch2::Catch2WithMain)
     else()
+        add_executable(api-tiered-regressions tiered_pair_tests.cpp)
+        target_link_libraries(api-tiered-regressions PRIVATE psitri::experimental Catch2::Catch2WithMain)
+        set_target_properties(api-tiered-regressions PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
         add_executable(api-storage-regressions
             dwal_byte_tests.cpp
             "${PSITRI_BENCH_SOURCE}/libraries/start_ref/test/session_tests.cpp"

@@ -188,3 +188,31 @@ that arena, and `--cache-mib` is not a Small Engine cache limit. This resident
 bank dataset does not exercise the separate large-value arena or establish
 performance beyond RAM. Compare reader throughput, memory, and close/drain time
 alongside writes; large DWAL commits delay fresh snapshot admission.
+
+## Tiered Small Engine + Large Engine diagnostic
+
+`fair-bank-tiered` uses `psitri::experimental::tiered_engine<>`: Small Engine for
+hot writes and Large Engine for the cold base, without a WAL. Run the same six
+commit sizes with:
+
+```sh
+cmake --build build/api-dwal --target fair-bank-tiered
+python3 scripts/direct_bank_sweep.py --suite tiered --build build/api-dwal \
+  --machine my-runner --output logs/my-tiered-sweep
+```
+
+This adapter explicitly selects a **16 MiB bytes-written flush threshold**, below
+the engine's 512 MiB default, so the fixed bank trace actually exercises the cold
+base. This is a flush trigger, not a 16 MiB memory cap. It logs completed base
+transactions after each validation phase; require migration evidence in a full
+run before presenting it as a tiered comparison. The small smoke trace need not
+trigger migration. The base retains the Large Engine adapter's disabled read
+promotion, pinned-cache budget, and database capacity. Both tiers use the
+requested synchronization policy. Reads use the merged **latest** view, not the
+base-only **stable** view.
+
+Close joins an active flush but leaves remaining committed hot data in Small
+Engine for reopening; it does not force all hot data into Large Engine. That
+lifecycle differs from the DWAL adapter's close-and-drain behavior. This remains
+an experimental composition without portable owned composite subtree snapshots.
+`api-tiered-regressions` checks this exact Small Engine/Large Engine pair.

@@ -644,6 +644,9 @@ namespace delta_art
             else
                return {0, 0};
          }
+         // Completed base transactions since open (including recovery).
+         uint64_t base_commit_count() const noexcept
+         { return _base_epoch.load(std::memory_order_acquire); }
          uint64_t flush_now()
          {
             // ── Dan's double buffer, in adb vocabulary ──────────────────────

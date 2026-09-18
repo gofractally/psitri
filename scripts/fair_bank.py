@@ -26,6 +26,7 @@ API_ENGINES = ("mdbx", "psitrimdbx", "rocksdb", "psitrirocks", "sqlite", "psitri
 DIRECT_ENGINES = ("mdbx", "psitrimdbx", "large")
 DWAL_ENGINES = ("mdbx", "psitrimdbx", "dwal")
 SMALL_ENGINES = ("small", "dwal_small")
+TIERED_ENGINES = ("tiered",)
 CHECKS = ("read_your_writes", "rollback", "snapshot", "exact_accounts", "balance", "reopen")
 WORKLOAD = "fair-bank-v2"
 SMOKE = dict(accounts=128, transfers=256, warmup=64, batch=32, readers=2,
@@ -123,7 +124,7 @@ def summarize(records: list[dict], engines: list[str], repeats: int, profile: st
 def validate_stderr(engine: str, stderr: str) -> None:
     # SAL can log storage flush failures instead of returning them to its caller.
     # These level markers come from libraries/sal/include/sal/debug.hpp.
-    if engine in ("small", "large", "dwal", "dwal_small", "psitrimdbx") and any(marker in stderr for marker in ("\x1b[1;31m", "\x1b[1;35m")):
+    if engine in ("small", "large", "dwal", "dwal_small", "tiered", "psitrimdbx") and any(marker in stderr for marker in ("\x1b[1;31m", "\x1b[1;35m")):
         raise ValueError("Native storage reported an error; see stderr.log")
 
 
@@ -310,8 +311,8 @@ def main():
     parser.add_argument("--machine", required=True, help="Stable physical runner identity")
     parser.add_argument("--profile", choices=("smoke", "diagnostic", "performance"), default="smoke",
                         help="diagnostic uses the performance workload once per engine, without qualifying as a performance series")
-    parser.add_argument("--suite", choices=("native", "api", "direct", "dwal", "small"), default="native")
-    parser.add_argument("--engines", nargs="+", choices=tuple(dict.fromkeys(ENGINES + API_ENGINES + DWAL_ENGINES + SMALL_ENGINES)))
+    parser.add_argument("--suite", choices=("native", "api", "direct", "dwal", "small", "tiered"), default="native")
+    parser.add_argument("--engines", nargs="+", choices=tuple(dict.fromkeys(ENGINES + API_ENGINES + DWAL_ENGINES + SMALL_ENGINES + TIERED_ENGINES)))
     parser.add_argument("--repeats", type=int)
     parser.add_argument("--order-seed", type=int, default=20260917)
     parser.add_argument("--timeout", type=float, default=1800)
@@ -325,9 +326,9 @@ def main():
         else:
             parser.add_argument("--" + key.replace("_", "-"), type=int)
     args = parser.parse_args()
-    if args.suite in ("api", "direct", "dwal", "small"):
+    if args.suite in ("api", "direct", "dwal", "small", "tiered"):
         WORKLOAD = "api-bank-v1"
-    allowed = SMALL_ENGINES if args.suite == "small" else DWAL_ENGINES if args.suite == "dwal" else DIRECT_ENGINES if args.suite == "direct" else API_ENGINES if args.suite == "api" else ENGINES
+    allowed = TIERED_ENGINES if args.suite == "tiered" else SMALL_ENGINES if args.suite == "small" else DWAL_ENGINES if args.suite == "dwal" else DIRECT_ENGINES if args.suite == "direct" else API_ENGINES if args.suite == "api" else ENGINES
     args.engines = args.engines or list(allowed)
     if any(e not in allowed for e in args.engines):
         parser.error("Engine is not part of the selected suite")

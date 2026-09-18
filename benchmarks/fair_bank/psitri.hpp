@@ -2,6 +2,8 @@
 #include "common.hpp"
 #if FAIR_small
 #include <psitri/engines/small.hpp>
+#elif FAIR_tiered
+#include <psitri/experimental/tiered.hpp>
 #else
 #include <psitri/engines/big.hpp>
 #endif
@@ -10,6 +12,9 @@ namespace fair_bank
 #if FAIR_small
 using Engine = psitri::small_engine;
 inline constexpr auto engine_name = "small";
+#elif FAIR_tiered
+using Engine = psitri::experimental::tiered_engine<>;
+inline constexpr auto engine_name = "tiered";
 #else
 using Engine = psitri::big_engine;
 inline constexpr auto engine_name = "large";
@@ -33,7 +38,12 @@ struct Store
    static std::string settings(const Config &c)
    {
       return std::string("sync_mode=") + c.durability +
-#if FAIR_small
+#if FAIR_tiered
+             "; tiered Small Engine -> Large Engine; latest view; no WAL; background flush enabled; "
+             "hi_water_bytes=16777216; lo_water_bytes=4194304; flush_chunk=10000000; "
+             "Small Engine default max_segments=4096; background release enabled; "
+             "Large Engine enable_read_cache=false; max_pinned_cache_size_mb=" + std::to_string(c.cache_mib);
+#elif FAIR_small
              "; fixed arena; default max_segments=4096; background release enabled";
 #else
              "; enable_read_cache=false; max_pinned_cache_size_mb=" + std::to_string(c.cache_mib);
@@ -45,7 +55,18 @@ struct Store
    {
       Engine::config config;
       // full requests F_FULLFSYNC on macOS and fsync on other platforms.
+#if FAIR_tiered
+      config.commit_sync = sync_policy(c);
+      config.bcfg.enable_read_cache = false;
+      config.bcfg.max_pinned_cache_size_mb = c.cache_mib;
+      config.bcfg.max_database_size = c.map_gib * (uint64_t(1) << 30);
+      // Exercise migration within this resident dataset; defaults would keep
+      // the entire bank run in the hot tier. Record the threshold explicitly.
+      config.knobs.hi_water_bytes = 16ull << 20;
+      config.knobs.lo_water_bytes = 4ull << 20;
+#else
       config.sync_mode = sync_policy(c);
+#endif
 #if FAIR_large
       config.max_pinned_cache_size_mb = c.cache_mib;
       config.max_database_size = c.map_gib * (uint64_t(1) << 30);
@@ -94,6 +115,9 @@ struct Store
       uint64_t n = 0;
       for (bool valid = cursor.seek_begin(); valid; valid = cursor.next())
          ++n;
+#if FAIR_tiered
+      std::cerr << "tiered base commits: " << db->base_commit_count() << "\n";
+#endif
       return n;
    }
 };

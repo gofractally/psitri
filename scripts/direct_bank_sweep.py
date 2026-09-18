@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--suite", choices=("direct", "dwal", "small"), default="direct")
+    parser.add_argument("--suite", choices=("direct", "dwal", "small", "tiered"), default="direct")
     parser.add_argument("--build", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True, help="New evidence directory")
     parser.add_argument("--machine", required=True)

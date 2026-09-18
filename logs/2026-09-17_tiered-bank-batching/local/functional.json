@@ -1,0 +1,41 @@
+{
+  "purpose": "correctness only; no idle timing claim",
+  "records": [
+    {
+      "command": [
+        "/Users/dlarimer/gofractally/psitri/build/api-dwal/bin/fair-bank-tiered",
+        "--path",
+        "/Users/dlarimer/gofractally/psitri/build/tiered-functional-tiered",
+        "--result",
+        "/Users/dlarimer/gofractally/psitri/logs/2026-09-17_tiered-bank-batching/local/tiered.json",
+        "--accounts",
+        "128",
+        "--transfers",
+        "256",
+        "--warmup",
+        "64",
+        "--batch",
+        "32",
+        "--readers",
+        "2",
+        "--reads-per-snapshot",
+        "16",
+        "--read-batches",
+        "2",
+        "--seed",
+        "12345",
+        "--value-bytes",
+        "8",
+        "--cache-mib",
+        "64",
+        "--map-gib",
+        "64",
+        "--durability",
+        "none"
+      ],
+      "engine": "tiered",
+      "binary_sha256": "1fa85b61524324c322584193acddcf523c4f48b616a971d067780f6ac29dfd31",
+      "exit_code": 0
+    }
+  ]
+}

@@ -117,7 +117,7 @@ class FairBankTest(unittest.TestCase):
             fair_bank.validate_description(desc, "rocksdb", "none")
 
     def test_logged_native_storage_errors_are_fatal(self):
-        for engine in ("small", "large", "dwal", "dwal_small", "psitrimdbx"):
+        for engine in ("small", "large", "dwal", "dwal_small", "tiered", "psitrimdbx"):
             for marker in ("\x1b[1;31m", "\x1b[1;35m"):
                 with self.assertRaisesRegex(ValueError, "storage reported"):
                     fair_bank.validate_stderr(engine, "mapping.cpp:1 " + marker + "Flush failed\x1b[0m")

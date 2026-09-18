@@ -1,7 +1,7 @@
 #include "common.hpp"
 #if FAIR_dwal || FAIR_dwal_small
 #include "dwal.hpp"
-#elif FAIR_small || FAIR_large
+#elif FAIR_small || FAIR_large || FAIR_tiered
 #include "psitri.hpp"
 #elif FAIR_mdbx
 #include "mdbx.hpp"
@@ -438,7 +438,7 @@ int main(int argc, char **argv)
       auto c = parse(argc, argv);
       fs::create_directories(c.path);
       // psitri create_only owns creating its directory.
-#if FAIR_small || FAIR_large || FAIR_dwal || FAIR_dwal_small
+#if FAIR_small || FAIR_large || FAIR_dwal || FAIR_dwal_small || FAIR_tiered
       fs::remove(c.path);
 #endif
       std::vector<uint64_t> model(c.accounts, initial_balance);

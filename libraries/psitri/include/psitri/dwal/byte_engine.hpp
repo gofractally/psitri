@@ -5,9 +5,34 @@
 #include <psitri/dwal/dwal_database_impl.hpp>
 #include <psitri/dwal/merge_cursor_impl.hpp>
 #include <unordered_map>
+#include <type_traits>
 
 namespace psitri::dwal
 {
+   namespace detail
+   {
+      template <class Base, bool = std::is_copy_constructible_v<typename Base::cursor>>
+      struct byte_base_snapshot
+      {
+         std::shared_ptr<typename Base::read_session> session;
+         typename Base::cursor point;
+         byte_base_snapshot(typename Base::database& db, uint32_t index)
+             : session(db.start_read_session()), point(session->create_cursor(index)) {}
+         typename Base::cursor create_cursor() const { return point; }
+      };
+
+      template <class Base>
+      struct byte_base_snapshot<Base, false>
+      {
+         // Multiple independent cursors must never reuse a single hazard slot.
+         decltype(std::declval<typename Base::database&>().get_root_owned(0)) root;
+         typename Base::cursor point;
+         byte_base_snapshot(typename Base::database& db, uint32_t index)
+             : root(db.get_root_owned(index)), point(root.snapshot_cursor()) {}
+         typename Base::cursor create_cursor() const { return root.snapshot_cursor(); }
+      };
+   }
+
    template <class Base>
    struct byte_engine
    {
@@ -22,13 +47,12 @@ namespace psitri::dwal
       struct snapshot
       {
          std::shared_ptr<database> owner;
-         std::shared_ptr<typename Base::read_session> session;
          std::shared_ptr<btree_layer> rw, ro;
          std::optional<btree_layer_view> rw_view, ro_view;
-         std::optional<typename Base::cursor> base;
+         std::optional<detail::byte_base_snapshot<Base>> base;
 
          snapshot(std::shared_ptr<database> db, uint32_t index, bool writer_owned = false)
-             : owner(std::move(db)), session(owner->dwal.underlying_db()->start_read_session())
+             : owner(std::move(db))
          {
             auto& state = owner->dwal.root(index);
             std::unique_lock lock(state.tx_mutex, std::defer_lock);
@@ -42,7 +66,7 @@ namespace psitri::dwal
             std::lock_guard buffered_lock(state.buffered_mutex);
             ro = state.buffered_ptr;
             if (ro) ro_view.emplace(*ro);
-            base.emplace(session->create_cursor(index));
+            base.emplace(*owner->dwal.underlying_db(), index);
          }
 
          template <class F>
@@ -59,7 +83,7 @@ namespace psitri::dwal
                }
                if ((*layer)->tombstones.is_deleted(key)) return false;
             }
-            return base->get(key, std::forward<F>(fn));
+            return base->point.get(key, std::forward<F>(fn));
          }
       };
 
@@ -70,7 +94,7 @@ namespace psitri::dwal
          auto& ordered()
          {
             if (!merge_)
-               merge_.emplace(view_->rw_view, view_->ro_view, *view_->base);
+               merge_.emplace(view_->rw_view, view_->ro_view, view_->base->create_cursor());
             return *merge_;
          }
        public:

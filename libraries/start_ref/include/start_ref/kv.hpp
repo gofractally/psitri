@@ -501,6 +501,8 @@ namespace start_ref::kv
       void upsert(key_view k, T&& v);
       any_value get_any(key_view k) const;
       int  remove(key_view k);
+      // Optional range operation; includes uncommitted writes in [low, high).
+      uint64_t remove_range_counted(key_view low, key_view high);
       // ── multi-root (psitri's model): open additional roots in STRICTLY
       // ASCENDING index order; all roots commit/abort together. set_root is a
       // pure ref-handle exchange (the working handle and the owned tree just
@@ -1153,6 +1155,22 @@ namespace start_ref::kv
          return _ws->tree_for(_roots[0].index).pg_remove(k) ? 0 : -1;
       else
          return _ws->tree_for(_roots[0].index).cow_remove(k) ? 0 : -1;
+   }
+   inline uint64_t transaction::remove_range_counted(key_view low, key_view high)
+   {
+      auto& t = tree_(_roots[0].index);
+      uint64_t count = 0;
+      auto it = t.lower_bound(low);
+      while (it != t.end() && (*it).first < high)
+      {
+         // Mutation invalidates iterators and borrowed keys. Re-seek with an
+         // owned key to bound temporary memory independently of range size.
+         std::string key((*it).first);
+         remove(key);
+         ++count;
+         it = t.lower_bound(key);
+      }
+      return count;
    }
    template <class F> requires adb::detail::value_callback<F>
    inline bool transaction::get(key_view k, F&& fn, uint64_t offset, uint64_t length) const

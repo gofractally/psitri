@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One sequential diagnostic per batch size for the three direct bank adapters."""
+"""One sequential diagnostic per batch size for the selected bank adapters."""
 import argparse
 import datetime as dt
 import json
@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--suite", choices=("direct", "dwal"), default="direct")
+    parser.add_argument("--suite", choices=("direct", "dwal", "small"), default="direct")
     parser.add_argument("--build", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True, help="New evidence directory")
     parser.add_argument("--machine", required=True)
@@ -34,8 +34,8 @@ def main():
                    "--machine", args.machine, "--profile", profile, "--durability", "none",
                    "--batch", str(batch), "--order-seed", str(20260917 + index),
                    "--idle-timeout", str(args.idle_timeout), "--notes",
-                   f"{args.suite} engine batch sweep; one run per configuration; read cache disabled "
-                   "for both psitri paths; no per-commit sync; no persistent subtree creation."]
+                   f"{args.suite} engine batch sweep; one run per configuration; "
+                   "native adapter defaults; no per-commit sync; no persistent subtree creation."]
         if profile != "smoke":
             command += ["--accounts", "100000", "--transfers", str(args.transfers),
                         "--warmup", "10000", "--readers", "4", "--reads-per-snapshot", "100",

@@ -68,6 +68,8 @@ else()
     api_binary(psitrimdbx mdbx psitrimdbx)
     target_compile_definitions(fair-bank-psitrimdbx PRIVATE FAIR_SHIM=1)
     # Native API baseline, compiled with the same driver and compiler options.
+    api_binary(small small psitri::small)
+    api_binary(dwal_small dwal_small "psitri;start_ref")
     api_binary(large large psitri::big)
     api_binary(dwal dwal "psitri;sal_art_ref")
     set(dependencies "\"ucc\": \"${FETCHCONTENT_SOURCE_DIR_UCC}\"")
@@ -107,7 +109,7 @@ if(API_BANK_BUILD_REGRESSION_TESTS)
             "${PSITRI_BENCH_SOURCE}/libraries/sal/test/allocator_session_tests.cpp"
             "${PSITRI_BENCH_SOURCE}/libraries/sal_art_ref/test/paged_tests.cpp"
             "${PSITRI_BENCH_SOURCE}/libraries/sal_art_ref/test/leaf_page_tests.cpp")
-        target_link_libraries(api-storage-regressions PRIVATE psitri sal_art_ref Catch2::Catch2WithMain)
+        target_link_libraries(api-storage-regressions PRIVATE psitri sal_art_ref start_ref Catch2::Catch2WithMain)
     endif()
     set_target_properties(api-storage-regressions PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endif()

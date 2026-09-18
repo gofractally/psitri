@@ -1,0 +1,13 @@
+Filters: [dwal-byte]
+Randomness seeded to: 978597467
+[MERGE] root=0 entries=34  0 ms wall / 0 ms cpu  syscall=1%  736473 entries/sec  1.36 us/entry  max=0.0 ms
+        latency: <1us=32  <10us=0  <100us=2  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] shutdown requested — aborting after 120 entries
+[MERGE] root=0 entries=34  0 ms wall / 0 ms cpu  syscall=1%  1441655 entries/sec  0.69 us/entry  max=0.0 ms
+        latency: <1us=32  <10us=1  <100us=1  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] shutdown requested — aborting after 1 entries
+===============================================================================
+All tests passed (72 assertions in 5 test cases)
+

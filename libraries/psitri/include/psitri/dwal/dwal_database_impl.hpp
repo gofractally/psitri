@@ -341,10 +341,10 @@ namespace psitri::dwal
                      std::lock_guard lk(root.buffered_mutex);
                      ro = root.buffered_ptr;
                   }
-                  if (ro && !ro->map.empty())
+                  if (ro && !ro->empty())
                      flush_layer(*ro);
 
-                  if (root.rw_layer && !root.rw_layer->map.empty())
+                  if (root.rw_layer && !root.rw_layer->empty())
                      flush_layer(*root.rw_layer);
 
                   // Ensure each layer is bound to the shared allocator.
@@ -352,10 +352,12 @@ namespace psitri::dwal
                   // thread-local session, so the layer's destructor will
                   // run correctly regardless of which thread owns the
                   // last shared_ptr reference.
-                  if (ro)
-                     ro->set_allocator(&_db->underlying_allocator());
-                  if (root.rw_layer)
-                     root.rw_layer->set_allocator(&_db->underlying_allocator());
+                  if constexpr (requires { _db->underlying_allocator(); })
+                  {
+                     if (ro) ro->set_allocator(&_db->underlying_allocator());
+                     if (root.rw_layer)
+                        root.rw_layer->set_allocator(&_db->underlying_allocator());
+                  }
 
                   flushed = true;
                }
@@ -432,7 +434,8 @@ namespace psitri::dwal
       // same allocator pointer is safe from any thread (writer, merge
       // worker, or the database-destructor flush thread).
       if (_roots[index]->rw_layer && !_roots[index]->rw_layer->alloc)
-         _roots[index]->rw_layer->set_allocator(&_db->underlying_allocator());
+         if constexpr (requires { _db->underlying_allocator(); })
+            _roots[index]->rw_layer->set_allocator(&_db->underlying_allocator());
       return *_roots[index];
    }
 
@@ -578,7 +581,8 @@ namespace psitri::dwal
             root.buffered_ptr = std::move(root.rw_layer);
          }
          root.rw_layer = std::make_shared<btree_layer>();
-         root.rw_layer->set_allocator(&_db->underlying_allocator());
+         if constexpr (requires { _db->underlying_allocator(); })
+            root.rw_layer->set_allocator(&_db->underlying_allocator());
 
          root.cow.reset();
       }
@@ -817,36 +821,45 @@ namespace psitri::dwal
       auto session =
           std::static_pointer_cast<read_session_type>(tlc.tri_session);
 
-      auto* cur = static_cast<tri_cursor_type*>(tlc.tri_cursor);
-      if (!cur)
+      auto lookup = [&](tri_cursor_type* cur) -> lookup_result
       {
-         cur                = new tri_cursor_type(session->create_cursor(root_index));
-         tlc.tri_cursor     = cur;
-         tlc.tri_cursor_del = [](void* c) { delete static_cast<tri_cursor_type*>(c); };
-      }
-      else if constexpr (requires(tri_cursor_type& c) { c.refresh(root_index); })
+         if constexpr (requires(std::string& b) {
+                          { cur->get(key_view(key.data(), key.size()), &b) } -> std::convertible_to<int>;
+                       })
+         {
+            std::string buf;
+            if (cur->get(key_view(key.data(), key.size()), &buf) >= 0)
+               return lookup_result::make_owned(std::move(buf));
+         }
+         else if (auto v = cur->template get<std::string>(key))
+            return lookup_result::make_owned(std::move(*v));
+         return {false, {}};
+      };
+
+      if constexpr (!requires(tri_cursor_type& c) { c.refresh(root_index); } &&
+                    !std::is_move_assignable_v<tri_cursor_type>)
       {
-         cur->refresh(root_index);
+         // Single-slot hazard readers must release their old pin BEFORE a new
+         // cursor publishes into that slot. A stack cursor also avoids a heap
+         // allocation on every Small Engine lookup.
+         auto cur = session->create_cursor(root_index);
+         return lookup(&cur);
       }
       else
-      {  // engines without refresh: re-pin by recreating at the live root
-         *cur = session->create_cursor(root_index);
-      }
-
-      if constexpr (requires(std::string& b) {
-                       { cur->get(key_view(key.data(), key.size()), &b) } -> std::convertible_to<int>;
-                    })
-      {  // psitri's borrowed-buffer point get — the measured hot path
-         std::string buf;
-         if (cur->get(key_view(key.data(), key.size()), &buf) >= 0)
-            return lookup_result::make_owned(std::move(buf));
-      }
-      else if (auto v = cur->template get<std::string>(std::string_view(key.data(), key.size())))
       {
-         return lookup_result::make_owned(std::move(*v));
+         auto* cur = static_cast<tri_cursor_type*>(tlc.tri_cursor);
+         if (!cur)
+         {
+            cur                = new tri_cursor_type(session->create_cursor(root_index));
+            tlc.tri_cursor     = cur;
+            tlc.tri_cursor_del = [](void* c) { delete static_cast<tri_cursor_type*>(c); };
+         }
+         else if constexpr (requires(tri_cursor_type& c) { c.refresh(root_index); })
+            cur->refresh(root_index);
+         else
+            *cur = session->create_cursor(root_index);
+         return lookup(cur);
       }
-
-      return {false, {}};
    }
 
    template <class LockPolicy, class Engine>

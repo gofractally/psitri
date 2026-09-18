@@ -1,0 +1,6 @@
+[1/6] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_database.cpp.o
+[2/6] Linking CXX static library psitri/libraries/psitri/libpsitri.a
+[3/6] Building CXX object CMakeFiles/fair-bank-dwal_small.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o
+[4/6] Linking CXX executable bin/fair-bank-dwal_small
+[5/6] Building CXX object CMakeFiles/api-storage-regressions.dir/dwal_byte_tests.cpp.o
+[6/6] Linking CXX executable bin/api-storage-regressions

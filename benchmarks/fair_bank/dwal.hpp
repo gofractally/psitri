@@ -1,21 +1,36 @@
 #pragma once
 #include "common.hpp"
 #include <psitri/dwal/byte_engine.hpp>
+#if FAIR_dwal_small
+#include <start_ref/kv.hpp>
+#else
 #include <sal_art_ref/engine.hpp>
+#endif
 namespace fair_bank
 {
+#if FAIR_dwal_small
+using Engine = psitri::dwal::byte_engine<start_ref::kv::engine>;
+inline constexpr auto engine_name = "dwal_small";
+inline constexpr auto base_name = "Small Engine";
+#else
 using Engine = psitri::dwal::byte_engine<sal_art_ref::radix::engine>;
 inline constexpr auto engine_name = "dwal";
+inline constexpr auto base_name = "Large Engine";
+#endif
 struct Store
 {
    static bool supports(std::string_view level) { return level == "none"; }
-   static std::string version() { return "DWAL over Large Engine; WAL format 2"; }
+   static std::string version() { return std::string("DWAL over ") + base_name + "; WAL format 2"; }
    static std::string settings(const Config& c)
    {
-      return "base=Large Engine; base_sync=none; WAL=pwrite per commit, no per-commit fsync; "
+      return std::string("base=") + base_name + "; base_sync=none; WAL=pwrite per commit, no per-commit fsync; "
              "rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; "
-             "max_rw_arena_bytes=1073741824; merge_threads=2; enable_read_cache=false; "
-             "max_pinned_cache_size_mb=" + std::to_string(c.cache_mib);
+             "max_rw_arena_bytes=1073741824; merge_threads=2; "
+#if FAIR_dwal_small
+             "fixed arena; default max_segments=4096; background release enabled";
+#else
+             "enable_read_cache=false; max_pinned_cache_size_mb=" + std::to_string(c.cache_mib);
+#endif
    }
    std::shared_ptr<Engine::database> db;
    std::shared_ptr<Engine::write_session> ws;
@@ -23,9 +38,11 @@ struct Store
    {
       Engine::config cfg;
       cfg.base.sync_mode = sal::sync_type::none;
+#if !FAIR_dwal_small
       cfg.base.enable_read_cache = false;
       cfg.base.max_pinned_cache_size_mb = c.cache_mib;
       cfg.base.max_database_size = c.map_gib * (uint64_t(1) << 30);
+#endif
       db = Engine::database::open(c.path, reopen ? sal::open_mode::open_existing : sal::open_mode::create_only, cfg);
       ws = db->start_write_session();
    }

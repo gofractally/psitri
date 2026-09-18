@@ -36,6 +36,9 @@
 //                                     engine as the WHOLE DB, written by the user thread. Isolates
 //                                     whether the cold-base SIGBUS is the engine itself vs the
 //                                     tiered drain/merger interaction.
+#ifndef PSITRIMDBX_BACKEND_DWAL
+#define PSITRIMDBX_BACKEND_DWAL 0
+#endif
 #if !defined(PSITRIMDBX_BACKEND_SAL_ART_REF)
 #define PSITRIMDBX_BACKEND_SAL_ART_REF 0
 #endif
@@ -58,7 +61,7 @@
 #if !PSITRIMDBX_BACKEND_TIERED_PSITRI && !PSITRIMDBX_BACKEND_PSITRI && \
     !PSITRIMDBX_BACKEND_START_VER && !PSITRIMDBX_BACKEND_SAL_ART_REF && \
     !PSITRIMDBX_BACKEND_START_REF && !PSITRIMDBX_BACKEND_GCART && \
-    !PSITRIMDBX_BACKEND_DELTA_GCART && !PSITRIMDBX_BACKEND_RCART
+    !PSITRIMDBX_BACKEND_DELTA_GCART && !PSITRIMDBX_BACKEND_RCART && !PSITRIMDBX_BACKEND_DWAL
 #define PSITRIMDBX_BACKEND_DELTA_ART 1
 #else
 #define PSITRIMDBX_BACKEND_DELTA_ART 0
@@ -83,7 +86,10 @@
 #if PSITRIMDBX_USES_TIERED
 #include <delta_art/tiered_kv.hpp>
 #endif
-#if PSITRIMDBX_BACKEND_DELTA_ART || PSITRIMDBX_BACKEND_SAL_ART_REF
+#if PSITRIMDBX_BACKEND_DWAL
+#include <psitri/dwal/byte_engine.hpp>
+#endif
+#if PSITRIMDBX_BACKEND_DWAL || PSITRIMDBX_BACKEND_DELTA_ART || PSITRIMDBX_BACKEND_SAL_ART_REF
 #include <sal_art_ref/engine.hpp>  // sal_art_ref::radix::dwal_engine (cold base / direct)
 #endif
 #if PSITRIMDBX_USES_PSITRI
@@ -213,6 +219,8 @@ using TK         = rcart::kv::engine;  // rcart refcount baseline DIRECT — FIX
 #elif PSITRIMDBX_BACKEND_DELTA_GCART
 using TK         = delta_art::tiered_kv<start_ver::kv::engine,
                                         gcart::kv::engine>;  // start_ver hot delta -> gcart cold base
+#elif PSITRIMDBX_BACKEND_DWAL
+using TK = psitri::dwal::byte_engine<sal_art_ref::radix::engine>;
 #elif PSITRIMDBX_BACKEND_SAL_ART_REF
 using TK         = sal_art_ref::radix::dwal_engine;  // sal_art_ref DIRECT — no tiering / no merger
 #else
@@ -1869,9 +1877,14 @@ static mdbx_view_cursor make_txn_cursor(const MDBX_txn* txn, uint32_t root_idx)
       // A cursor inside a write txn iterates the latest committed (W∪B) view
       // MERGED with this txn's read-own-writes overlay (write_set). The
       // owning read session lives in the txn (it must outlive the cursor).
+#if PSITRIMDBX_BACKEND_DWAL
+      // The writer already owns DWAL's root lock. Capture its COW view through
+      // the transaction, avoiding a recursive reader admission lock.
+      return mdbx_view_cursor(mtxn->direct_tx->create_cursor(), &mtxn->write_set);
+#else
       auto rs = mtxn->ensure_iter_read_session();
-      return mdbx_view_cursor(rs->create_cursor(be_root_latest),
-                              &mtxn->write_set);
+      return mdbx_view_cursor(rs->create_cursor(be_root_latest), &mtxn->write_set);
+#endif
    }
 
    if (txn->has_read_view)
@@ -2679,6 +2692,14 @@ int mdbx_env_open(MDBX_env* env, const char* pathname,
 #elif PSITRIMDBX_BACKEND_PSITRI
       // legacy psitri direct: config is sal::runtime_config (no tiered knobs).
       psitri::runtime_config cfg;
+      env->db = be_db::open(env->path, open_mode, cfg);
+#elif PSITRIMDBX_BACKEND_DWAL
+      if (mdbx_flags_to_sync(flags) != sal::sync_type::none)
+         throw std::runtime_error("DWAL byte adapter currently supports no-sync commits only");
+      TK::config cfg;
+      cfg.base.enable_read_cache = !shim_env::get().no_read_cache;
+      if (const auto mb = shim_env::get().cache_mb) cfg.base.max_pinned_cache_size_mb = mb;
+      cfg.base.sync_mode = sal::sync_type::none;
       env->db = be_db::open(env->path, open_mode, cfg);
 #elif PSITRIMDBX_BACKEND_SAL_ART_REF
       // sal_art_ref DIRECT: config is sal::runtime_config (no tiered knobs, no merger).

@@ -5,6 +5,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -53,8 +54,16 @@ namespace psitri::dwal
             publish_status();
             return;
          }
-         // Invalid header — truncate and rewrite.
-         ::ftruncate(_fd, 0);
+         ::close(_fd);
+         _fd = -1;
+         throw std::runtime_error("wal_writer: incompatible WAL header: " + path.string());
+      }
+
+      if (st.st_size != 0)
+      {
+         ::close(_fd);
+         _fd = -1;
+         throw std::runtime_error("wal_writer: truncated WAL header: " + path.string());
       }
 
       // Write fresh header.
@@ -132,7 +141,7 @@ namespace psitri::dwal
       _entry_active        = true;
 
       // Reserve space for the entry header (written at commit time).
-      // Uses the v2 header size (25 bytes) which includes multi-tx fields.
+      // Version 2 includes a 32-bit operation count and multi-root fields.
       _entry_buf.resize(wal_entry_header_size);
    }
 
@@ -185,6 +194,8 @@ namespace psitri::dwal
                                        uint16_t multi_participant_count)
    {
       assert(_entry_active);
+      if (_entry_buf.size() > std::numeric_limits<uint32_t>::max() - wal_entry_hash_size)
+         throw std::length_error("WAL transaction exceeds 32-bit entry size");
       _entry_active = false;
 
       uint64_t seq        = _next_seq++;
@@ -194,10 +205,10 @@ namespace psitri::dwal
       char* hdr = _entry_buf.data();
       std::memcpy(hdr + 0, &entry_size, 4);
       std::memcpy(hdr + 4, &seq, 8);
-      std::memcpy(hdr + 12, &_op_count, 2);
-      std::memcpy(hdr + 14, &entry_flags, 1);
-      std::memcpy(hdr + 15, &multi_tx_id, 8);
-      std::memcpy(hdr + 23, &multi_participant_count, 2);
+      std::memcpy(hdr + 12, &_op_count, 4);
+      std::memcpy(hdr + 16, &entry_flags, 1);
+      std::memcpy(hdr + 17, &multi_tx_id, 8);
+      std::memcpy(hdr + 25, &multi_participant_count, 2);
 
       // Compute hash over everything except the hash itself.
       uint64_t hash = XXH3_64bits(_entry_buf.data(), _entry_buf.size());

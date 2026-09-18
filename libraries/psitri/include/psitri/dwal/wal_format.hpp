@@ -6,7 +6,7 @@ namespace psitri::dwal
 {
    /// WAL file magic: "DWL1" as little-endian uint32.
    static constexpr uint32_t wal_magic   = 0x44574C31;
-   static constexpr uint32_t wal_version = 1;
+   static constexpr uint32_t wal_version = 2;
 
    /// WAL file header — 64 bytes, written once at file creation.
    struct wal_header
@@ -30,17 +30,17 @@ namespace psitri::dwal
       upsert_subtree = 0x04,
    };
 
-   /// WAL entry layout (serialized field-by-field, 25-byte header):
+   /// WAL entry layout (serialized field-by-field, 27-byte header):
    ///   [0..4)   uint32  entry_size — total bytes including trailing hash
    ///   [4..12)  uint64  sequence   — monotonically increasing
-   ///   [12..14) uint16  op_count   — number of operations
-   ///   [14..15) uint8   entry_flags — bit 0 = multi_tx_commit
-   ///   [15..23) uint64  multi_tx_id — 0 for single-root entries
-   ///   [23..25) uint16  multi_participant_count — 0 for single-root entries
-   ///   [25..N-8)        operations[]
+   ///   [12..16) uint32  op_count   — number of operations
+   ///   [16..17) uint8   entry_flags — bit 0 = multi_tx_commit
+   ///   [17..25) uint64  multi_tx_id — 0 for single-root entries
+   ///   [25..27) uint16  multi_participant_count — 0 for single-root entries
+   ///   [27..N-8)        operations[]
    ///   [N-8..N) uint64  xxh3_64    — covers bytes [0, N-8)
-   static constexpr size_t wal_entry_header_size_v1 = 14;
-   static constexpr size_t wal_entry_header_size    = 25;
+   static constexpr size_t wal_entry_header_size_v1 = 25;
+   static constexpr size_t wal_entry_header_size    = 27;
    static constexpr size_t wal_entry_hash_size      = 8;
 
    /// Flag bit for clean close in wal_header::flags.

@@ -1,0 +1,32 @@
+Filters: [dwal-byte]
+Randomness seeded to: 1688429468
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/dwal_byte_73897/ptrs/header.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4345315328, size=4224[0m
+control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/dwal_byte_73897/iref/header.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4345331712, size=4224[0m
+allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (7449 GB) — capping[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/dwal_byte_73897/header[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/dwal_byte_73897/roots[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/dwal_byte_73897/session_ops.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=93650944[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4959535104, size=93650944[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4345348096, size=32768[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4345380864, size=32768[0m
+[MERGE] root=0 entries=34  0 ms wall / 0 ms cpu  syscall=1%  917902 entries/sec  1.09 us/entry  max=0.0 ms
+        latency: <1us=32  <10us=1  <100us=1  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] shutdown requested — aborting after 202 entries
+mapping.cpp:94             (null)     mapping               [33mMapped file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/dwal_byte_73897/ptrs/header.bin, size=4224, addr=4345315328[0m
+mapping.cpp:94             (null)     mapping               [33mMapped file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/dwal_byte_73897/iref/header.bin, size=4224, addr=4345331712[0m
+allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (7449 GB) — capping[0m
+mapping.cpp:94             (null)     mapping               [33mMapped file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/dwal_byte_73897/header, size=93650944, addr=4959535104[0m
+mapping.cpp:94             (null)     mapping               [33mMapped file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/dwal_byte_73897/roots, size=32768, addr=4345348096[0m
+mapping.cpp:94             (null)     mapping               [33mMapped file: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/dwal_byte_73897/session_ops.bin, size=32768, addr=4345380864[0m
+===============================================================================
+All tests passed (20 assertions in 1 test case)
+

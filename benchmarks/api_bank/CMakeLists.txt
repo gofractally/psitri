@@ -69,6 +69,7 @@ else()
     target_compile_definitions(fair-bank-psitrimdbx PRIVATE FAIR_SHIM=1)
     # Native API baseline, compiled with the same driver and compiler options.
     api_binary(large large psitri::big)
+    api_binary(dwal dwal "psitri;sal_art_ref")
     set(dependencies "\"ucc\": \"${FETCHCONTENT_SOURCE_DIR_UCC}\"")
     set(libraries "\"${FAIR_MDBX_LIBRARY}\"")
 endif()
@@ -100,6 +101,7 @@ if(API_BANK_BUILD_REGRESSION_TESTS)
         target_link_libraries(api-storage-regressions PRIVATE psitrirocks psitri-sqlite Catch2::Catch2WithMain)
     else()
         add_executable(api-storage-regressions
+            dwal_byte_tests.cpp
             "${PSITRI_BENCH_SOURCE}/libraries/psitri/tests/dwal_tests.cpp"
             "${PSITRI_BENCH_SOURCE}/libraries/psitri/tests/dwal_snapshot_tests.cpp"
             "${PSITRI_BENCH_SOURCE}/libraries/sal/test/allocator_session_tests.cpp"

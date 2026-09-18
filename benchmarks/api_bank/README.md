@@ -139,3 +139,30 @@ without throughput metrics. Use these while debugging; they are functional tests
 not performance evidence. Passing them does not establish complete API coverage.
 Performance collection still requires a clean source build, the idle gate, and
 exclusive sequential execution.
+
+## DWAL batching diagnostic
+
+Configure a separate build with the same dependencies and compiler flags, replacing
+`-DPSITRIMDBX_BACKEND=sal_art_ref` with `-DPSITRIMDBX_BACKEND=dwal`. Build
+`fair-bank-mdbx`, `fair-bank-psitrimdbx`, and `fair-bank-dwal`, then run:
+
+```sh
+python3 scripts/direct_bank_sweep.py --suite dwal --build build/api-dwal \
+  --machine my-runner --output logs/my-dwal-sweep
+```
+
+This compares native MDBX, its shim over DWAL, and native DWAL over the Large
+Engine at the same six batch sizes. The adapter is an experimental byte-value
+binding, not a new public `psitri::engine` profile. Both DWAL paths use the same
+buffer thresholds, two merge workers, committed snapshots, and disabled read
+promotion. They submit a complete WAL record to the OS at every commit without
+per-commit fsync. Rotation and clean close retain DWAL's existing full barriers.
+The adapter currently accepts only the `none` durability tier; it makes no
+power-loss durability claim. Close/drain time, allocated storage, and peak RSS
+are retained alongside foreground throughput.
+
+`basic_dwal_transaction::commit(sal::sync_type::none)` submits WAL bytes before
+releasing writer admission; the existing no-argument commit still buffers them.
+WAL format 2 uses a 32-bit operation count, so a 100,000-transfer transaction's
+200,000 updates can be replayed as one atomic entry. Readers also accept format
+1's 25-byte header; writers reject incompatible files instead of rewriting them.

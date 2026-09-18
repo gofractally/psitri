@@ -1,0 +1,33 @@
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: build/api-dwal/functional-psitrimdbx/ptrs/header.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4351901696, size=4224[0m
+control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: build/api-dwal/functional-psitrimdbx/iref/header.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4351918080, size=4224[0m
+allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (7449 GB) — capping[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: build/api-dwal/functional-psitrimdbx/header[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: build/api-dwal/functional-psitrimdbx/roots[0m
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: build/api-dwal/functional-psitrimdbx/session_ops.bin[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=93650944[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4424007680, size=93650944[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4355031040, size=32768[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4355063808, size=32768[0m
+psitrimdbx psitrimdbx-0.1
+WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=psitrimdbx; compiler=clang; build_flags=; backend=DWAL over Large Engine; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; read cache controlled by recorded environment
+load
+contract checks
+warmup
+write
+mixed
+read
+close/reopen validation
+mapping.cpp:94             (null)     mapping               [33mMapped file: build/api-dwal/functional-psitrimdbx/ptrs/header.bin, size=4224, addr=4351901696[0m
+mapping.cpp:94             (null)     mapping               [33mMapped file: build/api-dwal/functional-psitrimdbx/iref/header.bin, size=4224, addr=4351918080[0m
+allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (7449 GB) — capping[0m
+mapping.cpp:94             (null)     mapping               [33mMapped file: build/api-dwal/functional-psitrimdbx/header, size=93650944, addr=4424007680[0m
+mapping.cpp:94             (null)     mapping               [33mMapped file: build/api-dwal/functional-psitrimdbx/roots, size=32768, addr=4355031040[0m
+mapping.cpp:94             (null)     mapping               [33mMapped file: build/api-dwal/functional-psitrimdbx/session_ops.bin, size=32768, addr=4355063808[0m
+PASS psitrimdbx final_hash=12150392390243270099

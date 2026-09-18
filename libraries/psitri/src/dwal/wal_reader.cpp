@@ -36,7 +36,7 @@ namespace psitri::dwal
          return false;
       }
 
-      if (_header.magic != wal_magic || _header.version != wal_version)
+      if (_header.magic != wal_magic || (_header.version != 1 && _header.version != wal_version))
       {
          ::close(_fd);
          _fd = -1;
@@ -84,7 +84,8 @@ namespace psitri::dwal
          return false;
 
       // Sanity: minimum entry is header + hash, maximum bounded by file.
-      if (entry_size < wal_entry_header_size + wal_entry_hash_size ||
+      const auto header_size = _header.version == 1 ? wal_entry_header_size_v1 : wal_entry_header_size;
+      if (entry_size < header_size + wal_entry_hash_size ||
           saved_pos + entry_size > _file_size)
       {
          _read_pos = saved_pos;
@@ -118,34 +119,21 @@ namespace psitri::dwal
 
    bool wal_reader::decode_entry(const std::vector<char>& buf, wal_entry& entry)
    {
-      // Accept both v1 (14-byte) and v2 (25-byte) headers.
-      if (buf.size() < wal_entry_header_size_v1 + wal_entry_hash_size)
+      const size_t header_size = _header.version == 1 ? wal_entry_header_size_v1 : wal_entry_header_size;
+      if (buf.size() < header_size + wal_entry_hash_size)
          return false;
-
       const char* p = buf.data();
-
-      // Parse header fields.
-      // uint32_t entry_size at [0..4) — already validated.
       std::memcpy(&entry.sequence, p + 4, 8);
-      uint16_t op_count = 0;
-      std::memcpy(&op_count, p + 12, 2);
-
-      // Parse v2 multi-tx fields if present, otherwise zero them.
-      size_t header_size;
-      if (buf.size() >= wal_entry_header_size + wal_entry_hash_size)
-      {
-         header_size = wal_entry_header_size;
-         std::memcpy(&entry.entry_flags, p + 14, 1);
-         std::memcpy(&entry.multi_tx_id, p + 15, 8);
-         std::memcpy(&entry.multi_participant_count, p + 23, 2);
-      }
-      else
-      {
-         header_size = wal_entry_header_size_v1;
-         entry.entry_flags             = 0;
-         entry.multi_tx_id             = 0;
-         entry.multi_participant_count = 0;
-      }
+      uint32_t op_count = 0;
+      const size_t count_bytes = _header.version == 1 ? 2 : 4;
+      std::memcpy(&op_count, p + 12, count_bytes);
+      std::memcpy(&entry.entry_flags, p + 12 + count_bytes, 1);
+      std::memcpy(&entry.multi_tx_id, p + 13 + count_bytes, 8);
+      std::memcpy(&entry.multi_participant_count, p + 21 + count_bytes, 2);
+      // Even an empty-key remove needs three bytes. Reject impossible counts
+      // before allocating from an untrusted on-disk header.
+      if (op_count > (buf.size() - header_size - wal_entry_hash_size) / 3)
+         return false;
 
       entry.ops.clear();
       entry.ops.reserve(op_count);
@@ -153,7 +141,7 @@ namespace psitri::dwal
       const char* cur = p + header_size;
       const char* end = p + buf.size() - wal_entry_hash_size;
 
-      for (uint16_t i = 0; i < op_count; ++i)
+      for (uint32_t i = 0; i < op_count; ++i)
       {
          if (cur >= end)
             return false;

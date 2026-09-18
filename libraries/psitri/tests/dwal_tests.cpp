@@ -19,6 +19,7 @@
 #include <psitri/dwal/wal_writer.hpp>
 
 #include <chrono>
+#include <ucc/hash/xxhash.h>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -410,6 +411,129 @@ TEST_CASE("WAL round-trip: upsert data", "[dwal]")
 
    // No more entries.
    CHECK_FALSE(reader.next(entry));
+}
+
+TEST_CASE("WAL replays a 200000-operation transaction atomically", "[dwal][large-batch]")
+{
+   temp_dir td;
+   auto path = td.path / "large.dwal";
+   {
+      psitri::dwal::wal_writer writer(path, 0);
+      writer.begin_entry();
+      writer.add_upsert_data("before", "retained");
+      writer.commit_entry();
+      writer.begin_entry();
+      for (uint32_t i = 0; i < 200000; ++i)
+         writer.add_upsert_data(std::to_string(i), std::to_string(i + 1));
+      writer.commit_entry();
+      writer.flush(sal::sync_type::none);
+   }
+   {
+      psitri::dwal::wal_reader reader;
+      REQUIRE(reader.open(path));
+      psitri::dwal::wal_entry entry;
+      REQUIRE(reader.next(entry));
+      REQUIRE(reader.next(entry));
+      REQUIRE(entry.ops.size() == 200000);
+      for (uint32_t i = 0; i < 200000; ++i)
+      {
+         REQUIRE(entry.ops[i].key == std::to_string(i));
+         REQUIRE(entry.ops[i].value == std::to_string(i + 1));
+      }
+      CHECK_FALSE(reader.next(entry));
+   }
+   // A torn large commit must expose none of its operations.
+   std::filesystem::resize_file(path, std::filesystem::file_size(path) - 1);
+   psitri::dwal::wal_reader reader;
+   REQUIRE(reader.open(path));
+   psitri::dwal::wal_entry entry;
+   REQUIRE(reader.next(entry));
+   REQUIRE(entry.ops.size() == 1);
+   CHECK(entry.ops[0].key == "before");
+   CHECK_FALSE(reader.next(entry));
+   CHECK(reader.end_sequence() == 1);
+}
+
+TEST_CASE("WAL reads version 1 without rewriting its header", "[dwal][large-batch]")
+{
+   temp_dir td;
+   auto path = td.path / "v1.dwal";
+   psitri::dwal::wal_header header;
+   header.version = 1;
+   // A version-1 25-byte entry header, one remove of key 'x', and checksum.
+   std::vector<char> bytes(25 + 4 + 8, 0);
+   uint32_t size = bytes.size();
+   uint16_t count = 1;
+   std::memcpy(bytes.data(), &size, 4);
+   std::memcpy(bytes.data() + 12, &count, 2);
+   bytes[25] = char(psitri::dwal::wal_op_type::remove);
+   bytes[26] = 1;
+   bytes[28] = 'x';
+   auto hash = XXH3_64bits(bytes.data(), bytes.size() - 8);
+   std::memcpy(bytes.data() + bytes.size() - 8, &hash, 8);
+   {
+      std::ofstream out(path, std::ios::binary);
+      out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+      out.write(bytes.data(), bytes.size());
+   }
+   psitri::dwal::wal_reader reader;
+   REQUIRE(reader.open(path));
+   psitri::dwal::wal_entry entry;
+   REQUIRE(reader.next(entry));
+   REQUIRE(entry.ops.size() == 1);
+   CHECK(entry.ops[0].key == "x");
+   CHECK(entry.ops[0].type == psitri::dwal::wal_op_type::remove);
+   // A current writer cannot append a new layout to the old file or truncate it.
+   REQUIRE_THROWS(psitri::dwal::wal_writer(path, 0));
+   CHECK(std::filesystem::file_size(path) == sizeof(header) + bytes.size());
+}
+
+TEST_CASE("DWAL recovers a transaction with 200000 updates", "[dwal][large-batch]")
+{
+   temp_dir td;
+   auto base = psitri::database::create(td.path / "db");
+   auto wal_dir = td.path / "wal";
+   std::filesystem::create_directories(wal_dir / "root-0");
+   {
+      psitri::dwal::wal_writer writer(wal_dir / "root-0" / "wal-rw.dwal", 0);
+      writer.begin_entry();
+      // Repeated keys exercise replay ordering, as bank transfers do.
+      for (uint32_t i = 0; i < 200000; ++i)
+         writer.add_upsert_data(std::to_string(i % 100000), std::to_string(i));
+      writer.commit_entry();
+      writer.flush(sal::sync_type::none);
+      // Deliberately no clean-close marker: simulate process loss after write.
+   }
+   psitri::dwal::dwal_config cfg;
+   cfg.merge_threads = 0;
+   psitri::dwal::dwal_database db(base, wal_dir, cfg);
+   auto& layer = *db.root(0).rw_layer;
+   REQUIRE(layer.size() == 100000);
+   for (uint32_t i = 0; i < 100000; ++i)
+   {
+      auto* value = layer.map.get(std::to_string(i));
+      REQUIRE(value);
+      REQUIRE(value->data == std::to_string(i + 100000));
+   }
+}
+
+TEST_CASE("DWAL explicit no-sync commit submits WAL before returning", "[dwal][large-batch]")
+{
+   temp_dir td;
+   auto base = psitri::database::create(td.path / "db");
+   psitri::dwal::dwal_config cfg;
+   cfg.merge_threads = 0;
+   psitri::dwal::dwal_database db(base, td.path / "wal", cfg);
+   auto tx = db.start_write_transaction(0);
+   tx.upsert("key", "value");
+   tx.commit(sal::sync_type::none);
+   CHECK(db.root(0).wal->buffered_bytes() == 0);
+   psitri::dwal::wal_reader reader;
+   REQUIRE(reader.open(td.path / "wal" / "root-0" / "wal-rw.dwal"));
+   psitri::dwal::wal_entry entry;
+   REQUIRE(reader.next(entry));
+   REQUIRE(entry.ops.size() == 1);
+   CHECK(entry.ops[0].value == "value");
 }
 
 TEST_CASE("WAL round-trip: all operation types", "[dwal]")
@@ -4100,7 +4224,7 @@ TEST_CASE("dwal get() sees range tombstones in RO layer", "[dwal][get]")
    CHECK_FALSE(r.found);
 }
 
-TEST_CASE("dwal should_swap triggers on WAL file size", "[dwal][swap]")
+TEST_CASE("dwal should_swap includes buffered WAL bytes", "[dwal][swap]")
 {
    temp_dir td;
    auto     db = psitri::database::create(td.path / "db");
@@ -4111,6 +4235,9 @@ TEST_CASE("dwal should_swap triggers on WAL file size", "[dwal][swap]")
    dcfg.max_wal_bytes   = 200;         // very low — will trigger on WAL size
    psitri::dwal::dwal_database dwal_db(db, td.path / "wal", dcfg);
 
+   // Hold rotation pending so the predicate can be inspected before any flush.
+   dwal_db.root(0).merge_complete.store(false);
+
    // Write enough data to push WAL past 200 bytes.
    {
       auto tx = dwal_db.start_write_transaction(0);
@@ -4119,8 +4246,10 @@ TEST_CASE("dwal should_swap triggers on WAL file size", "[dwal][swap]")
       tx.commit();
    }
 
-   dwal_db.flush_wal(0);
+   CHECK(dwal_db.root(0).wal->file_size() == sizeof(psitri::dwal::wal_header));
+   CHECK(dwal_db.root(0).wal->buffered_bytes() > 200);
    CHECK(dwal_db.should_swap(0));
+   dwal_db.root(0).merge_complete.store(true);
 }
 
 TEST_CASE("dwal direct transaction mode throws", "[dwal]")

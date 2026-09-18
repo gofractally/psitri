@@ -19,7 +19,7 @@ target_compile_features(psitrimdbx PUBLIC cxx_std_20)
 # from a PSITRIMDBX_BACKEND_* macro; this maps a friendly string option to it so an
 # embedder (Silkworm: -DPSITRIMDBX_BACKEND=gcart) can choose without editing source.
 set(PSITRIMDBX_BACKEND "delta_art" CACHE STRING
-    "psitrimdbx storage backend: delta_art|delta_gcart|start_ver|start_ref|gcart|rcart|sal_art_ref|psitri")
+    "psitrimdbx storage backend: delta_art|delta_gcart|start_ver|start_ref|gcart|rcart|sal_art_ref|dwal|psitri")
 if(PSITRIMDBX_BACKEND STREQUAL "gcart")
     target_compile_definitions(psitrimdbx PUBLIC PSITRIMDBX_BACKEND_GCART=1)
 elseif(PSITRIMDBX_BACKEND STREQUAL "rcart")
@@ -30,6 +30,8 @@ elseif(PSITRIMDBX_BACKEND STREQUAL "start_ver")
     target_compile_definitions(psitrimdbx PUBLIC PSITRIMDBX_BACKEND_START_VER=1)
 elseif(PSITRIMDBX_BACKEND STREQUAL "start_ref")
     target_compile_definitions(psitrimdbx PUBLIC PSITRIMDBX_BACKEND_START_REF=1)
+elseif(PSITRIMDBX_BACKEND STREQUAL "dwal")
+    target_compile_definitions(psitrimdbx PUBLIC PSITRIMDBX_BACKEND_DWAL=1)
 elseif(PSITRIMDBX_BACKEND STREQUAL "sal_art_ref")
     target_compile_definitions(psitrimdbx PUBLIC PSITRIMDBX_BACKEND_SAL_ART_REF=1)
 elseif(PSITRIMDBX_BACKEND STREQUAL "psitri")

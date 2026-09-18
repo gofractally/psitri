@@ -1,0 +1,22 @@
+Filters: [large-batch]
+Randomness seeded to: 1965612670
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+api-storage-regressions is a Catch2 v3.13.0 host application.
+Run with -? for options
+
+-------------------------------------------------------------------------------
+WAL replays a 200000-operation transaction atomically
+-------------------------------------------------------------------------------
+/Users/dlarimer/gofractally/psitri/libraries/psitri/tests/dwal_tests.cpp:415
+...............................................................................
+
+/Users/dlarimer/gofractally/psitri/libraries/psitri/tests/dwal_tests.cpp:435: FAILED:
+  REQUIRE( reader.next(entry) )
+with expansion:
+  false
+
+===============================================================================
+test cases: 1 | 1 failed
+assertions: 3 | 2 passed | 1 failed
+

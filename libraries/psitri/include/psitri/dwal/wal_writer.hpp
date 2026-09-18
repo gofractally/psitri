@@ -25,7 +25,7 @@ namespace psitri::dwal
      public:
       /// Open or create a WAL file at the given path.
       /// If the file exists and has a valid header, appends after the last
-      /// valid entry. Otherwise creates a fresh file.
+      /// entry. Nonempty files with incompatible headers are rejected.
       explicit wal_writer(const std::filesystem::path& path,
                           uint16_t                     root_index,
                           uint64_t                     sequence_base = 0,
@@ -104,7 +104,7 @@ namespace psitri::dwal
       int                    _fd        = -1;
       uint64_t               _file_pos  = 0;
       uint64_t               _next_seq  = 0;
-      uint16_t               _op_count  = 0;
+      uint32_t               _op_count  = 0;
       uint64_t               _entry_upsert_data = 0;
       uint64_t               _entry_upsert_subtree = 0;
       uint64_t               _entry_remove = 0;

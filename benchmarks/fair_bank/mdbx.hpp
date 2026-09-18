@@ -46,7 +46,13 @@ struct Store
       return std::string("WRITEMAP; ") + policy(c) + "; map_gib=" + std::to_string(c.map_gib) +
              "; build_options=" + (mdbx_build.options ? mdbx_build.options : "unknown") +
              "; compiler=" + (mdbx_build.compiler ? mdbx_build.compiler : "unknown") +
-             "; build_flags=" + (mdbx_build.flags ? mdbx_build.flags : "unknown");
+             "; build_flags=" + (mdbx_build.flags ? mdbx_build.flags : "unknown")
+#if PSITRIMDBX_BACKEND_DWAL
+             + "; backend=DWAL over Large Engine; WAL=pwrite per commit, no per-commit fsync; "
+               "rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; "
+               "max_rw_arena_bytes=1073741824; merge_threads=2; read cache controlled by recorded environment"
+#endif
+             ;
    }
    Store(const Config &c, bool reopen)
    {

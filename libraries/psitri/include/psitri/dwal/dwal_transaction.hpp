@@ -261,6 +261,10 @@ namespace psitri::dwal
       // ── Transaction Control ────────────────────────────────────────
 
       void commit();
+
+      /// Submit this commit to the OS before releasing writer admission.
+      /// none writes WAL bytes without requesting a persistence barrier.
+      void commit(sal::sync_type sync);
       void commit_multi(uint64_t tx_id, uint16_t participants, bool is_commit);
       void abort();
       basic_dwal_transaction sub_transaction();
@@ -274,6 +278,8 @@ namespace psitri::dwal
 
      private:
       friend class basic_remove_result<LockPolicy, Engine>;
+
+      void commit_impl(std::optional<sal::sync_type> sync);
 
       lookup_result ro_get(std::string_view key) const;
       bool          exists_in_lower_layers(std::string_view key) const;

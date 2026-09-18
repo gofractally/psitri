@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--suite", choices=("direct", "dwal"), default="direct")
     parser.add_argument("--build", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True, help="New evidence directory")
     parser.add_argument("--machine", required=True)
@@ -28,12 +29,12 @@ def main():
     benchmark.write_json(output / "sweep.json", evidence)
     for index, (profile, batch) in enumerate(steps):
         directory = output / ("smoke" if profile == "smoke" else f"batch-{batch}")
-        command = [sys.executable, str(ROOT / "scripts/fair_bank.py"), "--suite", "direct",
+        command = [sys.executable, str(ROOT / "scripts/fair_bank.py"), "--suite", args.suite,
                    "--build", str(args.build.resolve()), "--output", str(directory),
                    "--machine", args.machine, "--profile", profile, "--durability", "none",
                    "--batch", str(batch), "--order-seed", str(20260917 + index),
                    "--idle-timeout", str(args.idle_timeout), "--notes",
-                   "Direct-engine batch sweep; one run per configuration; read cache disabled "
+                   f"{args.suite} engine batch sweep; one run per configuration; read cache disabled "
                    "for both psitri paths; no per-commit sync; no persistent subtree creation."]
         if profile != "smoke":
             command += ["--accounts", "100000", "--transfers", str(args.transfers),

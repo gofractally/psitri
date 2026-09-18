@@ -265,6 +265,18 @@ namespace psitri::dwal
    template <class LockPolicy, class Engine>
    void basic_dwal_transaction<LockPolicy, Engine>::commit()
    {
+      commit_impl(std::nullopt);
+   }
+
+   template <class LockPolicy, class Engine>
+   void basic_dwal_transaction<LockPolicy, Engine>::commit(sal::sync_type sync)
+   {
+      commit_impl(sync);
+   }
+
+   template <class LockPolicy, class Engine>
+   void basic_dwal_transaction<LockPolicy, Engine>::commit_impl(std::optional<sal::sync_type> sync)
+   {
       auto lock = std::move(_transaction_lock);
       assert(_root && !_committed && !_aborted);
       _committed = true;
@@ -275,7 +287,10 @@ namespace psitri::dwal
       if (!_nested)
       {
          if (_wal)
+         {
             _wal->commit_entry();
+            if (sync) _wal->flush(*sync);
+         }
 
          _undo.discard();
 

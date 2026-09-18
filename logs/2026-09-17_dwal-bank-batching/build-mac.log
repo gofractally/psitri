@@ -1,0 +1,43 @@
+[1/43] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/mapping.cpp.o
+[2/43] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/block_allocator.cpp.o
+[3/43] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/control_block_alloc.cpp.o
+[4/43] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/segment_thread.cpp.o
+[5/43] Building CXX object psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/block_allocator.cpp.o
+[6/43] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/allocator_session.cpp.o
+[7/43] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/allocator.cpp.o
+[8/43] Linking CXX static library psitri/libraries/sal/libsal.a
+[9/43] Building CXX object psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/mapping.cpp.o
+[10/43] Building CXX object psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/control_block_alloc.cpp.o
+[11/43] Building CXX object psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/segment_thread.cpp.o
+[12/43] Building CXX object psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/allocator_session.cpp.o
+[13/43] Building CXX object psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/allocator.cpp.o
+[14/43] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/node/inner.cpp.o
+[15/43] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/database.cpp.o
+[16/43] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_writer.cpp.o
+[17/43] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/node/leaf.cpp.o
+[18/43] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_status.cpp.o
+[19/43] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_reader.cpp.o
+[20/43] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_transaction.cpp.o
+[21/43] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/transaction.cpp.o
+[22/43] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_read_session.cpp.o
+[23/43] Linking CXX static library psitri/experimental/sal_hybrid/libsal_hybrid_alloc.a
+[24/43] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/merge_cursor.cpp.o
+[25/43] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_database.cpp.o
+[26/43] Building CXX object CMakeFiles/fair-bank-mdbx.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o
+[27/43] Building CXX object psitri/libraries/psitrimdbx/CMakeFiles/psitrimdbx.dir/src/mdbx_impl.cpp.o
+FAILED: [code=1] psitri/libraries/psitrimdbx/CMakeFiles/psitrimdbx.dir/src/mdbx_impl.cpp.o 
+/opt/homebrew/opt/llvm/bin/clang++ -DPSITRIMDBX_BACKEND_DWAL=1 -DXXH_INLINE_ALL -I/Users/dlarimer/gofractally/psitri/libraries/psitrimdbx/include -I/Users/dlarimer/gofractally/psitri/libraries/psitri/include -I/Users/dlarimer/gofractally/psitri/libraries/sal/include -I/Users/dlarimer/gofractally/psitri/build/bench-sources/ucc/include -I/Users/dlarimer/gofractally/psitri/libraries/art/include -I/Users/dlarimer/gofractally/psitri/libraries/delta_art/include -I/Users/dlarimer/gofractally/psitri/libraries/adb/include -I/Users/dlarimer/gofractally/psitri/experimental/start_ver/include -I/Users/dlarimer/gofractally/psitri/libraries/start_ref/include -I/Users/dlarimer/gofractally/psitri/libraries/sal_art_ref/include -I/Users/dlarimer/gofractally/psitri/experimental/gcart/include -I/Users/dlarimer/gofractally/psitri/experimental/sal_hybrid/include -I/Users/dlarimer/gofractally/psitri/experimental/rcart/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -march=native -MD -MT psitri/libraries/psitrimdbx/CMakeFiles/psitrimdbx.dir/src/mdbx_impl.cpp.o -MF psitri/libraries/psitrimdbx/CMakeFiles/psitrimdbx.dir/src/mdbx_impl.cpp.o.d -o psitri/libraries/psitrimdbx/CMakeFiles/psitrimdbx.dir/src/mdbx_impl.cpp.o -c /Users/dlarimer/gofractally/psitri/libraries/psitrimdbx/src/mdbx_impl.cpp
+/Users/dlarimer/gofractally/psitri/libraries/psitrimdbx/src/mdbx_impl.cpp:1912:35: error: no matching member function for call to 'get'
+ 1912 |          bool r = txn->direct_tx->get(key, [&out](std::string_view vv) {
+      |                   ~~~~~~~~~~~~~~~~^~~
+/Users/dlarimer/gofractally/psitri/libraries/psitri/include/psitri/dwal/byte_engine.hpp:134:34: note: candidate function template not viable: 'this' argument has type 'const psitri::dwal::byte_engine<sal_art_ref::radix::engine>::transaction', but method is not marked const
+  134 |          template <class F> bool get(std::string_view k, F&& fn)
+      |                                  ^
+/Users/dlarimer/gofractally/psitri/libraries/psitri/include/psitri/dwal/byte_engine.hpp:141:46: note: candidate function template not viable: requires single argument 'k', but 2 arguments were provided
+  141 |          template <class T> std::optional<T> get(std::string_view k)
+      |                                              ^   ~~~~~~~~~~~~~~~~~~
+1 error generated.
+[28/43] Building CXX object CMakeFiles/fair-bank-psitrimdbx.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o
+[29/43] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/merge_pool.cpp.o
+[30/43] Building CXX object CMakeFiles/fair-bank-dwal.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o
+ninja: build stopped: subcommand failed.

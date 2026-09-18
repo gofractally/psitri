@@ -543,7 +543,7 @@ namespace psitri::dwal
       auto& root = *_roots[root_index];
       if (root.rw_layer->size() >= _cfg.max_rw_entries)
          return true;
-      if (root.wal && root.wal->file_size() >= _cfg.max_wal_bytes)
+      if (root.wal && root.wal->logical_size() >= _cfg.max_wal_bytes)
          return true;
       if (_cfg.max_freshness_delay.count() > 0 && !root.rw_layer->empty())
       {

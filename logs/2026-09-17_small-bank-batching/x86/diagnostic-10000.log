@@ -1,0 +1,8 @@
+Archive: /home/dlarimer/psitri-api-bench-20260917/small-fixed-evidence/x86/batch-10000/2026-09-18T035554-fair-bank-diagnostic-62e4814a
+[1/1] small
+Waiting for 10s idle (CPU busy 0.1%, limit 3.0%)
+  passed (2.27s)
+[1/1] dwal_small
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (1.12s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/small-fixed-evidence/x86/batch-10000/2026-09-18T035554-fair-bank-diagnostic-62e4814a/manifest.json

@@ -1,0 +1,352 @@
+{
+  "status": "passed",
+  "profile": "diagnostic",
+  "performance_series_complete": false,
+  "all_engines_same_final_hash": true,
+  "metrics": {
+    "small": {
+      "load": {
+        "unit": "accounts/s",
+        "direction": "higher",
+        "median": 9498909.715142896,
+        "minimum": 9498909.715142896,
+        "maximum": 9498909.715142896,
+        "samples": [
+          9498909.715142896
+        ]
+      },
+      "write": {
+        "unit": "transfers/s",
+        "direction": "higher",
+        "median": 374205.6713761359,
+        "minimum": 374205.6713761359,
+        "maximum": 374205.6713761359,
+        "samples": [
+          374205.6713761359
+        ]
+      },
+      "write_batch_p50": {
+        "unit": "us",
+        "direction": "lower",
+        "median": 2699.828,
+        "minimum": 2699.828,
+        "maximum": 2699.828,
+        "samples": [
+          2699.828
+        ]
+      },
+      "write_batch_p99": {
+        "unit": "us",
+        "direction": "lower",
+        "median": 2926.2599999999998,
+        "minimum": 2926.2599999999998,
+        "maximum": 2926.2599999999998,
+        "samples": [
+          2926.2599999999998
+        ]
+      },
+      "mixed_write_active": {
+        "unit": "transfers/s",
+        "direction": "higher",
+        "median": 395723.58975872525,
+        "minimum": 395723.58975872525,
+        "maximum": 395723.58975872525,
+        "samples": [
+          395723.58975872525
+        ]
+      },
+      "mixed_write_active_batch_p50": {
+        "unit": "us",
+        "direction": "lower",
+        "median": 2105.082,
+        "minimum": 2105.082,
+        "maximum": 2105.082,
+        "samples": [
+          2105.082
+        ]
+      },
+      "mixed_write_active_batch_p99": {
+        "unit": "us",
+        "direction": "lower",
+        "median": 3253.521,
+        "minimum": 3253.521,
+        "maximum": 3253.521,
+        "samples": [
+          3253.521
+        ]
+      },
+      "mixed_write": {
+        "unit": "transfers/s",
+        "direction": "higher",
+        "median": 395707.08275775035,
+        "minimum": 395707.08275775035,
+        "maximum": 395707.08275775035,
+        "samples": [
+          395707.08275775035
+        ]
+      },
+      "mixed_read": {
+        "unit": "reads/s",
+        "direction": "higher",
+        "median": 14307937.127646461,
+        "minimum": 14307937.127646461,
+        "maximum": 14307937.127646461,
+        "samples": [
+          14307937.127646461
+        ]
+      },
+      "read": {
+        "unit": "reads/s",
+        "direction": "higher",
+        "median": 11952579.33673942,
+        "minimum": 11952579.33673942,
+        "maximum": 11952579.33673942,
+        "samples": [
+          11952579.33673942
+        ]
+      },
+      "disk_before_close": {
+        "unit": "bytes",
+        "direction": "lower",
+        "median": 72257856,
+        "minimum": 72257856,
+        "maximum": 72257856,
+        "samples": [
+          72257856
+        ]
+      },
+      "allocated_before_close": {
+        "unit": "bytes",
+        "direction": "lower",
+        "median": 67772416,
+        "minimum": 67772416,
+        "maximum": 67772416,
+        "samples": [
+          67772416
+        ]
+      },
+      "close": {
+        "unit": "seconds",
+        "direction": "lower",
+        "median": 0.00412799,
+        "minimum": 0.00412799,
+        "maximum": 0.00412799,
+        "samples": [
+          0.00412799
+        ]
+      },
+      "disk_after_close": {
+        "unit": "bytes",
+        "direction": "lower",
+        "median": 72257856,
+        "minimum": 72257856,
+        "maximum": 72257856,
+        "samples": [
+          72257856
+        ]
+      },
+      "allocated_after_close": {
+        "unit": "bytes",
+        "direction": "lower",
+        "median": 67772416,
+        "minimum": 67772416,
+        "maximum": 67772416,
+        "samples": [
+          67772416
+        ]
+      },
+      "reopen": {
+        "unit": "seconds",
+        "direction": "lower",
+        "median": 0.000338234,
+        "minimum": 0.000338234,
+        "maximum": 0.000338234,
+        "samples": [
+          0.000338234
+        ]
+      },
+      "peak_rss": {
+        "unit": "bytes",
+        "direction": "lower",
+        "median": 74334208,
+        "minimum": 74334208,
+        "maximum": 74334208,
+        "samples": [
+          74334208
+        ]
+      }
+    },
+    "dwal_small": {
+      "load": {
+        "unit": "accounts/s",
+        "direction": "higher",
+        "median": 8854937.092313163,
+        "minimum": 8854937.092313163,
+        "maximum": 8854937.092313163,
+        "samples": [
+          8854937.092313163
+        ]
+      },
+      "write": {
+        "unit": "transfers/s",
+        "direction": "higher",
+        "median": 2325808.7242206284,
+        "minimum": 2325808.7242206284,
+        "maximum": 2325808.7242206284,
+        "samples": [
+          2325808.7242206284
+        ]
+      },
+      "write_batch_p50": {
+        "unit": "us",
+        "direction": "lower",
+        "median": 368.977,
+        "minimum": 368.977,
+        "maximum": 368.977,
+        "samples": [
+          368.977
+        ]
+      },
+      "write_batch_p99": {
+        "unit": "us",
+        "direction": "lower",
+        "median": 873.181,
+        "minimum": 873.181,
+        "maximum": 873.181,
+        "samples": [
+          873.181
+        ]
+      },
+      "mixed_write_active": {
+        "unit": "transfers/s",
+        "direction": "higher",
+        "median": 1322781.0713277443,
+        "minimum": 1322781.0713277443,
+        "maximum": 1322781.0713277443,
+        "samples": [
+          1322781.0713277443
+        ]
+      },
+      "mixed_write_active_batch_p50": {
+        "unit": "us",
+        "direction": "lower",
+        "median": 656.8620000000001,
+        "minimum": 656.8620000000001,
+        "maximum": 656.8620000000001,
+        "samples": [
+          656.8620000000001
+        ]
+      },
+      "mixed_write_active_batch_p99": {
+        "unit": "us",
+        "direction": "lower",
+        "median": 1273.55,
+        "minimum": 1273.55,
+        "maximum": 1273.55,
+        "samples": [
+          1273.55
+        ]
+      },
+      "mixed_write": {
+        "unit": "transfers/s",
+        "direction": "higher",
+        "median": 1322553.0150236455,
+        "minimum": 1322553.0150236455,
+        "maximum": 1322553.0150236455,
+        "samples": [
+          1322553.0150236455
+        ]
+      },
+      "mixed_read": {
+        "unit": "reads/s",
+        "direction": "higher",
+        "median": 529550.2272154676,
+        "minimum": 529550.2272154676,
+        "maximum": 529550.2272154676,
+        "samples": [
+          529550.2272154676
+        ]
+      },
+      "read": {
+        "unit": "reads/s",
+        "direction": "higher",
+        "median": 10429352.996835474,
+        "minimum": 10429352.996835474,
+        "maximum": 10429352.996835474,
+        "samples": [
+          10429352.996835474
+        ]
+      },
+      "disk_before_close": {
+        "unit": "bytes",
+        "direction": "lower",
+        "median": 55053074,
+        "minimum": 55053074,
+        "maximum": 55053074,
+        "samples": [
+          55053074
+        ]
+      },
+      "allocated_before_close": {
+        "unit": "bytes",
+        "direction": "lower",
+        "median": 50573312,
+        "minimum": 50573312,
+        "maximum": 50573312,
+        "samples": [
+          50573312
+        ]
+      },
+      "close": {
+        "unit": "seconds",
+        "direction": "lower",
+        "median": 0.045990134,
+        "minimum": 0.045990134,
+        "maximum": 0.045990134,
+        "samples": [
+          0.045990134
+        ]
+      },
+      "disk_after_close": {
+        "unit": "bytes",
+        "direction": "lower",
+        "median": 55053074,
+        "minimum": 55053074,
+        "maximum": 55053074,
+        "samples": [
+          55053074
+        ]
+      },
+      "allocated_after_close": {
+        "unit": "bytes",
+        "direction": "lower",
+        "median": 50573312,
+        "minimum": 50573312,
+        "maximum": 50573312,
+        "samples": [
+          50573312
+        ]
+      },
+      "reopen": {
+        "unit": "seconds",
+        "direction": "lower",
+        "median": 0.00040709,
+        "minimum": 0.00040709,
+        "maximum": 0.00040709,
+        "samples": [
+          0.00040709
+        ]
+      },
+      "peak_rss": {
+        "unit": "bytes",
+        "direction": "lower",
+        "median": 333901824,
+        "minimum": 333901824,
+        "maximum": 333901824,
+        "samples": [
+          333901824
+        ]
+      }
+    }
+  }
+}

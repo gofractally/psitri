@@ -1,0 +1,11 @@
+{
+  "status": "passed",
+  "engines": 7,
+  "batch_sizes": 6,
+  "bars": 42,
+  "metrics": 8,
+  "checkbox_filtering": true,
+  "mobile_width": 390,
+  "horizontal_overflow": false,
+  "browser_errors": []
+}

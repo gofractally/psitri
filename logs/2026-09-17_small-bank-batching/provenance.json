@@ -1,0 +1,36 @@
+{
+  "revision": "43c9c05c20359688187d9613f80c06e148372ed6",
+  "measured_runs": 12,
+  "smoke_runs": 2,
+  "final_hash": "1346279285150323400",
+  "binary_sha256": {
+    "small": "71381e16ce9c6b97bef6c009a0040c81793d260d5d9c30119bf764367136cfc2",
+    "dwal_small": "67c86e9f8f2aa6a043e9a535989bb0ca101abcf483b3d2f926131286a69e6a10"
+  },
+  "validation": "All checks passed; clean source and stable binaries; ten final idle samples <=3%; one repeat per configuration.",
+  "baseline": "../2026-09-17_dwal-bank-batching/comparison.json",
+  "baseline_revisions": {
+    "dwal": [
+      "2f10f14f89560489cf8c7d7d969c232797d605a3"
+    ],
+    "direct": "83cfcd044a6f0284127ba771016c933bdccdc850"
+  },
+  "functional_checks": {
+    "dwal_cases": 159,
+    "dwal_assertions": 602375,
+    "byte_cases": 5,
+    "byte_assertions": 72,
+    "session_cases": 1,
+    "session_assertions": 20,
+    "small_suite_cases": 39,
+    "small_suite_assertions": 1098734,
+    "python_checks": 38
+  },
+  "arm_status": "Not measured; busy Mac, see local/arm-availability.json. Functional checks only.",
+  "failed_attempt": "x86-attempt-01; stopped at batch 1 on exact-account mismatch, before the writer-session fix",
+  "scope": "Native Small Engine direct and DWAL over Small Engine; MDBX shim bars remain Large Engine based.",
+  "build_commands": [
+    "cmake -S /home/dlarimer/psitri-api-bench-20260917/small-fixed-source/benchmarks/api_bank -B /home/dlarimer/psitri-api-bench-20260917/build-small-fixed -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 -DFETCHCONTENT_SOURCE_DIR_PSIO=/home/dlarimer/psitri-api-bench-20260917/psio -DFETCHCONTENT_SOURCE_DIR_UCC=/home/dlarimer/psitri-api-bench-20260917/ucc -DFAIR_MDBX_INCLUDE_DIR=/home/dlarimer/arbtrie/build/release/_deps/libmdbx-src -DFAIR_MDBX_LIBRARY=/home/dlarimer/arbtrie/build/release/_deps/libmdbx-build/libmdbx.a -DPSITRIMDBX_BACKEND=dwal -DAPI_BANK_BUILD_CONTRACT_TESTS=OFF -DCMAKE_EXE_LINKER_FLAGS=-flto=thin",
+    "cmake --build /home/dlarimer/psitri-api-bench-20260917/build-small-fixed --target fair-bank-small fair-bank-dwal_small -j4"
+  ]
+}

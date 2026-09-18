@@ -1,0 +1,8 @@
+Archive: /home/dlarimer/psitri-api-bench-20260917/small-evidence/x86/smoke/2026-09-18T034818-fair-bank-smoke-93f3d06c
+[1/1] dwal_small
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (0.02s)
+[1/1] small
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (0.01s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/small-evidence/x86/smoke/2026-09-18T034818-fair-bank-smoke-93f3d06c/manifest.json

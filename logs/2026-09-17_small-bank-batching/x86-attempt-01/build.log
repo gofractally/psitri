@@ -1,0 +1,24 @@
+[1/24] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/mapping.cpp.o
+[2/24] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/block_allocator.cpp.o
+[3/24] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/control_block_alloc.cpp.o
+[4/24] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/segment_thread.cpp.o
+[5/24] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/allocator_session.cpp.o
+[6/24] Building CXX object psitri/libraries/sal/CMakeFiles/sal.dir/src/allocator.cpp.o
+[7/24] Linking CXX static library psitri/libraries/sal/libsal.a
+[8/24] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/database.cpp.o
+[9/24] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/node/inner.cpp.o
+[10/24] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/node/leaf.cpp.o
+[11/24] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_writer.cpp.o
+[12/24] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_status.cpp.o
+[13/24] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_reader.cpp.o
+[14/24] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_transaction.cpp.o
+[15/24] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_read_session.cpp.o
+[16/24] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/transaction.cpp.o
+[17/24] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/merge_cursor.cpp.o
+[18/24] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_database.cpp.o
+[19/24] Building CXX object psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/merge_pool.cpp.o
+[20/24] Linking CXX static library psitri/libraries/psitri/libpsitri.a
+[21/24] Building CXX object CMakeFiles/fair-bank-small.dir/home/dlarimer/psitri-api-bench-20260917/small-source/benchmarks/fair_bank/main.cpp.o
+[22/24] Linking CXX executable bin/fair-bank-small
+[23/24] Building CXX object CMakeFiles/fair-bank-dwal_small.dir/home/dlarimer/psitri-api-bench-20260917/small-source/benchmarks/fair_bank/main.cpp.o
+[24/24] Linking CXX executable bin/fair-bank-dwal_small

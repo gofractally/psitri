@@ -1,0 +1,63 @@
+Starting smoke, batch 32
+Archive: /home/dlarimer/psitri-api-bench-20260917/small-fixed-evidence/x86/smoke/2026-09-18T035306-fair-bank-smoke-d48b2180
+[1/1] dwal_small
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (0.02s)
+[1/1] small
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (0.01s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/small-fixed-evidence/x86/smoke/2026-09-18T035306-fair-bank-smoke-d48b2180/manifest.json
+Starting diagnostic, batch 1
+Archive: /home/dlarimer/psitri-api-bench-20260917/small-fixed-evidence/x86/batch-1/2026-09-18T035329-fair-bank-diagnostic-a4b421c9
+[1/1] small
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (7.77s)
+[1/1] dwal_small
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (21.60s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/small-fixed-evidence/x86/batch-1/2026-09-18T035329-fair-bank-diagnostic-a4b421c9/manifest.json
+Starting diagnostic, batch 10
+Archive: /home/dlarimer/psitri-api-bench-20260917/small-fixed-evidence/x86/batch-10/2026-09-18T035420-fair-bank-diagnostic-3052bbad
+[1/1] dwal_small
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (4.82s)
+[1/1] small
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (6.07s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/small-fixed-evidence/x86/batch-10/2026-09-18T035420-fair-bank-diagnostic-3052bbad/manifest.json
+Starting diagnostic, batch 100
+Archive: /home/dlarimer/psitri-api-bench-20260917/small-fixed-evidence/x86/batch-100/2026-09-18T035453-fair-bank-diagnostic-0beae76e
+[1/1] small
+Waiting for 10s idle (CPU busy 0.1%, limit 3.0%)
+  passed (8.13s)
+[1/1] dwal_small
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (2.42s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/small-fixed-evidence/x86/batch-100/2026-09-18T035453-fair-bank-diagnostic-0beae76e/manifest.json
+Starting diagnostic, batch 1000
+Archive: /home/dlarimer/psitri-api-bench-20260917/small-fixed-evidence/x86/batch-1000/2026-09-18T035526-fair-bank-diagnostic-dae6b9d3
+[1/1] dwal_small
+Waiting for 10s idle (CPU busy 0.1%, limit 3.0%)
+  passed (1.37s)
+[1/1] small
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (5.32s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/small-fixed-evidence/x86/batch-1000/2026-09-18T035526-fair-bank-diagnostic-dae6b9d3/manifest.json
+Starting diagnostic, batch 10000
+Archive: /home/dlarimer/psitri-api-bench-20260917/small-fixed-evidence/x86/batch-10000/2026-09-18T035554-fair-bank-diagnostic-62e4814a
+[1/1] small
+Waiting for 10s idle (CPU busy 0.1%, limit 3.0%)
+  passed (2.27s)
+[1/1] dwal_small
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (1.12s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/small-fixed-evidence/x86/batch-10000/2026-09-18T035554-fair-bank-diagnostic-62e4814a/manifest.json
+Starting diagnostic, batch 100000
+Archive: /home/dlarimer/psitri-api-bench-20260917/small-fixed-evidence/x86/batch-100000/2026-09-18T035620-fair-bank-diagnostic-cdf5cc39
+[1/1] small
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (1.07s)
+[1/1] dwal_small
+Waiting for 10s idle (CPU busy 0.1%, limit 3.0%)
+  passed (1.42s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/small-fixed-evidence/x86/batch-100000/2026-09-18T035620-fair-bank-diagnostic-cdf5cc39/manifest.json

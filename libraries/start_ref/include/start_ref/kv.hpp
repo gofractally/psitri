@@ -656,6 +656,8 @@ namespace start_ref::kv
       // working tree for root i: root 0 is THE hot member; roots >= 1 are lazy
       // (first open adopts the committed root and takes the working's ref).
       engine_t& tree_for(uint32_t i);
+      // Caller holds this root's writer lock. Refresh a reused session.
+      engine_t& refresh_tree(uint32_t i);
 
       database*          _db;
       start_ref::session _ses;
@@ -1034,14 +1036,8 @@ namespace start_ref::kv
    {
       _t.allocator_mut().vhooks = &db->_vh;
       _t.allocator_mut().lses   = &_lses;  // large-value allocations on this writer
-      // [persist/reopen] A fresh write session's working tree for root 0 starts
-      // empty; adopt the durable committed root so read-own-writes (mdbx_get on a
-      // RW txn -> direct_tx->get) and the first COW see the committed base. Without
-      // this, after an env reopen (Silkworm opens the datadir twice at startup) the
-      // RW read path misses all committed data while read-session cursors still see
-      // it via _live_raw — the start_ref-only divergence behind the 46147 failure.
-      // Mirrors start_ver's ctor and start_ref's own tree_for(i>=1) (refcount model:
-      // the working tree takes its own ref via cow_retain).
+      // Session creation can overlap another writer's root publication.
+      std::lock_guard lock(db->_root_mx);
       const root_ptr r = db->_live_root[0];
       if (!r.is_null())
       {
@@ -1192,9 +1188,9 @@ namespace start_ref::kv
                                    start_ref::transaction&& tx)
        : _ws(ws), _tx(std::move(tx)), _large_tx(ws->_lses.start_transaction())
    {
-      auto& t = ws->tree_for(root_index);
-      _roots.push_back({root_index, t.root_handle(), t.size_hint(),
-                        std::unique_lock<std::mutex>(ws->_db->_root_locks[root_index])});
+      std::unique_lock lock(ws->_db->_root_locks[root_index]);
+      auto& t = ws->refresh_tree(root_index);
+      _roots.push_back({root_index, t.root_handle(), t.size_hint(), std::move(lock)});
    }
    inline engine_t& transaction::tree_(uint32_t root_index) { return _ws->tree_for(root_index); }
    inline tree_handle transaction::primary() { return tree_handle(this, _roots[0].index); }
@@ -1203,9 +1199,9 @@ namespace start_ref::kv
       assert(root_index < kMaxRoots && !_roots.empty());
       assert(root_index > _roots.back().index &&
              "roots must be opened in ascending index order (deadlock freedom)");
-      auto& t = _ws->tree_for(root_index);
-      _roots.push_back({root_index, t.root_handle(), t.size_hint(),
-                        std::unique_lock<std::mutex>(_ws->_db->_root_locks[root_index])});
+      std::unique_lock lock(_ws->_db->_root_locks[root_index]);
+      auto& t = _ws->refresh_tree(root_index);
+      _roots.push_back({root_index, t.root_handle(), t.size_hint(), std::move(lock)});
       return tree_handle(this, root_index);
    }
    inline void transaction::abort() noexcept
@@ -1265,6 +1261,20 @@ namespace start_ref::kv
    inline tree write_session::get_root(uint32_t root_index)
    {
       return _db->get_root_owned(root_index);
+   }
+   inline engine_t& write_session::refresh_tree(uint32_t i)
+   {
+      auto& t = tree_for(i);
+      const root_ptr live = _db->_live_root[i];  // protected by root i's writer lock
+      const root_ptr old = t.root_handle();
+      if (live.raw() != old.raw())
+      {
+         if (!live.is_null() && !t.cow_retain(live))
+            throw std::runtime_error("start_ref::kv: root retain refused");
+         t.adopt_root(live, 0);
+         t.cow_release(old);
+      }
+      return t;
    }
    // Working tree for root i: root 0 is _t; roots >= 1 materialize lazily,
    // adopting the committed root and taking the working's ref on it.

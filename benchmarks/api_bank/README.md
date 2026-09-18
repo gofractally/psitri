@@ -166,3 +166,25 @@ releasing writer admission; the existing no-argument commit still buffers them.
 WAL format 2 uses a 32-bit operation count, so a 100,000-transfer transaction's
 200,000 updates can be replayed as one atomic entry. Readers also accept format
 1's 25-byte header; writers reject incompatible files instead of rewriting them.
+
+## Small Engine batching diagnostic
+
+The packaged build also provides `fair-bank-small` (direct Small Engine) and
+`fair-bank-dwal_small` (DWAL over Small Engine). Both use `api-bank-v1`, the same
+native byte API adapter, and the same trace and validation as the Large Engine
+comparison. Build both targets, then collect one isolated run per batch size:
+
+```sh
+cmake --build build/api-dwal --target fair-bank-small fair-bank-dwal_small
+python3 scripts/direct_bank_sweep.py --suite small --build build/api-dwal \
+  --machine my-runner --output logs/my-small-engine-sweep
+```
+
+The `small` suite has no MDBX shim target. Its DWAL binding is experimental and
+uses the same WAL submission, merge thresholds, and close barriers as DWAL over
+Large Engine. Small Engine retains its default fixed main arena capacity of
+4096 × 8 MiB (32 GiB), with background release enabled. `--map-gib` does not resize
+that arena, and `--cache-mib` is not a Small Engine cache limit. This resident
+bank dataset does not exercise the separate large-value arena or establish
+performance beyond RAM. Compare reader throughput, memory, and close/drain time
+alongside writes; large DWAL commits delay fresh snapshot admission.

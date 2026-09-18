@@ -22,3 +22,13 @@ The fix changes the close-path emptiness check to include range tombstones.
 The strengthened populated-base snapshot test then passed 5 cases / 72 assertions
 in `byte-tests-03.log`. It exercises independent cursors, retained base roots,
 rollback, background merges, range deletion, and reopen on both engines.
+
+The full x86 batch-1 run then exposed stale roots across Small Engine write
+sessions (`x86-attempt-01`), with an exact account mismatch after mixed writes.
+`session-tests-01.log` is a deterministic two-session reproduction. Transaction
+start now acquires the root writer lock before refreshing the working root;
+auxiliary roots opened in a transaction follow the same rule. Session creation
+also protects its initial root capture with the publication mutex.
+`session-tests-02.log`: the fix and DWAL adapter checks passed 92 assertions in
+6 cases. The initial failed database is retained outside Git in the local
+`build/small-dwal-failed-database-01` and original cloud evidence directory.

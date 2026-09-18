@@ -104,6 +104,7 @@ if(API_BANK_BUILD_REGRESSION_TESTS)
     else()
         add_executable(api-storage-regressions
             dwal_byte_tests.cpp
+            "${PSITRI_BENCH_SOURCE}/libraries/start_ref/test/session_tests.cpp"
             "${PSITRI_BENCH_SOURCE}/libraries/psitri/tests/dwal_tests.cpp"
             "${PSITRI_BENCH_SOURCE}/libraries/psitri/tests/dwal_snapshot_tests.cpp"
             "${PSITRI_BENCH_SOURCE}/libraries/sal/test/allocator_session_tests.cpp"

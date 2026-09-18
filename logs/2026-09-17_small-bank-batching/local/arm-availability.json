@@ -1,0 +1,46 @@
+{
+  "purpose": "availability only; no benchmark launched",
+  "threshold_percent": 3,
+  "samples": [
+    {
+      "time": 1789703316.2135758,
+      "cpu_busy_percent": 29.157
+    },
+    {
+      "time": 1789703317.218955,
+      "cpu_busy_percent": 20.755
+    },
+    {
+      "time": 1789703318.224222,
+      "cpu_busy_percent": 26.249
+    },
+    {
+      "time": 1789703319.2294168,
+      "cpu_busy_percent": 23.454
+    },
+    {
+      "time": 1789703320.23147,
+      "cpu_busy_percent": 24.251
+    },
+    {
+      "time": 1789703321.236379,
+      "cpu_busy_percent": 22.871
+    },
+    {
+      "time": 1789703322.237959,
+      "cpu_busy_percent": 25.111
+    },
+    {
+      "time": 1789703323.242948,
+      "cpu_busy_percent": 20.889
+    },
+    {
+      "time": 1789703324.248172,
+      "cpu_busy_percent": 28.388
+    },
+    {
+      "time": 1789703325.2496152,
+      "cpu_busy_percent": 22.247
+    }
+  ]
+}

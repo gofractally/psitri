@@ -26,6 +26,7 @@ if(START_REF_BUILD_TESTS)
             test/tree_tests.cpp
             test/cow_tests.cpp
             test/kv_tests.cpp
+            test/session_tests.cpp
             test/cbucket_tests.cpp
         )
         target_link_libraries(start_ref-tests PRIVATE start_ref Catch2::Catch2WithMain)

@@ -1,0 +1,10 @@
+Randomness seeded to: 3211234994
+
+[SHAPE2] seq-BE keys=100000 total=100394 leaves=100000 routers=394 prefix=0 setlist=1 SINGLE-CHILD-setlist=0 single-child-router=0 avgdepth=3.00 bytes/key=129
+
+[SHAPE] keys=80000 size_hint=80000 total_nodes=84291 leaves=80000 routers=2291 prefix=2000
+[SHAPE] setlist=289  SINGLE-CHILD setlists=0  single-child routers(any)=0
+[SHAPE] avg leaf depth=4.04  bytes/key(nodes*128/keys)=135
+===============================================================================
+All tests passed (1098734 assertions in 39 test cases)
+

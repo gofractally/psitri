@@ -1,0 +1,373 @@
+[1/8] Building CXX object psitri/libraries/start_ref/CMakeFiles/start_ref-tests.dir/test/freeset_tests.cpp.o
+[2/8] Building CXX object psitri/libraries/start_ref/CMakeFiles/start_ref-tests.dir/test/arena_tests.cpp.o
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/test/arena_tests.cpp:16:
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:335:50: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  335 |                     __builtin_return_address(0), __builtin_return_address(1),
+      |                                                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:336:21: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  336 |                     __builtin_return_address(2));
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:335:50: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  335 |                     __builtin_return_address(0), __builtin_return_address(1),
+      |                                                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/test/arena_tests.cpp:69:13: note: in instantiation of member function 'start_ref::arena_t<start_ref::geometry<128>>::retain' requested here
+   69 |    while (a.retain(i))
+      |             ^
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/test/arena_tests.cpp:16:
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:336:21: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  336 |                     __builtin_return_address(2));
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+4 warnings generated.
+[3/8] Building CXX object psitri/libraries/start_ref/CMakeFiles/start_ref-tests.dir/test/tree_tests.cpp.o
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/test/tree_tests.cpp:13:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/tree_alloc.hpp:14:
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:335:50: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  335 |                     __builtin_return_address(0), __builtin_return_address(1),
+      |                                                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:336:21: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  336 |                     __builtin_return_address(2));
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:335:50: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  335 |                     __builtin_return_address(0), __builtin_return_address(1),
+      |                                                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/tree_alloc.hpp:230:26: note: in instantiation of member function 'start_ref::arena_t<start_ref::geometry<32768, 2147483648, 32768>>::retain' requested here
+  230 |          return la ? la->retain(grain) : true;
+      |                          ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:6228:33: note: in instantiation of member function 'start_ref::part_alloc<unsigned long long>::hkv_large_retain' requested here
+ 6228 |                   return alloc_.hkv_large_retain(line_of(p));
+      |                                 ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:8282:15: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::cow_retain' requested here
+ 8282 |          if (!cow_retain(c))
+      |               ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:8298:13: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::cow_fix_child_' requested here
+ 8298 |             cow_fix_child_(&x->rh.term);
+      |             ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:8484:25: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::cow_clone_node_' requested here
+ 8484 |          const Ptr np = cow_clone_node_(cur);
+      |                         ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:882:25: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::cow_clone_into_' requested here
+  882 |                   cur = cow_clone_into_(slot, cur);  // eager: every hop is shared
+      |                         ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:878:26: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::insert_impl_<true, true, unsigned long long>' requested here
+  878 |                   return insert_impl_<Assign, true>(key, std::forward<VF>(v), slot, depth,
+      |                          ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:851:17: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::insert_impl_<true, false, unsigned long long>' requested here
+  851 |          return insert_impl_<Assign, false>(key, std::forward<VF>(v), &root_, 0, 0);
+      |                 ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:818:48: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::insert_<true, unsigned long long>' requested here
+  818 |       bool insert(key_param k, T&& v) { return insert_<true>(k, std::move(v)); }
+      |                                                ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/test/tree_tests.cpp:86:26: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::insert' requested here
+   86 |          REQUIRE_FALSE(t.insert(std::string_view(k), val + 7'000'000));
+      |                          ^
+/opt/homebrew/include/catch2/catch_test_macros.hpp:135:142: note: expanded from macro 'REQUIRE_FALSE'
+  135 |   #define REQUIRE_FALSE( ... ) INTERNAL_CATCH_TEST( "REQUIRE_FALSE", Catch::ResultDisposition::Normal | Catch::ResultDisposition::FalseTest, __VA_ARGS__ )
+      |                                                                                                                                              ^
+/opt/homebrew/include/catch2/internal/catch_test_macro_impl.hpp:45:40: note: expanded from macro 'INTERNAL_CATCH_TEST'
+   45 |         CATCH_INTERNAL_IGNORE_BUT_WARN(__VA_ARGS__); \
+      |                                        ^
+/opt/homebrew/include/catch2/internal/catch_compiler_capabilities.hpp:391:37: note: expanded from macro 'CATCH_INTERNAL_IGNORE_BUT_WARN'
+  391 |         (void)__builtin_constant_p( __VA_ARGS__ ) /* NOLINT(cppcoreguidelines-pro-type-vararg, \
+      |                                     ^
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/test/tree_tests.cpp:13:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/tree_alloc.hpp:14:
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:336:21: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  336 |                     __builtin_return_address(2));
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:335:50: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  335 |                     __builtin_return_address(0), __builtin_return_address(1),
+      |                                                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/tree_alloc.hpp:207:62: note: in instantiation of member function 'start_ref::arena_t<start_ref::geometry<128>>::retain' requested here
+  207 |       bool    hkv_retain(uint32_t line) noexcept { return a->retain(line); }
+      |                                                              ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:6229:27: note: in instantiation of member function 'start_ref::part_alloc<unsigned long long>::hkv_retain' requested here
+ 6229 |             return alloc_.hkv_retain(line_of(p));
+      |                           ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:8282:15: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::cow_retain' requested here
+ 8282 |          if (!cow_retain(c))
+      |               ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:8298:13: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::cow_fix_child_' requested here
+ 8298 |             cow_fix_child_(&x->rh.term);
+      |             ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:8484:25: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::cow_clone_node_' requested here
+ 8484 |          const Ptr np = cow_clone_node_(cur);
+      |                         ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:882:25: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::cow_clone_into_' requested here
+  882 |                   cur = cow_clone_into_(slot, cur);  // eager: every hop is shared
+      |                         ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:878:26: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::insert_impl_<true, true, unsigned long long>' requested here
+  878 |                   return insert_impl_<Assign, true>(key, std::forward<VF>(v), slot, depth,
+      |                          ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:851:17: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::insert_impl_<true, false, unsigned long long>' requested here
+  851 |          return insert_impl_<Assign, false>(key, std::forward<VF>(v), &root_, 0, 0);
+      |                 ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:818:48: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::insert_<true, unsigned long long>' requested here
+  818 |       bool insert(key_param k, T&& v) { return insert_<true>(k, std::move(v)); }
+      |                                                ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/test/tree_tests.cpp:86:26: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::insert' requested here
+   86 |          REQUIRE_FALSE(t.insert(std::string_view(k), val + 7'000'000));
+      |                          ^
+/opt/homebrew/include/catch2/catch_test_macros.hpp:135:142: note: expanded from macro 'REQUIRE_FALSE'
+  135 |   #define REQUIRE_FALSE( ... ) INTERNAL_CATCH_TEST( "REQUIRE_FALSE", Catch::ResultDisposition::Normal | Catch::ResultDisposition::FalseTest, __VA_ARGS__ )
+      |                                                                                                                                              ^
+/opt/homebrew/include/catch2/internal/catch_test_macro_impl.hpp:45:40: note: expanded from macro 'INTERNAL_CATCH_TEST'
+   45 |         CATCH_INTERNAL_IGNORE_BUT_WARN(__VA_ARGS__); \
+      |                                        ^
+/opt/homebrew/include/catch2/internal/catch_compiler_capabilities.hpp:391:37: note: expanded from macro 'CATCH_INTERNAL_IGNORE_BUT_WARN'
+  391 |         (void)__builtin_constant_p( __VA_ARGS__ ) /* NOLINT(cppcoreguidelines-pro-type-vararg, \
+      |                                     ^
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/test/tree_tests.cpp:13:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/tree_alloc.hpp:14:
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:336:21: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  336 |                     __builtin_return_address(2));
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+6 warnings generated.
+[4/8] Building CXX object psitri/libraries/start_ref/CMakeFiles/start_ref-tests.dir/test/cow_tests.cpp.o
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/test/cow_tests.cpp:14:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/tree_alloc.hpp:14:
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:335:50: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  335 |                     __builtin_return_address(0), __builtin_return_address(1),
+      |                                                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:336:21: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  336 |                     __builtin_return_address(2));
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:335:50: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  335 |                     __builtin_return_address(0), __builtin_return_address(1),
+      |                                                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/tree_alloc.hpp:207:62: note: in instantiation of member function 'start_ref::arena_t<start_ref::geometry<128>>::retain' requested here
+  207 |       bool    hkv_retain(uint32_t line) noexcept { return a->retain(line); }
+      |                                                              ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:7919:21: note: in instantiation of member function 'start_ref::part_alloc<unsigned long long>::hkv_retain' requested here
+ 7919 |          if (alloc_.hkv_retain(line_of(*slot)))
+      |                     ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:8310:16: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::cx_own_line_' requested here
+ 8310 |                cx_own_line_(&x->seglines[sg], x->lg);
+      |                ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:8484:25: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::cow_clone_node_' requested here
+ 8484 |          const Ptr np = cow_clone_node_(cur);
+      |                         ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:882:25: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::cow_clone_into_' requested here
+  882 |                   cur = cow_clone_into_(slot, cur);  // eager: every hop is shared
+      |                         ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:878:26: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::insert_impl_<true, true, unsigned long long &>' requested here
+  878 |                   return insert_impl_<Assign, true>(key, std::forward<VF>(v), slot, depth,
+      |                          ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:851:17: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::insert_impl_<true, false, unsigned long long &>' requested here
+  851 |          return insert_impl_<Assign, false>(key, std::forward<VF>(v), &root_, 0, 0);
+      |                 ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:6312:17: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::insert_<true, unsigned long long &>' requested here
+ 6312 |          return insert_<true>(k, std::forward<V>(v));
+      |                 ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/test/cow_tests.cpp:79:12: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::cow_insert<unsigned long long &>' requested here
+   79 |          t.cow_insert(std::string_view(k), v);
+      |            ^
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/test/cow_tests.cpp:14:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/tree_alloc.hpp:14:
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:336:21: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  336 |                     __builtin_return_address(2));
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:335:50: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  335 |                     __builtin_return_address(0), __builtin_return_address(1),
+      |                                                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/tree_alloc.hpp:230:26: note: in instantiation of member function 'start_ref::arena_t<start_ref::geometry<32768, 2147483648, 32768>>::retain' requested here
+  230 |          return la ? la->retain(grain) : true;
+      |                          ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:6228:33: note: in instantiation of member function 'start_ref::part_alloc<unsigned long long>::hkv_large_retain' requested here
+ 6228 |                   return alloc_.hkv_large_retain(line_of(p));
+      |                                 ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/test/cow_tests.cpp:84:17: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, unsigned long long, start_ref::hkv::mode::none, start_ref::part_alloc<unsigned long long>>::cow_retain' requested here
+   84 |       REQUIRE(t.cow_retain(r0));  // snapshot 0 pinned
+      |                 ^
+/opt/homebrew/include/catch2/catch_test_macros.hpp:134:92: note: expanded from macro 'REQUIRE'
+  134 |   #define REQUIRE( ... ) INTERNAL_CATCH_TEST( "REQUIRE", Catch::ResultDisposition::Normal, __VA_ARGS__  )
+      |                                                                                            ^
+/opt/homebrew/include/catch2/internal/catch_test_macro_impl.hpp:45:40: note: expanded from macro 'INTERNAL_CATCH_TEST'
+   45 |         CATCH_INTERNAL_IGNORE_BUT_WARN(__VA_ARGS__); \
+      |                                        ^
+/opt/homebrew/include/catch2/internal/catch_compiler_capabilities.hpp:391:37: note: expanded from macro 'CATCH_INTERNAL_IGNORE_BUT_WARN'
+  391 |         (void)__builtin_constant_p( __VA_ARGS__ ) /* NOLINT(cppcoreguidelines-pro-type-vararg, \
+      |                                     ^
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/test/cow_tests.cpp:14:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/tree_alloc.hpp:14:
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:336:21: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  336 |                     __builtin_return_address(2));
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+6 warnings generated.
+[5/8] Building CXX object psitri/libraries/start_ref/CMakeFiles/start_ref-tests.dir/test/session_tests.cpp.o
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/test/session_tests.cpp:2:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/kv.hpp:31:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/large_value.hpp:7:
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:335:50: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  335 |                     __builtin_return_address(0), __builtin_return_address(1),
+      |                                                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:336:21: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  336 |                     __builtin_return_address(2));
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:335:50: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  335 |                     __builtin_return_address(0), __builtin_return_address(1),
+      |                                                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/large_value.hpp:128:23: note: in instantiation of member function 'start_ref::arena_t<start_ref::geometry<32768, 2147483648, 32768>>::retain' requested here
+  128 |             if (store.retain(old))
+      |                       ^
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/test/session_tests.cpp:2:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/kv.hpp:31:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/large_value.hpp:7:
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:336:21: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  336 |                     __builtin_return_address(2));
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:335:50: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  335 |                     __builtin_return_address(0), __builtin_return_address(1),
+      |                                                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/tree_alloc.hpp:207:62: note: in instantiation of member function 'start_ref::arena_t<start_ref::geometry<128>>::retain' requested here
+  207 |       bool    hkv_retain(uint32_t line) noexcept { return a->retain(line); }
+      |                                                              ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:7919:21: note: in instantiation of member function 'start_ref::part_alloc<start_ref::hkv::detail::bytes_value>::hkv_retain' requested here
+ 7919 |          if (alloc_.hkv_retain(line_of(*slot)))
+      |                     ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:8310:16: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, start_ref::hkv::detail::bytes_value, start_ref::hkv::mode::none, start_ref::part_alloc<start_ref::hkv::detail::bytes_value>>::cx_own_line_' requested here
+ 8310 |                cx_own_line_(&x->seglines[sg], x->lg);
+      |                ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:8484:25: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, start_ref::hkv::detail::bytes_value, start_ref::hkv::mode::none, start_ref::part_alloc<start_ref::hkv::detail::bytes_value>>::cow_clone_node_' requested here
+ 8484 |          const Ptr np = cow_clone_node_(cur);
+      |                         ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:882:25: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, start_ref::hkv::detail::bytes_value, start_ref::hkv::mode::none, start_ref::part_alloc<start_ref::hkv::detail::bytes_value>>::cow_clone_into_' requested here
+  882 |                   cur = cow_clone_into_(slot, cur);  // eager: every hop is shared
+      |                         ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:878:26: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, start_ref::hkv::detail::bytes_value, start_ref::hkv::mode::none, start_ref::part_alloc<start_ref::hkv::detail::bytes_value>>::insert_impl_<true, true, start_ref::kv::chunked_val &>' requested here
+  878 |                   return insert_impl_<Assign, true>(key, std::forward<VF>(v), slot, depth,
+      |                          ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:851:17: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, start_ref::hkv::detail::bytes_value, start_ref::hkv::mode::none, start_ref::part_alloc<start_ref::hkv::detail::bytes_value>>::insert_impl_<true, false, start_ref::kv::chunked_val &>' requested here
+  851 |          return insert_impl_<Assign, false>(key, std::forward<VF>(v), &root_, 0, 0);
+      |                 ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:6312:17: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, start_ref::hkv::detail::bytes_value, start_ref::hkv::mode::none, start_ref::part_alloc<start_ref::hkv::detail::bytes_value>>::insert_<true, start_ref::kv::chunked_val &>' requested here
+ 6312 |          return insert_<true>(k, std::forward<V>(v));
+      |                 ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/kv.hpp:201:18: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, start_ref::hkv::detail::bytes_value, start_ref::hkv::mode::none, start_ref::part_alloc<start_ref::hkv::detail::bytes_value>>::cow_insert<start_ref::kv::chunked_val &>' requested here
+  201 |             tree.cow_insert(key, source);
+      |                  ^
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/test/session_tests.cpp:2:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/kv.hpp:31:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/large_value.hpp:7:
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:336:21: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  336 |                     __builtin_return_address(2));
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+6 warnings generated.
+[6/8] Building CXX object psitri/libraries/start_ref/CMakeFiles/start_ref-tests.dir/test/cbucket_tests.cpp.o
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/test/cbucket_tests.cpp:12:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/kv.hpp:31:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/large_value.hpp:7:
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:335:50: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  335 |                     __builtin_return_address(0), __builtin_return_address(1),
+      |                                                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:336:21: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  336 |                     __builtin_return_address(2));
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:335:50: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  335 |                     __builtin_return_address(0), __builtin_return_address(1),
+      |                                                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/large_value.hpp:128:23: note: in instantiation of member function 'start_ref::arena_t<start_ref::geometry<32768, 2147483648, 32768>>::retain' requested here
+  128 |             if (store.retain(old))
+      |                       ^
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/test/cbucket_tests.cpp:12:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/kv.hpp:31:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/large_value.hpp:7:
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:336:21: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  336 |                     __builtin_return_address(2));
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:335:50: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  335 |                     __builtin_return_address(0), __builtin_return_address(1),
+      |                                                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/tree_alloc.hpp:207:62: note: in instantiation of member function 'start_ref::arena_t<start_ref::geometry<128>>::retain' requested here
+  207 |       bool    hkv_retain(uint32_t line) noexcept { return a->retain(line); }
+      |                                                              ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:7919:21: note: in instantiation of member function 'start_ref::part_alloc<start_ref::hkv::detail::bytes_value>::hkv_retain' requested here
+ 7919 |          if (alloc_.hkv_retain(line_of(*slot)))
+      |                     ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:8310:16: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, start_ref::hkv::detail::bytes_value, start_ref::hkv::mode::none, start_ref::part_alloc<start_ref::hkv::detail::bytes_value>>::cx_own_line_' requested here
+ 8310 |                cx_own_line_(&x->seglines[sg], x->lg);
+      |                ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:8484:25: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, start_ref::hkv::detail::bytes_value, start_ref::hkv::mode::none, start_ref::part_alloc<start_ref::hkv::detail::bytes_value>>::cow_clone_node_' requested here
+ 8484 |          const Ptr np = cow_clone_node_(cur);
+      |                         ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:882:25: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, start_ref::hkv::detail::bytes_value, start_ref::hkv::mode::none, start_ref::part_alloc<start_ref::hkv::detail::bytes_value>>::cow_clone_into_' requested here
+  882 |                   cur = cow_clone_into_(slot, cur);  // eager: every hop is shared
+      |                         ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:878:26: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, start_ref::hkv::detail::bytes_value, start_ref::hkv::mode::none, start_ref::part_alloc<start_ref::hkv::detail::bytes_value>>::insert_impl_<true, true, start_ref::kv::chunked_val &>' requested here
+  878 |                   return insert_impl_<Assign, true>(key, std::forward<VF>(v), slot, depth,
+      |                          ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:851:17: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, start_ref::hkv::detail::bytes_value, start_ref::hkv::mode::none, start_ref::part_alloc<start_ref::hkv::detail::bytes_value>>::insert_impl_<true, false, start_ref::kv::chunked_val &>' requested here
+  851 |          return insert_impl_<Assign, false>(key, std::forward<VF>(v), &root_, 0, 0);
+      |                 ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:6312:17: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, start_ref::hkv::detail::bytes_value, start_ref::hkv::mode::none, start_ref::part_alloc<start_ref::hkv::detail::bytes_value>>::insert_<true, start_ref::kv::chunked_val &>' requested here
+ 6312 |          return insert_<true>(k, std::forward<V>(v));
+      |                 ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/kv.hpp:201:18: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, start_ref::hkv::detail::bytes_value, start_ref::hkv::mode::none, start_ref::part_alloc<start_ref::hkv::detail::bytes_value>>::cow_insert<start_ref::kv::chunked_val &>' requested here
+  201 |             tree.cow_insert(key, source);
+      |                  ^
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/test/cbucket_tests.cpp:12:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/kv.hpp:31:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/large_value.hpp:7:
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:336:21: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  336 |                     __builtin_return_address(2));
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+6 warnings generated.
+[7/8] Building CXX object psitri/libraries/start_ref/CMakeFiles/start_ref-tests.dir/test/kv_tests.cpp.o
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/test/kv_tests.cpp:13:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/kv.hpp:31:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/large_value.hpp:7:
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:335:50: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  335 |                     __builtin_return_address(0), __builtin_return_address(1),
+      |                                                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:336:21: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  336 |                     __builtin_return_address(2));
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:335:50: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  335 |                     __builtin_return_address(0), __builtin_return_address(1),
+      |                                                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/large_value.hpp:128:23: note: in instantiation of member function 'start_ref::arena_t<start_ref::geometry<32768, 2147483648, 32768>>::retain' requested here
+  128 |             if (store.retain(old))
+      |                       ^
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/test/kv_tests.cpp:13:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/kv.hpp:31:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/large_value.hpp:7:
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:336:21: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  336 |                     __builtin_return_address(2));
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:335:50: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  335 |                     __builtin_return_address(0), __builtin_return_address(1),
+      |                                                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/tree_alloc.hpp:207:62: note: in instantiation of member function 'start_ref::arena_t<start_ref::geometry<128>>::retain' requested here
+  207 |       bool    hkv_retain(uint32_t line) noexcept { return a->retain(line); }
+      |                                                              ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:7919:21: note: in instantiation of member function 'start_ref::part_alloc<start_ref::hkv::detail::bytes_value>::hkv_retain' requested here
+ 7919 |          if (alloc_.hkv_retain(line_of(*slot)))
+      |                     ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:8310:16: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, start_ref::hkv::detail::bytes_value, start_ref::hkv::mode::none, start_ref::part_alloc<start_ref::hkv::detail::bytes_value>>::cx_own_line_' requested here
+ 8310 |                cx_own_line_(&x->seglines[sg], x->lg);
+      |                ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:8484:25: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, start_ref::hkv::detail::bytes_value, start_ref::hkv::mode::none, start_ref::part_alloc<start_ref::hkv::detail::bytes_value>>::cow_clone_node_' requested here
+ 8484 |          const Ptr np = cow_clone_node_(cur);
+      |                         ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:882:25: note: in instantiation of member function 'start_ref::hkv::detail::kv_tree<std::string_view, start_ref::hkv::detail::bytes_value, start_ref::hkv::mode::none, start_ref::part_alloc<start_ref::hkv::detail::bytes_value>>::cow_clone_into_' requested here
+  882 |                   cur = cow_clone_into_(slot, cur);  // eager: every hop is shared
+      |                         ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:878:26: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, start_ref::hkv::detail::bytes_value, start_ref::hkv::mode::none, start_ref::part_alloc<start_ref::hkv::detail::bytes_value>>::insert_impl_<true, true, start_ref::kv::chunked_val &>' requested here
+  878 |                   return insert_impl_<Assign, true>(key, std::forward<VF>(v), slot, depth,
+      |                          ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:851:17: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, start_ref::hkv::detail::bytes_value, start_ref::hkv::mode::none, start_ref::part_alloc<start_ref::hkv::detail::bytes_value>>::insert_impl_<true, false, start_ref::kv::chunked_val &>' requested here
+  851 |          return insert_impl_<Assign, false>(key, std::forward<VF>(v), &root_, 0, 0);
+      |                 ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/hkv/tree.hpp:6312:17: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, start_ref::hkv::detail::bytes_value, start_ref::hkv::mode::none, start_ref::part_alloc<start_ref::hkv::detail::bytes_value>>::insert_<true, start_ref::kv::chunked_val &>' requested here
+ 6312 |          return insert_<true>(k, std::forward<V>(v));
+      |                 ^
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/kv.hpp:201:18: note: in instantiation of function template specialization 'start_ref::hkv::detail::kv_tree<std::string_view, start_ref::hkv::detail::bytes_value, start_ref::hkv::mode::none, start_ref::part_alloc<start_ref::hkv::detail::bytes_value>>::cow_insert<start_ref::kv::chunked_val &>' requested here
+  201 |             tree.cow_insert(key, source);
+      |                  ^
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/test/kv_tests.cpp:13:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/kv.hpp:31:
+In file included from /Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/large_value.hpp:7:
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/include/start_ref/arena.hpp:336:21: warning: calling '__builtin_return_address' with a nonzero argument is unsafe [-Wframe-address]
+  336 |                     __builtin_return_address(2));
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+6 warnings generated.
+[8/8] Linking CXX executable bin/start_ref-tests

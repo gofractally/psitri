@@ -1,0 +1,7 @@
+[1/7] Building CXX object CMakeFiles/api-storage-regressions.dir/Users/dlarimer/gofractally/psitri/libraries/start_ref/test/session_tests.cpp.o
+[2/7] Building CXX object CMakeFiles/fair-bank-small.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o
+[3/7] Linking CXX executable bin/fair-bank-small
+[4/7] Building CXX object CMakeFiles/fair-bank-dwal_small.dir/Users/dlarimer/gofractally/psitri/benchmarks/fair_bank/main.cpp.o
+[5/7] Linking CXX executable bin/fair-bank-dwal_small
+[6/7] Building CXX object CMakeFiles/api-storage-regressions.dir/dwal_byte_tests.cpp.o
+[7/7] Linking CXX executable bin/api-storage-regressions

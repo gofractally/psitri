@@ -1,0 +1,22 @@
+Filters: [session-refresh]
+Randomness seeded to: 3214530055
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+api-storage-regressions is a Catch2 v3.13.0 host application.
+Run with -? for options
+
+-------------------------------------------------------------------------------
+Small Engine write sessions begin from the latest committed roots
+-------------------------------------------------------------------------------
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/test/session_tests.cpp:5
+...............................................................................
+
+/Users/dlarimer/gofractally/psitri/libraries/start_ref/test/session_tests.cpp:20: FAILED:
+  REQUIRE( tx.get<std::string>("a") == "one" )
+with expansion:
+  {?} == "one"
+
+===============================================================================
+test cases: 1 | 1 failed
+assertions: 1 | 1 failed
+

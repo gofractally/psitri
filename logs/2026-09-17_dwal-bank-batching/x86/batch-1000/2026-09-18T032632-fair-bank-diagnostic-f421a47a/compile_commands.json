@@ -1,0 +1,182 @@
+[
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DFAIR_API_PAIR=1 -DFAIR_mdbx=1 -I/home/dlarimer/arbtrie/build/release/_deps/libmdbx-src -O3 -DNDEBUG -std=gnu++23 -march=native -o CMakeFiles/fair-bank-mdbx.dir/home/dlarimer/psitri-api-bench-20260917/dwal-source/benchmarks/fair_bank/main.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/benchmarks/fair_bank/main.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/benchmarks/fair_bank/main.cpp",
+  "output": "CMakeFiles/fair-bank-mdbx.dir/home/dlarimer/psitri-api-bench-20260917/dwal-source/benchmarks/fair_bank/main.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DFAIR_API_PAIR=1 -DFAIR_SHIM=1 -DFAIR_mdbx=1 -DPSITRIMDBX_BACKEND_DWAL=1 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitrimdbx/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/art/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/delta_art/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/adb/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/start_ver/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/start_ref/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal_art_ref/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/gcart/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/sal_hybrid/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/rcart/include -O3 -DNDEBUG -std=gnu++23 -march=native -o CMakeFiles/fair-bank-psitrimdbx.dir/home/dlarimer/psitri-api-bench-20260917/dwal-source/benchmarks/fair_bank/main.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/benchmarks/fair_bank/main.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/benchmarks/fair_bank/main.cpp",
+  "output": "CMakeFiles/fair-bank-psitrimdbx.dir/home/dlarimer/psitri-api-bench-20260917/dwal-source/benchmarks/fair_bank/main.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DFAIR_API_PAIR=1 -DFAIR_large=1 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri_api/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/adb/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal_art_ref/include -O3 -DNDEBUG -std=gnu++23 -march=native -o CMakeFiles/fair-bank-large.dir/home/dlarimer/psitri-api-bench-20260917/dwal-source/benchmarks/fair_bank/main.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/benchmarks/fair_bank/main.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/benchmarks/fair_bank/main.cpp",
+  "output": "CMakeFiles/fair-bank-large.dir/home/dlarimer/psitri-api-bench-20260917/dwal-source/benchmarks/fair_bank/main.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DFAIR_API_PAIR=1 -DFAIR_dwal=1 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/art/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal_art_ref/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/adb/include -O3 -DNDEBUG -std=gnu++23 -march=native -o CMakeFiles/fair-bank-dwal.dir/home/dlarimer/psitri-api-bench-20260917/dwal-source/benchmarks/fair_bank/main.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/benchmarks/fair_bank/main.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/benchmarks/fair_bank/main.cpp",
+  "output": "CMakeFiles/fair-bank-dwal.dir/home/dlarimer/psitri-api-bench-20260917/dwal-source/benchmarks/fair_bank/main.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DPSIO_EXCEPTIONS_ENABLED=1 -DPSIO_HAVE_SIMDJSON=0 -I/home/dlarimer/psitri-api-bench-20260917/psio/cpp/include -I/home/dlarimer/psitri-api-bench-20260917/psio/cpp/external/xxhash -O3 -DNDEBUG -std=gnu++23 -march=native -o _deps/psio-build/CMakeFiles/psio.dir/src/stub.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/psio/cpp/src/stub.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/psio/cpp/src/stub.cpp",
+  "output": "_deps/psio-build/CMakeFiles/psio.dir/src/stub.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -O3 -DNDEBUG -std=c++23 -march=native -Wall -Wextra -Werror -Wno-vla-cxx-extension -o psitri/libraries/sal/CMakeFiles/sal.dir/src/block_allocator.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/src/block_allocator.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/src/block_allocator.cpp",
+  "output": "psitri/libraries/sal/CMakeFiles/sal.dir/src/block_allocator.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -O3 -DNDEBUG -std=c++23 -march=native -Wall -Wextra -Werror -Wno-vla-cxx-extension -o psitri/libraries/sal/CMakeFiles/sal.dir/src/allocator.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/src/allocator.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/src/allocator.cpp",
+  "output": "psitri/libraries/sal/CMakeFiles/sal.dir/src/allocator.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -O3 -DNDEBUG -std=c++23 -march=native -Wall -Wextra -Werror -Wno-vla-cxx-extension -o psitri/libraries/sal/CMakeFiles/sal.dir/src/mapping.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/src/mapping.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/src/mapping.cpp",
+  "output": "psitri/libraries/sal/CMakeFiles/sal.dir/src/mapping.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -O3 -DNDEBUG -std=c++23 -march=native -Wall -Wextra -Werror -Wno-vla-cxx-extension -o psitri/libraries/sal/CMakeFiles/sal.dir/src/control_block_alloc.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/src/control_block_alloc.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/src/control_block_alloc.cpp",
+  "output": "psitri/libraries/sal/CMakeFiles/sal.dir/src/control_block_alloc.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -O3 -DNDEBUG -std=c++23 -march=native -Wall -Wextra -Werror -Wno-vla-cxx-extension -o psitri/libraries/sal/CMakeFiles/sal.dir/src/allocator_session.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/src/allocator_session.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/src/allocator_session.cpp",
+  "output": "psitri/libraries/sal/CMakeFiles/sal.dir/src/allocator_session.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -O3 -DNDEBUG -std=c++23 -march=native -Wall -Wextra -Werror -Wno-vla-cxx-extension -o psitri/libraries/sal/CMakeFiles/sal.dir/src/segment_thread.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/src/segment_thread.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/src/segment_thread.cpp",
+  "output": "psitri/libraries/sal/CMakeFiles/sal.dir/src/segment_thread.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/sal_hybrid/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -O3 -DNDEBUG -std=gnu++23 -march=native -Wno-vla-cxx-extension -o psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/block_allocator.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/sal_hybrid/src/block_allocator.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/sal_hybrid/src/block_allocator.cpp",
+  "output": "psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/block_allocator.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/sal_hybrid/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -O3 -DNDEBUG -std=gnu++23 -march=native -Wno-vla-cxx-extension -o psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/allocator.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/sal_hybrid/src/allocator.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/sal_hybrid/src/allocator.cpp",
+  "output": "psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/allocator.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/sal_hybrid/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -O3 -DNDEBUG -std=gnu++23 -march=native -Wno-vla-cxx-extension -o psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/mapping.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/sal_hybrid/src/mapping.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/sal_hybrid/src/mapping.cpp",
+  "output": "psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/mapping.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/sal_hybrid/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -O3 -DNDEBUG -std=gnu++23 -march=native -Wno-vla-cxx-extension -o psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/control_block_alloc.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/sal_hybrid/src/control_block_alloc.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/sal_hybrid/src/control_block_alloc.cpp",
+  "output": "psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/control_block_alloc.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/sal_hybrid/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -O3 -DNDEBUG -std=gnu++23 -march=native -Wno-vla-cxx-extension -o psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/allocator_session.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/sal_hybrid/src/allocator_session.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/sal_hybrid/src/allocator_session.cpp",
+  "output": "psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/allocator_session.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/sal_hybrid/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -O3 -DNDEBUG -std=gnu++23 -march=native -Wno-vla-cxx-extension -o psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/segment_thread.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/sal_hybrid/src/segment_thread.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/sal_hybrid/src/segment_thread.cpp",
+  "output": "psitri/experimental/sal_hybrid/CMakeFiles/sal_hybrid_alloc.dir/src/segment_thread.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/database.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/database.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/database.cpp",
+  "output": "psitri/libraries/psitri/CMakeFiles/psitri.dir/src/database.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/node/leaf.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/node/leaf.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/node/leaf.cpp",
+  "output": "psitri/libraries/psitri/CMakeFiles/psitri.dir/src/node/leaf.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/node/inner.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/node/inner.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/node/inner.cpp",
+  "output": "psitri/libraries/psitri/CMakeFiles/psitri.dir/src/node/inner.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_writer.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/dwal/wal_writer.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/dwal/wal_writer.cpp",
+  "output": "psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_writer.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_status.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/dwal/wal_status.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/dwal/wal_status.cpp",
+  "output": "psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_status.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_reader.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/dwal/wal_reader.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/dwal/wal_reader.cpp",
+  "output": "psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/wal_reader.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_transaction.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/dwal/dwal_transaction.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/dwal/dwal_transaction.cpp",
+  "output": "psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_transaction.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_database.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/dwal/dwal_database.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/dwal/dwal_database.cpp",
+  "output": "psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_database.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/transaction.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/dwal/transaction.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/dwal/transaction.cpp",
+  "output": "psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/transaction.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_read_session.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/dwal/dwal_read_session.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/dwal/dwal_read_session.cpp",
+  "output": "psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/dwal_read_session.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/merge_cursor.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/dwal/merge_cursor.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/dwal/merge_cursor.cpp",
+  "output": "psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/merge_cursor.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/art/include -O3 -DNDEBUG -std=gnu++23 -march=native -o psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/merge_pool.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/dwal/merge_pool.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/src/dwal/merge_pool.cpp",
+  "output": "psitri/libraries/psitri/CMakeFiles/psitri.dir/src/dwal/merge_pool.cpp.o"
+},
+{
+  "directory": "/home/dlarimer/psitri-api-bench-20260917/build-dwal",
+  "command": "/usr/bin/clang++-20 -DPSITRIMDBX_BACKEND_DWAL=1 -DXXH_INLINE_ALL -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitrimdbx/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitri/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal/include -I/home/dlarimer/psitri-api-bench-20260917/ucc/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/art/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/delta_art/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/adb/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/start_ver/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/start_ref/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/sal_art_ref/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/gcart/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/sal_hybrid/include -I/home/dlarimer/psitri-api-bench-20260917/dwal-source/experimental/rcart/include -O3 -DNDEBUG -std=gnu++23 -march=native -o psitri/libraries/psitrimdbx/CMakeFiles/psitrimdbx.dir/src/mdbx_impl.cpp.o -c /home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitrimdbx/src/mdbx_impl.cpp",
+  "file": "/home/dlarimer/psitri-api-bench-20260917/dwal-source/libraries/psitrimdbx/src/mdbx_impl.cpp",
+  "output": "psitri/libraries/psitrimdbx/CMakeFiles/psitrimdbx.dir/src/mdbx_impl.cpp.o"
+}
+]

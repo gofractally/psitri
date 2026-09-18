@@ -1,0 +1,9 @@
+{
+  "purpose": "availability check, not a benchmark gate",
+  "busy_percent": [
+    17.60133259300388,
+    19.220055710306404,
+    18.333333333333336
+  ],
+  "threshold_percent": 3
+}

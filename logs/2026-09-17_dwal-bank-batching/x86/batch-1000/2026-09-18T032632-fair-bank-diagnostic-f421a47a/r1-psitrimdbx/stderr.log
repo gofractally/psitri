@@ -1,0 +1,21 @@
+psitrimdbx psitrimdbx-0.1
+WRITEMAP; UTTERLY_NOSYNC; map_gib=64; build_options=psitrimdbx; compiler=clang; build_flags=; backend=DWAL over Large Engine; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; read cache controlled by recorded environment
+load
+contract checks
+warmup
+[MERGE] root=0 entries=100000  40 ms wall / 40 ms cpu  syscall=0%  2487139 entries/sec  0.40 us/entry  max=0.0 ms
+        latency: <1us=97807  <10us=2171  <100us=22  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+write
+[MERGE] root=0 entries=100000  31 ms wall / 31 ms cpu  syscall=0%  3246991 entries/sec  0.31 us/entry  max=0.0 ms
+        latency: <1us=98334  <10us=1662  <100us=4  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+mixed
+[MERGE] root=0 entries=100000  55 ms wall / 55 ms cpu  syscall=0%  1810834 entries/sec  0.55 us/entry  max=0.0 ms
+        latency: <1us=98371  <10us=1627  <100us=2  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=100000  36 ms wall / 36 ms cpu  syscall=0%  2792060 entries/sec  0.36 us/entry  max=0.0 ms
+        latency: <1us=98378  <10us=1616  <100us=6  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+read
+close/reopen validation

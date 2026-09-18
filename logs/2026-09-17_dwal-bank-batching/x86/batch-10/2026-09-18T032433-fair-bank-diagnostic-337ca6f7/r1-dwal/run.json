@@ -1,0 +1,200 @@
+{
+  "engine": "dwal",
+  "repetition": 1,
+  "directory": "r1-dwal",
+  "command": [
+    "/home/dlarimer/psitri-api-bench-20260917/build-dwal/bin/fair-bank-dwal",
+    "--path",
+    "/home/dlarimer/psitri-api-bench-20260917/dwal-sweep-x86/batch-10/2026-09-18T032433-fair-bank-diagnostic-337ca6f7/r1-dwal/database",
+    "--result",
+    "/home/dlarimer/psitri-api-bench-20260917/dwal-sweep-x86/batch-10/2026-09-18T032433-fair-bank-diagnostic-337ca6f7/r1-dwal/result.json",
+    "--accounts",
+    "100000",
+    "--transfers",
+    "1000000",
+    "--warmup",
+    "10000",
+    "--batch",
+    "10",
+    "--readers",
+    "4",
+    "--reads-per-snapshot",
+    "100",
+    "--read-batches",
+    "100",
+    "--seed",
+    "12345",
+    "--value-bytes",
+    "8",
+    "--cache-mib",
+    "256",
+    "--map-gib",
+    "64",
+    "--durability",
+    "none"
+  ],
+  "status": "passed",
+  "exit_code": 0,
+  "elapsed_seconds": 6.323388708755374,
+  "result": {
+    "schema_version": 1,
+    "workload": "api-bank-v1",
+    "engine": "dwal",
+    "version": "DWAL over Large Engine; WAL format 2",
+    "settings": "base=Large Engine; base_sync=none; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; enable_read_cache=false; max_pinned_cache_size_mb=256",
+    "status": "passed",
+    "config": {
+      "accounts": 100000,
+      "transfers": 1000000,
+      "warmup": 10000,
+      "batch": 10,
+      "readers": 4,
+      "reads_per_snapshot": 100,
+      "read_batches": 100,
+      "seed": 12345,
+      "value_bytes": 8,
+      "cache_mib": 256,
+      "map_gib": 64,
+      "durability": "none"
+    },
+    "validation": {
+      "read_your_writes": true,
+      "rollback": true,
+      "snapshot": true,
+      "exact_accounts": true,
+      "balance": true,
+      "reopen": true,
+      "final_hash": "1346279285150323400"
+    },
+    "counts": {
+      "write_transfers": 1000000,
+      "write_commits": 100000,
+      "mixed_transfers": 1000000,
+      "mixed_commits": 100000,
+      "mixed_reads": 35247000,
+      "read_only_reads": 40000,
+      "reader_checksum": "16840255926290520866"
+    },
+    "metrics": [
+      {
+        "engine": "dwal",
+        "name": "load",
+        "unit": "accounts/s",
+        "direction": "higher",
+        "value": 5454778.81990115
+      },
+      {
+        "engine": "dwal",
+        "name": "write",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 1920102.3374607735
+      },
+      {
+        "engine": "dwal",
+        "name": "write_batch_p50",
+        "unit": "us",
+        "direction": "lower",
+        "value": 4.406
+      },
+      {
+        "engine": "dwal",
+        "name": "write_batch_p99",
+        "unit": "us",
+        "direction": "lower",
+        "value": 11.065
+      },
+      {
+        "engine": "dwal",
+        "name": "mixed_write_active",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 185454.67820435288
+      },
+      {
+        "engine": "dwal",
+        "name": "mixed_write_active_batch_p50",
+        "unit": "us",
+        "direction": "lower",
+        "value": 51.190000000000005
+      },
+      {
+        "engine": "dwal",
+        "name": "mixed_write_active_batch_p99",
+        "unit": "us",
+        "direction": "lower",
+        "value": 80.71199999999999
+      },
+      {
+        "engine": "dwal",
+        "name": "mixed_write",
+        "unit": "transfers/s",
+        "direction": "higher",
+        "value": 185450.41454791013
+      },
+      {
+        "engine": "dwal",
+        "name": "mixed_read",
+        "unit": "reads/s",
+        "direction": "higher",
+        "value": 6536570.761570188
+      },
+      {
+        "engine": "dwal",
+        "name": "read",
+        "unit": "reads/s",
+        "direction": "higher",
+        "value": 13268749.90463086
+      },
+      {
+        "engine": "dwal",
+        "name": "disk_before_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 454857644
+      },
+      {
+        "engine": "dwal",
+        "name": "allocated_before_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 172322816
+      },
+      {
+        "engine": "dwal",
+        "name": "close",
+        "unit": "seconds",
+        "direction": "lower",
+        "value": 0.14564222
+      },
+      {
+        "engine": "dwal",
+        "name": "disk_after_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 186422188
+      },
+      {
+        "engine": "dwal",
+        "name": "allocated_after_close",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 176025600
+      },
+      {
+        "engine": "dwal",
+        "name": "reopen",
+        "unit": "seconds",
+        "direction": "lower",
+        "value": 0.010244736
+      },
+      {
+        "engine": "dwal",
+        "name": "peak_rss",
+        "unit": "bytes",
+        "direction": "lower",
+        "value": 1419337728
+      }
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "bars": 30,
+  "batch_sizes": 6,
+  "engine_checkboxes": 5,
+  "metrics": [
+    "write",
+    "mixed_write_active",
+    "mixed_read",
+    "write_batch_p99",
+    "peak_rss",
+    "allocated_after_close",
+    "close",
+    "read"
+  ],
+  "checkbox_filtering": "passed",
+  "mobile_width": 420,
+  "mobile_overflow": false,
+  "browser_errors": []
+}

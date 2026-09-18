@@ -1,0 +1,41 @@
+{
+  "revision": "2f10f14f89560489cf8c7d7d969c232797d605a3",
+  "measured_runs": 18,
+  "smoke_runs": 3,
+  "final_hash": "1346279285150323400",
+  "validation": "All configurations passed; source clean and binary hashes stable; last ten idle samples <=3%; exactly one repetition per configuration.",
+  "binary_sha256": {
+    "mdbx": "f1f6f888bbadd563e9c3ee6e98e7f5a4a65587b9c0e73045bcdf962c24dec742",
+    "psitrimdbx": "cdcc9707a353e43c25d9d4fe3b66a22444dd7f8a4b6cc4f35d2d23cfe1a2d9f1",
+    "dwal": "84652bcdaa17abc0d19c0a6afc9203e5bef8b0686b09b3362104bc17affe59ac"
+  },
+  "native_mdbx_binary_identical_to_direct_sweep": true,
+  "x86_mdbx_build": {
+    "source_sha256": {
+      "mdbx.h": "55130f2cd30bb7865848776b0c9f2ffcf0c3a5c13aaeb36ab7bfbb48f172bdfc",
+      "mdbx.c": "51e000f838b056341cbae3882a7dcd98471ceee2838e29f0ef81bc8d5adbaa4f"
+    },
+    "compile_commands": [
+      {
+        "directory": "/home/dlarimer/arbtrie/build/release",
+        "command": "/usr/bin/clang-20 -DMDBX_BUILD_SHARED_LIBRARY=0 -DMDBX_CONFIG_H=\\\"/home/dlarimer/arbtrie/build/release/_deps/libmdbx-build/config-cmake.h\\\" -DPSITRI_PLATFORM_OPTIMIZATIONS=1 -O3 -DNDEBUG -std=gnu23 -flto=thin -fPIC -march=native -ffast-math -fvisibility=hidden -o _deps/libmdbx-build/CMakeFiles/mdbx-static.dir/mdbx.c.o -c /home/dlarimer/arbtrie/build/release/_deps/libmdbx-src/mdbx.c",
+        "file": "/home/dlarimer/arbtrie/build/release/_deps/libmdbx-src/mdbx.c",
+        "output": "_deps/libmdbx-build/CMakeFiles/mdbx-static.dir/mdbx.c.o"
+      }
+    ]
+  },
+  "mdbx_version": "v0.13.11-0-gb862eb08",
+  "arm_status": "Not measured; Mac did not satisfy idle availability check. Functional tests only.",
+  "functional_checks": {
+    "dwal_cases": 159,
+    "dwal_assertions": 602375,
+    "byte_adapter_cases": 1,
+    "byte_adapter_assertions": 20,
+    "python_checks": 38
+  },
+  "notes": "DWAL and direct measurements are separate sequential sweeps on the same machine; they are single observations, not repeated performance distributions.",
+  "x86_build_commands": [
+    "cmake -S /home/dlarimer/psitri-api-bench-20260917/dwal-source/benchmarks/api_bank -B /home/dlarimer/psitri-api-bench-20260917/build-dwal -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 -DFETCHCONTENT_SOURCE_DIR_PSIO=/home/dlarimer/psitri-api-bench-20260917/psio -DFETCHCONTENT_SOURCE_DIR_UCC=/home/dlarimer/psitri-api-bench-20260917/ucc -DFAIR_MDBX_INCLUDE_DIR=/home/dlarimer/arbtrie/build/release/_deps/libmdbx-src -DFAIR_MDBX_LIBRARY=/home/dlarimer/arbtrie/build/release/_deps/libmdbx-build/libmdbx.a -DPSITRIMDBX_BACKEND=dwal -DAPI_BANK_BUILD_CONTRACT_TESTS=OFF -DCMAKE_EXE_LINKER_FLAGS=-flto=thin",
+    "cmake --build /home/dlarimer/psitri-api-bench-20260917/build-dwal --target fair-bank-dwal fair-bank-psitrimdbx fair-bank-mdbx -j4"
+  ]
+}

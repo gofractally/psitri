@@ -1,0 +1,21 @@
+dwal DWAL over Large Engine; WAL format 2
+base=Large Engine; base_sync=none; WAL=pwrite per commit, no per-commit fsync; rotation/close=full barrier; max_rw_entries=100000; max_wal_bytes=67108864; max_rw_arena_bytes=1073741824; merge_threads=2; enable_read_cache=false; max_pinned_cache_size_mb=256
+load
+contract checks
+warmup
+write
+[MERGE] root=0 entries=100000  51 ms wall / 51 ms cpu  syscall=0%  1968320 entries/sec  0.51 us/entry  max=0.0 ms
+        latency: <1us=97759  <10us=2185  <100us=56  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=100000  41 ms wall / 41 ms cpu  syscall=0%  2450318 entries/sec  0.41 us/entry  max=0.0 ms
+        latency: <1us=98125  <10us=1856  <100us=19  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+mixed
+[MERGE] root=0 entries=100000  43 ms wall / 43 ms cpu  syscall=0%  2344687 entries/sec  0.43 us/entry  max=0.0 ms
+        latency: <1us=98192  <10us=1799  <100us=9  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+[MERGE] root=0 entries=100000  45 ms wall / 45 ms cpu  syscall=0%  2227723 entries/sec  0.45 us/entry  max=0.0 ms
+        latency: <1us=98184  <10us=1807  <100us=9  <1ms=0  <10ms=0  >=10ms=0  |  stalls(>=1ms): 0 entries, 0 ms total (0% of wall)
+        segments: 0 new segs, 0 ms total (0% of wall)  0.0 ms/seg
+read
+close/reopen validation

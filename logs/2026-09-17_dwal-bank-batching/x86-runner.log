@@ -1,0 +1,84 @@
+Starting smoke, batch 32
+Archive: /home/dlarimer/psitri-api-bench-20260917/dwal-sweep-x86/smoke/2026-09-18T032038-fair-bank-smoke-3124f978
+[1/1] psitrimdbx
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (0.16s)
+[1/1] mdbx
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (0.01s)
+[1/1] dwal
+Waiting for 10s idle (CPU busy 0.1%, limit 3.0%)
+  passed (0.11s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/dwal-sweep-x86/smoke/2026-09-18T032038-fair-bank-smoke-3124f978/manifest.json
+Starting diagnostic, batch 1
+Archive: /home/dlarimer/psitri-api-bench-20260917/dwal-sweep-x86/batch-1/2026-09-18T032111-fair-bank-diagnostic-695843f1
+[1/1] dwal
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (21.19s)
+[1/1] mdbx
+Waiting for 10s idle (CPU busy 0.1%, limit 3.0%)
+  passed (97.75s)
+[1/1] psitrimdbx
+Waiting for 10s idle (CPU busy 5.7%, limit 3.0%)
+  passed (43.73s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/dwal-sweep-x86/batch-1/2026-09-18T032111-fair-bank-diagnostic-695843f1/manifest.json
+Starting diagnostic, batch 10
+Archive: /home/dlarimer/psitri-api-bench-20260917/dwal-sweep-x86/batch-10/2026-09-18T032433-fair-bank-diagnostic-337ca6f7
+[1/1] psitrimdbx
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (8.38s)
+[1/1] mdbx
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (16.84s)
+[1/1] dwal
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (6.32s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/dwal-sweep-x86/batch-10/2026-09-18T032433-fair-bank-diagnostic-337ca6f7/manifest.json
+Starting diagnostic, batch 100
+Archive: /home/dlarimer/psitri-api-bench-20260917/dwal-sweep-x86/batch-100/2026-09-18T032540-fair-bank-diagnostic-5f50bbcc
+[1/1] mdbx
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (11.48s)
+[1/1] psitrimdbx
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (3.72s)
+[1/1] dwal
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (2.72s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/dwal-sweep-x86/batch-100/2026-09-18T032540-fair-bank-diagnostic-5f50bbcc/manifest.json
+Starting diagnostic, batch 1000
+Archive: /home/dlarimer/psitri-api-bench-20260917/dwal-sweep-x86/batch-1000/2026-09-18T032632-fair-bank-diagnostic-f421a47a
+[1/1] psitrimdbx
+Waiting for 10s idle (CPU busy 0.1%, limit 3.0%)
+  passed (2.47s)
+[1/1] dwal
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (1.57s)
+[1/1] mdbx
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (5.17s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/dwal-sweep-x86/batch-1000/2026-09-18T032632-fair-bank-diagnostic-f421a47a/manifest.json
+Starting diagnostic, batch 10000
+Archive: /home/dlarimer/psitri-api-bench-20260917/dwal-sweep-x86/batch-10000/2026-09-18T032715-fair-bank-diagnostic-d690d822
+[1/1] mdbx
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (2.22s)
+[1/1] psitrimdbx
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (2.47s)
+[1/1] dwal
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (1.22s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/dwal-sweep-x86/batch-10000/2026-09-18T032715-fair-bank-diagnostic-d690d822/manifest.json
+Starting diagnostic, batch 100000
+Archive: /home/dlarimer/psitri-api-bench-20260917/dwal-sweep-x86/batch-100000/2026-09-18T032754-fair-bank-diagnostic-1193a6bd
+[1/1] dwal
+Waiting for 10s idle (CPU busy 0.1%, limit 3.0%)
+  passed (1.52s)
+[1/1] mdbx
+Waiting for 10s idle (CPU busy 0.1%, limit 3.0%)
+  passed (1.92s)
+[1/1] psitrimdbx
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (3.32s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/dwal-sweep-x86/batch-100000/2026-09-18T032754-fair-bank-diagnostic-1193a6bd/manifest.json

@@ -1,0 +1,11 @@
+Archive: /home/dlarimer/psitri-api-bench-20260917/dwal-sweep-x86/batch-100000/2026-09-18T032754-fair-bank-diagnostic-1193a6bd
+[1/1] dwal
+Waiting for 10s idle (CPU busy 0.1%, limit 3.0%)
+  passed (1.52s)
+[1/1] mdbx
+Waiting for 10s idle (CPU busy 0.1%, limit 3.0%)
+  passed (1.92s)
+[1/1] psitrimdbx
+Waiting for 10s idle (CPU busy 0.0%, limit 3.0%)
+  passed (3.32s)
+PASSED: /home/dlarimer/psitri-api-bench-20260917/dwal-sweep-x86/batch-100000/2026-09-18T032754-fair-bank-diagnostic-1193a6bd/manifest.json

@@ -65,6 +65,33 @@ only one read batch per reader can pass data-correctness checks while exposing
 reader starvation; it does not establish useful concurrent progress. Diagnose
 snapshot admission and cursor work before collecting more repetitions.
 
+## Direct engine batching diagnostic
+
+The packaged build also provides `fair-bank-large`, using the native Large Engine
+API with the same driver and compiler settings as the MDBX pair. The `direct`
+suite compares native MDBX, the direct MDBX shim, and native psitri. It requires
+`PSITRIMDBX_BACKEND=sal_art_ref`, disables the shim's optional read-promotion cache
+to match the native adapter, and gives both psitri paths the same pinned-cache
+budget. The manifest retains those shim environment settings. The native API
+sets its database capacity from `--map-gib`; the shim retains its allocator's
+default capacity limit, so this resident-data diagnostic is not a capacity test.
+
+```sh
+cmake --build build/api-mdbx --target fair-bank-mdbx fair-bank-psitrimdbx fair-bank-large
+python3 scripts/fair_bank.py --suite direct --build build/api-mdbx \
+  --machine my-runner --profile diagnostic --durability none \
+  --accounts 100000 --transfers 1000000 --batch 1
+```
+
+Sweep batches 1, 10, 100, 1000, 10000, and 100000 sequentially, with one diagnostic
+per configuration. Keep the account count, transfer trace, warmup, reader settings,
+and durability fixed. `write` measures the transfers without concurrent readers;
+mixed-phase metrics are retained separately. This measures transaction grouping,
+not persistent subtree creation or a database larger than RAM.
+`scripts/direct_bank_sweep.py --build build/api-mdbx --output NEW_DIRECTORY
+--machine my-runner` runs this sweep after a smoke check, stopping on a failed
+cohort and retaining each invocation and its evidence.
+
 Once the workload, backend selection, and any anomalies are understood, use
 `--profile performance --repeats 5` for each pair. Or collect all three pairs in
 sequence, measuring only the pairs that pass smoke:

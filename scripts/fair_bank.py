@@ -23,6 +23,7 @@ import benchmark_idle
 ROOT = Path(__file__).resolve().parents[1]
 ENGINES = ("small", "large", "mdbx", "rocksdb", "sqlite", "duckdb")
 API_ENGINES = ("mdbx", "psitrimdbx", "rocksdb", "psitrirocks", "sqlite", "psitri_sqlite")
+DIRECT_ENGINES = ("mdbx", "psitrimdbx", "large")
 CHECKS = ("read_your_writes", "rollback", "snapshot", "exact_accounts", "balance", "reopen")
 WORKLOAD = "fair-bank-v2"
 SMOKE = dict(accounts=128, transfers=256, warmup=64, batch=32, readers=2,
@@ -176,7 +177,8 @@ def run(args) -> int:
                     revision=benchmark.capture("git", "rev-parse", "HEAD"), source_status=source_status,
                     dirty=bool(source_status), command=sys.argv, records=[], dependencies={}, binaries={})
     manifest["environment"] = {k: os.environ[k] for k in (
-        "CC", "CXX", "CFLAGS", "CXXFLAGS", "LDFLAGS", "HEART_PINNED_MB", "HEART_READ_CACHE", "HEART_READ_CACHE_SEC") if k in os.environ}
+        "CC", "CXX", "CFLAGS", "CXXFLAGS", "LDFLAGS", "HEART_PINNED_MB", "HEART_READ_CACHE", "HEART_READ_CACHE_SEC",
+        "PSITRI_NO_READ_CACHE", "PSITRI_CACHE_MB", "PSITRI_SYNC") if k in os.environ}
     manifest["environment"]["SAL_LOG_LEVEL"] = "ERROR"  # Forced for every child; errors cannot be suppressed.
     manifest["notes"] = args.notes
     manifest["isolation"] = dict(machine_lock=True, idle_seconds=10, max_cpu_busy_percent=3,
@@ -193,6 +195,10 @@ def run(args) -> int:
         if args.profile == "performance" and source_status:
             raise ValueError("Performance profile requires a clean source checkout; commit code/evidence first")
         build = args.build.resolve()
+        if args.suite == "direct":
+            cache = (build / "CMakeCache.txt").read_text()
+            if "PSITRIMDBX_BACKEND:STRING=sal_art_ref\n" not in cache:
+                raise ValueError("Direct comparison requires PSITRIMDBX_BACKEND=sal_art_ref")
         build_info = json.loads((build / "fair-bank-build.json").read_text())
         if build_info["build_type"] != "Release":
             raise ValueError("Use a Release build for this comparison suite")
@@ -301,7 +307,7 @@ def main():
     parser.add_argument("--machine", required=True, help="Stable physical runner identity")
     parser.add_argument("--profile", choices=("smoke", "diagnostic", "performance"), default="smoke",
                         help="diagnostic uses the performance workload once per engine, without qualifying as a performance series")
-    parser.add_argument("--suite", choices=("native", "api"), default="native")
+    parser.add_argument("--suite", choices=("native", "api", "direct"), default="native")
     parser.add_argument("--engines", nargs="+", choices=tuple(dict.fromkeys(ENGINES + API_ENGINES)))
     parser.add_argument("--repeats", type=int)
     parser.add_argument("--order-seed", type=int, default=20260917)
@@ -316,12 +322,20 @@ def main():
         else:
             parser.add_argument("--" + key.replace("_", "-"), type=int)
     args = parser.parse_args()
-    if args.suite == "api":
+    if args.suite in ("api", "direct"):
         WORKLOAD = "api-bank-v1"
-    allowed = API_ENGINES if args.suite == "api" else ENGINES
+    allowed = DIRECT_ENGINES if args.suite == "direct" else API_ENGINES if args.suite == "api" else ENGINES
     args.engines = args.engines or list(allowed)
     if any(e not in allowed for e in args.engines):
         parser.error("Engine is not part of the selected suite")
+    if args.suite == "direct":
+        # Match the native Large Engine adapter's cache policy. These existing
+        # shim knobs are recorded in the manifest and do not change the workload.
+        os.environ["PSITRI_NO_READ_CACHE"] = "1"
+        defaults = SMOKE if args.profile == "smoke" else PERFORMANCE
+        os.environ["PSITRI_CACHE_MB"] = str(args.cache_mib if args.cache_mib is not None else defaults["cache_mib"])
+        if "PSITRI_SYNC" in os.environ:
+            parser.error("Unset PSITRI_SYNC; the requested durability must be authoritative")
     try:
         with benchmark_idle.exclusive():
             return run(args)

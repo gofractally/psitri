@@ -67,6 +67,8 @@ else()
     target_include_directories(fair-bank-mdbx PRIVATE "${FAIR_MDBX_INCLUDE_DIR}")
     api_binary(psitrimdbx mdbx psitrimdbx)
     target_compile_definitions(fair-bank-psitrimdbx PRIVATE FAIR_SHIM=1)
+    # Native API baseline, compiled with the same driver and compiler options.
+    api_binary(large large psitri::big)
     set(dependencies "\"ucc\": \"${FETCHCONTENT_SOURCE_DIR_UCC}\"")
     set(libraries "\"${FAIR_MDBX_LIBRARY}\"")
 endif()

@@ -438,6 +438,8 @@ namespace sal
    allocator::~allocator()
    {
       stop_background_threads();
+      if (!_read_only)
+         drain_releases_stopped();
       // The utility session releases its session slot through mapped state.
       // Destroy it before member teardown unmaps that state.
       _utility_ses = allocator_session_ptr(nullptr);
@@ -1665,6 +1667,50 @@ namespace sal
     * back to queue or processes inline if full) → unlock → record_freed_space
     * → free control block.
     */
+   bool allocator::apply_posted_releases(allocator_session& ses)
+   {
+      std::vector<ptr_address> q;
+      {
+         std::lock_guard g(_post_release_mx);
+         q.swap(_post_release_q);
+      }
+      for (ptr_address adr : q)
+      {
+         ses.release(adr);
+         _post_release_pending.fetch_sub(1, std::memory_order_release);
+      }
+      return !q.empty();
+   }
+
+   // Releases still queued when the release thread stops would otherwise be forgotten: the
+   // queues are process state, reset by the next open, and a clean close runs no recovery.
+   // Finish them here so a clean close leaves nothing leaked.
+   void allocator::drain_releases_stopped()
+   {
+      auto        ses = create_session();
+      auto&       sesr = *ses;
+      ptr_address read_ids[1024];
+      for (bool work = true; work;)
+      {
+         work = apply_posted_releases(sesr);
+         for (uint32_t snum = 0; snum < _mapped_state->_session_data.session_capacity(); ++snum)
+         {
+            auto& rqueue =
+                _mapped_state->_session_data.release_queue(allocator_session_number(snum));
+            while (auto num_loaded = rqueue.pop(read_ids, 1024))
+            {
+               work = true;
+               for (uint32_t i = 0; i < num_loaded; ++i)
+               {
+                  sesr.retain_read_lock();
+                  sesr.final_release(read_ids[i]);
+                  sesr.release_read_lock();
+               }
+            }
+         }
+      }
+   }
+
    void allocator::release_loop(segment_thread& thread)
    {
       sal::set_current_thread_name("release");
@@ -1675,15 +1721,7 @@ namespace sal
       ptr_address read_ids[1024];
       while (thread.yield())
       {
-         {  // sessionless cross-thread releases (Dan's release queue)
-            std::vector<ptr_address> q;
-            {
-               std::lock_guard g(_post_release_mx);
-               q.swap(_post_release_q);
-            }
-            for (ptr_address adr : q)
-               sesr.release(adr);
-         }
+         apply_posted_releases(sesr);  // sessionless cross-thread releases (Dan's release queue)
          for (uint32_t snum = 0; snum < _mapped_state->_session_data.session_capacity(); ++snum)
          {
             auto& rqueue =
@@ -2734,6 +2772,7 @@ namespace sal
    {
       std::lock_guard g(_post_release_mx);
       _post_release_q.push_back(adr);
+      _post_release_pending.fetch_add(1, std::memory_order_release);
    }
    void allocator::release_session_num(allocator_session_number sn) noexcept
    {

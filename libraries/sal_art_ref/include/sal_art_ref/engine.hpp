@@ -12,6 +12,7 @@ namespace sal_art_ref::radix
       using read_session  = sal_art_ref::radix::read_session;
       using transaction   = sal_art_ref::radix::transaction;
       using cursor        = sal_art_ref::radix::cursor;
+      using shared_tree   = sal_art_ref::radix::shared_tree;
       using config        = sal_art_ref::radix::runtime_config;
    };
    using dwal_engine = engine;  // historical spelling

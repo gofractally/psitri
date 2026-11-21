@@ -36,6 +36,7 @@ if(SAL_ART_REF_BUILD_TESTS)
         test/radix_tree_tests.cpp
         test/sal_radix_tree_tests.cpp
         test/radix_engine_tests.cpp
+        test/shared_tree_tests.cpp
     )
     target_link_libraries(sal_art_ref-tests
         PRIVATE

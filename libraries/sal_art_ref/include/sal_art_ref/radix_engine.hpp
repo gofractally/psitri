@@ -120,6 +120,63 @@ namespace sal_art_ref::radix
       return i;
    }
 
+   class radix_tree;
+
+   /// An owning reference to a tree that is safe to copy, move, and drop on ANY thread,
+   /// with no session and no lock. A `tree` is bound to the writer's session and a cursor to
+   /// its reader's; this is what crosses between them: the writer shares what it built
+   /// (write_session::share), any thread keeps it alive, and each reader thread opens its own
+   /// cursor on it (read_session::create_cursor). Copies add a reference directly on the
+   /// control block; the last drop is handed to the background release thread, so no destroy
+   /// cascade ever runs on the dropping thread. The tree it names is immutable: holding a
+   /// reference forces the writer to copy-on-write.
+   class shared_tree
+   {
+      radix_tree*      _t    = nullptr;
+      sal::ptr_address _root = sal::null_ptr_address;
+      friend class radix_tree;
+      friend class read_session;
+      friend class write_session;
+      struct adopt_reference
+      {
+      };
+      shared_tree(radix_tree* t, sal::ptr_address root, adopt_reference) noexcept
+          : _t(t), _root(root)
+      {
+      }
+      shared_tree(radix_tree* t, sal::ptr_address root);  // adds a reference
+      void drop() noexcept;
+
+     public:
+      shared_tree() = default;
+      shared_tree(const shared_tree& other) : shared_tree(other._t, other._root) {}
+      shared_tree(shared_tree&& other) noexcept : _t(other._t), _root(other._root)
+      {
+         other._root = sal::null_ptr_address;
+      }
+      shared_tree& operator=(const shared_tree& other)
+      {
+         if (this != &other)
+            *this = shared_tree(other);
+         return *this;
+      }
+      shared_tree& operator=(shared_tree&& other) noexcept
+      {
+         if (this != &other)
+         {
+            drop();
+            _t          = other._t;
+            _root       = other._root;
+            other._root = sal::null_ptr_address;
+         }
+         return *this;
+      }
+      ~shared_tree() { drop(); }
+      /// False for the empty tree.
+      explicit operator bool() const noexcept { return _root != sal::null_ptr_address; }
+      void     reset() noexcept { drop(); }
+   };
+
    class radix_tree
    {
      public:
@@ -3600,6 +3657,10 @@ namespace sal_art_ref::radix
          // ── first-class subtree values ── (handles only; ptr_address stays internal)
          bool        is_subtree() const noexcept { return _valid && _is_subtree; }  // value is a subtree
          read_handle subtree() const;                                    // the nested tree (handle)
+         /// The nested tree as a thread-safe owning reference (alive: this cursor pins its parent).
+         shared_tree subtree_shared() const { return shared_tree(_t, _subtree); }
+         /// The tree this cursor reads, as a thread-safe owning reference.
+         shared_tree share() const { return shared_tree(_t, _root.address()); }
          cursor      subtree_cursor() const  // iterate it (pinned via THIS cursor's session)
          {
             return cursor(_t, sal::smart_ptr<sal::alloc_header>(_root.session(), _subtree,
@@ -4910,6 +4971,18 @@ namespace sal_art_ref::radix
       {
          return cursor(this,
                        ses->get_root<sal::alloc_header>(sal::root_object_number(idx)));
+      }
+      // A cursor on an arbitrary shared tree, pinned (and later released) through the CALLER's
+      // session. The shared reference keeps the tree alive while the pin is taken.
+      cursor shared_cursor(const shared_tree& shared, const sal::allocator_session_ptr& ses)
+      {
+         return cursor(this, sal::smart_ptr<sal::alloc_header>(ses, shared._root, /*retain=*/true));
+      }
+      // Writer side: a session-bound tree from a shared one, and back (consuming the tree's ref).
+      tree        adopt(const shared_tree& shared) { return tree(this, shared._root, /*retain=*/true); }
+      shared_tree share(tree t)
+      {
+         return shared_tree(this, t._root.take(), shared_tree::adopt_reference{});
       }
       // One SAL session per thread: call on the thread that will use it (psitri read_session model).
       sal::allocator_session_ptr make_session() { return _alloc->create_session(); }
@@ -6834,6 +6907,20 @@ namespace sal_art_ref::radix
       cow_counters                    _cc;
    };
 
+   // A read-only open frees nothing and runs no release thread, so its shared trees need no
+   // counting at all: every object outlives the open.
+   inline shared_tree::shared_tree(radix_tree* t, sal::ptr_address root) : _t(t), _root(root)
+   {
+      if (_root != sal::null_ptr_address && !_t->underlying_allocator().read_only())
+         _t->underlying_allocator().retain(_root);
+   }
+   inline void shared_tree::drop() noexcept
+   {
+      if (_root != sal::null_ptr_address && !_t->underlying_allocator().read_only())
+         _t->underlying_allocator().post_release(_root);
+      _root = sal::null_ptr_address;
+   }
+
    // Out-of-line (uses dispatch(), whose deduced return type must be defined first).
    inline void radix_tree::dump_root_child_refs(const char* tag)
    {
@@ -6963,6 +7050,13 @@ namespace sal_art_ref::radix
       {
          return _t->snapshot_cursor_at(idx, _ses);
       }
+      /// Read any shared tree, published or not, through this reader's session.
+      radix_tree::cursor create_cursor(const shared_tree& shared)
+      {
+         return _t->shared_cursor(shared, _ses);
+      }
+      /// The published root as a reference that can leave this thread.
+      shared_tree get_root(uint32_t idx = 0) { return create_cursor(idx).share(); }
    };
 
    class write_session
@@ -6978,6 +7072,11 @@ namespace sal_art_ref::radix
          return _t->start_write_transaction(std::move(base));
       }
       radix_tree::tree get_root(uint32_t idx) { return _t->get_root(idx); }
+      /// Hand a tree to other threads (consumes this writer's reference).
+      shared_tree share(radix_tree::tree t) { return _t->share(std::move(t)); }
+      /// Continue from a shared tree on the writer. Edits copy-on-write; the shared tree
+      /// never changes.
+      radix_tree::tree adopt(const shared_tree& shared) { return _t->adopt(shared); }
       void             set_root(uint32_t idx, radix_tree::tree t,
                                 sal::sync_type = sal::sync_type::none)
       {

@@ -622,6 +622,9 @@ namespace sal
       uint32_t                        _allocator_index;
       std::mutex               _post_release_mx;  // sessionless ASYNC release queue
       std::vector<ptr_address> _post_release_q;
+      std::atomic<uint64_t>    _post_release_pending{0};  // queued, not yet applied
+      bool                     apply_posted_releases(allocator_session& ses);
+      void                     drain_releases_stopped();
       // Guards _segment_provider.mlock_segments (a non-atomic hierarchical_bitmap):
       // the provider thread mutates it (update_segment_pinned_state / reset) while the
       // compactor thread iterates it (compactor_promote_rcache_data) — an unsynchronized
@@ -960,7 +963,8 @@ namespace sal
       // polling "pending == 0" (wait-for-drain before asserting an exact object count) returns
       // while up to 1024 popped entries are still being destroyed in the background — object
       // counts then read high by however much was in flight (a phantom "leak").
-      uint64_t total = _release_in_flight.load(std::memory_order_acquire);
+      uint64_t total = _release_in_flight.load(std::memory_order_acquire) +
+                       _post_release_pending.load(std::memory_order_acquire);
       for (uint32_t i = 0; i < max_session_count; ++i)
          total += get_release_queue(allocator_session_number(i)).usage();
       return total;

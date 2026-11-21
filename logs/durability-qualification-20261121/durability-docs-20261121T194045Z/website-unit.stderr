@@ -1,0 +1,43 @@
+test_all_repetitions_contribute_to_median_and_range (test_api_bank_evidence.ApiEvidenceTest.test_all_repetitions_contribute_to_median_and_range) ... ok
+test_missing_repetition_or_different_final_state_rejected (test_api_bank_evidence.ApiEvidenceTest.test_missing_repetition_or_different_final_state_rejected) ... ok
+test_paired_chart_labels_repeated_cohort_and_ranges (test_api_bank_evidence.ApiEvidenceTest.test_paired_chart_labels_repeated_cohort_and_ranges) ... ok
+test_small_positive_ratio_is_not_displayed_as_zero (test_api_bank_evidence.ApiEvidenceTest.test_small_positive_ratio_is_not_displayed_as_zero) ... ok
+test_smoke_dirty_failed_and_unisolated_runs_cannot_be_published (test_api_bank_evidence.ApiEvidenceTest.test_smoke_dirty_failed_and_unisolated_runs_cannot_be_published) ... ok
+test_failed_smoke_skips_measurement_and_keeps_other_pairs (test_api_bank_matrix.MatrixTest.test_failed_smoke_skips_measurement_and_keeps_other_pairs) ... ok
+test_interrupt_stops_before_starting_another_pair (test_api_bank_matrix.MatrixTest.test_interrupt_stops_before_starting_another_pair) ... ok
+test_failed_process_retains_both_streams_and_exit_code (test_benchmark.CaptureTest.test_failed_process_retains_both_streams_and_exit_code) ... ok
+test_success_exit_with_bad_metrics_is_failed_record (test_benchmark.CaptureTest.test_success_exit_with_bad_metrics_is_failed_record) ... ok
+test_unique_archives_and_json_metrics (test_benchmark.CaptureTest.test_unique_archives_and_json_metrics) ... ok
+test_durability_and_machine_mismatch_rejected (test_benchmark.ComparisonTest.test_durability_and_machine_mismatch_rejected) ... ok
+test_improvements_and_threshold_boundary (test_benchmark.ComparisonTest.test_improvements_and_threshold_boundary) ... ok
+test_missing_metrics_and_changed_units_rejected (test_benchmark.ComparisonTest.test_missing_metrics_and_changed_units_rejected) ... ok
+test_throughput_loss_and_latency_growth_are_regressions (test_benchmark.ComparisonTest.test_throughput_loss_and_latency_growth_are_regressions) ... ok
+test_zero_baseline_is_explicit (test_benchmark.ComparisonTest.test_zero_baseline_is_explicit) ... ok
+test_correctness_failure_and_absent_data_cannot_pass (test_benchmark.MetricsTest.test_correctness_failure_and_absent_data_cannot_pass) ... ok
+test_duplicate_repetitions_are_not_silently_averaged (test_benchmark.MetricsTest.test_duplicate_repetitions_are_not_silently_averaged) ... ok
+test_nonfinite_negative_and_duplicate_metrics_rejected (test_benchmark.MetricsTest.test_nonfinite_negative_and_duplicate_metrics_rejected) ... ok
+test_real_archived_bank_and_missing_instrumentation (test_benchmark.MetricsTest.test_real_archived_bank_and_missing_instrumentation) ... ok
+test_busy_machine_times_out_without_admitting_a_run (test_benchmark_idle.IsolationTest.test_busy_machine_times_out_without_admitting_a_run) ... ok
+test_other_process_cannot_acquire_machine_lock (test_benchmark_idle.IsolationTest.test_other_process_cannot_acquire_machine_lock) ... ok
+test_api_pairs_only_publish_validated_matching_runs (test_evidence.PublicEvidenceTest.test_api_pairs_only_publish_validated_matching_runs) ... ok
+test_bank_chart_matches_archived_rows (test_evidence.PublicEvidenceTest.test_bank_chart_matches_archived_rows) ... ok
+test_scale_series_preserves_every_probe_and_ram_context (test_evidence.PublicEvidenceTest.test_scale_series_preserves_every_probe_and_ram_context) ... ok
+test_actual_smoke_result_is_accepted (test_fair_bank.FairBankTest.test_actual_smoke_result_is_accepted) ... ok
+test_capture_retains_failures_and_timeouts (test_fair_bank.FairBankTest.test_capture_retains_failures_and_timeouts) ... ok
+test_diagnostic_is_one_run_and_never_a_performance_series (test_fair_bank.FairBankTest.test_diagnostic_is_one_run_and_never_a_performance_series) ... ok
+test_different_final_state_or_config_rejects_series (test_fair_bank.FairBankTest.test_different_final_state_or_config_rejects_series) ... ok
+test_durability_and_snapshot_batch_mismatch_rejected (test_fair_bank.FairBankTest.test_durability_and_snapshot_batch_mismatch_rejected) ... ok
+test_failed_or_missing_checks_rejected (test_fair_bank.FairBankTest.test_failed_or_missing_checks_rejected) ... ok
+test_full_flush_cannot_substitute_for_fsync_or_none (test_fair_bank.FairBankTest.test_full_flush_cannot_substitute_for_fsync_or_none) ... ok
+test_incomplete_failed_or_duplicate_cohort_has_no_metrics (test_fair_bank.FairBankTest.test_incomplete_failed_or_duplicate_cohort_has_no_metrics) ... ok
+test_library_or_adapter_changes_reject_series (test_fair_bank.FairBankTest.test_library_or_adapter_changes_reject_series) ... ok
+test_logged_native_storage_errors_are_fatal (test_fair_bank.FairBankTest.test_logged_native_storage_errors_are_fatal) ... ok
+test_missing_metrics_cannot_hide_costs (test_fair_bank.FairBankTest.test_missing_metrics_cannot_hide_costs) ... ok
+test_performance_still_requires_repetitions (test_fair_bank.FairBankTest.test_performance_still_requires_repetitions) ... ok
+test_skipped_transfers_and_commits_rejected (test_fair_bank.FairBankTest.test_skipped_transfers_and_commits_rejected) ... ok
+test_smoke_never_becomes_performance_series (test_fair_bank.FairBankTest.test_smoke_never_becomes_performance_series) ... ok
+
+----------------------------------------------------------------------
+Ran 38 tests in 0.902s
+
+OK

@@ -446,6 +446,10 @@ namespace sal
 
    void allocator::truncate_free_tail_stopped()
    {
+      // Unclean shutdown can leave unused tail segments. Read-only inspection
+      // must not trim them, including during allocator destruction.
+      if (_read_only)
+         return;
       auto& provider_state = _mapped_state->_segment_provider;
 
       // Drain the provider's ready queues back into free_segments bitmap.
@@ -487,6 +491,8 @@ namespace sal
 
    void allocator::truncate_free_tail()
    {
+      if (_read_only)
+         return;
       // Stop all background threads to get exclusive access to provider queues,
       // free_segments bitmap, and mlock_segments bitmap.
       stop_background_threads();
@@ -501,6 +507,8 @@ namespace sal
 
    void allocator::truncate_free_tail_final()
    {
+      if (_read_only)
+         return;
       stop_background_threads();
       truncate_free_tail_stopped();
       // Intentionally do NOT restart threads or repopulate provider queues.

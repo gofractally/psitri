@@ -18,3 +18,7 @@ if(Catch2_FOUND)
     set_target_properties(api-conformance-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME api-conformance-tests COMMAND api-conformance-tests)
 endif()
+
+if(UNIX AND NOT CMAKE_CROSSCOMPILING)
+    add_subdirectory(durability)
+endif()

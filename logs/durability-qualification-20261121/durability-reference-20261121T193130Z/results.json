@@ -1,0 +1,86 @@
+{
+  "head": "e4d23be469c7a246536431b2abb72859c6d1b014",
+  "phase": "unmodified maintained library reference; expected flush acknowledgements are defective",
+  "commands": [
+    {
+      "name": "configure",
+      "argv": [
+        "cmake",
+        "-S",
+        "tests/durability",
+        "-B",
+        "/Users/dlarimer/psitri-psibase-readers/build-durability-reference",
+        "-G",
+        "Ninja",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang",
+        "-DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++",
+        "-DPSITRI_DURABILITY_UCC_SOURCE=/Users/dlarimer/psibase-foundation-psitri/.caches/psitri-sources/ucc"
+      ],
+      "exit_code": 0
+    },
+    {
+      "name": "build",
+      "argv": [
+        "cmake",
+        "--build",
+        "/Users/dlarimer/psitri-psibase-readers/build-durability-reference",
+        "--parallel",
+        "4"
+      ],
+      "exit_code": 0
+    },
+    {
+      "name": "engine-fsync-error",
+      "argv": [
+        "/Users/dlarimer/psitri-psibase-readers/build-durability-reference/durability_fault_driver",
+        "engine",
+        "/Users/dlarimer/psitri-psibase-readers/logs/durability-reference-20261121T193130Z/database/engine-fsync-error",
+        "error",
+        "fsync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 0
+    },
+    {
+      "name": "mapping-msync-error",
+      "argv": [
+        "/Users/dlarimer/psitri-psibase-readers/build-durability-reference/durability_fault_driver",
+        "mapping",
+        "/Users/dlarimer/psitri-psibase-readers/logs/durability-reference-20261121T193130Z/database/mapping-msync-error",
+        "error",
+        "msync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 0
+    },
+    {
+      "name": "engine-msync-eintr",
+      "argv": [
+        "/Users/dlarimer/psitri-psibase-readers/build-durability-reference/durability_fault_driver",
+        "engine",
+        "/Users/dlarimer/psitri-psibase-readers/logs/durability-reference-20261121T193130Z/database/engine-msync-eintr",
+        "eintr",
+        "msync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": -6
+    },
+    {
+      "name": "fd0",
+      "argv": [
+        "/Users/dlarimer/psitri-psibase-readers/build-durability-reference/durability_fault_driver",
+        "fd0",
+        "/Users/dlarimer/psitri-psibase-readers/logs/durability-reference-20261121T193130Z/database/fd0",
+        "none",
+        "fsync",
+        "0",
+        "fsync"
+      ],
+      "exit_code": 3
+    }
+  ]
+}

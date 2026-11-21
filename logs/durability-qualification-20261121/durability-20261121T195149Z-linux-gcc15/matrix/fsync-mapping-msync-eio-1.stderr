@@ -1,0 +1,4 @@
+mapping.cpp:85             (null)     mapping               [33mOpened empty file: /home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-gcc15/evidence/20261121T195220Z/database/fsync-mapping-msync-eio-1/mapping[0m
+mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=16384[0m
+mapping.cpp:191            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=138324589252608, size=16384[0m
+SAL durability failure: msync errno=5; store durability is unknown, terminating without acknowledgement

@@ -1,0 +1,7 @@
+mapping.cpp:95             (null)     mapping               [33mMapped file: /Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193710Z/20261121T193713Z/database/fsync-engine-msync-eio-1/ptrs/header.bin, size=4224, addr=4370481152[0m
+mapping.cpp:95             (null)     mapping               [33mMapped file: /Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193710Z/20261121T193713Z/database/fsync-engine-msync-eio-1/iref/header.bin, size=4224, addr=4370497536[0m
+mapping.cpp:95             (null)     mapping               [33mMapped file: /Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193710Z/20261121T193713Z/database/fsync-engine-msync-eio-1/header, size=93650944, addr=4450353152[0m
+mapping.cpp:95             (null)     mapping               [33mMapped file: /Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193710Z/20261121T193713Z/database/fsync-engine-msync-eio-1/roots, size=32768, addr=4370513920[0m
+mapping.cpp:95             (null)     mapping               [33mMapped file: /Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193710Z/20261121T193713Z/database/fsync-engine-msync-eio-1/session_ops.bin, size=32768, addr=4370546688[0m
+block_allocator.cpp:601    (null)     truncate              [1;31mFailed to remap file after truncate failure: Permission denied[0m
+libc++abi: terminating due to uncaught exception of type std::runtime_error: failed to remap file after truncate failure

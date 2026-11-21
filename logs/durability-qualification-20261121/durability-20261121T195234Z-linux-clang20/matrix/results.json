@@ -1,0 +1,1195 @@
+{
+  "platform": "Linux-6.17.0-22-generic-x86_64-with-glibc2.42",
+  "binary_sha256": "e4b3560dc9955bb4ebf8cf427fb72c6975dae208710f6957abbb9718d1d468a0",
+  "passed": true,
+  "cases": [
+    {
+      "label": "fsync-mapping-msync-healthy",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "mapping",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-mapping-msync-healthy",
+        "count",
+        "msync",
+        "0",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0028803274035453796,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-mapping-msync-eintr-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "mapping",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-mapping-msync-eintr-1",
+        "eintr",
+        "msync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0017574913799762726,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-mapping-msync-eio-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "mapping",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-mapping-msync-eio-1",
+        "error",
+        "msync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 74,
+      "seconds": 0.0010370425879955292,
+      "acknowledged": false
+    },
+    {
+      "label": "fsync-mapping-fsync-healthy",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "mapping",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-mapping-fsync-healthy",
+        "count",
+        "fsync",
+        "0",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.002095237374305725,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-mapping-fsync-eintr-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "mapping",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-mapping-fsync-eintr-1",
+        "eintr",
+        "fsync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0016016103327274323,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-mapping-fsync-eio-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "mapping",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-mapping-fsync-eio-1",
+        "error",
+        "fsync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 74,
+      "seconds": 0.001983504742383957,
+      "acknowledged": false
+    },
+    {
+      "label": "fsync-block-fsync-healthy",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "block",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-block-fsync-healthy",
+        "count",
+        "fsync",
+        "0",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0018013827502727509,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-block-fsync-eintr-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "block",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-block-fsync-eintr-1",
+        "eintr",
+        "fsync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0016127265989780426,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-block-fsync-eio-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "block",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-block-fsync-eio-1",
+        "error",
+        "fsync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 74,
+      "seconds": 0.0011706165969371796,
+      "acknowledged": false
+    },
+    {
+      "label": "fsync-engine-msync-healthy",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-msync-healthy",
+        "count",
+        "msync",
+        "0",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.07113264501094818,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-engine-msync-eintr-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-msync-eintr-1",
+        "eintr",
+        "msync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0736413337290287,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-engine-msync-eio-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-msync-eio-1",
+        "error",
+        "msync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 74,
+      "seconds": 0.057820212095975876,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=old"
+    },
+    {
+      "label": "fsync-engine-msync-eintr-2",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-msync-eintr-2",
+        "eintr",
+        "msync",
+        "2",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.06825645640492439,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-engine-msync-eio-2",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-msync-eio-2",
+        "error",
+        "msync",
+        "2",
+        "fsync"
+      ],
+      "exit_code": 74,
+      "seconds": 0.05795394629240036,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=old"
+    },
+    {
+      "label": "fsync-engine-msync-eintr-3",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-msync-eintr-3",
+        "eintr",
+        "msync",
+        "3",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.06964888796210289,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-engine-msync-eio-3",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-msync-eio-3",
+        "error",
+        "msync",
+        "3",
+        "fsync"
+      ],
+      "exit_code": 74,
+      "seconds": 0.05474758520722389,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=new"
+    },
+    {
+      "label": "fsync-engine-fsync-healthy",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-fsync-healthy",
+        "count",
+        "fsync",
+        "0",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.13095341995358467,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-engine-fsync-eintr-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-fsync-eintr-1",
+        "eintr",
+        "fsync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.11998798325657845,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-engine-fsync-eio-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-fsync-eio-1",
+        "error",
+        "fsync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 74,
+      "seconds": 0.05760759860277176,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=old"
+    },
+    {
+      "label": "fsync-engine-fsync-eintr-2",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-fsync-eintr-2",
+        "eintr",
+        "fsync",
+        "2",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0705164335668087,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-engine-fsync-eio-2",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-fsync-eio-2",
+        "error",
+        "fsync",
+        "2",
+        "fsync"
+      ],
+      "exit_code": 74,
+      "seconds": 0.05639888718724251,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=old"
+    },
+    {
+      "label": "fsync-engine-fsync-eintr-3",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-fsync-eintr-3",
+        "eintr",
+        "fsync",
+        "3",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.07150017097592354,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-engine-fsync-eio-3",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-fsync-eio-3",
+        "error",
+        "fsync",
+        "3",
+        "fsync"
+      ],
+      "exit_code": 74,
+      "seconds": 0.05716608837246895,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=new"
+    },
+    {
+      "label": "fsync-engine-fsync-eintr-4",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-fsync-eintr-4",
+        "eintr",
+        "fsync",
+        "4",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.06937037780880928,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-engine-fsync-eio-4",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-fsync-eio-4",
+        "error",
+        "fsync",
+        "4",
+        "fsync"
+      ],
+      "exit_code": 74,
+      "seconds": 0.05632020905613899,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=new"
+    },
+    {
+      "label": "fsync-engine-thread-fsync-healthy",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine-thread",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-thread-fsync-healthy",
+        "count",
+        "fsync",
+        "0",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.070164043456316,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-engine-thread-fsync-eintr-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine-thread",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-thread-fsync-eintr-1",
+        "eintr",
+        "fsync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.09210558980703354,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-engine-thread-fsync-eio-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine-thread",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-thread-fsync-eio-1",
+        "error",
+        "fsync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 74,
+      "seconds": 0.05609121918678284,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=old"
+    },
+    {
+      "label": "fsync-engine-thread-fsync-eintr-2",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine-thread",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-thread-fsync-eintr-2",
+        "eintr",
+        "fsync",
+        "2",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.07168954610824585,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-engine-thread-fsync-eio-2",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine-thread",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-thread-fsync-eio-2",
+        "error",
+        "fsync",
+        "2",
+        "fsync"
+      ],
+      "exit_code": 74,
+      "seconds": 0.057989511638879776,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=old"
+    },
+    {
+      "label": "fsync-engine-thread-fsync-eintr-3",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine-thread",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-thread-fsync-eintr-3",
+        "eintr",
+        "fsync",
+        "3",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.07268453389406204,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-engine-thread-fsync-eio-3",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine-thread",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-thread-fsync-eio-3",
+        "error",
+        "fsync",
+        "3",
+        "fsync"
+      ],
+      "exit_code": 74,
+      "seconds": 0.055068571120500565,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=new"
+    },
+    {
+      "label": "fsync-engine-thread-fsync-eintr-4",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine-thread",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-thread-fsync-eintr-4",
+        "eintr",
+        "fsync",
+        "4",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0701390691101551,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-engine-thread-fsync-eio-4",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine-thread",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/fsync-engine-thread-fsync-eio-4",
+        "error",
+        "fsync",
+        "4",
+        "fsync"
+      ],
+      "exit_code": 74,
+      "seconds": 0.05459879711270332,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=new"
+    },
+    {
+      "label": "full-mapping-msync-healthy",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "mapping",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-mapping-msync-healthy",
+        "count",
+        "msync",
+        "0",
+        "full"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0024562999606132507,
+      "acknowledged": true
+    },
+    {
+      "label": "full-mapping-msync-eintr-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "mapping",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-mapping-msync-eintr-1",
+        "eintr",
+        "msync",
+        "1",
+        "full"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0015820600092411041,
+      "acknowledged": true
+    },
+    {
+      "label": "full-mapping-msync-eio-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "mapping",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-mapping-msync-eio-1",
+        "error",
+        "msync",
+        "1",
+        "full"
+      ],
+      "exit_code": 74,
+      "seconds": 0.0010372847318649292,
+      "acknowledged": false
+    },
+    {
+      "label": "full-mapping-fsync-healthy",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "mapping",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-mapping-fsync-healthy",
+        "count",
+        "fsync",
+        "0",
+        "full"
+      ],
+      "exit_code": 0,
+      "seconds": 0.001527886837720871,
+      "acknowledged": true
+    },
+    {
+      "label": "full-mapping-fsync-eintr-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "mapping",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-mapping-fsync-eintr-1",
+        "eintr",
+        "fsync",
+        "1",
+        "full"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0018124878406524658,
+      "acknowledged": true
+    },
+    {
+      "label": "full-mapping-fsync-eio-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "mapping",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-mapping-fsync-eio-1",
+        "error",
+        "fsync",
+        "1",
+        "full"
+      ],
+      "exit_code": 74,
+      "seconds": 0.0012752190232276917,
+      "acknowledged": false
+    },
+    {
+      "label": "full-block-fsync-healthy",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "block",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-block-fsync-healthy",
+        "count",
+        "fsync",
+        "0",
+        "full"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0016355551779270172,
+      "acknowledged": true
+    },
+    {
+      "label": "full-block-fsync-eintr-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "block",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-block-fsync-eintr-1",
+        "eintr",
+        "fsync",
+        "1",
+        "full"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0011647865176200867,
+      "acknowledged": true
+    },
+    {
+      "label": "full-block-fsync-eio-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "block",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-block-fsync-eio-1",
+        "error",
+        "fsync",
+        "1",
+        "full"
+      ],
+      "exit_code": 74,
+      "seconds": 0.0009099505841732025,
+      "acknowledged": false
+    },
+    {
+      "label": "full-engine-msync-healthy",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-msync-healthy",
+        "count",
+        "msync",
+        "0",
+        "full"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0663813017308712,
+      "acknowledged": true
+    },
+    {
+      "label": "full-engine-msync-eintr-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-msync-eintr-1",
+        "eintr",
+        "msync",
+        "1",
+        "full"
+      ],
+      "exit_code": 0,
+      "seconds": 0.06957433745265007,
+      "acknowledged": true
+    },
+    {
+      "label": "full-engine-msync-eio-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-msync-eio-1",
+        "error",
+        "msync",
+        "1",
+        "full"
+      ],
+      "exit_code": 74,
+      "seconds": 0.05462071672081947,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=old"
+    },
+    {
+      "label": "full-engine-msync-eintr-2",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-msync-eintr-2",
+        "eintr",
+        "msync",
+        "2",
+        "full"
+      ],
+      "exit_code": 0,
+      "seconds": 0.07028493285179138,
+      "acknowledged": true
+    },
+    {
+      "label": "full-engine-msync-eio-2",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-msync-eio-2",
+        "error",
+        "msync",
+        "2",
+        "full"
+      ],
+      "exit_code": 74,
+      "seconds": 0.05536823347210884,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=old"
+    },
+    {
+      "label": "full-engine-msync-eintr-3",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-msync-eintr-3",
+        "eintr",
+        "msync",
+        "3",
+        "full"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0688665360212326,
+      "acknowledged": true
+    },
+    {
+      "label": "full-engine-msync-eio-3",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-msync-eio-3",
+        "error",
+        "msync",
+        "3",
+        "full"
+      ],
+      "exit_code": 74,
+      "seconds": 0.05573828145861626,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=new"
+    },
+    {
+      "label": "full-engine-fsync-healthy",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-fsync-healthy",
+        "count",
+        "fsync",
+        "0",
+        "full"
+      ],
+      "exit_code": 0,
+      "seconds": 0.06861802190542221,
+      "acknowledged": true
+    },
+    {
+      "label": "full-engine-fsync-eintr-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-fsync-eintr-1",
+        "eintr",
+        "fsync",
+        "1",
+        "full"
+      ],
+      "exit_code": 0,
+      "seconds": 0.06979268044233322,
+      "acknowledged": true
+    },
+    {
+      "label": "full-engine-fsync-eio-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-fsync-eio-1",
+        "error",
+        "fsync",
+        "1",
+        "full"
+      ],
+      "exit_code": 74,
+      "seconds": 0.05502604320645332,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=old"
+    },
+    {
+      "label": "full-engine-fsync-eintr-2",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-fsync-eintr-2",
+        "eintr",
+        "fsync",
+        "2",
+        "full"
+      ],
+      "exit_code": 0,
+      "seconds": 0.06866208091378212,
+      "acknowledged": true
+    },
+    {
+      "label": "full-engine-fsync-eio-2",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-fsync-eio-2",
+        "error",
+        "fsync",
+        "2",
+        "full"
+      ],
+      "exit_code": 74,
+      "seconds": 0.05544785410165787,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=old"
+    },
+    {
+      "label": "full-engine-fsync-eintr-3",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-fsync-eintr-3",
+        "eintr",
+        "fsync",
+        "3",
+        "full"
+      ],
+      "exit_code": 0,
+      "seconds": 0.071612399071455,
+      "acknowledged": true
+    },
+    {
+      "label": "full-engine-fsync-eio-3",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-fsync-eio-3",
+        "error",
+        "fsync",
+        "3",
+        "full"
+      ],
+      "exit_code": 74,
+      "seconds": 0.11923375353217125,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=new"
+    },
+    {
+      "label": "full-engine-fsync-eintr-4",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-fsync-eintr-4",
+        "eintr",
+        "fsync",
+        "4",
+        "full"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0711473785340786,
+      "acknowledged": true
+    },
+    {
+      "label": "full-engine-fsync-eio-4",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-fsync-eio-4",
+        "error",
+        "fsync",
+        "4",
+        "full"
+      ],
+      "exit_code": 74,
+      "seconds": 0.058736227452754974,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=new"
+    },
+    {
+      "label": "full-engine-thread-fsync-healthy",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine-thread",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-thread-fsync-healthy",
+        "count",
+        "fsync",
+        "0",
+        "full"
+      ],
+      "exit_code": 0,
+      "seconds": 0.11092159897089005,
+      "acknowledged": true
+    },
+    {
+      "label": "full-engine-thread-fsync-eintr-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine-thread",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-thread-fsync-eintr-1",
+        "eintr",
+        "fsync",
+        "1",
+        "full"
+      ],
+      "exit_code": 0,
+      "seconds": 0.1179192066192627,
+      "acknowledged": true
+    },
+    {
+      "label": "full-engine-thread-fsync-eio-1",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine-thread",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-thread-fsync-eio-1",
+        "error",
+        "fsync",
+        "1",
+        "full"
+      ],
+      "exit_code": 74,
+      "seconds": 0.06291735917329788,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=old"
+    },
+    {
+      "label": "full-engine-thread-fsync-eintr-2",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine-thread",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-thread-fsync-eintr-2",
+        "eintr",
+        "fsync",
+        "2",
+        "full"
+      ],
+      "exit_code": 0,
+      "seconds": 0.07250268757343292,
+      "acknowledged": true
+    },
+    {
+      "label": "full-engine-thread-fsync-eio-2",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine-thread",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-thread-fsync-eio-2",
+        "error",
+        "fsync",
+        "2",
+        "full"
+      ],
+      "exit_code": 74,
+      "seconds": 0.07307655364274979,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=old"
+    },
+    {
+      "label": "full-engine-thread-fsync-eintr-3",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine-thread",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-thread-fsync-eintr-3",
+        "eintr",
+        "fsync",
+        "3",
+        "full"
+      ],
+      "exit_code": 0,
+      "seconds": 0.08177132159471512,
+      "acknowledged": true
+    },
+    {
+      "label": "full-engine-thread-fsync-eio-3",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine-thread",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-thread-fsync-eio-3",
+        "error",
+        "fsync",
+        "3",
+        "full"
+      ],
+      "exit_code": 74,
+      "seconds": 0.057297032326459885,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=new"
+    },
+    {
+      "label": "full-engine-thread-fsync-eintr-4",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine-thread",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-thread-fsync-eintr-4",
+        "eintr",
+        "fsync",
+        "4",
+        "full"
+      ],
+      "exit_code": 0,
+      "seconds": 0.07019748166203499,
+      "acknowledged": true
+    },
+    {
+      "label": "full-engine-thread-fsync-eio-4",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine-thread",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-engine-thread-fsync-eio-4",
+        "error",
+        "fsync",
+        "4",
+        "full"
+      ],
+      "exit_code": 74,
+      "seconds": 0.056064967066049576,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=new"
+    },
+    {
+      "label": "valid-fd-zero",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "fd0",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/valid-fd-zero",
+        "count",
+        "fsync",
+        "0",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0022692643105983734,
+      "acknowledged": true
+    },
+    {
+      "label": "truncate-grow-shrink-prefix",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "block-grow",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/truncate-grow-shrink-prefix",
+        "count",
+        "fsync",
+        "0",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0015690624713897705,
+      "acknowledged": true
+    },
+    {
+      "label": "readonly-truncate-rejected",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "readonly-truncate",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/readonly-truncate-rejected",
+        "count",
+        "fsync",
+        "0",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0022268295288085938,
+      "acknowledged": true
+    },
+    {
+      "label": "error-enospc-engine-fsync",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/error-enospc-engine-fsync",
+        "error-enospc",
+        "fsync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 74,
+      "seconds": 0.056940384209156036,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=old"
+    },
+    {
+      "label": "error-erofs-engine-fsync",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/error-erofs-engine-fsync",
+        "error-erofs",
+        "fsync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 74,
+      "seconds": 0.06139025092124939,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=old"
+    },
+    {
+      "label": "error-ebadf-engine-fsync",
+      "argv": [
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver",
+        "engine",
+        "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/error-ebadf-engine-fsync",
+        "error-ebadf",
+        "fsync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 74,
+      "seconds": 0.09740734100341797,
+      "acknowledged": false,
+      "reopen_exit_code": 0,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=old"
+    }
+  ],
+  "ack_boundary": "ACK is written only after commit/sync returns.",
+  "terminal_contract": "EIO exits the entire process with 74 before ACK; no later writes execute.",
+  "reopen_contract": "Without a power cut or corruption injection, the failed fixture must reopen as complete old or complete new. Unacknowledged does not promise rollback. Read-only reopen never modifies files."
+}

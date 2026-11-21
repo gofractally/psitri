@@ -1,0 +1,25 @@
+{
+  "commands": [
+    {
+      "name": "website-unit",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/website",
+        "-v"
+      ],
+      "exit_code": 0
+    },
+    {
+      "name": "website-build",
+      "argv": [
+        "python3",
+        "scripts/build_site.py"
+      ],
+      "exit_code": 0
+    }
+  ]
+}

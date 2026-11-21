@@ -1,0 +1,1 @@
+SAL durability failure: fsync errno=5; store durability is unknown, terminating without acknowledgement

@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include <sal/config.hpp>
+#include <sal/durable_io.hpp>
 #include <sal/mapping.hpp>  // sync_type
 #include <ucc/typed_int.hpp>
 
@@ -77,6 +78,8 @@ namespace sal
        * Resizes the file and num_blocks() count to nblocks.
        */
       void truncate(uint32_t nblocks);
+      // Retries EINTR. Returns true only on success; a terminal flush failure
+      // terminates with durable_io_failure_exit_code, never a false success.
       bool fsync(bool full = false) noexcept;
 
       /**

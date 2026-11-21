@@ -1,5 +1,6 @@
 #include <fcntl.h>
 #include <sal/debug.hpp>
+#include <sal/durable_io.hpp>
 #include <sal/mapping.hpp>
 
 #include <cassert>
@@ -205,32 +206,21 @@ namespace sal
          return;
       if (st == sync_type::msync_async)
       {
-         if (::msync(data(), size(), MS_ASYNC) != 0)
-            SAL_ERROR("Failed to msync: error={}", strerror(errno));
+         durable_msync(data(), size(), MS_ASYNC);
       }
       else if (st == sync_type::msync_sync)
       {
-         if (::msync(data(), size(), MS_SYNC) != 0)
-            SAL_ERROR("Failed to msync: error={}", strerror(errno));
+         durable_msync(data(), size(), MS_SYNC);
       }
       else if (st == sync_type::fsync)
       {
-         if (::msync(data(), size(), MS_SYNC) != 0)
-            SAL_ERROR("Failed to msync: error={}", strerror(errno));
-         if (::fsync(_fd) != 0)
-            SAL_ERROR("Failed to fsync: error={}", strerror(errno));
+         durable_msync(data(), size(), MS_SYNC);
+         durable_fsync(_fd);
       }
       else if (st == sync_type::full)
       {
-         if (::msync(data(), size(), MS_SYNC) != 0)
-            SAL_ERROR("Failed to msync: error={}", strerror(errno));
-#ifdef __APPLE__
-         if (-1 == ::fcntl(_fd, F_FULLFSYNC))
-            SAL_ERROR("Failed to fcntl: error={}", strerror(errno));
-#else
-         if (::fsync(_fd) != 0)
-            SAL_ERROR("Failed to fsync: error={}", strerror(errno));
-#endif
+         durable_msync(data(), size(), MS_SYNC);
+         durable_fsync(_fd, true);
       }
    }
 }  // namespace sal

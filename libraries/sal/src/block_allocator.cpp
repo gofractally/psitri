@@ -296,7 +296,7 @@ namespace sal
 
    block_allocator::~block_allocator()
    {
-      if (_fd)
+      if (_fd >= 0)
       {
          // Unmap the entire file at once if we have a mapped base
          if (_mapped_base && _mapped_base != MAP_FAILED &&
@@ -320,27 +320,8 @@ namespace sal
 
    bool block_allocator::fsync([[maybe_unused]] bool full) noexcept
    {
-      if (_fd)
-      {
-#ifdef __APPLE__
-         if (full)
-         {
-            if (fcntl(_fd, F_FULLFSYNC) < 0)
-            {
-               SAL_ERROR("Failed to fsync file: {}", strerror(errno));
-               return false;
-            }
-            return true;
-         }
-#endif
-         if (::fsync(_fd) < 0)
-         {
-            SAL_ERROR("Failed to fsync file: {}", strerror(errno));
-            return false;
-         }
-         return true;
-      }
-      return false;
+      durable_fsync(_fd, full);
+      return true; // terminal failures fail-stop; false is never ignored upstream
    }
 
    bool block_allocator::mlock_mapped_blocks(uint32_t desired_num_blocks) noexcept
@@ -563,7 +544,9 @@ namespace sal
 
    void block_allocator::truncate(uint32_t nblocks)
    {
-      std::lock_guard l{_resize_mutex};
+      if (_mode != access_mode::read_write)
+         throw std::runtime_error("block_allocator: cannot truncate a read-only mapping");
+      std::unique_lock l{_resize_mutex};
 
       // Check if the requested size is greater than max_blocks
       if (nblocks > _max_blocks)
@@ -576,8 +559,8 @@ namespace sal
       if (new_size > _file_size)
       {
          // Release the lock and call reserve
-         l.~lock_guard();
-         reserve(nblocks);
+         l.unlock();
+         resize(nblocks);
          return;
       }
 
@@ -656,7 +639,7 @@ namespace sal
    bool block_allocator::punch_hole(block_number block, uint32_t count) noexcept
    {
 #ifdef __linux__
-      if (!_fd || count == 0)
+      if (_fd < 0 || count == 0)
          return false;
 
       off_t  offset = static_cast<off_t>(*block) * _block_size;

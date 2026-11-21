@@ -1,0 +1,443 @@
+Internal ctest changing into directory: /home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20
+UpdateCTestConfiguration  from :/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/DartConfiguration.tcl
+UpdateCTestConfiguration  from :/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/DartConfiguration.tcl
+Test project /home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20
+Constructing a list of tests
+Done constructing a list of tests
+Updating test list for fixtures
+Added 0 tests to meet fixture requirements
+Checking test dependency graph...
+Checking test dependency graph end
+test 1
+    Start 1: durability_public_api_regression
+
+1: Test command: /home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_api_regression
+1: Working Directory: /home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20
+1: Test timeout computed to be: 10000000
+1: Randomness seeded to: 1330823666
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-JVZr86/db/meta.part[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=1312[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857923072, size=1312[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-JVZr86/db/large/meta.part[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=131360[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123483354689536, size=131360[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-api-JVZr86/db/meta.part, size=1312, addr=123517857923072[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-api-JVZr86/db/large/meta.part, size=131360, addr=123483354689536[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-tn6cAI/db/ptrs/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857918976, size=4224[0m
+1: control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-tn6cAI/db/iref/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857910784, size=4224[0m
+1: allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (60 GB) — capping[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-tn6cAI/db/header[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-tn6cAI/db/roots[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-tn6cAI/db/session_ops.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=93618176[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123483397521408, size=93618176[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=24576[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857845248, size=24576[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=20480[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857890304, size=20480[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-api-tn6cAI/db/ptrs/header.bin, size=4224, addr=123517857918976[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-api-tn6cAI/db/iref/header.bin, size=4224, addr=123517857910784[0m
+1: allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (60 GB) — capping[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-api-tn6cAI/db/header, size=93618176, addr=123483397521408[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-api-tn6cAI/db/roots, size=24576, addr=123517857845248[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-api-tn6cAI/db/session_ops.bin, size=20480, addr=123517857890304[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-api-tn6cAI/db/ptrs/header.bin, size=4224, addr=123517857918976[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-api-tn6cAI/db/iref/header.bin, size=4224, addr=123517857910784[0m
+1: allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (60 GB) — capping[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-api-tn6cAI/db/header, size=93618176, addr=123483397521408[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-api-tn6cAI/db/roots, size=24576, addr=123517857845248[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-api-tn6cAI/db/session_ops.bin, size=20480, addr=123517857890304[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-oVh2EL/meta.part[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=1312[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857923072, size=1312[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-oVh2EL/large/meta.part[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=131360[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517714427904, size=131360[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-WWN8TY/ptrs/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857918976, size=4224[0m
+1: control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-WWN8TY/iref/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857910784, size=4224[0m
+1: allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (60 GB) — capping[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-WWN8TY/header[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-WWN8TY/roots[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-WWN8TY/session_ops.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=93618176[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123483397521408, size=93618176[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=24576[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857845248, size=24576[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=20480[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857890304, size=20480[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-e7YEB8/meta.part[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=1312[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857923072, size=1312[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-e7YEB8/large/meta.part[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=131360[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517714427904, size=131360[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-Szm4y6/ptrs/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857918976, size=4224[0m
+1: control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-Szm4y6/iref/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857910784, size=4224[0m
+1: allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (60 GB) — capping[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-Szm4y6/header[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-Szm4y6/roots[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-Szm4y6/session_ops.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=93618176[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123483397521408, size=93618176[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=24576[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857845248, size=24576[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=20480[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857890304, size=20480[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-Gnyff0/ptrs/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857918976, size=4224[0m
+1: control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-Gnyff0/iref/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857910784, size=4224[0m
+1: allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (60 GB) — capping[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-Gnyff0/header[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-Gnyff0/roots[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-Gnyff0/session_ops.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=93618176[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123483397521408, size=93618176[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=24576[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857845248, size=24576[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=20480[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857890304, size=20480[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-108hTt/ptrs/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857918976, size=4224[0m
+1: control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-108hTt/iref/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857910784, size=4224[0m
+1: allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (60 GB) — capping[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-108hTt/header[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-108hTt/roots[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-api-108hTt/session_ops.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=93618176[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123483397521408, size=93618176[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=24576[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857845248, size=24576[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=20480[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857890304, size=20480[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-4812bV/ptrs/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857918976, size=4224[0m
+1: control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-4812bV/iref/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857910784, size=4224[0m
+1: allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (60 GB) — capping[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-4812bV/header[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-4812bV/roots[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-4812bV/session_ops.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=93618176[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123483397521408, size=93618176[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=24576[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857845248, size=24576[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=20480[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857890304, size=20480[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-0TtfhQ/ptrs/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857918976, size=4224[0m
+1: control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-0TtfhQ/iref/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857910784, size=4224[0m
+1: allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (60 GB) — capping[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-0TtfhQ/header[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-0TtfhQ/roots[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-0TtfhQ/session_ops.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=93618176[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123483397521408, size=93618176[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=24576[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857845248, size=24576[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=20480[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857890304, size=20480[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-9lIP3W/ptrs/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857918976, size=4224[0m
+1: control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-9lIP3W/iref/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857910784, size=4224[0m
+1: allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (60 GB) — capping[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-9lIP3W/header[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-9lIP3W/roots[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-9lIP3W/session_ops.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=93618176[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123483397521408, size=93618176[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=24576[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857845248, size=24576[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=20480[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857890304, size=20480[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-vFO1Th/ptrs/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857918976, size=4224[0m
+1: control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-vFO1Th/iref/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857910784, size=4224[0m
+1: allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (60 GB) — capping[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-vFO1Th/header[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-vFO1Th/roots[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-vFO1Th/session_ops.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=93618176[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123483397521408, size=93618176[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=24576[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857845248, size=24576[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=20480[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857890304, size=20480[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-hRdrDa/ptrs/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857918976, size=4224[0m
+1: control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-hRdrDa/iref/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857910784, size=4224[0m
+1: allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (60 GB) — capping[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-hRdrDa/header[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-hRdrDa/roots[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-hRdrDa/session_ops.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=93618176[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123483397521408, size=93618176[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=24576[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857845248, size=24576[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=20480[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857890304, size=20480[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-TA7LYO/ptrs/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857918976, size=4224[0m
+1: control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-TA7LYO/iref/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857910784, size=4224[0m
+1: allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (60 GB) — capping[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-TA7LYO/header[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-TA7LYO/roots[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-TA7LYO/session_ops.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=93618176[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123511849582592, size=93618176[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=24576[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857845248, size=24576[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=20480[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857890304, size=20480[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-large-TA7LYO/ptrs/header.bin, size=4224, addr=123517857918976[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-large-TA7LYO/iref/header.bin, size=4224, addr=123517857910784[0m
+1: allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (60 GB) — capping[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-large-TA7LYO/header, size=93618176, addr=123511849582592[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-large-TA7LYO/roots, size=24576, addr=123517857845248[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-large-TA7LYO/session_ops.bin, size=20480, addr=123517857890304[0m
+1: allocator.cpp:974          (null)     reset_reference_counts  [33mResetting reference counts...[0m
+1: control_block_alloc.cpp:213  (null)     release_unreachable   [33mrelease_unreachable: freed 0 unreachable, 4 surviving[0m
+1: allocator.cpp:859          (null)     recover               [33mRecovering... rebuilding control blocks from segments![0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 248832[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 4159488[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1457664[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 621056[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 2891264[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1976320[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 3730432[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 3162624[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 2985984[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 2949120[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 3277312[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 3211776[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 2049024[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 2078720[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 2043392[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 357376[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 3331072[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1199616[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 133632[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 2998784[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 196096[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 465920[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 4156416[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 35328[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1943552[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 2593792[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 3012608[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1382912[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 3308544[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1285120[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 510976[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1507840[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1382400[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1727488[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 698368[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 3105280[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1664000[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 547328[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 3010048[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1211904[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 629248[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 3764736[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1131008[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1131009[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 3153408[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1449984[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 437248[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 2515968[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 368640[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1405440[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1539072[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1131010[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1944576[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1153536[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 3520512[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 814592[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1388544[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 733696[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 338432[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 2133504[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 3913728[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1346560[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 724992[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1232896[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 4158976[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 2714624[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1134592[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 2417152[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1582593[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1582594[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 4166144[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 2896384[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 440320[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 885760[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1334784[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 2487296[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1644544[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 1582595[0m
+1: control_block_alloc.hpp:497  (null)     get_or_alloc          [33mget_or_alloc: 3255808[0m
+1: control_block_alloc.cpp:213  (null)     release_unreachable   [33mrelease_unreachable: freed 75 unreachable, 4 surviving[0m
+1: allocator.cpp:969          (null)     recover               [33mRecovery complete.[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-large-TA7LYO/ptrs/header.bin, size=4224, addr=123517857918976[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-large-TA7LYO/iref/header.bin, size=4224, addr=123517857910784[0m
+1: allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (60 GB) — capping[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-large-TA7LYO/header, size=93618176, addr=123511849582592[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-large-TA7LYO/roots, size=24576, addr=123517857845248[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-large-TA7LYO/session_ops.bin, size=20480, addr=123517857890304[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-HYdxPa/ptrs/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857918976, size=4224[0m
+1: control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-HYdxPa/iref/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857910784, size=4224[0m
+1: allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (60 GB) — capping[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-HYdxPa/header[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-HYdxPa/roots[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-HYdxPa/session_ops.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=93618176[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123483397521408, size=93618176[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=24576[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857845248, size=24576[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=20480[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857890304, size=20480[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-eiOl6W/ptrs/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857918976, size=4224[0m
+1: control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-eiOl6W/iref/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857910784, size=4224[0m
+1: allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (60 GB) — capping[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-eiOl6W/header[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-eiOl6W/roots[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-eiOl6W/session_ops.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=93618176[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123483397521408, size=93618176[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=24576[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857845248, size=24576[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=20480[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857890304, size=20480[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-WbYo49/ptrs/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857918976, size=4224[0m
+1: control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-WbYo49/iref/header.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857910784, size=4224[0m
+1: allocator.cpp:260          (null)     cap_to_disk_space     [33mmax_database_size (32768 GB) exceeds filesystem capacity (60 GB) — capping[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-WbYo49/header[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-WbYo49/roots[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-large-WbYo49/session_ops.bin[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=93618176[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123477800222720, size=93618176[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=24576[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857845248, size=24576[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=20480[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857890304, size=20480[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-small-large-ayVe4j/meta.part[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=736[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857923072, size=736[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-small-large-ayVe4j/large/meta.part[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=65760[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857800192, size=65760[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-small-large-T49us0/meta.part[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=736[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857923072, size=736[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-small-large-T49us0/large/meta.part[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=65760[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857800192, size=65760[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-small-large-aBtT80/meta.part[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=232[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857906688, size=232[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-small-large-aBtT80/large/meta.part[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=8360[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857792000, size=8360[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-small-large-T0kBxH/meta.part[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=232[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857906688, size=232[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-small-large-T0kBxH/large/meta.part[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=8360[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857792000, size=8360[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-small-large-uZvJKx/meta.part[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=736[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857923072, size=736[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-small-large-uZvJKx/large/meta.part[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=65760[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857800192, size=65760[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-small-large-uZvJKx/meta.part, size=736, addr=123517857923072[0m
+1: mapping.cpp:95             (null)     mapping               [33mMapped file: /tmp/psitri-small-large-uZvJKx/large/meta.part, size=65760, addr=123517857800192[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-small-large-6jaXMy/meta.part[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=736[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857923072, size=736[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-small-large-6jaXMy/large/meta.part[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=65760[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857800192, size=65760[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-small-large-zrNLPT/meta.part[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=736[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857923072, size=736[0m
+1: mapping.cpp:85             (null)     mapping               [33mOpened empty file: /tmp/psitri-small-large-zrNLPT/large/meta.part[0m
+1: mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=65760[0m
+1: mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=123517857800192, size=65760[0m
+1: ===============================================================================
+1: All tests passed (6320 assertions in 21 test cases)
+1: 
+1/2 Test #1: durability_public_api_regression ...   Passed    3.65 sec
+test 2
+    Start 2: durable_io_fail_stop
+
+2: Test command: /usr/bin/python3 "/home/dlarimer/psibase-migration-20261121/psitri-durability/tests/durability/run_matrix.py" "--binary" "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/durability_fault_driver" "--output" "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence"
+2: Working Directory: /home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20
+2: Test timeout computed to be: 180
+2: {"evidence": "/home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z", "passed": true, "cases": 74, "error": null}
+2/2 Test #2: durable_io_fail_stop ...............   Passed   15.11 sec
+
+100% tests passed, 0 tests failed out of 2
+
+Total Test time (real) =  18.77 sec

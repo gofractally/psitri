@@ -1,0 +1,4 @@
+mapping.cpp:84             (null)     mapping               [33mOpened empty file: /Users/dlarimer/psitri-psibase-readers/logs/durability-reference-20261121T193130Z/database/mapping-msync-error/mapping[0m
+mapping.cpp:132            (null)     resize                [33mResizing mapping: current=0, new=16384[0m
+mapping.cpp:192            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4311105536, size=16384[0m
+mapping.cpp:219            (null)     sync                  [1;31mFailed to msync: error=Input/output error[0m

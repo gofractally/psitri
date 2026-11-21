@@ -323,8 +323,8 @@ namespace sal
          // fsync(full=true) because _root_object_file also need to be synced
          // and it will do a full (computer-wide) sync if needed and implicitly
          // grab data synced by _block_alloc.
-         if (st >= sync_type::fsync)
-            _block_alloc.fsync(false);
+         if (st >= sync_type::fsync && !_block_alloc.fsync(false))
+            fail_durable_io("data file fsync", EIO);
          _root_object_file.sync(st);
 
          // we don't sync _ptr_alloc because that data can be recovered from data

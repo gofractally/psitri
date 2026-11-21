@@ -1,0 +1,1 @@
+{"evidence": "/Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193710Z/20261121T193713Z", "passed": false, "cases": 12, "error": "fsync-engine-msync-eio-1: failed commit reopened inconsistently or read-only modified files"}

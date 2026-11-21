@@ -49,6 +49,7 @@ set(SAL_HEADERS
     include/sal/block_allocator.hpp
     include/sal/mapping.hpp
     include/sal/debug.hpp
+    include/sal/durable_io.hpp
 )
 
 # Tests

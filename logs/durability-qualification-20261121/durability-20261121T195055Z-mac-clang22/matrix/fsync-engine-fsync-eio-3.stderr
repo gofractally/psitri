@@ -1,0 +1,17 @@
+mapping.cpp:85             (null)     mapping               [33mOpened empty file: /Users/dlarimer/psitri-psibase-readers/build-durability-api/evidence/20261121T195101Z/database/fsync-engine-fsync-eio-3/ptrs/header.bin[0m
+mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4330782720, size=4224[0m
+control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+mapping.cpp:85             (null)     mapping               [33mOpened empty file: /Users/dlarimer/psitri-psibase-readers/build-durability-api/evidence/20261121T195101Z/database/fsync-engine-fsync-eio-3/iref/header.bin[0m
+mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4330799104, size=4224[0m
+mapping.cpp:85             (null)     mapping               [33mOpened empty file: /Users/dlarimer/psitri-psibase-readers/build-durability-api/evidence/20261121T195101Z/database/fsync-engine-fsync-eio-3/header[0m
+mapping.cpp:85             (null)     mapping               [33mOpened empty file: /Users/dlarimer/psitri-psibase-readers/build-durability-api/evidence/20261121T195101Z/database/fsync-engine-fsync-eio-3/roots[0m
+mapping.cpp:85             (null)     mapping               [33mOpened empty file: /Users/dlarimer/psitri-psibase-readers/build-durability-api/evidence/20261121T195101Z/database/fsync-engine-fsync-eio-3/session_ops.bin[0m
+mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=93650944[0m
+mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4946100224, size=93650944[0m
+mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4330815488, size=32768[0m
+mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4330848256, size=32768[0m
+SAL durability failure: fsync errno=5; store durability is unknown, terminating without acknowledgement

@@ -1,0 +1,16 @@
+mapping.cpp:85             (null)     mapping               [33mOpened empty file: /Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193834Z/20261121T193835Z/database/fsync-engine-fsync-eintr-3/ptrs/header.bin[0m
+mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4372365312, size=4224[0m
+control_block_alloc.cpp:124  (null)     ensure_capacity       [33mgrowing control_block capacity: 0 [0m
+mapping.cpp:85             (null)     mapping               [33mOpened empty file: /Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193834Z/20261121T193835Z/database/fsync-engine-fsync-eintr-3/iref/header.bin[0m
+mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=4224[0m
+mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4372381696, size=4224[0m
+mapping.cpp:85             (null)     mapping               [33mOpened empty file: /Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193834Z/20261121T193835Z/database/fsync-engine-fsync-eintr-3/header[0m
+mapping.cpp:85             (null)     mapping               [33mOpened empty file: /Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193834Z/20261121T193835Z/database/fsync-engine-fsync-eintr-3/roots[0m
+mapping.cpp:85             (null)     mapping               [33mOpened empty file: /Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193834Z/20261121T193835Z/database/fsync-engine-fsync-eintr-3/session_ops.bin[0m
+mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=93650944[0m
+mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4988125184, size=93650944[0m
+mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4372398080, size=32768[0m
+mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=32768[0m
+mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=4372430848, size=32768[0m

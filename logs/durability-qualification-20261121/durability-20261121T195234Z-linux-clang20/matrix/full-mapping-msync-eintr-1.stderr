@@ -1,0 +1,3 @@
+mapping.cpp:85             (null)     mapping               [33mOpened empty file: /home/dlarimer/psibase-migration-20261121/psitri-durability/build-durability-clang20/evidence/20261121T195245Z/database/full-mapping-msync-eintr-1/mapping[0m
+mapping.cpp:133            (null)     resize                [33mResizing mapping: current=0, new=16384[0m
+mapping.cpp:193            (null)     resize                [33mRemapped to new location: old_addr=0, new_addr=128762657964032, size=16384[0m

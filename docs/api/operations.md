@@ -45,6 +45,18 @@ cursor. Do not pass a writer's owned snapshot to another thread; use that
 thread's read session to acquire its own snapshot. This contract does not
 promise a shared snapshot transfer API between threads.
 
+The Large Engine also supports **serialized handoff** of an inactive session
+and its retained handle graph between threads. One shared synchronization gate
+must cover every native operation and every handle copy or destruction that
+touches that session, including cursors and owned snapshots. The requirement is
+that two threads are never active on one SAL session simultaneously. Finish
+each mutable transaction on one thread before releasing the gate; do not carry
+a borrowed view or active residency scope across a handoff. Keep the database
+alive until the entire handle graph is destroyed. A wrapper can enforce this
+with a common mutex and opaque retained handles. This profile-specific pattern
+does not provide concurrent access to one session and does not change the
+portable creating-thread rule above.
+
 ### Read path and synchronization
 
 **Practically lock-free:** once a snapshot is acquired, tree traversal does
@@ -154,14 +166,34 @@ There is no universal power-loss guarantee across devices. Do not treat `db->syn
 as a portable replacement for configured transaction durability: the Small Engine's
 standalone `sync()` is currently a no-op, so it is not part of the core concept.
 
+For the Large Engine's SAL storage, requested `msync`, `fsync`, and
+`F_FULLFSYNC` operations retry `EINTR`. A terminal flush failure emits a
+durability diagnostic and terminates the process with exit code **74**
+(`sal::durable_io_failure_exit_code`). It does not return a successful commit,
+unwind a transaction, run exit handlers, or allow later writes. A root or its
+recovery record may already have reached the kernel, so such a failure cannot
+be treated as a recoverable transaction rejection. Acknowledge a durable write
+only after its configured commit returns successfully.
+
+After a failed, unacknowledged commit, do not assume that the previous root was
+restored. Reopen may find the complete old or complete new state; an actual
+storage fault can also require recovery or operator repair. Validate the store
+using the supported engine recovery procedures and the application's
+authoritative log. A read-only open does not repair the original store.
+This failure contract does not strengthen `none` or `mprotect` into durable
+policies, and does not change the Small Engine's failure handling.
+
 Transactions in the Small Engine sync their companion arena's heads and continuations before
 the ordinary arena and root publication, using the configured policy. This
 ordering also covers contiguous values in the companion arena.
 
 The API suite verifies **clean close/reopen** with `fsync`. The Large Engine's large-value
 suite also exercises refcount reconstruction and explicit full recovery.
-Comprehensive power-loss, arbitrary process-kill, disk-full/I/O failure, and
-sustained beyond-RAM validation is incomplete. Select the library against your
+Focused Large Engine tests inject ordinary flush errors and interruptions,
+verify no acknowledgement after terminal failure, and check consistent,
+unchanged read-only reopen without an additional power cut or corruption.
+Comprehensive power-loss, arbitrary process-kill, disk-full, storage-corruption,
+and sustained beyond-RAM validation is incomplete. Select the library against your
 application's failure model and test recovery on the target storage stack.
 The Small Engine exposes low-level rebuild machinery, but its database factory does not
 perform a complete root walk/rebuild.

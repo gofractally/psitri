@@ -1,0 +1,26 @@
+[1/9] Building CXX object dependencies/sal/CMakeFiles/sal.dir/src/mapping.cpp.o
+[2/9] Building CXX object dependencies/sal/CMakeFiles/sal.dir/src/control_block_alloc.cpp.o
+[3/9] Building CXX object dependencies/sal/CMakeFiles/sal.dir/src/block_allocator.cpp.o
+[4/9] Building CXX object dependencies/sal/CMakeFiles/sal.dir/src/segment_thread.cpp.o
+[5/9] Building CXX object dependencies/sal/CMakeFiles/sal.dir/src/allocator_session.cpp.o
+[6/9] Building CXX object CMakeFiles/durability_fault_driver.dir/fault_driver.cpp.o
+FAILED: [code=1] CMakeFiles/durability_fault_driver.dir/fault_driver.cpp.o 
+/opt/homebrew/opt/llvm/bin/clang++ -DXXH_INLINE_ALL -I/Users/dlarimer/psitri-psibase-readers/libraries/psitri_api/include -I/Users/dlarimer/psitri-psibase-readers/libraries/adb/include -I/Users/dlarimer/psitri-psibase-readers/libraries/sal/include -I/Users/dlarimer/psibase-foundation-psitri/.caches/psitri-sources/ucc/include -I/Users/dlarimer/psitri-psibase-readers/libraries/sal_art_ref/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -MD -MT CMakeFiles/durability_fault_driver.dir/fault_driver.cpp.o -MF CMakeFiles/durability_fault_driver.dir/fault_driver.cpp.o.d -o CMakeFiles/durability_fault_driver.dir/fault_driver.cpp.o -c /Users/dlarimer/psitri-psibase-readers/tests/durability/fault_driver.cpp
+/Users/dlarimer/psitri-psibase-readers/tests/durability/fault_driver.cpp:216:29: error: variable has incomplete type 'std::exception_ptr'
+  216 |          std::exception_ptr failure;
+      |                             ^
+/opt/homebrew/Cellar/llvm/22.1.2/bin/../include/c++/v1/__exception/operations.h:36:33: note: forward declaration of 'std::exception_ptr'
+   36 | class _LIBCPP_EXPORTED_FROM_ABI exception_ptr;
+      |                                 ^
+/Users/dlarimer/psitri-psibase-readers/tests/durability/fault_driver.cpp:226:30: error: calling 'current_exception' with incomplete return type 'exception_ptr'
+  226 |                    failure = std::current_exception();
+      |                              ^~~~~~~~~~~~~~~~~~~~~~~~
+/opt/homebrew/Cellar/llvm/22.1.2/bin/../include/c++/v1/__exception/operations.h:38:59: note: 'current_exception' declared here
+   38 | [[__nodiscard__]] _LIBCPP_EXPORTED_FROM_ABI exception_ptr current_exception() _NOEXCEPT;
+      |                                                           ^
+/opt/homebrew/Cellar/llvm/22.1.2/bin/../include/c++/v1/__exception/operations.h:36:33: note: forward declaration of 'std::exception_ptr'
+   36 | class _LIBCPP_EXPORTED_FROM_ABI exception_ptr;
+      |                                 ^
+2 errors generated.
+[7/9] Building CXX object dependencies/sal/CMakeFiles/sal.dir/src/allocator.cpp.o
+ninja: build stopped: subcommand failed.

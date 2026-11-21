@@ -1,0 +1,194 @@
+{
+  "platform": "macOS-26.3.1-arm64-arm-64bit-Mach-O",
+  "binary_sha256": "81ce671b9ed73b594c8e8ac739fd3ed5b88a62b2a85a38e6e898b1b15868f0e6",
+  "passed": false,
+  "cases": [
+    {
+      "label": "fsync-mapping-msync-healthy",
+      "argv": [
+        "/Users/dlarimer/psitri-psibase-readers/build-durability/durability_fault_driver",
+        "mapping",
+        "/Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193710Z/20261121T193713Z/database/fsync-mapping-msync-healthy",
+        "count",
+        "msync",
+        "0",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.18398441700264812,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-mapping-msync-eintr-1",
+      "argv": [
+        "/Users/dlarimer/psitri-psibase-readers/build-durability/durability_fault_driver",
+        "mapping",
+        "/Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193710Z/20261121T193713Z/database/fsync-mapping-msync-eintr-1",
+        "eintr",
+        "msync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.004654749995097518,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-mapping-msync-eio-1",
+      "argv": [
+        "/Users/dlarimer/psitri-psibase-readers/build-durability/durability_fault_driver",
+        "mapping",
+        "/Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193710Z/20261121T193713Z/database/fsync-mapping-msync-eio-1",
+        "error",
+        "msync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 74,
+      "seconds": 0.0039035830413922668,
+      "acknowledged": false
+    },
+    {
+      "label": "fsync-mapping-fsync-healthy",
+      "argv": [
+        "/Users/dlarimer/psitri-psibase-readers/build-durability/durability_fault_driver",
+        "mapping",
+        "/Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193710Z/20261121T193713Z/database/fsync-mapping-fsync-healthy",
+        "count",
+        "fsync",
+        "0",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.004428250016644597,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-mapping-fsync-eintr-1",
+      "argv": [
+        "/Users/dlarimer/psitri-psibase-readers/build-durability/durability_fault_driver",
+        "mapping",
+        "/Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193710Z/20261121T193713Z/database/fsync-mapping-fsync-eintr-1",
+        "eintr",
+        "fsync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.004197290982119739,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-mapping-fsync-eio-1",
+      "argv": [
+        "/Users/dlarimer/psitri-psibase-readers/build-durability/durability_fault_driver",
+        "mapping",
+        "/Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193710Z/20261121T193713Z/database/fsync-mapping-fsync-eio-1",
+        "error",
+        "fsync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 74,
+      "seconds": 0.004653749987483025,
+      "acknowledged": false
+    },
+    {
+      "label": "fsync-block-fsync-healthy",
+      "argv": [
+        "/Users/dlarimer/psitri-psibase-readers/build-durability/durability_fault_driver",
+        "block",
+        "/Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193710Z/20261121T193713Z/database/fsync-block-fsync-healthy",
+        "count",
+        "fsync",
+        "0",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.004654499934986234,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-block-fsync-eintr-1",
+      "argv": [
+        "/Users/dlarimer/psitri-psibase-readers/build-durability/durability_fault_driver",
+        "block",
+        "/Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193710Z/20261121T193713Z/database/fsync-block-fsync-eintr-1",
+        "eintr",
+        "fsync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.005350499995984137,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-block-fsync-eio-1",
+      "argv": [
+        "/Users/dlarimer/psitri-psibase-readers/build-durability/durability_fault_driver",
+        "block",
+        "/Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193710Z/20261121T193713Z/database/fsync-block-fsync-eio-1",
+        "error",
+        "fsync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 74,
+      "seconds": 0.004486707970499992,
+      "acknowledged": false
+    },
+    {
+      "label": "fsync-engine-msync-healthy",
+      "argv": [
+        "/Users/dlarimer/psitri-psibase-readers/build-durability/durability_fault_driver",
+        "engine",
+        "/Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193710Z/20261121T193713Z/database/fsync-engine-msync-healthy",
+        "count",
+        "msync",
+        "0",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.043391583021730185,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-engine-msync-eintr-1",
+      "argv": [
+        "/Users/dlarimer/psitri-psibase-readers/build-durability/durability_fault_driver",
+        "engine",
+        "/Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193710Z/20261121T193713Z/database/fsync-engine-msync-eintr-1",
+        "eintr",
+        "msync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 0,
+      "seconds": 0.03873495804145932,
+      "acknowledged": true
+    },
+    {
+      "label": "fsync-engine-msync-eio-1",
+      "argv": [
+        "/Users/dlarimer/psitri-psibase-readers/build-durability/durability_fault_driver",
+        "engine",
+        "/Users/dlarimer/psitri-psibase-readers/logs/durability-fixed-20261121T193710Z/20261121T193713Z/database/fsync-engine-msync-eio-1",
+        "error",
+        "msync",
+        "1",
+        "fsync"
+      ],
+      "exit_code": 74,
+      "seconds": 0.027214500005356967,
+      "acknowledged": false,
+      "reopen_exit_code": -6,
+      "readonly_files_unchanged": true,
+      "reopen_stdout": "CONSISTENT generation=old"
+    }
+  ],
+  "ack_boundary": "ACK is written only after commit/sync returns.",
+  "terminal_contract": "EIO exits the entire process with 74 before ACK; no later writes execute.",
+  "reopen_contract": "Without a power cut or corruption injection, the failed fixture must reopen as complete old or complete new. Unacknowledged does not promise rollback. Read-only reopen never modifies files.",
+  "error": "fsync-engine-msync-eio-1: failed commit reopened inconsistently or read-only modified files"
+}

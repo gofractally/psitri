@@ -1,5 +1,6 @@
 #pragma once
 #include <sal/alloc_header.hpp>
+#include <sal/durable_io.hpp>
 #include <sal/mapped_memory/segment.hpp>
 
 namespace sal
@@ -71,11 +72,7 @@ namespace sal
                   const uint32_t page_size = system_config::os_page_size();
                   const uint32_t page_pos  = alloc_pos & ~(page_size - 1);
                   int mode = st == sync_type::msync_async ? MS_ASYNC : MS_SYNC;
-                  if (msync(data + page_pos, page_size, mode))
-                  {
-                     SAL_ERROR("msync ({}) failed: {}", st, strerror(errno));
-                     throw std::runtime_error("msync failed");
-                  }
+                  durable_msync(data + page_pos, page_size, mode);
                }
                return marker_size;
             }
@@ -130,11 +127,7 @@ namespace sal
             if (st >= sync_type::msync_async)
             {
                int mode = st == sync_type::msync_async ? MS_ASYNC : MS_SYNC;
-               if (msync(data + old_fwp_pos, protect_size, mode))
-               {
-                  SAL_ERROR("msync ({}) failed: {}", st, strerror(errno));
-                  throw std::runtime_error("msync failed");
-               }
+               durable_msync(data + old_fwp_pos, protect_size, mode);
             }
             assert(is_finalized() ? is_read_only() : true);
             return protect_size;
@@ -200,11 +193,7 @@ namespace sal
          if (st >= sync_type::msync_async)
          {
             int mode = st == sync_type::msync_async ? MS_ASYNC : MS_SYNC;
-            if (msync(data + old_first_writable_page_pos, protect_size, mode))
-            {
-               SAL_ERROR("msync ({}) failed: {}", st, strerror(errno));
-               throw std::runtime_error("msync failed");
-            }
+            durable_msync(data + old_first_writable_page_pos, protect_size, mode);
          }
          assert(is_finalized() ? is_read_only() : true);
          return protect_size;

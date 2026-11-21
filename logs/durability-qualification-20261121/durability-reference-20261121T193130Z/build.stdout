@@ -1,0 +1,9 @@
+[1/9] Building CXX object dependencies/sal/CMakeFiles/sal.dir/src/mapping.cpp.o
+[2/9] Building CXX object dependencies/sal/CMakeFiles/sal.dir/src/control_block_alloc.cpp.o
+[3/9] Building CXX object dependencies/sal/CMakeFiles/sal.dir/src/block_allocator.cpp.o
+[4/9] Building CXX object dependencies/sal/CMakeFiles/sal.dir/src/segment_thread.cpp.o
+[5/9] Building CXX object dependencies/sal/CMakeFiles/sal.dir/src/allocator_session.cpp.o
+[6/9] Building CXX object dependencies/sal/CMakeFiles/sal.dir/src/allocator.cpp.o
+[7/9] Linking CXX static library dependencies/sal/libsal.a
+[8/9] Building CXX object CMakeFiles/durability_fault_driver.dir/fault_driver.cpp.o
+[9/9] Linking CXX executable durability_fault_driver

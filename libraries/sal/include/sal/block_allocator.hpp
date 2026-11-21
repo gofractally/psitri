@@ -81,6 +81,10 @@ namespace sal
       // Retries EINTR. Returns true only on success; a terminal flush failure
       // terminates with durable_io_failure_exit_code, never a false success.
       bool fsync(bool full = false) noexcept;
+      // Flush the mapped blocks themselves (msync), then the file. For state
+      // that is not flushed on the commit path but must be durable before a
+      // store may be recorded as cleanly closed.
+      void sync(sync_type type) noexcept;
 
       /**
        * Return a pointer to the block at the specified offset

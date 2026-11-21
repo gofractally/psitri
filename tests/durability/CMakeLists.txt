@@ -40,3 +40,8 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME durable_io_fail_stop COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/run_matrix.py"
   --binary $<TARGET_FILE:durability_fault_driver> --output "${CMAKE_CURRENT_BINARY_DIR}/evidence")
 set_tests_properties(durable_io_fail_stop PROPERTIES TIMEOUT 180)
+add_executable(durability_recovery_contract recovery_contract.cpp)
+target_link_libraries(durability_recovery_contract PRIVATE psitri::big)
+add_test(NAME large_engine_recovery_contract COMMAND durability_recovery_contract
+  "${CMAKE_CURRENT_BINARY_DIR}/recovery-databases")
+set_tests_properties(large_engine_recovery_contract PROPERTIES TIMEOUT 600)

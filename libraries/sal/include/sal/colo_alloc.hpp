@@ -345,6 +345,15 @@ namespace sal
                  (1ull << (*address % 64)));
       }
 
+      // Flush slots, free list, and header. Never needed on the commit path
+      // (the contents are rebuilt by recovery); used before a clean close is recorded.
+      void sync(sync_type type) noexcept
+      {
+         _zone_allocator->sync(type);
+         _zone_free_list->sync(type);
+         _header->sync(type);
+      }
+
       // ── recovery: counts/allocation are ephemeral, rebuilt from persistent node handles ──
       // Reset to all-free, counters zeroed. Then a recovery walk replays each live handle through
       // get_or_claim() to reconstruct the allocation set + (caller's) counts.

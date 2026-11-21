@@ -38,6 +38,16 @@ namespace sal
    };
 
    /**
+    * Thrown by recovery when a reference reachable from a root does not resolve
+    * to an object. Nothing has been freed or reclaimed when it is thrown.
+    */
+   class recovery_error : public std::runtime_error
+   {
+     public:
+      using std::runtime_error::runtime_error;
+   };
+
+   /**
     * Exception thrown when a write is attempted on a corruption-halted database.
     */
    class corruption_error : public std::runtime_error
@@ -250,6 +260,52 @@ namespace sal
        * Used to reclaim leaked memory without a full segment scan.
        */
       void reset_reference_counts();
+
+      /**
+       * Enumerates the references one object owns, for the recovery walk.
+       * Call `retain` once per owned reference and return true; return false
+       * to use the object type's visit_children. An engine whose nodes share
+       * branch sets through the implicit_ref_pool must supply this: a shared
+       * set owns its branches once, however many nodes share it.
+       */
+      using recovery_walk =
+          std::function<bool(const alloc_header*, const std::function<void(ptr_address)>& retain)>;
+
+      struct recovery_hooks
+      {
+         /// When set, recovery also clears the implicit_ref_pool before the
+         /// walk, so the walk can re-tally it.
+         recovery_walk walk;
+         /// Recount every segment's live data after recovery: segments left
+         /// active by dead sessions become compactable, and segments with no
+         /// live object become free. Requires that no session owns a segment.
+         bool rebuild_segment_metadata = false;
+         /// recover*() restart the background threads when they finish.
+         bool restart_threads = true;
+         /// Throw recovery_error, before anything is freed, if a root or a
+         /// reachable reference has no object behind it. The control blocks
+         /// (or, after a rebuild from segments, the data itself) cannot then
+         /// be trusted, and freeing "unreachable" objects would destroy data.
+         bool fail_on_unresolved = false;
+         /// recover_from_power_loss(): keep only what a commit flushed. In each
+         /// segment, everything after the last sync header that chains back to
+         /// the segment start was written but never flushed; after a power cut
+         /// it can be any mix of old and new pages, including newer, unpublished
+         /// versions of live objects. Requires that every commit syncs, so only
+         /// for stores opened with sync_mode fsync or stronger.
+         bool truncate_unsynced_tails = false;
+      };
+      void set_recovery_hooks(recovery_hooks hooks) { _recovery = std::move(hooks); }
+
+      /**
+       * Flush the state the commit path deliberately leaves unflushed (control
+       * blocks, implicit refcounts, allocator state) together with the data and
+       * root files. After this returns, the files alone describe the store.
+       */
+      void sync_control_state(sync_type st) noexcept;
+
+      /// Run sync_control_state(st) as the last step of destruction.
+      void sync_control_state_on_close(sync_type st) noexcept { _close_sync = st; }
 
       /**
        * Power-loss recovery: validate sync header chains in each segment,
@@ -585,6 +641,12 @@ namespace sal
       std::array<uint64_t, 2> _registered_type_bits{};
       bool                    _types_sealed = false;
       bool                    _read_only    = false;
+      recovery_hooks          _recovery;
+      sync_type               _close_sync   = sync_type::none;
+      uint64_t                _recovery_unresolved = 0;
+      void                    begin_recovery_walk();
+      void                    finish_recovery_walk();
+      void                    rebuild_segment_metadata();
 
      public:
       bool read_only() const noexcept { return _read_only; }

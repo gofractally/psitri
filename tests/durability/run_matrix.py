@@ -20,7 +20,7 @@ binary = a.binary.resolve()
 report = {'platform': platform.platform(), 'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(),
           'passed': False, 'cases': [], 'ack_boundary': 'ACK is written only after commit/sync returns.',
           'terminal_contract': 'EIO exits the entire process with 74 before ACK; no later writes execute.',
-          'reopen_contract': 'Without a power cut or corruption injection, the failed fixture must reopen as complete old or complete new. Unacknowledged does not promise rollback. Read-only reopen never modifies files.'}
+          'reopen_contract': 'A fail-stopped store was not closed: a read-only open refuses it without modifying files, and the next read-write open recovers it. Without a power cut or corruption injection, the recovered fixture is complete old or complete new. Unacknowledged does not promise rollback. Read-only reopen never modifies files.'}
 
 def save():
     (evidence / 'results.json').write_text(json.dumps(report, indent=2) + '\n')
@@ -44,16 +44,26 @@ def run(label, kind, mode, operation, number, durability):
         if result.returncode != 74 or record['acknowledged'] or 'SAL durability failure:' not in result.stderr:
             raise RuntimeError(label + ': terminal I/O failure did not fail-stop before acknowledgement')
         if kind.startswith('engine'):
-            before = digest(database)
-            reopen = subprocess.run([str(binary), 'reopen', str(database)], capture_output=True, text=True, timeout=20)
-            (evidence / (label + '-reopen.stdout')).write_text(reopen.stdout)
-            (evidence / (label + '-reopen.stderr')).write_text(reopen.stderr)
-            record['reopen_exit_code'] = reopen.returncode
-            record['readonly_files_unchanged'] = before == digest(database)
-            record['reopen_stdout'] = reopen.stdout.strip()
-            save()
-            if reopen.returncode or not record['readonly_files_unchanged']:
-                raise RuntimeError(label + ': failed commit reopened inconsistently or read-only modified files')
+            def reopen(step):
+                before = digest(database)
+                attempt = subprocess.run([str(binary), 'recover' if step == 'recover' else 'reopen', str(database)],
+                                         capture_output=True, text=True, timeout=60)
+                (evidence / (label + '-' + step + '.stdout')).write_text(attempt.stdout)
+                (evidence / (label + '-' + step + '.stderr')).write_text(attempt.stderr)
+                record[step + '_exit_code'] = attempt.returncode
+                record[step + '_stdout'] = attempt.stdout.strip()
+                if step != 'recover':
+                    record[step + '_files_unchanged'] = before == digest(database)
+                save()
+                return attempt
+            refused = reopen('unclean-readonly')
+            if (refused.returncode == 0 or 'not shut down cleanly' not in refused.stderr
+                    or not record['unclean-readonly_files_unchanged']):
+                raise RuntimeError(label + ': read-only open accepted or modified a store that was not closed')
+            if reopen('recover').returncode:
+                raise RuntimeError(label + ': failed commit did not recover to a consistent root')
+            if reopen('readonly').returncode or not record['readonly_files_unchanged']:
+                raise RuntimeError(label + ': recovered store reopened inconsistently or read-only modified files')
         return None
     if result.returncode or not record['acknowledged']:
         raise RuntimeError(label + ': healthy/interrupted flush did not acknowledge success')

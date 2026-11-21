@@ -36,6 +36,7 @@
 #include <sal/allocator.hpp>
 #include <sal/allocator_session_impl.hpp>
 #include <sal/read_lock.hpp>
+#include <sal/shutdown_record.hpp>
 #include <ucc/round.hpp>
 
 #include <sal/diag.hpp>            // PSITRI_STATS / PSITRI_DEBUG gating + sal::stat_counter
@@ -136,8 +137,24 @@ namespace sal_art_ref::radix
           : radix_tree(dir, wipe, legacy_config(read_only, sync))
       {
       }
-      radix_tree(const std::filesystem::path& dir, bool wipe, const sal::runtime_config& cfg)
-          : _alloc(make_alloc(dir, wipe, cfg)),
+      /// `recovery` selects what to rebuild before the store is used. The default,
+      /// recovery_mode::none, decides from the store's shutdown record and from the
+      /// durability the configuration asks for:
+      ///   - clean close: nothing.
+      ///   - the owning process died: app_crash (reference counts, range counters,
+      ///     and segment bookkeeping; cost follows live data, not store size).
+      ///   - the system stopped, or there is no record: power_loss (rebuild from
+      ///     flushed segments; cost follows store size) ONLY when cfg.sync_mode is
+      ///     fsync or stronger. A store that never asked for power-loss durability
+      ///     is not charged for it and gets app_crash.
+      /// deferred_cleanup opens at once and recovers nothing: what the dead owner
+      /// held stays leaked.
+      radix_tree(const std::filesystem::path& dir,
+                 bool                         wipe,
+                 const sal::runtime_config&   cfg,
+                 sal::recovery_mode           recovery = sal::recovery_mode::none)
+          : _prior_shutdown(prior_shutdown(dir, wipe)),
+            _alloc(make_alloc(dir, wipe, cfg)),
             _ses(_alloc->create_session()),
             _sync(cfg.sync_mode)
       {
@@ -170,6 +187,11 @@ namespace sal_art_ref::radix
          // object they touch. Threads running before registration = a data race, and on a
          // reopened database the compactor would MOVE live heart nodes using the default
          // alloc_header ops (wrong visit/checksum/move semantics) — silent corruption.
+         //
+         // RECOVERY runs in the same window: after registration (it walks nodes through
+         // their type ops) and before any thread or caller can observe stale reference
+         // counts, range counters, or segment state left by an owner that never closed.
+         recover_before_use(dir, cfg, recovery);
          _alloc->start_background_threads();
          // [BISECT] RADIX_NO_COMPACT=1 stops the compactor (keeps the release thread, so
          // get_new_segment doesn't stall). If the cold-base SIGBUS vanishes, the race is the
@@ -671,6 +693,10 @@ namespace sal_art_ref::radix
       }
 
       uint64_t object_count() const { return _alloc->total_allocated_objects(); }
+      /// How the previous read-write owner left this store, as found at open.
+      sal::shutdown_state prior_shutdown() const noexcept { return _prior_shutdown; }
+      /// The recovery this open ran (recovery_mode::none when it ran none).
+      sal::recovery_mode recovery_performed() const noexcept { return _recovered; }
       // Live count is exact only once the background release thread has drained — releases of
       // a sole-referenced object are deferred to it. Tests poll this to a quiescent point.
       uint64_t pending_releases() const { return _alloc->total_pending_releases(); }
@@ -6645,6 +6671,143 @@ namespace sal_art_ref::radix
          }
       }
 
+      // ── unclean-shutdown detection and recovery ──────────────────────────────────
+      static sal::shutdown_state prior_shutdown(const std::filesystem::path& dir, bool wipe)
+      {
+         // A store that does not exist yet (or is about to be wiped) has no history.
+         if (wipe || !std::filesystem::exists(dir / "roots"))
+            return sal::shutdown_state::clean;
+         return sal::shutdown_record::read(dir);
+      }
+
+      // One dense node: its terminal value is held directly; each range's branch set is
+      // owned once per range COUNTER, shared by every node version holding that counter.
+      // Re-tally the counter per node, and follow the branches only on first sight.
+      template <class N>
+      bool recovery_walk_dense(const sal::alloc_header*                    obj,
+                               const std::function<void(sal::ptr_address)>& retain)
+      {
+         if (obj->type() != N::type_id)
+            return false;
+         const N* n = reinterpret_cast<const N*>(obj);
+         if (not n->rc_has_ctrs())
+            return false;  // owns each child directly: the type's visit_children is exact
+         const smart_address tv = n->term_value();
+         if (tv.is_pointer())
+            retain(tv.as_pointer());
+         bool first[range_count];
+         for (int r = 0; r < range_count; ++r)
+            first[r] = _alloc->iref().retally(n->rc_ctr(r));
+         n->for_each_entry([&](uint8_t byte, smart_address sa) {
+            if (sa.is_pointer() && first[range_of(byte)])
+               retain(sa.as_pointer());
+         });
+         return true;
+      }
+      bool recovery_walk(const sal::alloc_header*                    obj,
+                         const std::function<void(sal::ptr_address)>& retain)
+      {
+         return recovery_walk_dense<bitset_r2_node>(obj, retain) ||
+                recovery_walk_dense<bitset_r4_node>(obj, retain) ||
+                recovery_walk_dense<full_radix_node>(obj, retain);
+      }
+
+      void recover_before_use(const std::filesystem::path& dir,
+                              const sal::runtime_config&   cfg,
+                              sal::recovery_mode           requested)
+      {
+         if (cfg.read_only)
+         {
+            // Recovery writes. Reading through whatever the dead owner left in the
+            // unflushed control files could return garbage or fault.
+            if (_prior_shutdown != sal::shutdown_state::clean)
+               throw std::runtime_error(
+                   "database was not shut down cleanly; recovery requires a read-write open "
+                   "before it can be opened read-only: " + dir.generic_string());
+            return;
+         }
+         const bool durable = cfg.sync_mode >= sal::sync_type::fsync;
+         auto       mode    = requested;
+         if (mode == sal::recovery_mode::none)
+            mode = _prior_shutdown == sal::shutdown_state::clean
+                       ? sal::recovery_mode::none
+                       : _prior_shutdown == sal::shutdown_state::system_stopped && durable
+                             ? sal::recovery_mode::power_loss
+                             : sal::recovery_mode::app_crash;
+         _alloc->set_recovery_hooks(
+             {.walk = [this](const sal::alloc_header* obj,
+                             const std::function<void(sal::ptr_address)>& retain)
+              { return recovery_walk(obj, retain); },
+              .rebuild_segment_metadata = true,
+              .restart_threads          = false,
+              .fail_on_unresolved       = true,
+              .truncate_unsynced_tails  = durable});
+         switch (mode)
+         {
+            case sal::recovery_mode::none:
+               break;
+            case sal::recovery_mode::deferred_cleanup:
+               break;  // stale counts only ever over-count: a leak, never a dangling reference
+            case sal::recovery_mode::app_crash:
+               try
+               {
+                  _alloc->reset_reference_counts();
+               }
+               catch (const sal::recovery_error&)
+               {
+                  // The control blocks do not describe the roots, so the page cache
+                  // was not intact after all. Rebuild from what was flushed instead.
+                  if (requested != sal::recovery_mode::none)
+                     throw;
+                  mode = sal::recovery_mode::power_loss;
+                  _alloc->recover_from_power_loss();
+               }
+               break;
+            case sal::recovery_mode::power_loss:
+               _alloc->recover_from_power_loss();
+               break;
+            case sal::recovery_mode::full_verify:
+               _alloc->recover();
+               break;
+         }
+         _recovered = mode;
+         // Durable before the first mutation: from here on, a stop without the matching
+         // clean record below is detected by the next open.
+         sal::shutdown_record::mark_open(dir, cfg.sync_mode);
+         _alloc->sync_control_state_on_close(cfg.sync_mode);
+         _clean_close = {dir, cfg.sync_mode, true};
+      }
+
+      // Declared before _alloc so it is destroyed after it: the clean record is written
+      // only once the allocator has flushed and closed every file.
+      struct clean_close
+      {
+         std::filesystem::path dir;
+         sal::sync_type        sync  = sal::sync_type::none;
+         bool                  armed = false;
+         clean_close()                              = default;
+         clean_close(std::filesystem::path d, sal::sync_type s, bool a)
+             : dir(std::move(d)), sync(s), armed(a)
+         {
+         }
+         clean_close& operator=(clean_close&& other) noexcept
+         {
+            dir         = std::move(other.dir);
+            sync        = other.sync;
+            armed       = other.armed;
+            other.armed = false;
+            return *this;
+         }
+         ~clean_close()
+         {
+            if (armed)
+               sal::shutdown_record::mark_clean(dir, sync);
+         }
+      };
+      clean_close         _clean_close;
+      sal::shutdown_state _prior_shutdown = sal::shutdown_state::clean;
+      sal::recovery_mode  _recovered      = sal::recovery_mode::none;
+
       std::unique_ptr<sal::allocator> _alloc;
       sal::allocator_session_ptr      _ses;
       sal::sync_type                  _sync = sal::sync_type::none;  // commit durability (adb config)
@@ -6836,8 +6999,10 @@ namespace sal_art_ref::radix
           : _engine(dir, wipe, read_only, sync)
       {
       }
-      database(const std::filesystem::path& dir, const sal::runtime_config& cfg)
-          : _engine(dir, /*wipe=*/false, cfg)
+      database(const std::filesystem::path& dir,
+               const sal::runtime_config&   cfg,
+               sal::recovery_mode           recovery = sal::recovery_mode::none)
+          : _engine(dir, /*wipe=*/false, cfg, recovery)
       {
       }
       // Unified open semantics (the kv_engine concept's construction clause —
@@ -6845,9 +7010,14 @@ namespace sal_art_ref::radix
       //   open(path, open_mode, config) -> shared_ptr<database>
       // NOTE: open() no longer wipes; benches that want a fresh database
       // remove_all() themselves (they all already did).
+      //
+      // A read-write open first recovers a store whose previous owner did not close it
+      // (see radix_tree's constructor); `recovery` forces a specific rebuild instead. A
+      // read-only open of such a store throws: recovery has to write.
       static std::shared_ptr<database> open(const std::filesystem::path& dir,
                                             sal::open_mode mode = sal::open_mode::create_or_open,
-                                            const sal::runtime_config& cfg = runtime_config{})
+                                            const sal::runtime_config& cfg = runtime_config{},
+                                            sal::recovery_mode recovery = sal::recovery_mode::none)
       {
          const bool exists = std::filesystem::exists(dir / "roots");
          switch (mode)
@@ -6868,7 +7038,7 @@ namespace sal_art_ref::radix
             std::filesystem::create_directories(dir);
          auto effective = cfg;
          effective.read_only = mode == sal::open_mode::read_only;
-         return std::make_shared<database>(dir, effective);
+         return std::make_shared<database>(dir, effective, recovery);
       }
       // Open an EXISTING database (no wipe). read_only=true: no background
       // threads, data PROT_READ, control pages copy-on-write (file pristine),
@@ -6890,6 +7060,17 @@ namespace sal_art_ref::radix
       }
       sal::seg_alloc_dump dump() { return _engine.dump(); }
       void sync(sal::sync_type st = sal::sync_type::msync_sync) { _engine.sync(st); }
+      /// Whether the store at `dir` was closed by its last read-write owner, without
+      /// opening it. False means a read-only open will refuse it and the next
+      /// read-write open will recover it.
+      static bool closed_cleanly(const std::filesystem::path& dir)
+      {
+         return sal::shutdown_record::read(dir) == sal::shutdown_state::clean;
+      }
+      /// How the previous read-write owner left this store, as found at open.
+      sal::shutdown_state prior_shutdown() const noexcept { return _engine.prior_shutdown(); }
+      /// The recovery this open ran (recovery_mode::none when it ran none).
+      sal::recovery_mode recovery_performed() const noexcept { return _engine.recovery_performed(); }
       // [testing] engine diagnostics passthrough — leak checks need object_count/audit_refs
       // against the SAME tree the public sessions drive.
       radix_tree& engine_for_testing() { return _engine; }

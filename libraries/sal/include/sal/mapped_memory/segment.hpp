@@ -137,6 +137,21 @@ namespace sal
             flags.store((flags.load(std::memory_order_relaxed) & pinned) | read_only,
                         std::memory_order_relaxed);
          }
+         /// Recovery: a segment holding live objects becomes read only and
+         /// compactable, with its reclaimable space recounted from scratch.
+         void recovered_with_data(uint64_t vage_value, uint32_t freed)
+         {
+            vage.store(vage_value, std::memory_order_relaxed);
+            _freed_space_LOCKED.store(freed, std::memory_order_relaxed);
+            flags.store(read_only, std::memory_order_relaxed);
+         }
+         /// Recovery: a segment holding no live object is free for reuse.
+         void recovered_free()
+         {
+            vage.store(0, std::memory_order_relaxed);
+            _freed_space_LOCKED.store(0, std::memory_order_relaxed);
+            flags.store(free, std::memory_order_relaxed);
+         }
          void set_pinned(bool is_pinned)
          {
             if (is_pinned)
@@ -214,6 +229,11 @@ namespace sal
             meta[*segment].prepare_for_compaction(vage);
             assert(meta[*segment].may_compact());
          }
+         void recovered_with_data(segment_number segment, uint64_t vage, uint32_t freed)
+         {
+            meta[*segment].recovered_with_data(vage, freed);
+         }
+         void recovered_free(segment_number segment) { meta[*segment].recovered_free(); }
          void allocated_by_session(segment_number segment)
          {
             //        ARBTRIE_INFO("allocated: ", segment);

@@ -106,6 +106,14 @@ namespace sal
                lock.unlock();
          }
 
+         /// Recovery: forget segments queued for recycling. Their state is
+         /// recomputed from the segments themselves. No session may be active.
+         void reset_recycled_segments()
+         {
+            recycled_segments.reset();
+            broadcast_end_ptr(0);
+         }
+
          /// Current depth of the recycled segments queue.
          uint64_t recycled_queue_depth() const { return recycled_segments.usage(); }
 

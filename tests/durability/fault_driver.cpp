@@ -139,9 +139,17 @@ int main(int argc, char** argv)
 {
    try
    {
-      if (argc == 3 && std::string(argv[1]) == "reopen")
+      // "reopen" is read-only and must never modify the store. A store whose writer
+      // fail-stopped was not closed, so it is first reopened read-write ("recover").
+      if (argc == 3 && (std::string(argv[1]) == "reopen" || std::string(argv[1]) == "recover"))
       {
-         auto       db = Engine::database::open(argv[2], psitri::open_mode::read_only, config());
+         const bool recover = std::string(argv[1]) == "recover";
+         auto       db      = Engine::database::open(argv[2],
+                                                     recover ? psitri::open_mode::open_existing
+                                                             : psitri::open_mode::read_only,
+                                                     config());
+         require(!recover || db->recovery_performed() != sal::recovery_mode::none,
+                 "fail-stopped store was opened read-write without recovery");
          auto       session    = db->start_read_session();
          auto       cursor     = session->create_cursor(0);
          const auto generation = cursor.get<std::string>("generation");

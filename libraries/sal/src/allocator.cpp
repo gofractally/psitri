@@ -264,7 +264,8 @@ namespace sal
    }
 
    allocator::allocator(std::filesystem::path dir, runtime_config cfg, bool start_threads_now)
-       : _ptr_alloc(dir / "ptrs"),
+       : _ptr_alloc(dir / "ptrs",
+                    cfg.read_only ? access_mode::read_only : access_mode::read_write),
          _iref(dir / "iref",
                cfg.read_only ? access_mode::read_only : access_mode::read_write),
          _block_alloc(dir / "segs", segment_size,
@@ -441,6 +442,7 @@ namespace sal
       // Destroy it before member teardown unmaps that state.
       _utility_ses = allocator_session_ptr(nullptr);
       truncate_free_tail_stopped();
+      sync_control_state(_close_sync);
       free_allocator_index(_allocator_index);
    }
 
@@ -604,7 +606,10 @@ namespace sal
 
       auto* cb = _ptr_alloc.try_get(addr);
       if (!cb || cb->ref() == 0)
+      {
+         ++_recovery_unresolved;
          return;
+      }
 
       auto prev = cb->retain();
       auto& visited = *static_cast<recovery_visit_set*>(visited_ptr);
@@ -621,10 +626,119 @@ namespace sal
       auto* obj    = reinterpret_cast<const alloc_header*>(segptr->data + loc.segment_offset());
 
       if (obj->address() != addr)
+      {
+         ++_recovery_unresolved;
          return;
+      }
 
-      type_ops(obj).visit_children(
-          obj, [this, visited_ptr](ptr_address child) { recursive_retain_all(child, visited_ptr); });
+      const std::function<void(ptr_address)> retain = [this, visited_ptr](ptr_address child)
+      { recursive_retain_all(child, visited_ptr); };
+      if (!_recovery.walk || !_recovery.walk(obj, retain))
+         type_ops(obj).visit_children(obj, retain);
+   }
+
+   void allocator::finish_recovery_walk()
+   {
+      if (_recovery.fail_on_unresolved && _recovery_unresolved != 0)
+         throw recovery_error("sal: recovery found " + std::to_string(_recovery_unresolved) +
+                              " reachable reference(s) with no object behind them; nothing was "
+                              "freed");
+   }
+
+   void allocator::begin_recovery_walk()
+   {
+      _recovery_unresolved = 0;
+      if (_recovery.walk)
+         _iref.clear_all();
+      else if (_iref.used() != 0)
+         throw std::runtime_error(
+             "sal: this store has shared branch-set counters; its engine must install a "
+             "recovery walk before recovery can rebuild reference counts");
+   }
+
+   void allocator::rebuild_segment_metadata()
+   {
+      auto& provider = _mapped_state->_segment_provider;
+      auto& seg_data = _mapped_state->_segment_data;
+
+      for (auto seg : provider.mlock_segments)
+         ::munlock(get_segment(segment_number(seg)), segment_size);
+      provider.mlock_segments.reset();
+      provider.free_segments.reset();
+      provider.ready_pinned_segments.clear();
+      provider.ready_unpinned_segments.clear();
+      _mapped_state->_read_lock_queue.reset_recycled_segments();
+      _mapped_state->_read_lock_queue.reset_all_session_locks();
+
+      const uint32_t num_segs  = _block_alloc.num_blocks();
+      uint32_t       with_data = 0;
+      for (uint32_t i = 0; i < num_segs; ++i)
+      {
+         const segment_number num(i);
+         auto*                seg = get_segment(num);
+         const uint32_t end = std::min<uint32_t>(seg->end_pos(), seg->get_alloc_pos());
+         const auto*    obj = reinterpret_cast<const alloc_header*>(seg->data);
+         const auto*    stop = reinterpret_cast<const alloc_header*>(seg->data + end);
+         uint64_t       live = 0;
+         while (obj < stop && obj->size() != 0)
+         {
+            if (obj->type() != header_type::sync_head)
+            {
+               auto* cb = _ptr_alloc.try_get(obj->address());
+               if (cb && cb->ref() != 0)
+               {
+                  const auto data = cb->load(std::memory_order_relaxed);
+                  if (!allocator_session::is_custom_cb(data) &&
+                      reinterpret_cast<const alloc_header*>(
+                          get_segment(data.loc().segment())->data +
+                          data.loc().segment_offset()) == obj)
+                     live += obj->size();
+               }
+            }
+            obj = obj->next();
+         }
+
+         if (live == 0)
+         {
+            // Nothing references this segment. Return its blocks where the
+            // platform can, and leave a header later scans read as unused.
+            _block_alloc.punch_hole(block_allocator::block_number(i));
+            if (seg->get_alloc_pos() != 0)
+               seg->set_alloc_pos(0);
+            if (seg->_first_writable_page.load(std::memory_order_relaxed) != 0)
+               seg->_first_writable_page.store(0, std::memory_order_relaxed);
+            if (seg->_provider_sequence != 0)
+               seg->_provider_sequence = 0;
+            if (seg->_last_aheader_pos != 0)
+               seg->_last_aheader_pos = 0;
+            provider.free_segments.set(i);
+            seg_data.recovered_free(num);
+            continue;
+         }
+
+         // A dead session may have left this segment open. Freeze it so the
+         // compactor may walk it, and count its unused tail as reclaimable.
+         if (!seg->is_finalized())
+            seg->finalize();
+         seg->_first_writable_page.store(pages_per_segment, std::memory_order_relaxed);
+         seg_data.recovered_with_data(num, seg->age_accumulator.average(),
+                                      static_cast<uint32_t>(seg->end_pos() - live));
+         ++with_data;
+      }
+      SAL_WARN("rebuild_segment_metadata: {} segments hold live data, {} are free", with_data,
+               num_segs - with_data);
+   }
+
+   void allocator::sync_control_state(sync_type st) noexcept
+   {
+      // Only a store that targets power-loss durability pays for this.
+      if (_read_only || st < sync_type::fsync)
+         return;
+      _ptr_alloc.sync(st);
+      _iref.sync(st);
+      _seg_alloc_state_file.sync(st);
+      _block_alloc.sync(st);
+      _root_object_file.sync(st);
    }
 
    void allocator::recursive_sum_size(ptr_address addr, uint64_t& total, void* visited_ptr)
@@ -945,6 +1059,7 @@ namespace sal
       reconstruct_custom_cbs_from_roots(&version_index);
 
       // Phase 4: Walk all root objects, recursively retain reachable nodes
+      begin_recovery_walk();
       recovery_visit_set visited(_ptr_alloc.current_max_address_count());
       for (uint32_t i = 0; i < _root_objects->size(); ++i)
       {
@@ -953,8 +1068,11 @@ namespace sal
             recursive_retain_all(tid.root, &visited);
       }
 
+      finish_recovery_walk();
       // Phase 5: Free leaked objects
       _ptr_alloc.release_unreachable();
+      if (_recovery.rebuild_segment_metadata)
+         rebuild_segment_metadata();
 
       // Reset segment provider sequence counter
       _mapped_state->_segment_provider._next_alloc_seq.store(max_provider_seq + 1,
@@ -964,7 +1082,8 @@ namespace sal
 
       provider_populate_pinned_segments();
       provider_populate_unpinned_segments();
-      start_background_threads();
+      if (_recovery.restart_threads)
+         start_background_threads();
 
       SAL_WARN("Recovery complete.");
    }
@@ -1010,6 +1129,7 @@ namespace sal
       // Reconstruct custom CBs before walking roots
       reconstruct_custom_cbs_from_roots(&version_index);
 
+      begin_recovery_walk();
       recovery_visit_set visited(_ptr_alloc.current_max_address_count());
       for (uint32_t i = 0; i < _root_objects->size(); ++i)
       {
@@ -1018,9 +1138,66 @@ namespace sal
             recursive_retain_all(tid.root, &visited);
       }
 
+      finish_recovery_walk();
       _ptr_alloc.release_unreachable();
 
-      start_background_threads();
+      if (_recovery.rebuild_segment_metadata)
+      {
+         rebuild_segment_metadata();
+         provider_populate_pinned_segments();
+         provider_populate_unpinned_segments();
+      }
+      if (_recovery.restart_threads)
+         start_background_threads();
+   }
+
+   /**
+    * The flushed prefix of a segment, found by walking forward from its start
+    * without trusting the footer (alloc_pos and the last-header position live in
+    * the segment's final page, which a commit does not msync).
+    *
+    * A sync header is accepted only if it continues the chain: it names the
+    * previous accepted header, is not older than it, and its checksum (when one
+    * was written) matches. A header left over from the segment's previous use,
+    * or from an unflushed page, breaks one of those and ends the prefix.
+    */
+   struct durable_prefix
+   {
+      uint32_t end           = 0;  ///< first byte after the last accepted sync header
+      uint32_t last_sync_pos = 0;
+   };
+   template <typename OnSync>
+   static durable_prefix scan_durable_prefix(const mapped_memory::segment* seg, OnSync&& on_sync)
+   {
+      durable_prefix result;
+      const uint32_t limit     = seg->end_pos();
+      uint32_t       pos       = 0;
+      uint64_t       last_time = 0;
+      while (pos + sizeof(sync_header) <= limit)
+      {
+         const auto* ah   = reinterpret_cast<const alloc_header*>(seg->data + pos);
+         const auto  size = ah->size();
+         if (size == 0 || size % cacheline_size != 0 || size > limit - pos)
+            break;
+         if (ah->type() == header_type::sync_head)
+         {
+            const auto* sh = reinterpret_cast<const sync_header*>(ah);
+            if (sh->prev_aheader_pos() != result.last_sync_pos || *sh->timestamp() < last_time ||
+                sh->start_checksum_pos() > pos)
+               break;
+            if (sh->sync_checksum() != 0 &&
+                XXH3_64bits(seg->data + sh->start_checksum_pos(),
+                            pos + sh->checksum_offset() - sh->start_checksum_pos()) !=
+                    sh->sync_checksum())
+               break;
+            on_sync(pos, sh);
+            result.end           = pos + size;
+            result.last_sync_pos = pos;
+            last_time            = *sh->timestamp();
+         }
+         pos += size;
+      }
+      return result;
    }
 
    /**
@@ -1112,6 +1289,32 @@ namespace sal
       {
          auto* seg = get_segment(segment_number(seg_idx));
 
+         const bool flushed_only = _recovery.truncate_unsynced_tails;
+         if (flushed_only)
+         {
+            const auto prefix = scan_durable_prefix(
+                seg, [&](uint32_t pos, const sync_header* sh)
+                {
+                   if (auto info = sh->get_root_info())
+                   {
+                      version_index.record(*info);
+                      SAL_WARN("  found root_info in sync header at pos {}: root[{}] = {} ts={}",
+                               pos, info->root_index, info->root_address, *sh->timestamp());
+                      recovered_roots.push_back({sh->timestamp(), info->root_index,
+                                                 info->root_address, info->version_address,
+                                                 info->root_version});
+                   }
+                });
+            if (seg->get_alloc_pos() != prefix.end)
+            {
+               SAL_WARN("segment {}: alloc_pos {} -> {} (flushed prefix)", seg_idx,
+                        seg->get_alloc_pos(), prefix.end);
+               seg->set_alloc_pos(prefix.end);
+            }
+            if (seg->_last_aheader_pos != prefix.last_sync_pos)
+               seg->_last_aheader_pos = prefix.last_sync_pos;
+         }
+
          if (seg->_provider_sequence == 0 && seg->get_alloc_pos() == 0)
          {
             _mapped_state->_segment_provider.free_segments.set(seg_idx);
@@ -1122,7 +1325,7 @@ namespace sal
             max_provider_seq = seg->_provider_sequence;
 
          // Find last valid sync boundary
-         uint32_t valid_sync_pos = find_last_valid_sync(seg);
+         uint32_t valid_sync_pos = flushed_only ? 0 : find_last_valid_sync(seg);
 
          // Determine valid data end.
          // For segments with valid sync headers, we know data up to the sync
@@ -1250,6 +1453,10 @@ namespace sal
             {
                // Verify the existing root's control block was rebuilt by the segment scan
                auto resolved = resolve(tid.root);
+               if (!resolved.first && _recovery.fail_on_unresolved)
+                  throw recovery_error("sal: root " + std::to_string(i) +
+                                       " names an object that is not in any segment; nothing "
+                                       "was freed");
                if (!resolved.first)
                {
                   SAL_WARN("root[{}] = {} from roots file is invalid (no control block), clearing", i, *tid.root);
@@ -1269,6 +1476,7 @@ namespace sal
       reconstruct_custom_cbs_from_roots(&version_index);
 
       // Phase 6: Walk all valid roots, recursively retain reachable nodes
+      begin_recovery_walk();
       recovery_visit_set visited(_ptr_alloc.current_max_address_count());
       for (uint32_t i = 0; i < _root_objects->size(); ++i)
       {
@@ -1277,8 +1485,11 @@ namespace sal
             recursive_retain_all(tid.root, &visited);
       }
 
+      finish_recovery_walk();
       // Phase 7: Free leaked objects
       _ptr_alloc.release_unreachable();
+      if (_recovery.rebuild_segment_metadata)
+         rebuild_segment_metadata();
 
       // Reset segment provider sequence counter
       _mapped_state->_segment_provider._next_alloc_seq.store(max_provider_seq + 1,
@@ -1288,7 +1499,8 @@ namespace sal
 
       provider_populate_pinned_segments();
       provider_populate_unpinned_segments();
-      start_background_threads();
+      if (_recovery.restart_threads)
+         start_background_threads();
 
       SAL_WARN("Power-loss recovery complete. {} roots from sync headers, {} validated from roots file.",
                roots_recovered, roots_from_file);

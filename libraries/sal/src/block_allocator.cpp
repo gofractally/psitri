@@ -324,6 +324,20 @@ namespace sal
       return true; // terminal failures fail-stop; false is never ignored upstream
    }
 
+   void block_allocator::sync(sync_type type) noexcept
+   {
+      if (type <= sync_type::mprotect || _mode != access_mode::read_write)
+         return;
+      std::lock_guard l{_resize_mutex};
+      const auto      size = _file_size.load(std::memory_order_relaxed);
+      if (!_mapped_base || _mapped_base == MAP_FAILED || size == 0)
+         return;
+      durable_msync(_mapped_base, size,
+                    type == sync_type::msync_async ? MS_ASYNC : MS_SYNC);
+      if (type >= sync_type::fsync)
+         durable_fsync(_fd, type == sync_type::full);
+   }
+
    bool block_allocator::mlock_mapped_blocks(uint32_t desired_num_blocks) noexcept
    {
       std::lock_guard l{_resize_mutex};

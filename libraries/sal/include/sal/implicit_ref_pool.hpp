@@ -15,6 +15,7 @@
 #include <cassert>
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 
 #include <sal/colo_alloc.hpp>
 
@@ -87,10 +88,16 @@ namespace sal
       /// Replay ONE reference to `adr` from the recovery walk: claim the slot on first sight,
       /// then ++ its counter. After walking all live (node,range) handles, each slot's counter
       /// equals its live share-count and the allocation set is exactly the referenced slots.
-      void retally(ptr_address adr)
+      /// Returns true on first sight: the caller then owns walking that range's branches,
+      /// which are referenced once per counter rather than once per sharing node.
+      bool retally(ptr_address adr)
       {
-         _a.get_or_claim(adr).fetch_add(1, std::memory_order_relaxed);
+         const auto previous = _a.get_or_claim(adr).fetch_add(1, std::memory_order_relaxed);
+         if (previous == implicit_ref_max)
+            throw std::runtime_error("implicit_ref_pool: share count overflow during recovery");
+         return previous == 0;
       }
+      void sync(sync_type type) noexcept { _a.sync(type); }
 
      private:
       colo_alloc<implicit_ref_count> _a;

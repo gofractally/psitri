@@ -514,6 +514,10 @@ namespace sal
       // set all meta nodes to empty state
       void clear_all();
 
+      // Flush control blocks, free list, and header. They are deliberately not
+      // flushed on the commit path; recovery rebuilds them after an unclean stop.
+      void sync(sync_type type) noexcept;
+
       // release all refs, if prior was <= 1 move to free list
       void release_unreachable();
 

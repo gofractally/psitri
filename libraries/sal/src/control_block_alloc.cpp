@@ -156,6 +156,13 @@ namespace sal
       _header_ptr->alloc_seq.store(0, std::memory_order_relaxed);
    }
 
+   void control_block_alloc::sync(sync_type type) noexcept
+   {
+      _zone_allocator->sync(type);
+      _zone_free_list->sync(type);
+      _header->sync(type);
+   }
+
    void control_block_alloc::release_unreachable()
    {
       auto     num_zones       = _header_ptr->allocated_zones.load(std::memory_order_relaxed);

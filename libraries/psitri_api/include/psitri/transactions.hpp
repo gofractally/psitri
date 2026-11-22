@@ -470,6 +470,25 @@ namespace psitri
             --_depth;
          }
 
+         /// Write the changes, in key order, to anything that has `upsert` and
+         /// `remove`: an engine's transaction, an editor of a tree that is not
+         /// installed in any root, or another transaction of these types. The
+         /// changes stay in this transaction as well.
+         template <class Target>
+         void apply_to(Target& target)
+         {
+            auto changes = store().freeze();
+            for (auto it = changes.begin(), end = changes.end(); it != end; ++it)
+            {
+               if (it.value().removed)
+                  target.remove(it.key());
+               else
+                  target.upsert(it.key(), it.value().value());
+            }
+         }
+         /// How many keys this transaction has written or removed.
+         std::uint32_t changed_keys() const noexcept { return store().size(); }
+
         protected:
          delta_store& store() { return *static_cast<Derived*>(this)->_store; }
          const delta_store& store() const { return *static_cast<const Derived*>(this)->_store; }
@@ -657,14 +676,7 @@ namespace psitri
       /// Apply the changes in key order and publish the root.
       void commit()
       {
-         auto changes = _store->freeze();
-         for (auto it = changes.begin(), end = changes.end(); it != end; ++it)
-         {
-            if (it.value().removed)
-               _inner.remove(it.key());
-            else
-               _inner.upsert(it.key(), it.value().value());
-         }
+         this->apply_to(_inner);
          _inner.commit();
          finish();
       }

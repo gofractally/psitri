@@ -483,6 +483,94 @@ TEMPLATE_TEST_CASE("Transactions: an engine's own transaction reads its own chan
    }
 }
 
+TEST_CASE("Transactions: changes kept aside are applied to a tree that is in no root",
+          "[api][transactions][detached]")
+{
+   using E  = psitri::big_engine;
+   using DB = psitri::database_for<E>;
+   temporary_directory temp;
+   auto                db = DB::open(temp.path / "db", psitri::open_mode::create_only, config<E>());
+   auto                writer = db->start_write_session();
+   std::mt19937        rng(7);
+
+   // A tree of its own, never installed in a root.
+   model contents;
+   auto  base = [&]
+   {
+      auto edit = writer->start_write_transaction(writer->create_temporary_tree());
+      for (int i = 0; i < 300; ++i)
+      {
+         auto key      = random_key(rng);
+         contents[key] = random_value(rng);
+         edit.upsert(key, contents[key]);
+      }
+      return edit.get_tree();
+   }();
+
+   for (int round = 0; round < 8; ++round)
+   {
+      // Work on it without touching it...
+      psitri::transient_transaction tx(base);
+      auto                          expected = contents;
+      exercise(tx, expected, rng, 300);
+      require_same_scan(base.snapshot_cursor(), contents);
+      if (round % 3 == 2)
+         continue;  // ...and sometimes throw the work away.
+      // ...then write the changes into a copy of it in one pass.
+      auto edit = writer->start_write_transaction(base);
+      tx.apply_to(edit);
+      auto next = edit.get_tree();
+      require_same_scan(base.snapshot_cursor(), contents);  // the old tree is as it was
+      require_same_scan(next.snapshot_cursor(), expected);
+      base     = std::move(next);
+      contents = std::move(expected);
+   }
+}
+
+TEMPLATE_TEST_CASE("Transactions: a nested transaction's changes fold into the outer one",
+                   "[api][transactions]",
+                   psitri::small_engine,
+                   psitri::big_engine)
+{
+   using E  = TestType;
+   using DB = psitri::database_for<E>;
+   temporary_directory temp;
+   auto                db = DB::open(temp.path / "db", psitri::open_mode::create_only, config<E>());
+   auto                writer = db->start_write_session();
+   std::mt19937        rng(11);
+   model               committed = fill(*writer, 5, rng, 200);
+   {
+      auto cursor = writer->get_root(5).snapshot_cursor();
+      committed.clear();
+      for (bool more = cursor.seek_begin(); more; more = cursor.next())
+         committed[std::string(cursor.key())] = *cursor.template value<std::string>();
+   }
+
+   // The block: one delta transaction. Each transaction in it works on its
+   // own changes over the block so far and is folded in, or dropped, whole.
+   psitri::delta_transaction<E> block(*writer, 5);
+   model                        expected = committed;
+   for (int n = 0; n < 30; ++n)
+   {
+      struct block_so_far
+      {
+         psitri::delta_transaction<E>* block;
+         auto snapshot_cursor() const { return block->snapshot_cursor(); }
+      };
+      psitri::transient_transaction tx(block_so_far{&block});
+      model                         inner = expected;
+      exercise(tx, inner, rng, 60);
+      if (n % 4 == 3)
+         continue;  // this transaction failed: nothing of it remains
+      tx.apply_to(block);
+      expected = std::move(inner);
+      require_same_scan(block.snapshot_cursor(), expected);
+   }
+   require_same_scan(writer->get_root(5).snapshot_cursor(), committed);  // nothing published yet
+   block.commit();
+   require_same_scan(writer->get_root(5).snapshot_cursor(), expected);
+}
+
 TEMPLATE_TEST_CASE("Cursors: an empty root is both ended and reverse-ended after a failed seek",
                    "[api][cursors]",
                    psitri::small_engine,

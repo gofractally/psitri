@@ -366,7 +366,12 @@ namespace start_ref::kv
          _rend = false;
          _it   = _view.begin();
          if (_it == _view.end())
+         {
+            // Nothing to land on: the cursor is before the first key, as it
+            // is after stepping back off the first key of a non-empty tree.
+            _rend = true;
             return false;
+         }
          auto last = _it;
          for (auto i = _it; i != _view.end(); ++i)
             last = i;

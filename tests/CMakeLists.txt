@@ -13,7 +13,7 @@ set_target_properties(kv-compat-test PROPERTIES
 add_test(NAME kv-compat-test COMMAND kv-compat-test)
 
 if(Catch2_FOUND)
-    add_executable(api-conformance-tests api/conformance.cpp api/large_values.cpp api/small_large_values.cpp api/writers.cpp)
+    add_executable(api-conformance-tests api/conformance.cpp api/large_values.cpp api/small_large_values.cpp api/writers.cpp api/transactions.cpp)
     target_link_libraries(api-conformance-tests PRIVATE psitri::api psitri::experimental Catch2::Catch2WithMain)
     set_target_properties(api-conformance-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME api-conformance-tests COMMAND api-conformance-tests)

@@ -5,7 +5,7 @@ add_library(psitri::concepts ALIAS psitri_api_concepts)
 target_include_directories(psitri_api_concepts INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
-target_link_libraries(psitri_api_concepts INTERFACE adb sal)
+target_link_libraries(psitri_api_concepts INTERFACE adb sal art)
 target_compile_features(psitri_api_concepts INTERFACE cxx_std_23)
 
 add_library(psitri_api_small INTERFACE)

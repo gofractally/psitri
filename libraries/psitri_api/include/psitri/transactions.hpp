@@ -1,0 +1,671 @@
+#pragma once
+// Transaction types that work on any engine satisfying the concept.
+//
+//   transient_transaction<Snapshot>
+//       Never commits. Writes go to a private delta; reads see the delta
+//       merged over a snapshot. It takes no lock and touches nothing shared,
+//       so any number run at once, each on its own thread. Use it to try a
+//       change that will be thrown away.
+//
+//   delta_transaction<Engine>
+//       Holds the root's writer for its whole life, so writers queue. Writes
+//       go to a private delta and the tree is not touched until commit, which
+//       applies the delta in key order and publishes the root once. Readers
+//       of the root are unaffected until that publication.
+//
+// The engine's own transaction is the third kind: it changes a private copy
+// of the tree as it goes and publishes it on commit.
+//
+// Reads through either type, including cursors in both directions, see the
+// transaction's own writes. A cursor stays usable when the transaction is
+// written to: it re-finds its place.
+
+#include <psitri/concepts.hpp>
+
+#include <art/art_map.hpp>
+#include <art/heap_arena.hpp>
+
+#include <cstdint>
+#include <cstring>
+#include <memory>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace psitri
+{
+   namespace detail
+   {
+      // One changed key: a new value (stored after this header) or a removal.
+      struct delta_entry
+      {
+         std::uint8_t  removed = 0;
+         std::uint32_t size    = 0;
+         std::string_view value() const noexcept
+         {
+            return {reinterpret_cast<const char*>(this) + sizeof(delta_entry), size};
+         }
+      };
+   }  // namespace detail
+
+   /// The changes of one transaction, in key order. Memory comes from one
+   /// region that is reused, not freed, when the store is cleared.
+   class delta_store
+   {
+     public:
+      using map_type = art::art_map<detail::delta_entry, art::heap_arena>;
+      using iterator = art::art_iterator<detail::delta_entry, art::heap_arena>;
+
+      explicit delta_store(std::uint32_t initial_bytes = 1u << 16) : _map(initial_bytes) {}
+
+      void put(std::string_view key, std::string_view value)
+      {
+         if (value.size() > UINT32_MAX)
+            throw std::length_error("value too large for a transaction delta");
+         _map.upsert_inline(key, detail::delta_entry{0, static_cast<std::uint32_t>(value.size())},
+                            value);
+         ++_version;
+      }
+      void erase(std::string_view key)
+      {
+         _map.upsert_inline(key, detail::delta_entry{1, 0}, {});
+         ++_version;
+      }
+      const detail::delta_entry* find(std::string_view key) const noexcept
+      {
+         return const_cast<map_type&>(_map).get(key);
+      }
+
+      iterator begin() const noexcept { return const_cast<map_type&>(_map).begin(); }
+      iterator end() const noexcept { return const_cast<map_type&>(_map).end(); }
+      /// First entry with key >= `key`.
+      iterator at_or_after(std::string_view key) const noexcept
+      {
+         return const_cast<map_type&>(_map).lower_bound(key);
+      }
+      /// First entry with key > `key`.
+      iterator after(std::string_view key) const noexcept
+      {
+         return const_cast<map_type&>(_map).upper_bound(key);
+      }
+
+      bool          empty() const noexcept { return _map.empty(); }
+      std::uint32_t size() const noexcept { return _map.size(); }
+      /// Changes whenever the contents do. Cursors use it to notice.
+      std::uint64_t version() const noexcept { return _version; }
+
+      /// A point the contents can be returned to.
+      struct mark
+      {
+         art::offset_t root;
+         std::uint32_t size;
+      };
+      mark save() noexcept
+      {
+         // Entries written from here on never overwrite ones that exist now.
+         _map.bump_cow_seq();
+         return {_map.root(), _map.size()};
+      }
+      void restore(const mark& m) noexcept
+      {
+         _map.root() = m.root;
+         _map.set_size(m.size);
+         _map.bump_cow_seq();
+         ++_version;
+      }
+
+      void clear() noexcept
+      {
+         _map.clear();
+         ++_version;
+      }
+
+     private:
+      map_type      _map;
+      std::uint64_t _version = 0;
+   };
+
+   namespace detail
+   {
+      // Stores are kept per thread and handed out one per live transaction.
+      inline std::vector<std::unique_ptr<delta_store>>& idle_delta_stores()
+      {
+         thread_local std::vector<std::unique_ptr<delta_store>> stores;
+         return stores;
+      }
+      inline std::unique_ptr<delta_store> take_delta_store()
+      {
+         auto& idle = idle_delta_stores();
+         if (idle.empty())
+            return std::make_unique<delta_store>();
+         auto result = std::move(idle.back());
+         idle.pop_back();
+         return result;
+      }
+      inline void give_delta_store(std::unique_ptr<delta_store> store) noexcept
+      {
+         if (!store)
+            return;
+         store->clear();
+         try
+         {
+            idle_delta_stores().push_back(std::move(store));
+         }
+         catch (...)
+         {
+         }
+      }
+   }  // namespace detail
+
+   /// A cursor over a delta merged with a base cursor. It has the positioning
+   /// rules of an engine cursor: `lower_bound` finds the first key at or after
+   /// its argument and `upper_bound` the last key at or before it.
+   template <adb::mergeable_cursor Base>
+   class merged_cursor
+   {
+     public:
+      merged_cursor(const delta_store& delta, Base base) : _delta(&delta), _base(std::move(base)) {}
+
+      bool seek_begin() { return forward_from({}, true); }
+      bool lower_bound(std::string_view key) { return forward_from(key, true); }
+      bool seek_last()
+      {
+         _d      = _delta->end();
+         _d_live = step_delta_back();
+         _b_live = _base.seek_last();
+         return settle_backward();
+      }
+      bool upper_bound(std::string_view key) { return backward_from(key, true); }
+
+      bool next()
+      {
+         if (_where == position::after_last)
+            return false;
+         if (_where == position::before_first)
+            return seek_begin();
+         if (!_forward || _seen != _delta->version())
+            return forward_from(std::string(_key), false);
+         if (_on_delta)
+            _d_live = (++_d != _delta->end());
+         else
+            _b_live = _base.next();
+         return settle_forward();
+      }
+      bool prev()
+      {
+         if (_where == position::before_first)
+            return false;
+         if (_where == position::after_last)
+            return seek_last();
+         if (_forward || _seen != _delta->version())
+            return backward_from(std::string(_key), false);
+         if (_on_delta)
+            _d_live = step_delta_back();
+         else
+            _b_live = _base.prev();
+         return settle_backward();
+      }
+
+      bool is_end() const noexcept { return _where == position::after_last; }
+      bool is_rend() const noexcept { return _where == position::before_first; }
+
+      std::string_view key() const noexcept { return _key; }
+
+      template <class T = std::string>
+      std::optional<T> value()
+      {
+         if (_where != position::on_key)
+            return std::nullopt;
+         refresh();
+         if (_where != position::on_key)
+            return std::nullopt;
+         if (_on_delta)
+         {
+            auto v = _d.value().value();
+            T    result;
+            result.resize(v.size());
+            if (!v.empty())
+               std::memcpy(result.data(), v.data(), v.size());
+            return result;
+         }
+         return _base.template value<T>();
+      }
+      template <class F>
+      bool get_value(F&& callback)
+      {
+         if (_where != position::on_key)
+            return false;
+         refresh();
+         if (_where != position::on_key)
+            return false;
+         if (_on_delta)
+         {
+            callback(_d.value().value());
+            return true;
+         }
+         return _base.get_value(std::forward<F>(callback));
+      }
+      bool is_subtree()
+      {
+         if (_where != position::on_key)
+            return false;
+         refresh();
+         return _where == position::on_key && !_on_delta && _base.is_subtree();
+      }
+
+      /// Point reads. They do not move the cursor's position in the merged
+      /// view, but they do use the base cursor, so the place is found again.
+      template <class F>
+      bool get(std::string_view key, F&& callback)
+      {
+         if (auto* entry = _delta->find(key))
+         {
+            if (entry->removed)
+               return false;
+            callback(entry->value());
+            return true;
+         }
+         bool found = _base.get(key, std::forward<F>(callback));
+         _seen      = _delta->version() - 1;  // the base cursor may have moved
+         return found;
+      }
+      template <class T = std::string>
+      std::optional<T> get(std::string_view key)
+      {
+         std::optional<T> result;
+         get(key,
+             [&](std::string_view v)
+             {
+                result.emplace();
+                result->resize(v.size());
+                if (!v.empty())
+                   std::memcpy(result->data(), v.data(), v.size());
+             });
+         return result;
+      }
+
+     private:
+      enum class position : std::uint8_t
+      {
+         before_first,
+         on_key,
+         after_last
+      };
+
+      // Put the cursor back on its key after the delta changed under it. If
+      // the key has since been removed the cursor moves to the next key.
+      void refresh()
+      {
+         if (_seen != _delta->version())
+         {
+            std::string key(_key);
+            if (_forward)
+               forward_from(key, true);
+            else
+               backward_from(key, true);
+         }
+      }
+
+      bool step_delta_back()
+      {
+         if (_d == _delta->begin())
+            return false;
+         --_d;
+         return true;
+      }
+
+      // Position on the first key >= `key` (or > `key` when not inclusive).
+      bool forward_from(std::string_view key, bool inclusive)
+      {
+         std::string held(key);
+         if (inclusive)
+         {
+            _d      = _delta->at_or_after(held);
+            _b_live = held.empty() ? _base.seek_begin() : _base.lower_bound(held);
+         }
+         else
+         {
+            _d      = _delta->after(held);
+            _b_live = _base.lower_bound(held);
+            if (_b_live && _base.key() == held)
+               _b_live = _base.next();
+         }
+         _d_live = _d != _delta->end();
+         return settle_forward();
+      }
+      // Position on the last key <= `key` (or < `key` when not inclusive).
+      bool backward_from(std::string_view key, bool inclusive)
+      {
+         std::string held(key);
+         _d      = inclusive ? _delta->after(held) : _delta->at_or_after(held);
+         _d_live = step_delta_back();
+         _b_live = _base.upper_bound(held);
+         if (!inclusive && _b_live && _base.key() == held)
+            _b_live = _base.prev();
+         return settle_backward();
+      }
+
+      // Both sources are at their first candidate. Pick the smaller key; the
+      // delta wins a tie, and a removal in the delta hides the key.
+      bool settle_forward()
+      {
+         _forward = true;
+         _seen    = _delta->version();
+         for (;;)
+         {
+            if (!_d_live && !_b_live)
+            {
+               _where = position::after_last;
+               _key.clear();
+               return false;
+            }
+            if (_d_live && (!_b_live || _d.key() <= _base.key()))
+            {
+               if (_b_live && _d.key() == _base.key())
+                  _b_live = _base.next();
+               if (_d.value().removed)
+               {
+                  _d_live = (++_d != _delta->end());
+                  continue;
+               }
+               _on_delta = true;
+               _key.assign(_d.key());
+            }
+            else
+            {
+               _on_delta = false;
+               _key.assign(_base.key());
+            }
+            _where = position::on_key;
+            return true;
+         }
+      }
+      bool settle_backward()
+      {
+         _forward = false;
+         _seen    = _delta->version();
+         for (;;)
+         {
+            if (!_d_live && !_b_live)
+            {
+               _where = position::before_first;
+               _key.clear();
+               return false;
+            }
+            if (_d_live && (!_b_live || _d.key() >= _base.key()))
+            {
+               if (_b_live && _d.key() == _base.key())
+                  _b_live = _base.prev();
+               if (_d.value().removed)
+               {
+                  _d_live = step_delta_back();
+                  continue;
+               }
+               _on_delta = true;
+               _key.assign(_d.key());
+            }
+            else
+            {
+               _on_delta = false;
+               _key.assign(_base.key());
+            }
+            _where = position::on_key;
+            return true;
+         }
+      }
+
+      const delta_store*    _delta;
+      Base                  _base;
+      delta_store::iterator _d{};
+      bool                  _d_live   = false;
+      bool                  _b_live   = false;
+      bool                  _on_delta = false;
+      bool                  _forward  = true;
+      position              _where    = position::before_first;
+      std::uint64_t         _seen     = 0;
+      std::string           _key;
+   };
+
+   namespace detail
+   {
+      // Shared by both transaction types: a delta over something readable.
+      template <class Derived, class BaseCursor>
+      class delta_operations
+      {
+        public:
+         using cursor = merged_cursor<BaseCursor>;
+
+         /// A point to roll back to. Savepoints nest; release or roll back the
+         /// most recent one first.
+         struct savepoint
+         {
+            delta_store::mark mark;
+            std::uint32_t     depth;
+         };
+         savepoint save()
+         {
+            return {store().save(), ++_depth};
+         }
+         /// Undo everything written since the savepoint.
+         void rollback(const savepoint& point)
+         {
+            check_innermost(point);
+            store().restore(point.mark);
+            --_depth;
+         }
+         /// Keep everything written since the savepoint.
+         void release(const savepoint& point)
+         {
+            check_innermost(point);
+            --_depth;
+         }
+
+        protected:
+         delta_store& store() { return *static_cast<Derived*>(this)->_store; }
+         const delta_store& store() const { return *static_cast<const Derived*>(this)->_store; }
+         std::uint32_t depth() const noexcept { return _depth; }
+         void reset_depth() noexcept { _depth = 0; }
+
+         template <class C>
+         static bool read_through(const delta_store& delta, C&& base, std::string_view key,
+                                  auto&& callback)
+         {
+            if (auto* entry = delta.find(key))
+            {
+               if (entry->removed)
+                  return false;
+               callback(entry->value());
+               return true;
+            }
+            return base.get(key, callback);
+         }
+
+         // Remove every key in [lower, upper) by recording a removal for each.
+         std::uint64_t remove_each(cursor scan, std::string_view lower, std::string_view upper)
+         {
+            std::vector<std::string> keys;
+            for (bool more = lower.empty() ? scan.seek_begin() : scan.lower_bound(lower);
+                 more && (upper.empty() || scan.key() < upper); more = scan.next())
+               keys.emplace_back(scan.key());
+            for (auto& key : keys)
+               store().erase(key);
+            return keys.size();
+         }
+
+        private:
+         void check_innermost(const savepoint& point) const
+         {
+            if (point.depth != _depth)
+               throw std::logic_error("savepoints must be closed innermost first");
+         }
+         std::uint32_t _depth = 0;
+      };
+   }  // namespace detail
+
+   /// A transaction that is never committed. See the top of this file.
+   template <adb::shared_snapshot Snapshot>
+   class transient_transaction
+       : public detail::delta_operations<
+             transient_transaction<Snapshot>,
+             decltype(std::declval<const Snapshot&>().snapshot_cursor())>
+   {
+      using base_cursor = decltype(std::declval<const Snapshot&>().snapshot_cursor());
+      using operations  = detail::delta_operations<transient_transaction<Snapshot>, base_cursor>;
+      friend operations;
+
+     public:
+      using cursor = merged_cursor<base_cursor>;
+
+      explicit transient_transaction(Snapshot base)
+          : _base(std::move(base)), _store(detail::take_delta_store())
+      {
+      }
+      transient_transaction(transient_transaction&&) noexcept            = default;
+      transient_transaction& operator=(transient_transaction&&) noexcept = delete;
+      ~transient_transaction() { detail::give_delta_store(std::move(_store)); }
+
+      void upsert(std::string_view key, std::string_view value) { _store->put(key, value); }
+      /// 0 if the key was there, -1 if not.
+      int remove(std::string_view key)
+      {
+         if (!get(key, [](std::string_view) {}))
+            return -1;
+         _store->erase(key);
+         return 0;
+      }
+      /// Removes every key in [lower, upper); an empty bound is open. Returns
+      /// how many keys were removed.
+      std::uint64_t remove_range(std::string_view lower, std::string_view upper)
+      {
+         return this->remove_each(snapshot_cursor(), lower, upper);
+      }
+
+      template <class F>
+      bool get(std::string_view key, F&& callback) const
+      {
+         auto base = _base.snapshot_cursor();
+         return operations::read_through(*_store, base, key, callback);
+      }
+      template <class T = std::string>
+      std::optional<T> get(std::string_view key) const
+      {
+         std::optional<T> result;
+         get(key, [&](std::string_view v) { result.emplace(v.data(), v.size()); });
+         return result;
+      }
+
+      /// A cursor over the snapshot with this transaction's changes applied.
+      cursor snapshot_cursor() const { return cursor(*_store, _base.snapshot_cursor()); }
+
+      /// Throw away every change and start again on the same snapshot.
+      void reset()
+      {
+         _store->clear();
+         this->reset_depth();
+      }
+
+     private:
+      Snapshot                     _base;
+      std::unique_ptr<delta_store> _store;
+   };
+
+   /// A transaction that keeps its changes in a delta and applies them at
+   /// commit. See the top of this file.
+   template <psitri::engine E>
+   class delta_transaction
+       : public detail::delta_operations<
+             delta_transaction<E>,
+             decltype(std::declval<const snapshot_for<E>&>().snapshot_cursor())>
+   {
+      using snapshot    = snapshot_for<E>;
+      using base_cursor = decltype(std::declval<const snapshot&>().snapshot_cursor());
+      using operations  = detail::delta_operations<delta_transaction<E>, base_cursor>;
+      friend operations;
+
+     public:
+      using cursor = merged_cursor<base_cursor>;
+
+      /// Waits for the root's writer, as the engine's own transaction does.
+      delta_transaction(typename E::write_session& session, std::uint32_t root)
+          : _inner(session.start_transaction(root)),
+            _base(session.get_root(root)),
+            _store(detail::take_delta_store())
+      {
+      }
+      delta_transaction(delta_transaction&&) noexcept            = default;
+      delta_transaction& operator=(delta_transaction&&) noexcept = delete;
+      ~delta_transaction()
+      {
+         if (_store)
+            abort();
+      }
+
+      void upsert(std::string_view key, std::string_view value) { _store->put(key, value); }
+      /// 0 if the key was there, -1 if not.
+      int remove(std::string_view key)
+      {
+         if (!get(key, [](std::string_view) {}))
+            return -1;
+         _store->erase(key);
+         return 0;
+      }
+      /// Removes every key in [lower, upper); an empty bound is open. Returns
+      /// how many keys were removed.
+      std::uint64_t remove_range(std::string_view lower, std::string_view upper)
+      {
+         return this->remove_each(snapshot_cursor(), lower, upper);
+      }
+
+      template <class F>
+      bool get(std::string_view key, F&& callback) const
+      {
+         auto base = _base.snapshot_cursor();
+         return operations::read_through(*_store, base, key, callback);
+      }
+      template <class T = std::string>
+      std::optional<T> get(std::string_view key) const
+      {
+         std::optional<T> result;
+         get(key, [&](std::string_view v) { result.emplace(v.data(), v.size()); });
+         return result;
+      }
+
+      /// A cursor over the root as it was when this transaction started, with
+      /// this transaction's changes applied.
+      cursor snapshot_cursor() const { return cursor(*_store, _base.snapshot_cursor()); }
+
+      /// Apply the changes in key order and publish the root.
+      void commit()
+      {
+         for (auto it = _store->begin(), end = _store->end(); it != end; ++it)
+         {
+            if (it.value().removed)
+               _inner.remove(it.key());
+            else
+               _inner.upsert(it.key(), it.value().value());
+         }
+         _inner.commit();
+         finish();
+      }
+      /// Discard the changes. The root is as it was.
+      void abort() noexcept
+      {
+         _inner.abort();
+         finish();
+      }
+
+     private:
+      void finish() noexcept
+      {
+         this->reset_depth();
+         detail::give_delta_store(std::move(_store));
+      }
+
+      typename E::transaction      _inner;
+      snapshot                     _base;
+      std::unique_ptr<delta_store> _store;
+   };
+}  // namespace psitri

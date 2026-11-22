@@ -679,7 +679,14 @@ namespace psitri
              _session->record_operation(is_upper
                                             ? sal::mapped_memory::session_operation::txn_upper_bound
                                             : sal::mapped_memory::session_operation::txn_lower_bound);
-         auto& cs = cs_at(idx);
+         // A cursor reads the tree, so writes still held in the buffer have to
+         // reach it first; otherwise a scan would miss this transaction's own
+         // changes. As with a range remove, this is the point at which a
+         // buffered transaction starts touching the tree.
+         auto& self = const_cast<transaction&>(*this);
+         auto& cs   = self.cs_at(idx);
+         if (cs.buffer && !cs.buffer->empty())
+            self.merge_buffer_to_persistent(cs);
          cursor c(cs.cursor->root());
          if (is_upper)
             c.upper_bound(key);

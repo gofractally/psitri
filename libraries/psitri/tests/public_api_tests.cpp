@@ -2880,3 +2880,39 @@ TEST_CASE("micro nested sub_transaction: inner merge, outer abort",
    REQUIRE(c.get(to_key("L0_key"), &buf) >= 0);
    REQUIRE(c.get(to_key("L1_key"), &buf) < 0);
 }
+
+// A scan inside a transaction sees that transaction's own writes, in either mode.
+static std::vector<std::string> scan_from(psitri::transaction& tx, std::string_view from)
+{
+   std::vector<std::string> keys;
+   auto                     c = tx.lower_bound(key_view(from.data(), from.size()));
+   while (!c.is_end())
+   {
+      keys.emplace_back(c.key().data(), c.key().size());
+      c.next();
+   }
+   return keys;
+}
+
+TEST_CASE("a scan inside a transaction sees its own writes", "[public-api][transaction][scan]")
+{
+   for (auto mode : {tx_mode::expect_success, tx_mode::expect_failure})
+   {
+      CAPTURE(mode == tx_mode::expect_failure);
+      test_db t;
+      {
+         auto tx = t.ses->start_transaction(0);
+         tx.upsert(to_key("a"), to_value("1"));
+         tx.upsert(to_key("c"), to_value("1"));
+         tx.upsert(to_key("e"), to_value("1"));
+         tx.commit();
+      }
+      auto tx = t.ses->start_transaction(0, mode);
+      tx.upsert(to_key("b"), to_value("2"));
+      tx.remove(to_key("c"));
+      tx.upsert(to_key("f"), to_value("2"));
+      CHECK(scan_from(tx, "a") == std::vector<std::string>{"a", "b", "e", "f"});
+      CHECK(scan_from(tx, "c") == std::vector<std::string>{"e", "f"});
+      tx.abort();
+   }
+}

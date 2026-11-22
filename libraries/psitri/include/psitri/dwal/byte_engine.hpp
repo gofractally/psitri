@@ -133,14 +133,14 @@ namespace psitri::dwal
       class read_session
       {
          std::shared_ptr<database> db_;
-         std::unordered_map<uint32_t, std::shared_ptr<snapshot>> snapshots_;
        public:
          explicit read_session(std::shared_ptr<database> db) : db_(std::move(db)) {}
+         // Each cursor is a snapshot of the root as committed when it is created.
+         // (One snapshot used to be kept per root for the life of the session, so
+         // later cursors never showed later commits.)
          cursor create_cursor(uint32_t index)
          {
-            auto& view = snapshots_[index];
-            if (!view) view = std::make_shared<snapshot>(db_, index);
-            return cursor(view);
+            return cursor(std::make_shared<snapshot>(db_, index));
          }
       };
 

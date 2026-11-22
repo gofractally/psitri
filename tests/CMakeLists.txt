@@ -17,6 +17,14 @@ if(Catch2_FOUND)
     target_link_libraries(api-conformance-tests PRIVATE psitri::api psitri::experimental Catch2::Catch2WithMain)
     set_target_properties(api-conformance-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME api-conformance-tests COMMAND api-conformance-tests)
+
+    # The same writer and reader cases on the engines layered over others.
+    if(TARGET psitri)
+        add_executable(layered-conformance-tests api/layered.cpp)
+        target_link_libraries(layered-conformance-tests PRIVATE psitri psitri::api psitri::experimental Catch2::Catch2WithMain)
+        set_target_properties(layered-conformance-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+        add_test(NAME layered-conformance-tests COMMAND layered-conformance-tests)
+    endif()
 endif()
 
 if(UNIX AND NOT CMAKE_CROSSCOMPILING)

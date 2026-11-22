@@ -17,6 +17,7 @@
 // reopen and re-flush whatever W still holds (idempotent upserts/removes).
 #pragma once
 
+#include <stdexcept>
 #include <sal/config.hpp>  // sal::open_mode (the unified open clause)
 #include <sal/diag.hpp>    // PSITRI_DEBUG(...) gate + sal::env cached env reader
 
@@ -471,6 +472,10 @@ namespace delta_art
          {
             if (root_index == 1)
                return cursor(_brs->create_cursor(0));
+            // This engine tiers one keyspace. Any other index used to read
+            // that same keyspace, as if it were a root of its own.
+            if (root_index != 0)
+               throw std::out_of_range("the tiered engine has one root (0); 1 reads its base");
             std::lock_guard rg(_db->_rot_m);  // legs sampled atomically vs rotation
             auto hot = _wrs->create_cursor(0);
             if (_db->_warm_active)
@@ -581,6 +586,11 @@ namespace delta_art
         public:
          transaction start_transaction(uint32_t root_index)
          {
+            // One keyspace: the hot tier's other roots are this engine's own
+            // (root 1 holds the batch being merged), so a transaction on them
+            // would overwrite it or write data that is never merged or read.
+            if (root_index != 0)
+               throw std::out_of_range("the tiered engine has one root (0)");
             std::unique_lock lk(_db->_writer_m);  // released at commit/abort
             return transaction(_db, this, std::move(lk), _ws->start_transaction(root_index));
          }

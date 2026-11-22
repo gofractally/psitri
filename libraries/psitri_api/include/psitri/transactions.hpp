@@ -142,6 +142,14 @@ namespace psitri
       }
 
       void clear() noexcept { _map.clear(); }
+      /// Forget the contents but keep their memory, so that views frozen
+      /// earlier can still be read.
+      void drop_contents() noexcept
+      {
+         _map.root() = art::null_offset;
+         _map.set_size(0);
+         _map.bump_cow_seq();
+      }
 
      private:
       map_type _map;
@@ -645,9 +653,19 @@ namespace psitri
       }
       /// Removes every key in [lower, upper); an empty bound is open. Returns
       /// how many keys were removed.
+      ///
+      /// With both bounds given and no savepoint open, the changes made so far
+      /// are written to the engine's transaction and the range is removed there
+      /// in one operation; the transaction then carries on keeping its changes
+      /// aside as before. Otherwise each key in the range is removed singly.
       std::uint64_t remove_range(std::string_view lower, std::string_view upper)
       {
-         return this->remove_each(snapshot_cursor(), lower, upper);
+         if (lower.empty() || upper.empty() || this->depth() != 0)
+            return this->remove_each(snapshot_cursor(), lower, upper);
+         this->apply_to(_inner);
+         _store->drop_contents();
+         _written = true;
+         return _inner.remove_range_counted(lower, upper);
       }
       /// The name the engines' transactions use.
       std::uint64_t remove_range_counted(std::string_view lower, std::string_view upper)
@@ -658,7 +676,7 @@ namespace psitri
       template <class F>
       bool get(std::string_view key, F&& callback) const
       {
-         auto base = _base.snapshot_cursor();
+         auto base = base_position();
          return operations::read_through(*_store, base, key, callback);
       }
       template <class T = std::string>
@@ -671,7 +689,7 @@ namespace psitri
 
       /// A cursor over the root as it was when this transaction started, with
       /// this transaction's changes applied.
-      cursor snapshot_cursor() const { return cursor(_store->freeze(), _base.snapshot_cursor()); }
+      cursor snapshot_cursor() const { return cursor(_store->freeze(), base_position()); }
 
       /// Apply the changes in key order and publish the root.
       void commit()
@@ -688,6 +706,14 @@ namespace psitri
       }
 
      private:
+      // What the changes kept aside sit on: the root as it was at the start,
+      // or the engine's transaction once a range remove has written to it.
+      base_cursor base_position() const
+      {
+         if (_written)
+            return const_cast<typename E::transaction&>(_inner).snapshot_cursor();
+         return _base.snapshot_cursor();
+      }
       void finish() noexcept
       {
          this->reset_depth();
@@ -697,5 +723,6 @@ namespace psitri
       typename E::transaction      _inner;
       snapshot                     _base;
       std::unique_ptr<delta_store> _store;
+      bool                         _written = false;
    };
 }  // namespace psitri

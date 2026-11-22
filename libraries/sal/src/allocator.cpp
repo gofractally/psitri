@@ -443,6 +443,12 @@ namespace sal
       // The utility session releases its session slot through mapped state.
       // Destroy it before member teardown unmaps that state.
       _utility_ses = allocator_session_ptr(nullptr);
+      // Every session must be gone by now. One that is not belongs to a
+      // session, tree or cursor that outlived its database; it would go on to
+      // use this allocator after it is destroyed and later release a session
+      // number that may by then belong to someone else.
+      assert(_mapped_state->_session_data.active_session_count() == 0 &&
+             "a session, tree or cursor outlived its database");
       truncate_free_tail_stopped();
       sync_control_state(_close_sync);
       free_allocator_index(_allocator_index);

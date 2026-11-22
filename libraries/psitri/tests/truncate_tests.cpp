@@ -337,16 +337,19 @@ TEST_CASE("full lifecycle: truncate reopen grow truncate reopen", "[truncate]")
    auto seg3 = t.segment_count();
    REQUIRE(seg3 == seg2);  // no change from reopen alone
 
-   // Verify surviving data
-   auto root = t.ses->get_root(0);
-   REQUIRE(root);
-   cursor c(root);
-   for (uint32_t i = 70000; i < 80000; ++i)
+   // Verify surviving data. The tree and cursor go away before the store is
+   // closed and reopened below: a handle must not outlive its session.
    {
-      char key[32];
-      snprintf(key, sizeof(key), "key_%08u", i);
-      std::string buf;
-      REQUIRE(c.get(to_key(key), &buf) >= 0);
+      auto root = t.ses->get_root(0);
+      REQUIRE(root);
+      cursor c(root);
+      for (uint32_t i = 70000; i < 80000; ++i)
+      {
+         char key[32];
+         snprintf(key, sizeof(key), "key_%08u", i);
+         std::string buf;
+         REQUIRE(c.get(to_key(key), &buf) >= 0);
+      }
    }
 
    // Step 4: grow again past original size

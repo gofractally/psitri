@@ -554,6 +554,9 @@ namespace start_ref::kv
      private:
       friend class database;
       explicit read_session(database* db);
+      // Keeps the database open for as long as this session exists. First, so
+      // that it is released last.
+      std::shared_ptr<database> _open;
       database*          _db;
       start_ref::read_session _rs;
       bool                    _slot_busy = false;  // a live cursor is using _rs's slot
@@ -733,6 +736,9 @@ namespace start_ref::kv
       // Caller holds this root's writer lock. Refresh a reused session.
       engine_t& refresh_tree(uint32_t i);
 
+      // Keeps the database open for as long as this session exists. First, so
+      // that it is released last.
+      std::shared_ptr<database> _open;
       database*          _db;
       start_ref::session _ses;
       start_ref::large_session _lses;  // large-arena allocation context (writer)
@@ -740,7 +746,7 @@ namespace start_ref::kv
       std::array<std::optional<engine_t>, kMaxRoots> _aux;  // roots >= 1, lazy
    };
 
-   class database
+   class database : public std::enable_shared_from_this<database>
    {
      public:
       static std::shared_ptr<database> create(std::filesystem::path dir, runtime_config cfg = {})
@@ -777,11 +783,15 @@ namespace start_ref::kv
 
       std::shared_ptr<write_session> start_write_session()
       {
-         return std::shared_ptr<write_session>(new write_session(this));
+         std::shared_ptr<write_session> session(new write_session(this));
+         session->_open = weak_from_this().lock();
+         return session;
       }
       std::shared_ptr<read_session> start_read_session()
       {
-         return std::shared_ptr<read_session>(new read_session(this));
+         std::shared_ptr<read_session> session(new read_session(this));
+         session->_open = weak_from_this().lock();
+         return session;
       }
 
       void sync(sal::sync_type = sal::sync_type::none) {}  // commits sync per cfg already

@@ -281,3 +281,39 @@ TEMPLATE_TEST_CASE("Readers: every cursor of a read session stays on its own sna
    CHECK(all_are(latest, 299));
    CHECK(all_are(first, 1));
 }
+
+TEMPLATE_TEST_CASE("Sessions: a session keeps its database open",
+                   "[api][writers][lifetime]",
+                   WRITER_ROOT0_ENGINES)
+{
+   using E  = TestType;
+   using DB = typename E::database;
+   temporary_directory temp;
+   const auto          path = temp.path / "db";
+   {
+      auto db     = DB::open(path, psitri::open_mode::create_only, writer_config<E>());
+      auto writer = db->start_write_session();
+      auto reader = db->start_read_session();
+      // The last handle to the database goes away while its sessions are in use.
+      db.reset();
+      {
+         auto tx = writer->start_transaction(0);
+         for (std::uint32_t i = 0; i < 500; ++i)
+            tx.upsert(key(0, 0, i), "kept");
+         tx.commit();
+      }
+      auto        cursor = reader->create_cursor(0);
+      std::size_t n      = 0;
+      for (bool more = cursor.seek_begin(); more; more = cursor.next())
+         ++n;
+      REQUIRE(n == 500);
+   }
+   // Everything was closed in order: the store opens again with the data.
+   auto        db     = DB::open(path, psitri::open_mode::open_existing, writer_config<E>());
+   auto        reader = db->start_read_session();
+   auto        cursor = reader->create_cursor(0);
+   std::size_t n      = 0;
+   for (bool more = cursor.seek_begin(); more; more = cursor.next())
+      ++n;
+   REQUIRE(n == 500);
+}

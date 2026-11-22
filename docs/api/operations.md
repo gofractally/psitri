@@ -36,6 +36,12 @@ retried. Starting a second transaction on a root from the thread that already
 has one open on it therefore never returns. Additional roots opened with
 `open_root` wait for their writer when opened in ascending index order.
 
+A session keeps its database open: the store closes when the last handle to
+the database and the last session are gone. Trees, transactions and cursors
+are lighter and do not; each must be destroyed before the session it came
+from. (The Large Engine's `shared_tree` belongs to the store, not to a
+session, and must be destroyed before the store closes.)
+
 Readers never wait for a writer's work: they are excluded only for the moment
 a root is published. `tests/api/writers.cpp` checks these rules on both engines.
 

@@ -491,6 +491,8 @@ namespace delta_art
              : _db(db), _wrs(std::move(w)), _brs(std::move(b))
          {
          }
+         // Keeps the database open for as long as this session exists.
+         std::shared_ptr<database>                  _open;
          database*                                  _db;
          std::shared_ptr<typename W::read_session> _wrs;
          std::shared_ptr<typename B::read_session> _brs;
@@ -603,11 +605,13 @@ namespace delta_art
              : _db(db), _ws(std::move(ws))
          {
          }
+         // Keeps the database open for as long as this session exists.
+         std::shared_ptr<database>                  _open;
          database*                                  _db;
          std::shared_ptr<typename W::write_session> _ws;
       };
 
-      class database
+      class database : public std::enable_shared_from_this<database>
       {
         public:
          static std::shared_ptr<database> open(const std::filesystem::path& dir,
@@ -618,12 +622,16 @@ namespace delta_art
          }
          std::shared_ptr<write_session> start_write_session()
          {
-            return std::shared_ptr<write_session>(new write_session(this, _wws));
+            std::shared_ptr<write_session> session(new write_session(this, _wws));
+            session->_open = this->weak_from_this().lock();
+            return session;
          }
          std::shared_ptr<read_session> start_read_session()
          {
-            return std::shared_ptr<read_session>(
+            std::shared_ptr<read_session> session(
                 new read_session(this, _w->start_read_session(), _b->start_read_session()));
+            session->_open = this->weak_from_this().lock();
+            return session;
          }
          ~database()
          {

@@ -7185,10 +7185,14 @@ namespace sal_art_ref::radix
    // cursor navigation takes THIS session's read_lock for page residency.
    class read_session
    {
+      // Keeps the database open for as long as this session exists. First, so that it
+      // is released last.
+      std::shared_ptr<void>      _open;
       radix_tree*                _t;
       sal::allocator_session_ptr _ses;  // this reader thread's own SAL session
 
      public:
+      void keep_open(std::shared_ptr<void> database) noexcept { _open = std::move(database); }
       explicit read_session(radix_tree* t) : _t(t), _ses(t->make_session())
       {
          // Dropping a pinned snapshot must never run the dead lineage's destroy cascade on the
@@ -7217,12 +7221,16 @@ namespace sal_art_ref::radix
 
    class write_session
    {
+      // Keeps the database open for as long as this session exists. First, so that it
+      // is released last.
+      std::shared_ptr<void>       _open;
       // This session's own writer context on the store. Trees, transactions and cursors
       // made through the session refer to it and must not outlive the session.
       std::unique_ptr<radix_tree> _own;
       radix_tree*                 _t = nullptr;
 
      public:
+      void keep_open(std::shared_ptr<void> database) noexcept { _open = std::move(database); }
       explicit write_session(radix_tree* engine)
           : _own(std::make_unique<radix_tree>(radix_tree::writer_context{}, *engine)), _t(_own.get())
       {
@@ -7248,7 +7256,7 @@ namespace sal_art_ref::radix
       uint64_t get_pending_release_count() const { return _t->get_pending_release_count(); }
    };
 
-   class database
+   class database : public std::enable_shared_from_this<database>
    {
       radix_tree _engine;
 
@@ -7312,12 +7320,16 @@ namespace sal_art_ref::radix
       }
       std::shared_ptr<write_session> start_write_session()
       {
-         return std::make_shared<write_session>(&_engine);
+         auto session = std::make_shared<write_session>(&_engine);
+         session->keep_open(weak_from_this().lock());
+         return session;
       }
       // One per reader THREAD, created ON that thread (psitri model; see read_session).
       std::shared_ptr<read_session> start_read_session()
       {
-         return std::make_shared<read_session>(&_engine);
+         auto session = std::make_shared<read_session>(&_engine);
+         session->keep_open(weak_from_this().lock());
+         return session;
       }
       sal::seg_alloc_dump dump() { return _engine.dump(); }
       void sync(sal::sync_type st = sal::sync_type::msync_sync) { _engine.sync(st); }

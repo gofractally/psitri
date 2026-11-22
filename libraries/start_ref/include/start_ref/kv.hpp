@@ -358,9 +358,10 @@ namespace start_ref::kv
       bool is_end() const { return !_rend && _it == _view.end(); }
       bool is_rend() const { return _rend; }
       bool is_subtree() const { return false; }  // start_ref has no subtree values
-      // Reverse iteration via FORWARD SCAN (start_ref's hkv has no native
-      // reverse). O(n)/op — correct but slow; the forward bank/scale workload
-      // never calls these. The native fix is porting start_ver's reverse hkv.
+      // Backward positioning. The tree iterates forward only, so the key before
+      // a position is found with lower_bound probes: a binary search over the
+      // next byte at each level of the key, about nine probes per byte. The cost
+      // follows key length, not the number of keys.
       bool seek_last()
       {
          _rend = false;
@@ -372,10 +373,8 @@ namespace start_ref::kv
             _rend = true;
             return false;
          }
-         auto last = _it;
-         for (auto i = _it; i != _view.end(); ++i)
-            last = i;
-         _it = last;
+         std::string prefix;
+         last_with_prefix_(prefix);
          return true;
       }
       bool prev()
@@ -384,25 +383,75 @@ namespace start_ref::kv
             return false;
          if (_it == _view.end())
             return seek_last();  // prev from end = last
-         const std::string cur((*_it).first);
-         auto              best = _view.end();
-         for (auto i = _view.begin(); i != _view.end(); ++i)
+         // The key before the current one shares some prefix P with it and
+         // continues with a smaller byte, or is P itself. Try the longest P first.
+         std::string prefix((*_it).first);
+         while (!prefix.empty())
          {
-            if (std::string_view((*i).first) < std::string_view(cur))
-               best = i;
-            else
-               break;  // sorted: nothing past here is < cur
+            const int limit = static_cast<unsigned char>(prefix.back());
+            prefix.pop_back();
+            const int child = last_child_(prefix, limit);
+            if (child >= 0)
+            {
+               prefix.push_back(static_cast<char>(child));
+               last_with_prefix_(prefix);
+               return true;
+            }
+            auto exact = _view.lower_bound(prefix);
+            if (exact != _view.end() && std::string_view((*exact).first) == std::string_view(prefix))
+            {
+               _it = exact;
+               return true;
+            }
          }
-         if (best == _view.end())
-         {
-            _rend = true;
-            _it   = _view.end();
-            return false;
-         }
-         _it = best;
-         return true;
+         _rend = true;
+         _it   = _view.end();
+         return false;
       }
 
+     private:
+      // The largest byte d < limit for which some key starts with prefix+d, or -1.
+      int last_child_(std::string& prefix, int limit)
+      {
+         // Is there a key starting with prefix whose next byte is in [lo, hi]?
+         auto any = [&](int lo, int hi)
+         {
+            prefix.push_back(static_cast<char>(lo));
+            auto it = _view.lower_bound(prefix);
+            prefix.pop_back();
+            if (it == _view.end())
+               return false;
+            const std::string_view k((*it).first);
+            return k.size() > prefix.size() && k.substr(0, prefix.size()) == std::string_view(prefix) &&
+                   static_cast<unsigned char>(k[prefix.size()]) <= hi;
+         };
+         if (limit <= 0 || !any(0, limit - 1))
+            return -1;
+         int lo = 0, hi = limit - 1;
+         while (lo < hi)
+         {
+            const int mid = (lo + hi + 1) / 2;
+            if (any(mid, hi))
+               lo = mid;
+            else
+               hi = mid - 1;
+         }
+         return lo;
+      }
+      // Position on the largest key that starts with `prefix`; one exists.
+      void last_with_prefix_(std::string& prefix)
+      {
+         for (;;)
+         {
+            const int child = last_child_(prefix, 256);
+            if (child < 0)
+               break;  // nothing longer: the prefix itself is the key
+            prefix.push_back(static_cast<char>(child));
+         }
+         _it = _view.lower_bound(prefix);
+      }
+
+     public:
       key_view key() const { return (*_it).first; }
 
       template <class S = std::string>

@@ -268,7 +268,8 @@ namespace sal_art_ref::radix
       {
       };
       radix_tree(writer_context, radix_tree& owner)
-          : _alloc(owner._alloc),
+          : _store(owner._store),
+            _alloc(owner._alloc),
             _root_writers(owner._root_writers),
             _ses(_alloc->create_session()),
             _sync(owner._sync),
@@ -279,6 +280,9 @@ namespace sal_art_ref::radix
             _c1_promote_on(owner._c1_promote_on)
       {
       }
+      /// The engine the database opened. References that may outlive a write session, such
+      /// as shared trees, refer to it and not to the session's writer context.
+      radix_tree* store() noexcept { return _store; }
       /// The writer lock of root `idx`.
       std::mutex& root_writer(uint32_t idx)
       {
@@ -3758,7 +3762,7 @@ namespace sal_art_ref::radix
          /// The nested tree as a thread-safe owning reference (alive: this cursor pins its parent).
          shared_tree subtree_shared() const { return shared_tree(_t, _subtree); }
          /// The tree this cursor reads, as a thread-safe owning reference.
-         shared_tree share() const { return shared_tree(_t, _root.address()); }
+         shared_tree share() const { return shared_tree(_t->store(), _root.address()); }
          cursor      subtree_cursor() const  // iterate it (pinned via THIS cursor's session)
          {
             return cursor(_t, sal::smart_ptr<sal::alloc_header>(_root.session(), _subtree,
@@ -5116,7 +5120,7 @@ namespace sal_art_ref::radix
       tree        adopt(const shared_tree& shared) { return tree(this, shared._root, /*retain=*/true); }
       shared_tree share(tree t)
       {
-         return shared_tree(this, t._root.take(), shared_tree::adopt_reference{});
+         return shared_tree(_store, t._root.take(), shared_tree::adopt_reference{});
       }
       // One SAL session per thread: call on the thread that will use it (psitri read_session model).
       sal::allocator_session_ptr make_session() { return _alloc->create_session(); }
@@ -7017,6 +7021,7 @@ namespace sal_art_ref::radix
 
       // The store. Owned by the engine a database opens; a writer context (see the
       // constructor taking writer_context) borrows it.
+      radix_tree*                     _store = this;
       std::unique_ptr<sal::allocator> _owned_alloc;
       sal::allocator*                 _alloc = nullptr;
       // One writer at a time per root, held from the start of a transaction on that root

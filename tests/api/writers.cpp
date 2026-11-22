@@ -302,3 +302,87 @@ TEMPLATE_TEST_CASE("Writers: the eight portable roots are separate keyspaces",
       REQUIRE_FALSE(other);
    }
 }
+
+// Large Engine extension: trees that are not installed in any root. Each
+// writer edits its own copy of one shared ancestor at the same time; the
+// ancestor and the other writers' copies are unaffected.
+TEST_CASE("Writers: sessions edit detached trees from a shared ancestor concurrently",
+          "[api][writers][detached]")
+{
+   using E  = psitri::big_engine;
+   using DB = psitri::database_for<E>;
+   temporary_directory temp;
+   auto                db = DB::open(temp.path / "db", psitri::open_mode::create_only, config<E>());
+
+   constexpr std::uint32_t writers = 4;
+   constexpr std::uint32_t rounds  = 30;
+   constexpr std::uint32_t batch   = 200;
+   constexpr std::uint32_t common  = 2000;
+
+   auto owner    = db->start_write_session();
+   auto ancestor = [&]
+   {
+      auto edit = owner->start_write_transaction(owner->create_temporary_tree());
+      for (std::uint32_t i = 0; i < common; ++i)
+         edit.upsert(key(99, 0, i), "common");
+      return owner->share(edit.get_tree());
+   }();
+
+   std::atomic<bool>        go{false}, wrong{false};
+   std::vector<std::thread> threads;
+   std::vector<decltype(ancestor)> results(writers);
+   for (std::uint32_t w = 0; w < writers; ++w)
+   {
+      threads.emplace_back(
+          [&, w]
+          {
+             auto writer = db->start_write_session();
+             auto mine   = writer->adopt(ancestor);
+             while (!go)
+                std::this_thread::yield();
+             for (std::uint32_t round = 0; round < rounds; ++round)
+             {
+                auto edit = writer->start_write_transaction(std::move(mine));
+                for (std::uint32_t i = 0; i < batch; ++i)
+                   edit.upsert(key(w, round, i), "own");
+                // Replace and remove some of the shared keys as well.
+                edit.upsert(key(99, 0, (round * 7 + w) % common), "changed");
+                edit.remove(key(99, 0, (round * 13 + w * 101) % common));
+                mine = edit.get_tree();
+             }
+             results[w] = writer->share(std::move(mine));
+          });
+   }
+   go = true;
+   for (auto& thread : threads)
+      thread.join();
+
+   auto reader = db->start_read_session();
+   // The ancestor is exactly as it was.
+   {
+      auto        cursor = reader->create_cursor(ancestor);
+      std::size_t n      = 0;
+      for (bool more = cursor.seek_begin(); more; more = cursor.next(), ++n)
+         if (cursor.template value<std::string>() != std::optional<std::string>{"common"})
+            wrong = true;
+      REQUIRE(n == common);
+   }
+   // Each result holds its writer's keys and nobody else's.
+   for (std::uint32_t w = 0; w < writers; ++w)
+   {
+      auto        cursor = reader->create_cursor(results[w]);
+      char        own[8], shared[8];
+      std::snprintf(own, sizeof(own), "r%02u/", w);
+      std::snprintf(shared, sizeof(shared), "r%02u/", 99u);
+      std::size_t mine = 0;
+      for (bool more = cursor.seek_begin(); more; more = cursor.next())
+      {
+         if (cursor.key().starts_with(own))
+            ++mine;
+         else if (!cursor.key().starts_with(shared))
+            wrong = true;
+      }
+      REQUIRE(mine == std::size_t{rounds} * batch);
+   }
+   REQUIRE_FALSE(wrong);
+}

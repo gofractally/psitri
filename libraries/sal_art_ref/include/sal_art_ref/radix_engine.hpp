@@ -13,6 +13,8 @@
 // segment cacheline (skip CL0); r1 (a prefixed node) reads CL0. Mutation model:
 // COW-to-root (ref-based unique|shared); `versioned`/version_history unused.
 #pragma once
+#include <array>
+#include <mutex>
 #include <adb/value_range.hpp>
 #include <algorithm>
 #include <array>
@@ -211,7 +213,9 @@ namespace sal_art_ref::radix
                  const sal::runtime_config&   cfg,
                  sal::recovery_mode           recovery = sal::recovery_mode::none)
           : _prior_shutdown(prior_shutdown(dir, wipe)),
-            _alloc(make_alloc(dir, wipe, cfg)),
+            _owned_alloc(make_alloc(dir, wipe, cfg)),
+            _alloc(_owned_alloc.get()),
+            _root_writers(std::make_shared<root_writers>()),
             _ses(_alloc->create_session()),
             _sync(cfg.sync_mode)
       {
@@ -254,6 +258,33 @@ namespace sal_art_ref::radix
          // get_new_segment doesn't stall). If the cold-base SIGBUS vanishes, the race is the
          // compactor relocating live tree nodes that route_to_page reads via a RAW pointer.
          PSITRI_DEBUG(if (sal::env::flag("RADIX_NO_COMPACT")) _alloc->stop_compactor_thread(););
+      }
+
+      /// A writer's own view of an open store: the same allocator, roots and settings as
+      /// `owner`, with its own allocator session and its own per-operation state. Each
+      /// write session has one, so write sessions never share mutable state and may run
+      /// on different threads at the same time. The owner must outlive it.
+      struct writer_context
+      {
+      };
+      radix_tree(writer_context, radix_tree& owner)
+          : _alloc(owner._alloc),
+            _root_writers(owner._root_writers),
+            _ses(_alloc->create_session()),
+            _sync(owner._sync),
+            _page_mode(owner._page_mode),
+            _wide_stems(owner._wide_stems),
+            _bucket_mode(owner._bucket_mode),
+            _adaptive(owner._adaptive),
+            _c1_promote_on(owner._c1_promote_on)
+      {
+      }
+      /// The writer lock of root `idx`.
+      std::mutex& root_writer(uint32_t idx)
+      {
+         if (idx >= _root_writers->mutex.size())
+            throw std::out_of_range("root index out of range");
+         return _root_writers->mutex[idx];
       }
 
       // Radix + bucket hybrid: leaf -> bucket-of-leaves -> radix with bucket/leaf branches.
@@ -4783,14 +4814,26 @@ namespace sal_art_ref::radix
          radix_tree* _t           = nullptr;
          uint32_t    _primary_idx = 0;
          bool        _open        = false;
+         // Held from here until commit or abort, so a second writer on the root waits and
+         // starts from what this one published. Declared before _primary: the root is read
+         // only once the lock is held.
+         std::unique_lock<std::mutex> _writer;
          tree_handle _primary;                                              // the root at _primary_idx
          std::vector<std::pair<uint32_t, std::unique_ptr<tree_handle>>> _extra;  // open_root(idx)
+         std::vector<std::unique_lock<std::mutex>> _extra_writers;
          transaction(radix_tree* t, uint32_t idx)
              : _t(t),
                _primary_idx(idx),
                _open(true),
+               _writer(t->root_writer(idx)),
                _primary(t, t->_ses->get_root<sal::alloc_header>(sal::root_object_number(idx)))
          {
+         }
+         void unlock_roots() noexcept
+         {
+            _extra_writers.clear();
+            if (_writer.owns_lock())
+               _writer.unlock();
          }
          // COMMIT a flushed working root: hand it to SAL's root table — set_root TAKES the
          // working ref, writes the commit sync-header (sealing filled segments so the compactor
@@ -4877,6 +4920,22 @@ namespace sal_art_ref::radix
             if (idx == _primary_idx) return _primary;
             for (auto& [i, h] : _extra)
                if (i == idx) return *h;
+            // Roots opened in ascending order wait for their writer. Out of order, waiting
+            // could deadlock against a transaction that holds them the other way round, so
+            // the root is taken only if it is free.
+            uint32_t highest = _primary_idx;
+            for (auto& [i, h] : _extra)
+               highest = std::max(highest, i);
+            if (idx > highest)
+               _extra_writers.emplace_back(_t->root_writer(idx));
+            else
+            {
+               std::unique_lock<std::mutex> writer(_t->root_writer(idx), std::try_to_lock);
+               if (!writer.owns_lock())
+                  throw std::runtime_error(
+                      "root is being written; open roots in ascending order to wait for it");
+               _extra_writers.push_back(std::move(writer));
+            }
             _extra.emplace_back(idx, std::unique_ptr<tree_handle>(new tree_handle(
                                          _t, _t->_ses->get_root<sal::alloc_header>(
                                                  sal::root_object_number(idx)))));
@@ -4891,6 +4950,7 @@ namespace sal_art_ref::radix
             for (auto& [i, h] : _extra) publish(i, h->flush());
             _extra.clear();
             _open = false;
+            unlock_roots();
          }
          void abort() noexcept
          {
@@ -4899,6 +4959,7 @@ namespace sal_art_ref::radix
             _primary._children.clear();
             _extra.clear();
             _open = false;
+            unlock_roots();
          }
          frame sub_transaction();  // savepoint (defined after frame)
       };
@@ -5020,6 +5081,7 @@ namespace sal_art_ref::radix
       // definition and never touch the table.
       void set_root(uint32_t idx, tree t, sal::sync_type st = sal::sync_type::none)
       {
+         std::lock_guard<std::mutex> writer(root_writer(idx));
          auto old =
              _ses->set_root<sal::alloc_header>(sal::root_object_number(idx), std::move(t._root), st);
       }
@@ -6953,7 +7015,17 @@ namespace sal_art_ref::radix
       sal::shutdown_state _prior_shutdown = sal::shutdown_state::clean;
       sal::recovery_mode  _recovered      = sal::recovery_mode::none;
 
-      std::unique_ptr<sal::allocator> _alloc;
+      // The store. Owned by the engine a database opens; a writer context (see the
+      // constructor taking writer_context) borrows it.
+      std::unique_ptr<sal::allocator> _owned_alloc;
+      sal::allocator*                 _alloc = nullptr;
+      // One writer at a time per root, held from the start of a transaction on that root
+      // until it commits or aborts. Shared by every writer context of one store.
+      struct root_writers
+      {
+         std::array<std::mutex, 1024> mutex;
+      };
+      std::shared_ptr<root_writers>   _root_writers;
       sal::allocator_session_ptr      _ses;
       sal::sync_type                  _sync = sal::sync_type::none;  // commit durability (adb config)
       // The DIRECT-API working root — an OWNING smart_ptr (psitri tree_context's discipline);
@@ -7140,10 +7212,16 @@ namespace sal_art_ref::radix
 
    class write_session
    {
-      radix_tree* _t = nullptr;
+      // This session's own writer context on the store. Trees, transactions and cursors
+      // made through the session refer to it and must not outlive the session.
+      std::unique_ptr<radix_tree> _own;
+      radix_tree*                 _t = nullptr;
 
      public:
-      explicit write_session(radix_tree* t) noexcept : _t(t) {}
+      explicit write_session(radix_tree* engine)
+          : _own(std::make_unique<radix_tree>(radix_tree::writer_context{}, *engine)), _t(_own.get())
+      {
+      }
       radix_tree::transaction start_transaction(uint32_t idx = 0) { return _t->start_transaction(idx); }
       radix_tree::tree        create_temporary_tree() { return _t->create_temporary_tree(); }
       radix_tree::write_transaction start_write_transaction(radix_tree::tree base)
@@ -7157,9 +7235,9 @@ namespace sal_art_ref::radix
       /// never changes.
       radix_tree::tree adopt(const shared_tree& shared) { return _t->adopt(shared); }
       void             set_root(uint32_t idx, radix_tree::tree t,
-                                sal::sync_type = sal::sync_type::none)
+                                sal::sync_type sync = sal::sync_type::none)
       {
-         _t->set_root(idx, std::move(t));
+         _t->set_root(idx, std::move(t), sync);
       }
       uint64_t get_total_allocated_objects() const { return _t->get_total_allocated_objects(); }
       uint64_t get_pending_release_count() const { return _t->get_pending_release_count(); }

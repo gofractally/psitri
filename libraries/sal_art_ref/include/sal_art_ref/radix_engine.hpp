@@ -3540,6 +3540,63 @@ namespace sal_art_ref::radix
       }
 
      public:
+      // A cursor's hold on its root. Normally it owns a reference (a pin). A BORROWED
+      // root owns none: the caller guarantees the tree outlives the cursor (it holds a
+      // shared_tree), so opening and closing the cursor never touches the root's shared
+      // reference count -- which every reader of the same snapshot would otherwise
+      // contend on. Copying a borrowed root yields an owning one.
+      class cursor_root
+      {
+         sal::smart_ptr<sal::alloc_header> _ptr;
+         bool                              _borrowed = false;
+         void drop() noexcept
+         {
+            if (_borrowed)
+               (void)_ptr.take();  // forget without releasing: nothing was retained
+            _borrowed = false;
+         }
+
+        public:
+         cursor_root() = default;
+         cursor_root(sal::smart_ptr<sal::alloc_header> pinned, bool borrowed = false) noexcept
+             : _ptr(std::move(pinned)), _borrowed(borrowed)
+         {
+         }
+         cursor_root(const sal::allocator_session_ptr& ses, ptr_address root, bool retain) noexcept
+             : _ptr(ses, root, retain)
+         {
+         }
+         cursor_root(const cursor_root& other)
+             : _ptr(other._ptr.session(), other._ptr.address(), /*retain=*/true)
+         {
+         }
+         cursor_root(cursor_root&& other) noexcept
+             : _ptr(std::move(other._ptr)), _borrowed(other._borrowed)
+         {
+            other._borrowed = false;
+         }
+         cursor_root& operator=(const cursor_root& other)
+         {
+            if (this != &other)
+               *this = cursor_root(other);
+            return *this;
+         }
+         cursor_root& operator=(cursor_root&& other) noexcept
+         {
+            if (this != &other)
+            {
+               drop();
+               _ptr            = std::move(other._ptr);
+               _borrowed       = other._borrowed;
+               other._borrowed = false;
+            }
+            return *this;
+         }
+         ~cursor_root() { drop(); }
+         const sal::allocator_session_ptr& session() const noexcept { return _ptr.session(); }
+         ptr_address                       address() const noexcept { return _ptr.address(); }
+      };
+
       // The native ordered cursor. Its owned root keeps the COW snapshot alive;
       // session read locks protect residency during navigation and value access.
       // Positioning builds a path which next()/prev() advance without re-seeking.
@@ -3562,6 +3619,16 @@ namespace sal_art_ref::radix
          // session path (the retain happens under the publish mutex; see snapshot_cursor_at).
          cursor(radix_tree* t, sal::smart_ptr<sal::alloc_header> pinned) noexcept
              : _t(t), _root(std::move(pinned))
+         {
+         }
+         // Borrowed ctor: read `root` without pinning it (see cursor_root).
+         struct borrow_root
+         {
+         };
+         cursor(radix_tree* t, const sal::allocator_session_ptr& ses, ptr_address root,
+                borrow_root) noexcept
+             : _t(t),
+               _root(sal::smart_ptr<sal::alloc_header>(ses, root, /*retain=*/false), /*borrowed=*/true)
          {
          }
          // Every read_lock AND every node access (get_ref) this cursor makes goes through the
@@ -4416,7 +4483,7 @@ namespace sal_art_ref::radix
          }
 
          radix_tree*                     _t;
-         sal::smart_ptr<sal::alloc_header> _root;  // pins the snapshot version (RAII refcount)
+         cursor_root _root;  // pins the snapshot version (RAII refcount) unless borrowed
          frame                           _fr[256];  // descent path (bounded by key depth; no heap)
          uint8_t                         _kbuf[1024];
          uint32_t    _klen      = 0;
@@ -4977,6 +5044,11 @@ namespace sal_art_ref::radix
       cursor shared_cursor(const shared_tree& shared, const sal::allocator_session_ptr& ses)
       {
          return cursor(this, sal::smart_ptr<sal::alloc_header>(ses, shared._root, /*retain=*/true));
+      }
+      // The same without pinning: the caller keeps `shared` alive for the cursor's lifetime.
+      cursor borrowed_cursor(const shared_tree& shared, const sal::allocator_session_ptr& ses)
+      {
+         return cursor(this, ses, shared._root, cursor::borrow_root{});
       }
       // Writer side: a session-bound tree from a shared one, and back (consuming the tree's ref).
       tree        adopt(const shared_tree& shared) { return tree(this, shared._root, /*retain=*/true); }
@@ -7054,6 +7126,13 @@ namespace sal_art_ref::radix
       radix_tree::cursor create_cursor(const shared_tree& shared)
       {
          return _t->shared_cursor(shared, _ses);
+      }
+      /// Read a shared tree the caller keeps alive for as long as the cursor (and any
+      /// cursor moved from it) exists. Takes no reference, so readers of one snapshot
+      /// on many threads share no counter.
+      radix_tree::cursor borrow_cursor(const shared_tree& shared)
+      {
+         return _t->borrowed_cursor(shared, _ses);
       }
       /// The published root as a reference that can leave this thread.
       shared_tree get_root(uint32_t idx = 0) { return create_cursor(idx).share(); }

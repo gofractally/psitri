@@ -83,7 +83,9 @@ TEST_CASE("shared_tree: readers on shared snapshots run beside the writer", "[sh
                       std::lock_guard l(mutex);
                       mine = latest;
                    }
-                   const unsigned generation = check(session->create_cursor(mine));
+                   // Half the readers borrow: no reference taken on the shared root.
+                   const unsigned generation = check(reads.load() % 2 ? session->borrow_cursor(mine)
+                                                                      : session->create_cursor(mine));
                    REQUIRE(generation >= last);  // never goes back in time
                    last = generation;
                    ++reads;

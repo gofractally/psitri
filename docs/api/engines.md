@@ -43,9 +43,9 @@ identify their storage model, not a limit on the size of an individual value.
 | Large-value storage | Fixed-address chunks, at most 2 MiB per allocation | Segment-aware chunks, almost 32 MiB per allocation |
 | Read-driven hot-object promotion | Not applicable | Optional; disabled by default |
 
-Both engines support parallel snapshot readers. The **portable API uses one
-serialized writer**. Native SAL supports independent root writers, but the Large Engine
-API adapter shares a write session. See the
+Both engines support parallel snapshot readers and **one writer per root at a
+time, with writers on different roots running concurrently**. Each write
+session has its own allocation state. See the
 [concurrency contract](operations.md#concurrency-contract) before sharing objects
 between threads.
 

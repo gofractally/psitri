@@ -62,9 +62,30 @@ an attached snapshot on which to create a cursor. A tree returned by
 | `tx.abort()` | Discards uncommitted work |
 | transaction destructor | Aborts unfinished work |
 
+| `tx.snapshot_cursor()` | A cursor on the root as this transaction has changed it so far; a snapshot, like any cursor |
+| `tx.remove_range_counted(low, high)` | Removes every key in `[low, high)`, including uncommitted ones; returns how many |
+
 Call commit or abort at most once and then destroy the transaction. Do not
 retain mutable root handles beyond their transaction. Only one transaction may
-be active on a write session; portable applications serialize all writes.
+be active on a write session. A transaction holds its root's writer until it
+commits or aborts; see the [concurrency contract](operations.md#concurrency-contract).
+
+### Transactions that keep their changes aside
+
+`<psitri/transactions.hpp>` adds two transaction types that work on any engine.
+Both keep their changes in memory and read through them, so point reads and
+cursors in either direction see the transaction's own writes; both have
+`save()`, `rollback(savepoint)` and `release(savepoint)` for nested work.
+
+| Type | Root writer | Commit |
+|---|---|---|
+| `transient_transaction<Snapshot>` | never taken; any number run at once | never; `reset()` discards the changes |
+| `delta_transaction<Engine>` | held from construction until commit or abort | applies the changes in key order, then publishes once |
+
+The engine's own transaction changes a private copy of the tree as it goes.
+Use it when the work is expected to commit and a transient or delta transaction
+when it may well be thrown away. `tests/api/transactions.cpp` drives all three
+against a reference map.
 Missing keys are ordinary results, not exceptions. Failed allocation, invalid
 open modes, or I/O may throw `std::exception` subclasses. Catch failures outside
 the transaction scope so rollback runs during unwinding. A commit failure can

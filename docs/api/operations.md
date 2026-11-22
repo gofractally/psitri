@@ -25,11 +25,19 @@ revision records; the Large Engine can store their owned subtrees in a manifest.
 
 ## Concurrency contract
 
-Use one writer thread, with the database opened and write session created on
-that thread. Serialize write transactions and scope each to completion before
-starting another. Native SAL supports separate writers for independent root
-tables; the shared engine API uses one serialized writer. The Large Engine database
-adapter shares an engine write session across its write-session handles.
+Roots are independent. Each writer thread creates its own write session and
+uses it only on that thread; write sessions working on different roots run at
+the same time and do not wait for each other.
+
+A transaction holds its root's writer from `start_transaction` until it commits
+or aborts. A second transaction on the same root, from any session, waits and
+then starts from what the first published, so no commit is lost and nothing is
+retried. Starting a second transaction on a root from the thread that already
+has one open on it therefore never returns. Additional roots opened with
+`open_root` wait for their writer when opened in ascending index order.
+
+Readers never wait for a writer's work: they are excluded only for the moment
+a root is published. `tests/api/writers.cpp` checks these rules on both engines.
 
 Each reader thread creates, uses, and destroys its own read session and cursor.
 Keep sessions, snapshots, and cursors on their creating thread. The database
@@ -38,15 +46,16 @@ before database destruction. Opening a read session does not freeze the root;
 creating a cursor does. A new cursor sees a new committed snapshot; an existing
 cursor never silently advances to a newer commit.
 
-For portable use, keep **one live cursor per read session**. The Small Engine currently
-uses one hazard slot per read session: creating a second cursor overwrites the
-first cursor's protection. Use another read session if you need another live
-cursor. Do not pass a writer's owned snapshot to another thread; use that
-thread's read session to acquire its own snapshot. This contract does not
-promise a shared snapshot transfer API between threads.
+A read session may hold several cursors, each on the snapshot it was created
+on. Do not pass a writer's owned snapshot to another thread; use that thread's
+read session to acquire its own. The portable contract does not promise a
+snapshot that can be handed between threads; the Large Engine's `shared_tree`
+is such a handle.
 
-The Large Engine also supports **serialized handoff** of an inactive session
-and its retained handle graph between threads. One shared synchronization gate
+Trees, transactions and cursors made through a Large Engine write session
+refer to that session and must not outlive it; a `shared_tree` does not and
+may. The Large Engine also supports **serialized handoff** of an inactive
+session and its retained handle graph between threads. One shared synchronization gate
 must cover every native operation and every handle copy or destruction that
 touches that session, including cursors and owned snapshots. The requirement is
 that two threads are never active on one SAL session simultaneously. Finish
@@ -78,7 +87,8 @@ races with a commit. No relocation pin is needed during traversal.
 | Boundary | Synchronization |
 |---|---|
 | Large Engine: acquire a published snapshot | Shared per-root mutex protects loading and retaining the root |
-| Large Engine: publish a root | Per-root writer mutex and exclusive root-publication mutex |
+| Large Engine: start a write transaction | Per-root writer mutex held until commit or abort |
+| Large Engine: publish a root | Exclusive root-publication mutex |
 | Small Engine: acquire a read-session cursor | Atomic hazard publication and root validation |
 | Small Engine: acquire an owned root / publish roots | Root-publication mutex |
 | Small Engine: start a write transaction | Per-root writer mutex held until commit or abort |

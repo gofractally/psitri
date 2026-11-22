@@ -5,7 +5,7 @@ add_library(psitri::concepts ALIAS psitri_api_concepts)
 target_include_directories(psitri_api_concepts INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
-target_link_libraries(psitri_api_concepts INTERFACE adb sal art)
+target_link_libraries(psitri_api_concepts INTERFACE adb sal)
 target_compile_features(psitri_api_concepts INTERFACE cxx_std_23)
 
 add_library(psitri_api_small INTERFACE)
@@ -15,6 +15,13 @@ target_link_libraries(psitri_api_small INTERFACE psitri_api_concepts start_ref)
 add_library(psitri_api_big INTERFACE)
 add_library(psitri::big ALIAS psitri_api_big)
 target_link_libraries(psitri_api_big INTERFACE psitri_api_concepts sal_art_ref)
+
+# <psitri/transactions.hpp>: the transient and delta transaction types. They
+# keep their changes in an ART map, so only users of that header need `art`;
+# an embedder of an engine alone does not.
+add_library(psitri_api_transactions INTERFACE)
+add_library(psitri::transactions ALIAS psitri_api_transactions)
+target_link_libraries(psitri_api_transactions INTERFACE psitri_api_concepts art)
 
 add_library(psitri_api INTERFACE)
 add_library(psitri::api ALIAS psitri_api)

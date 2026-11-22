@@ -7,6 +7,14 @@
 #ifndef WRITER_ROOT0_ENGINES
 #define WRITER_ROOT0_ENGINES WRITER_ENGINES
 #endif
+// WRITER_FREE_READER_ENGINES, when defined, lists the engines whose readers are
+// not held up by an open transaction; it defaults to WRITER_ROOT0_ENGINES.
+#ifndef WRITER_FREE_READER_ENGINES
+#define WRITER_FREE_READER_ENGINES WRITER_ROOT0_ENGINES
+#endif
+#ifndef WRITER_FREE_READER_TAGS
+#define WRITER_FREE_READER_TAGS "[api][writers][readers]"
+#endif
 
 
 TEMPLATE_TEST_CASE("Writers: sessions on different roots commit concurrently",
@@ -316,4 +324,50 @@ TEMPLATE_TEST_CASE("Sessions: a session keeps its database open",
    for (bool more = cursor.seek_begin(); more; more = cursor.next())
       ++n;
    REQUIRE(n == 500);
+}
+
+TEMPLATE_TEST_CASE("Readers: a reader is not held up by an open transaction",
+                   WRITER_FREE_READER_TAGS,
+                   WRITER_FREE_READER_ENGINES)
+{
+   using E  = TestType;
+   using DB = typename E::database;
+   temporary_directory temp;
+   auto                db = DB::open(temp.path / "db", psitri::open_mode::create_only, writer_config<E>());
+   auto                writer = db->start_write_session();
+   {
+      auto tx = writer->start_transaction(0);
+      for (std::uint32_t i = 0; i < 100; ++i)
+         tx.upsert(key(0, 0, i), "committed");
+      tx.commit();
+   }
+
+   // A transaction is open on the root, with uncommitted writes, for as long
+   // as the reader below is at work.
+   auto tx = writer->start_transaction(0);
+   for (std::uint32_t i = 0; i < 300; ++i)
+      tx.upsert(key(0, 0, i), "uncommitted");
+
+   std::atomic<int> seen{-1};
+   std::thread      reader_thread(
+       [&]
+       {
+          auto        reader = db->start_read_session();
+          auto        cursor = reader->create_cursor(0);
+          int         n      = 0;
+          bool        clean  = true;
+          for (bool more = cursor.seek_begin(); more; more = cursor.next(), ++n)
+             if (cursor.template value<std::string>() != std::optional<std::string>{"committed"})
+                clean = false;
+          seen = clean ? n : -2;
+       });
+   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+   while (seen == -1 && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+   const int while_open = seen;
+   tx.abort();  // lets a reader that was waiting finish, so the thread can be joined
+   reader_thread.join();
+   // The reader finished while the transaction was still open, and saw only
+   // what had been committed.
+   REQUIRE(while_open == 100);
 }

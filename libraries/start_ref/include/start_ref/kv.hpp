@@ -461,6 +461,7 @@ namespace start_ref::kv
       friend class database;
       friend class read_session;
       friend class tree;
+      friend class transaction;
       cursor(start_ref::arena*  a,
              root_ptr            root,
              std::atomic<uint64_t>* hp = nullptr,
@@ -508,6 +509,9 @@ namespace start_ref::kv
       int  remove(key_view k);
       // Optional range operation; includes uncommitted writes in [low, high).
       uint64_t remove_range_counted(key_view low, key_view high);
+      // A cursor on the primary root as this transaction has changed it so far.
+      // It is a snapshot: later writes of the transaction do not show in it.
+      cursor snapshot_cursor();
       // ── multi-root (psitri's model): open additional roots in STRICTLY
       // ASCENDING index order; all roots commit/abort together. set_root is a
       // pure ref-handle exchange (the working handle and the owned tree just
@@ -1259,6 +1263,17 @@ namespace start_ref::kv
       _roots.clear();
    }
 
+   inline cursor transaction::snapshot_cursor()
+   {
+      database*      db   = _ws->_db;
+      engine_t&      tree = _ws->tree_for(_roots[0].index);
+      const root_ptr root = tree.root_handle();
+      // The cursor holds its own reference, so the transaction's next write
+      // copies instead of changing what the cursor reads.
+      if (!root.is_null() && !tree.cow_retain(root))
+         throw std::runtime_error("start_ref::kv: root retain refused");
+      return cursor(&db->_arena, root, nullptr, &db->_vh);
+   }
    inline transaction write_session::start_transaction(uint32_t root_index)
    {
       return transaction(this, root_index, _ses.start_transaction(0));

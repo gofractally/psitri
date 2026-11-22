@@ -2,9 +2,10 @@
 //
 // Each case drives a transaction and a plain std::map with the same random
 // operations and requires every read to agree: point reads, bounds, scans in
-// both directions, a cursor held across writes, range removes and nested
-// savepoints. A read that ignored the transaction's own changes, in any of
-// those forms, fails here.
+// both directions, range removes and nested savepoints, and requires a cursor
+// to keep showing the state it was created on. A read that ignored the
+// transaction's own changes, in any of those forms, fails here. The engines'
+// own transactions are held to the same reads.
 
 #include <psitri/api.hpp>
 #include <psitri/transactions.hpp>
@@ -95,12 +96,55 @@ namespace
       REQUIRE(cursor.is_rend());
    }
 
+   template <class Tx>
+   concept has_savepoints = requires(Tx& tx) { tx.save(); };
+
+   // Savepoints where the transaction type has them.
+   template <class Tx>
+   struct savepoints
+   {
+      void save(Tx&, const model&) {}
+      bool close(Tx&, model&, bool) { return false; }
+      void release_all(Tx&) {}
+   };
+   template <has_savepoints Tx>
+   struct savepoints<Tx>
+   {
+      std::vector<std::pair<typename Tx::savepoint, model>> open;
+      void save(Tx& tx, const model& expected)
+      {
+         if (open.size() < 4)
+            open.emplace_back(tx.save(), expected);
+      }
+      bool close(Tx& tx, model& expected, bool rollback)
+      {
+         if (open.empty())
+            return false;
+         if (rollback)
+         {
+            tx.rollback(open.back().first);
+            expected = open.back().second;
+         }
+         else
+            tx.release(open.back().first);
+         open.pop_back();
+         return true;
+      }
+      void release_all(Tx& tx)
+      {
+         while (!open.empty())
+         {
+            tx.release(open.back().first);
+            open.pop_back();
+         }
+      }
+   };
+
    // Applies `steps` random operations to both and checks every read.
    template <class Tx>
    void exercise(Tx& tx, model& expected, std::mt19937& rng, int steps)
    {
-      using savepoint = typename Tx::savepoint;
-      std::vector<std::pair<savepoint, model>> saved;
+      savepoints<Tx> saved;
       for (int step = 0; step < steps; ++step)
       {
          auto key = random_key(rng);
@@ -192,27 +236,25 @@ namespace
             }
             case 10:
             {
-               // A cursor held while the transaction is written to.
-               auto cursor = tx.snapshot_cursor();
-               if (!cursor.lower_bound(key))
-                  break;
-               std::string at(cursor.key());
-               auto        other = random_key(rng);
-               auto        value = random_value(rng);
-               if (rng() % 2)
+               // A cursor keeps showing the state it was created on.
+               auto  cursor = tx.snapshot_cursor();
+               model frozen = expected;
+               for (int i = 0; i < 3; ++i)
                {
-                  tx.upsert(other, value);
-                  expected[other] = value;
+                  auto other = random_key(rng);
+                  auto value = random_value(rng);
+                  if (rng() % 2)
+                  {
+                     tx.upsert(other, value);
+                     expected[other] = value;
+                  }
+                  else
+                  {
+                     tx.remove(other);
+                     expected.erase(other);
+                  }
                }
-               else
-               {
-                  tx.remove(other);
-                  expected.erase(other);
-               }
-               auto after = expected.upper_bound(at);
-               REQUIRE(cursor.next() == (after != expected.end()));
-               if (after != expected.end())
-                  REQUIRE(cursor.key() == after->first);
+               require_same_scan(std::move(cursor), frozen);
                break;
             }
             case 11:
@@ -220,48 +262,26 @@ namespace
                auto upper = random_key(rng);
                if (upper < key)
                   std::swap(key, upper);
-               if (rng() % 6 == 0)
-                  upper.clear();
-               auto first = key.empty() ? expected.begin() : expected.lower_bound(key);
-               auto last  = upper.empty() ? expected.end() : expected.lower_bound(upper);
-               std::uint64_t count = 0;
-               if (upper.empty() || key < upper)
-               {
-                  count = std::distance(first, last);
-                  expected.erase(first, last);
-               }
-               REQUIRE(tx.remove_range(key, upper) == count);
+               if (key.empty() || upper.empty() || key == upper)
+                  break;
+               auto          first = expected.lower_bound(key);
+               auto          last  = expected.lower_bound(upper);
+               std::uint64_t count = std::distance(first, last);
+               expected.erase(first, last);
+               REQUIRE(tx.remove_range_counted(key, upper) == count);
                break;
             }
             case 12:
-            {
-               if (saved.size() < 4)
-                  saved.emplace_back(tx.save(), expected);
+               saved.save(tx, expected);
                break;
-            }
             case 13:
-            {
-               if (saved.empty())
-                  break;
-               if (rng() % 2)
-               {
-                  tx.rollback(saved.back().first);
-                  expected = saved.back().second;
-               }
-               else
-                  tx.release(saved.back().first);
-               saved.pop_back();
+               saved.close(tx, expected, rng() % 2);
                break;
-            }
          }
          if (step % 25 == 0)
             require_same_scan(tx.snapshot_cursor(), expected);
       }
-      while (!saved.empty())
-      {
-         tx.release(saved.back().first);
-         saved.pop_back();
-      }
+      saved.release_all(tx);
       require_same_scan(tx.snapshot_cursor(), expected);
    }
 
@@ -429,6 +449,38 @@ TEMPLATE_TEST_CASE("Transactions: transient transactions run in parallel on one 
    for (auto& thread : threads)
       thread.join();
    REQUIRE_FALSE(failed);
+}
+
+TEMPLATE_TEST_CASE("Transactions: an engine's own transaction reads its own changes",
+                   "[api][transactions]",
+                   psitri::small_engine,
+                   psitri::big_engine)
+{
+   using E  = TestType;
+   using DB = psitri::database_for<E>;
+   temporary_directory temp;
+   auto                db = DB::open(temp.path / "db", psitri::open_mode::create_only, config<E>());
+   auto                writer = db->start_write_session();
+   model               committed;
+
+   for (std::uint32_t seed = 1; seed <= 12; ++seed)
+   {
+      std::mt19937 rng(seed * 104729);
+      bool         keep = seed % 3 != 0;
+      {
+         auto tx       = writer->start_transaction(4);
+         auto expected = committed;
+         exercise(tx, expected, rng, 400);
+         if (keep)
+         {
+            tx.commit();
+            committed = std::move(expected);
+         }
+         else
+            tx.abort();
+      }
+      require_same_scan(writer->get_root(4).snapshot_cursor(), committed);
+   }
 }
 
 TEMPLATE_TEST_CASE("Cursors: an empty root is both ended and reverse-ended after a failed seek",

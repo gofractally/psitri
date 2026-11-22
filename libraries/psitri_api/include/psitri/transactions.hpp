@@ -17,8 +17,10 @@
 // of the tree as it goes and publishes it on commit.
 //
 // Reads through either type, including cursors in both directions, see the
-// transaction's own writes. A cursor stays usable when the transaction is
-// written to: it re-finds its place.
+// transaction's own writes. A cursor is a snapshot, as an engine's cursor is:
+// it shows the state at the moment it was created and does not change when
+// the transaction is written to afterwards. It must not be used after the
+// transaction commits, aborts or is reset.
 
 #include <psitri/concepts.hpp>
 
@@ -67,35 +69,58 @@ namespace psitri
             throw std::length_error("value too large for a transaction delta");
          _map.upsert_inline(key, detail::delta_entry{0, static_cast<std::uint32_t>(value.size())},
                             value);
-         ++_version;
       }
       void erase(std::string_view key)
       {
          _map.upsert_inline(key, detail::delta_entry{1, 0}, {});
-         ++_version;
       }
       const detail::delta_entry* find(std::string_view key) const noexcept
       {
          return const_cast<map_type&>(_map).get(key);
       }
 
-      iterator begin() const noexcept { return const_cast<map_type&>(_map).begin(); }
-      iterator end() const noexcept { return const_cast<map_type&>(_map).end(); }
-      /// First entry with key >= `key`.
-      iterator at_or_after(std::string_view key) const noexcept
+      /// The contents at one moment. Later changes to the store do not show
+      /// through it. Valid until the store is cleared.
+      class view
       {
-         return const_cast<map_type&>(_map).lower_bound(key);
-      }
-      /// First entry with key > `key`.
-      iterator after(std::string_view key) const noexcept
+        public:
+         view() = default;
+         iterator begin() const noexcept { return art::make_begin<detail::delta_entry>(*_arena, _root); }
+         iterator end() const noexcept { return art::make_end<detail::delta_entry>(*_arena, _root); }
+         /// First entry with key >= `key`.
+         iterator at_or_after(std::string_view key) const noexcept
+         {
+            return art::make_lower_bound<detail::delta_entry>(*_arena, _root, key);
+         }
+         /// First entry with key > `key`.
+         iterator after(std::string_view key) const noexcept
+         {
+            auto it = at_or_after(key);
+            if (it != end() && it.key() == key)
+               ++it;
+            return it;
+         }
+         const detail::delta_entry* find(std::string_view key) const noexcept
+         {
+            return art::get<detail::delta_entry>(*_arena, _root, key);
+         }
+
+        private:
+         friend class delta_store;
+         view(art::heap_arena* arena, art::offset_t root) : _arena(arena), _root(root) {}
+         art::heap_arena* _arena = nullptr;
+         art::offset_t    _root  = art::null_offset;
+      };
+      /// The contents as they are now, unaffected by later writes.
+      view freeze() noexcept
       {
-         return const_cast<map_type&>(_map).upper_bound(key);
+         // Entries written from here on never overwrite ones that exist now.
+         _map.bump_cow_seq();
+         return view(&_map.get_arena(), _map.root());
       }
 
       bool          empty() const noexcept { return _map.empty(); }
       std::uint32_t size() const noexcept { return _map.size(); }
-      /// Changes whenever the contents do. Cursors use it to notice.
-      std::uint64_t version() const noexcept { return _version; }
 
       /// A point the contents can be returned to.
       struct mark
@@ -114,18 +139,12 @@ namespace psitri
          _map.root() = m.root;
          _map.set_size(m.size);
          _map.bump_cow_seq();
-         ++_version;
       }
 
-      void clear() noexcept
-      {
-         _map.clear();
-         ++_version;
-      }
+      void clear() noexcept { _map.clear(); }
 
      private:
-      map_type      _map;
-      std::uint64_t _version = 0;
+      map_type _map;
    };
 
    namespace detail
@@ -160,20 +179,20 @@ namespace psitri
       }
    }  // namespace detail
 
-   /// A cursor over a delta merged with a base cursor. It has the positioning
-   /// rules of an engine cursor: `lower_bound` finds the first key at or after
-   /// its argument and `upper_bound` the last key at or before it.
+   /// A cursor over a frozen delta merged with a base cursor. It has the
+   /// positioning rules of an engine cursor: `lower_bound` finds the first key
+   /// at or after its argument and `upper_bound` the last key at or before it.
    template <adb::mergeable_cursor Base>
    class merged_cursor
    {
      public:
-      merged_cursor(const delta_store& delta, Base base) : _delta(&delta), _base(std::move(base)) {}
+      merged_cursor(delta_store::view delta, Base base) : _delta(delta), _base(std::move(base)) {}
 
       bool seek_begin() { return forward_from({}, true); }
       bool lower_bound(std::string_view key) { return forward_from(key, true); }
       bool seek_last()
       {
-         _d      = _delta->end();
+         _d      = _delta.end();
          _d_live = step_delta_back();
          _b_live = _base.seek_last();
          return settle_backward();
@@ -186,10 +205,10 @@ namespace psitri
             return false;
          if (_where == position::before_first)
             return seek_begin();
-         if (!_forward || _seen != _delta->version())
+         if (!_forward || _moved)
             return forward_from(std::string(_key), false);
          if (_on_delta)
-            _d_live = (++_d != _delta->end());
+            _d_live = (++_d != _delta.end());
          else
             _b_live = _base.next();
          return settle_forward();
@@ -200,7 +219,7 @@ namespace psitri
             return false;
          if (_where == position::after_last)
             return seek_last();
-         if (_forward || _seen != _delta->version())
+         if (_forward || _moved)
             return backward_from(std::string(_key), false);
          if (_on_delta)
             _d_live = step_delta_back();
@@ -217,10 +236,7 @@ namespace psitri
       template <class T = std::string>
       std::optional<T> value()
       {
-         if (_where != position::on_key)
-            return std::nullopt;
-         refresh();
-         if (_where != position::on_key)
+         if (!on_key())
             return std::nullopt;
          if (_on_delta)
          {
@@ -236,10 +252,7 @@ namespace psitri
       template <class F>
       bool get_value(F&& callback)
       {
-         if (_where != position::on_key)
-            return false;
-         refresh();
-         if (_where != position::on_key)
+         if (!on_key())
             return false;
          if (_on_delta)
          {
@@ -248,29 +261,21 @@ namespace psitri
          }
          return _base.get_value(std::forward<F>(callback));
       }
-      bool is_subtree()
-      {
-         if (_where != position::on_key)
-            return false;
-         refresh();
-         return _where == position::on_key && !_on_delta && _base.is_subtree();
-      }
+      bool is_subtree() { return on_key() && !_on_delta && _base.is_subtree(); }
 
-      /// Point reads. They do not move the cursor's position in the merged
-      /// view, but they do use the base cursor, so the place is found again.
+      /// Point reads. They do not change where the cursor is.
       template <class F>
       bool get(std::string_view key, F&& callback)
       {
-         if (auto* entry = _delta->find(key))
+         if (auto* entry = _delta.find(key))
          {
             if (entry->removed)
                return false;
             callback(entry->value());
             return true;
          }
-         bool found = _base.get(key, std::forward<F>(callback));
-         _seen      = _delta->version() - 1;  // the base cursor may have moved
-         return found;
+         _moved = true;  // the base cursor is used for the read
+         return _base.get(key, std::forward<F>(callback));
       }
       template <class T = std::string>
       std::optional<T> get(std::string_view key)
@@ -295,11 +300,12 @@ namespace psitri
          after_last
       };
 
-      // Put the cursor back on its key after the delta changed under it. If
-      // the key has since been removed the cursor moves to the next key.
-      void refresh()
+      // On a key, with both sources where a step expects them.
+      bool on_key()
       {
-         if (_seen != _delta->version())
+         if (_where != position::on_key)
+            return false;
+         if (_moved)
          {
             std::string key(_key);
             if (_forward)
@@ -307,11 +313,12 @@ namespace psitri
             else
                backward_from(key, true);
          }
+         return _where == position::on_key;
       }
 
       bool step_delta_back()
       {
-         if (_d == _delta->begin())
+         if (_d == _delta.begin())
             return false;
          --_d;
          return true;
@@ -323,24 +330,24 @@ namespace psitri
          std::string held(key);
          if (inclusive)
          {
-            _d      = _delta->at_or_after(held);
+            _d      = _delta.at_or_after(held);
             _b_live = held.empty() ? _base.seek_begin() : _base.lower_bound(held);
          }
          else
          {
-            _d      = _delta->after(held);
+            _d      = _delta.after(held);
             _b_live = _base.lower_bound(held);
             if (_b_live && _base.key() == held)
                _b_live = _base.next();
          }
-         _d_live = _d != _delta->end();
+         _d_live = _d != _delta.end();
          return settle_forward();
       }
       // Position on the last key <= `key` (or < `key` when not inclusive).
       bool backward_from(std::string_view key, bool inclusive)
       {
          std::string held(key);
-         _d      = inclusive ? _delta->after(held) : _delta->at_or_after(held);
+         _d      = inclusive ? _delta.after(held) : _delta.at_or_after(held);
          _d_live = step_delta_back();
          _b_live = _base.upper_bound(held);
          if (!inclusive && _b_live && _base.key() == held)
@@ -353,7 +360,7 @@ namespace psitri
       bool settle_forward()
       {
          _forward = true;
-         _seen    = _delta->version();
+         _moved   = false;
          for (;;)
          {
             if (!_d_live && !_b_live)
@@ -368,7 +375,7 @@ namespace psitri
                   _b_live = _base.next();
                if (_d.value().removed)
                {
-                  _d_live = (++_d != _delta->end());
+                  _d_live = (++_d != _delta.end());
                   continue;
                }
                _on_delta = true;
@@ -386,7 +393,7 @@ namespace psitri
       bool settle_backward()
       {
          _forward = false;
-         _seen    = _delta->version();
+         _moved   = false;
          for (;;)
          {
             if (!_d_live && !_b_live)
@@ -417,15 +424,15 @@ namespace psitri
          }
       }
 
-      const delta_store*    _delta;
+      delta_store::view     _delta;
       Base                  _base;
       delta_store::iterator _d{};
       bool                  _d_live   = false;
       bool                  _b_live   = false;
       bool                  _on_delta = false;
       bool                  _forward  = true;
+      bool                  _moved    = false;  // the base cursor is no longer at its place
       position              _where    = position::before_first;
-      std::uint64_t         _seen     = 0;
       std::string           _key;
    };
 
@@ -542,6 +549,11 @@ namespace psitri
       {
          return this->remove_each(snapshot_cursor(), lower, upper);
       }
+      /// The name the engines' transactions use.
+      std::uint64_t remove_range_counted(std::string_view lower, std::string_view upper)
+      {
+         return remove_range(lower, upper);
+      }
 
       template <class F>
       bool get(std::string_view key, F&& callback) const
@@ -558,7 +570,7 @@ namespace psitri
       }
 
       /// A cursor over the snapshot with this transaction's changes applied.
-      cursor snapshot_cursor() const { return cursor(*_store, _base.snapshot_cursor()); }
+      cursor snapshot_cursor() const { return cursor(_store->freeze(), _base.snapshot_cursor()); }
 
       /// Throw away every change and start again on the same snapshot.
       void reset()
@@ -618,6 +630,11 @@ namespace psitri
       {
          return this->remove_each(snapshot_cursor(), lower, upper);
       }
+      /// The name the engines' transactions use.
+      std::uint64_t remove_range_counted(std::string_view lower, std::string_view upper)
+      {
+         return remove_range(lower, upper);
+      }
 
       template <class F>
       bool get(std::string_view key, F&& callback) const
@@ -635,12 +652,13 @@ namespace psitri
 
       /// A cursor over the root as it was when this transaction started, with
       /// this transaction's changes applied.
-      cursor snapshot_cursor() const { return cursor(*_store, _base.snapshot_cursor()); }
+      cursor snapshot_cursor() const { return cursor(_store->freeze(), _base.snapshot_cursor()); }
 
       /// Apply the changes in key order and publish the root.
       void commit()
       {
-         for (auto it = _store->begin(), end = _store->end(); it != end; ++it)
+         auto changes = _store->freeze();
+         for (auto it = changes.begin(), end = changes.end(); it != end; ++it)
          {
             if (it.value().removed)
                _inner.remove(it.key());

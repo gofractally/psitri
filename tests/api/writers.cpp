@@ -395,21 +395,27 @@ TEMPLATE_TEST_CASE("Readers: every cursor of a read session stays on its own sna
    using E  = TestType;
    using DB = psitri::database_for<E>;
    temporary_directory temp;
-   auto                db = DB::open(temp.path / "db", psitri::open_mode::create_only, config<E>());
-   auto                writer = db->start_write_session();
-   auto                reader = db->start_read_session();
+   // A small store, so that space freed by one commit is reused by the next
+   // ones and a snapshot that is not protected is soon overwritten.
+   auto cfg = config<E>();
+   if constexpr (std::same_as<E, psitri::small_engine>)
+      cfg.max_segments = 3;
+   auto db     = DB::open(temp.path / "db", psitri::open_mode::create_only, cfg);
+   auto writer = db->start_write_session();
+   auto reader = db->start_read_session();
 
    auto write_generation = [&](std::uint32_t generation)
    {
       auto tx = writer->start_transaction(0);
       // Every key is rewritten, so nothing of an older generation is shared.
       for (std::uint32_t i = 0; i < 2000; ++i)
-         tx.upsert(key(0, 0, i), "generation " + std::to_string(generation));
+         tx.upsert(key(0, 0, i), "generation " + std::to_string(generation) + std::string(400, '.'));
       tx.commit();
    };
    auto all_are = [](auto& cursor, std::uint32_t generation)
    {
-      const std::optional<std::string> expected{"generation " + std::to_string(generation)};
+      const std::optional<std::string> expected{"generation " + std::to_string(generation) +
+                                                std::string(400, '.')};
       std::size_t                      n = 0;
       for (bool more = cursor.seek_begin(); more; more = cursor.next(), ++n)
          if (cursor.template value<std::string>() != expected)
@@ -424,13 +430,13 @@ TEMPLATE_TEST_CASE("Readers: every cursor of a read session stays on its own sna
    write_generation(3);
    auto third = reader->create_cursor(0);
    // Enough further commits that anything not held would be reclaimed and reused.
-   for (std::uint32_t generation = 4; generation < 40; ++generation)
+   for (std::uint32_t generation = 4; generation < 300; ++generation)
       write_generation(generation);
 
    CHECK(all_are(first, 1));
    CHECK(all_are(second, 2));
    CHECK(all_are(third, 3));
    auto latest = reader->create_cursor(0);
-   CHECK(all_are(latest, 39));
+   CHECK(all_are(latest, 299));
    CHECK(all_are(first, 1));
 }

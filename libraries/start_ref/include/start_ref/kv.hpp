@@ -304,10 +304,17 @@ namespace start_ref::kv
    {
      public:
       cursor(cursor&& o) noexcept
-          : _a(o._a), _hp(o._hp), _root(o._root), _view(std::move(o._view)), _it(_view.end())
+          : _a(o._a),
+            _hp(o._hp),
+            _root(o._root),
+            _view(std::move(o._view)),
+            _it(_view.end()),
+            _own_slot(std::move(o._own_slot)),
+            _session_slot_busy(o._session_slot_busy)
       {
          o._a  = nullptr;  // moved-from cursor owns no pin; position resets
          o._hp = nullptr;
+         o._session_slot_busy = nullptr;
       }
       cursor(const cursor&) = delete;
       ~cursor()
@@ -320,6 +327,8 @@ namespace start_ref::kv
             _hp->store(0, std::memory_order_seq_cst);  // readers only clear their slot:
          else if (!r.is_null())                        // reclamation is the writer's job
             _view.cow_release(r);  // write-side pinned cursor (scan_all path)
+         if (_session_slot_busy)
+            *_session_slot_busy = false;
       }
 
       bool seek_begin() { _rend = false; _it = _view.begin(); return _it != _view.end(); }
@@ -511,6 +520,7 @@ namespace start_ref::kv
       friend class read_session;
       friend class tree;
       friend class transaction;
+      friend class read_session;
       cursor(start_ref::arena*  a,
              root_ptr            root,
              std::atomic<uint64_t>* hp = nullptr,
@@ -521,6 +531,11 @@ namespace start_ref::kv
          _view.adopt_root(_root);
       }
 
+      // A reader's cursor protects its snapshot through one reader slot. The
+      // first live cursor of a read session uses the session's slot; each
+      // further one holds a slot of its own for as long as it lives.
+      std::unique_ptr<start_ref::read_session> _own_slot;
+      bool*                                    _session_slot_busy = nullptr;
       start_ref::arena*             _a;
       std::atomic<uint64_t>*   _hp;  // sal paradigm: the reader's published slot
       root_ptr                 _root;
@@ -541,6 +556,7 @@ namespace start_ref::kv
       explicit read_session(database* db);
       database*          _db;
       start_ref::read_session _rs;
+      bool                    _slot_busy = false;  // a live cursor is using _rs's slot
    };
 
    class write_session;
@@ -1111,7 +1127,12 @@ namespace start_ref::kv
 
    inline cursor read_session::create_cursor(uint32_t root_index)
    {
-      auto& slot = _db->_arena.reader_slot(_rs.slot());
+      // Every live cursor needs a slot to itself: sharing one would leave all
+      // but the latest snapshot unprotected.
+      std::unique_ptr<start_ref::read_session> own;
+      if (_slot_busy)
+         own = std::make_unique<start_ref::read_session>(_db->_arena.start_read_session());
+      auto& slot = _db->_arena.reader_slot(own ? own->slot() : _rs.slot());
       for (;;)
       {
          const uint64_t r = _db->_live_raw[root_index].load(std::memory_order_seq_cst);
@@ -1122,7 +1143,15 @@ namespace start_ref::kv
             root_ptr p = root_ptr::null();
             if (r)
                p = decode_root(r);
-            return cursor(&_db->_arena, p, &slot);
+            cursor result(&_db->_arena, p, &slot);
+            if (own)
+               result._own_slot = std::move(own);
+            else
+            {
+               _slot_busy                = true;
+               result._session_slot_busy = &_slot_busy;
+            }
+            return result;
          }
       }
    }

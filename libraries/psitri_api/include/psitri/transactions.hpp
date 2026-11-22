@@ -585,8 +585,10 @@ namespace psitri
       template <class F>
       bool get(std::string_view key, F&& callback) const
       {
-         auto base = _base.snapshot_cursor();
-         return operations::read_through(*_store, base, key, callback);
+         // One cursor on the snapshot serves every point read.
+         if (!_reader)
+            _reader.emplace(_base.snapshot_cursor());
+         return operations::read_through(*_store, *_reader, key, callback);
       }
       template <class T = std::string>
       std::optional<T> get(std::string_view key) const
@@ -607,8 +609,9 @@ namespace psitri
       }
 
      private:
-      Snapshot                     _base;
-      std::unique_ptr<delta_store> _store;
+      Snapshot                           _base;
+      std::unique_ptr<delta_store>       _store;
+      mutable std::optional<base_cursor> _reader;
    };
 
    /// A transaction that keeps its changes in a delta and applies them at
@@ -665,7 +668,9 @@ namespace psitri
          this->apply_to(_inner);
          _store->drop_contents();
          _written = true;
-         return _inner.remove_range_counted(lower, upper);
+         const auto removed = _inner.remove_range_counted(lower, upper);
+         _reader.reset();  // what the changes sit on has moved
+         return removed;
       }
       /// The name the engines' transactions use.
       std::uint64_t remove_range_counted(std::string_view lower, std::string_view upper)
@@ -676,8 +681,10 @@ namespace psitri
       template <class F>
       bool get(std::string_view key, F&& callback) const
       {
-         auto base = base_position();
-         return operations::read_through(*_store, base, key, callback);
+         // One cursor on what the changes sit on serves every point read.
+         if (!_reader)
+            _reader.emplace(base_position());
+         return operations::read_through(*_store, *_reader, key, callback);
       }
       template <class T = std::string>
       std::optional<T> get(std::string_view key) const
@@ -716,13 +723,15 @@ namespace psitri
       }
       void finish() noexcept
       {
+         _reader.reset();
          this->reset_depth();
          detail::give_delta_store(std::move(_store));
       }
 
-      typename E::transaction      _inner;
-      snapshot                     _base;
-      std::unique_ptr<delta_store> _store;
-      bool                         _written = false;
+      typename E::transaction            _inner;
+      snapshot                           _base;
+      std::unique_ptr<delta_store>       _store;
+      mutable std::optional<base_cursor> _reader;
+      bool                               _written = false;
    };
 }  // namespace psitri

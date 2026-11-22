@@ -607,3 +607,74 @@ TEMPLATE_TEST_CASE("Cursors: an empty root is both ended and reverse-ended after
    REQUIRE_FALSE(one.next());
    CHECK(one.is_end());
 }
+
+// Not a correctness case: how long a small transaction that is thrown away
+// takes, kept aside in a transient transaction versus made in the engine's own
+// transaction and aborted. Run with "[.][bench]".
+TEMPLATE_TEST_CASE("Bench: a small discarded transaction, kept aside versus in the engine",
+                   "[.][bench]",
+                   psitri::small_engine,
+                   psitri::big_engine)
+{
+   using E  = TestType;
+   using DB = psitri::database_for<E>;
+   temporary_directory temp;
+   auto                db = DB::open(temp.path / "db", psitri::open_mode::create_only, config<E>());
+   auto                writer = db->start_write_session();
+   constexpr int       base_keys = 200000;
+   auto                name = [](int i)
+   {
+      char buffer[32];
+      std::snprintf(buffer, sizeof(buffer), "acct/%08d/bal", i);
+      return std::string(buffer);
+   };
+   {
+      auto tx = writer->start_transaction(0);
+      for (int i = 0; i < base_keys; ++i)
+         tx.upsert(name(i), "0000000000000000");
+      tx.commit();
+   }
+   constexpr int rounds = 20000;
+   auto          work   = [&](auto& tx, std::mt19937& rng)
+   {
+      std::size_t found = 0;
+      for (int i = 0; i < 16; ++i)
+      {
+         auto key = name(rng() % base_keys);
+         found += tx.template get<std::string>(key).has_value();
+         tx.upsert(key, "1111111111111111");
+         found += tx.template get<std::string>(key).has_value();
+      }
+      auto cursor = tx.snapshot_cursor();
+      if (cursor.lower_bound(name(rng() % base_keys)))
+         for (int i = 0; i < 4 && cursor.next(); ++i)
+            ++found;
+      return found;
+   };
+   using clock = std::chrono::steady_clock;
+   std::size_t sink = 0;
+
+   std::mt19937 rng1(1);
+   auto         t0   = clock::now();
+   auto         base = writer->get_root(0);
+   for (int r = 0; r < rounds; ++r)
+   {
+      psitri::transient_transaction tx(base);
+      sink += work(tx, rng1);
+   }
+   auto t1 = clock::now();
+   std::mt19937 rng2(1);
+   for (int r = 0; r < rounds; ++r)
+   {
+      auto tx = writer->start_transaction(0);
+      sink += work(tx, rng2);
+      tx.abort();
+   }
+   auto t2 = clock::now();
+   auto us = [&](auto a, auto b)
+   { return std::chrono::duration<double, std::micro>(b - a).count() / rounds; };
+   std::printf("BENCH discarded transaction (16 writes, 32 reads, 1 short scan): kept aside %.2f us, "
+               "in the engine %.2f us  [%zu]\n",
+               us(t0, t1), us(t1, t2), sink);
+   SUCCEED();
+}

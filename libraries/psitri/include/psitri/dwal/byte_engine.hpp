@@ -4,7 +4,11 @@
 // and synchronous commit policies are not exposed by this adapter.
 #include <psitri/dwal/dwal_database_impl.hpp>
 #include <psitri/dwal/merge_cursor_impl.hpp>
+#include <psitri/transactions.hpp>
+#include <map>
+#include <mutex>
 #include <unordered_map>
+#include <variant>
 #include <type_traits>
 
 namespace psitri::dwal
@@ -87,7 +91,8 @@ namespace psitri::dwal
          }
       };
 
-      class cursor
+      // A cursor over the committed layers of one root.
+      class layer_cursor
       {
          std::shared_ptr<snapshot> view_;
          std::optional<basic_merge_cursor<Base>> merge_;
@@ -98,7 +103,7 @@ namespace psitri::dwal
             return *merge_;
          }
        public:
-         explicit cursor(std::shared_ptr<snapshot> view) : view_(std::move(view)) {}
+         explicit layer_cursor(std::shared_ptr<snapshot> view) : view_(std::move(view)) {}
          bool seek_begin() { return ordered().seek_begin(); }
          bool seek_last() { return ordered().seek_last(); }
          bool lower_bound(std::string_view k) { return ordered().lower_bound(k); }
@@ -128,6 +133,59 @@ namespace psitri::dwal
                return merge_->tri_cursor()->template value<T>();
             return T(merge_->current_value().data);
          }
+         bool is_subtree() { return merge_ && !is_end() && !is_rend() && merge_->is_subtree(); }
+         template <class F> bool get_value(F&& fn)
+         {
+            if (is_end() || is_rend() || merge_->is_subtree()) return false;
+            if (merge_->current_source() == basic_merge_cursor<Base>::source::tri)
+               return merge_->tri_cursor()->get_value(std::forward<F>(fn));
+            fn(std::string_view(merge_->current_value().data));
+            return true;
+         }
+      };
+
+      // What a transaction's changes sit on: the root as committed when the
+      // transaction started.
+      struct committed_view
+      {
+         std::shared_ptr<snapshot> view;
+         layer_cursor snapshot_cursor() const { return layer_cursor(view); }
+      };
+      using changes_type = psitri::transient_transaction<committed_view>;
+
+      // The engine's cursor: over a root's committed layers, or over a
+      // transaction's changes on top of them.
+      class cursor
+      {
+         std::variant<layer_cursor, typename changes_type::cursor> impl_;
+       public:
+         explicit cursor(std::shared_ptr<snapshot> view) : impl_(layer_cursor(std::move(view))) {}
+         explicit cursor(typename changes_type::cursor merged) : impl_(std::move(merged)) {}
+         bool seek_begin() { return std::visit([](auto& c) { return bool(c.seek_begin()); }, impl_); }
+         bool seek_last() { return std::visit([](auto& c) { return bool(c.seek_last()); }, impl_); }
+         bool lower_bound(std::string_view k)
+         { return std::visit([&](auto& c) { return bool(c.lower_bound(k)); }, impl_); }
+         bool upper_bound(std::string_view k)
+         { return std::visit([&](auto& c) { return bool(c.upper_bound(k)); }, impl_); }
+         bool next() { return std::visit([](auto& c) { return bool(c.next()); }, impl_); }
+         bool prev() { return std::visit([](auto& c) { return bool(c.prev()); }, impl_); }
+         bool is_end() const { return std::visit([](auto& c) { return bool(c.is_end()); }, impl_); }
+         bool is_rend() const { return std::visit([](auto& c) { return bool(c.is_rend()); }, impl_); }
+         std::string_view key() const
+         { return std::visit([](auto& c) { return std::string_view(c.key()); }, impl_); }
+         bool is_subtree() { return std::visit([](auto& c) { return bool(c.is_subtree()); }, impl_); }
+         template <class F> bool get(std::string_view k, F&& fn)
+         { return std::visit([&](auto& c) { return bool(c.get(k, fn)); }, impl_); }
+         template <class T> std::optional<T> get(std::string_view k)
+         {
+            std::optional<T> result;
+            get(k, [&](std::string_view v) { result.emplace(v); });
+            return result;
+         }
+         template <class F> bool get_value(F&& fn)
+         { return std::visit([&](auto& c) { return bool(c.get_value(fn)); }, impl_); }
+         template <class T> std::optional<T> value()
+         { return std::visit([](auto& c) { return c.template value<T>(); }, impl_); }
       };
 
       class read_session
@@ -144,38 +202,55 @@ namespace psitri::dwal
          }
       };
 
+      // A transaction keeps its changes aside and writes them to the buffered
+      // layer when it commits. It holds its root's writer for its whole life,
+      // so writers queue, but it touches the shared layer only at commit, so a
+      // reader is never held up behind an open transaction.
       class transaction
       {
-         std::shared_ptr<database> db_;
-         uint32_t index_;
-         typename dwal_type::dwal_transaction_type tx_;
+         std::shared_ptr<database>    db_;
+         uint32_t                     index_;
+         std::unique_lock<std::mutex> writer_;
+         changes_type                 changes_;
        public:
          transaction(std::shared_ptr<database> db, uint32_t index)
-             : db_(std::move(db)), index_(index), tx_(db_->dwal.start_write_transaction(index)) {}
-         transaction(transaction&&) = default;
-         void upsert(std::string_view k, std::string_view v) { tx_.upsert(k, v); }
-         bool remove(std::string_view k) { return tx_.remove(k); }
-         template <class F> bool get(std::string_view k, F&& fn) const
+             : db_(std::move(db)),
+               index_(index),
+               writer_(db_->writer(index)),
+               changes_(committed_view{std::make_shared<snapshot>(db_, index)})
          {
-            auto result = tx_.get(k);
-            if (!result.found || !result.value.is_data()) return false;
-            fn(result.value.data);
-            return true;
          }
+         transaction(transaction&&) = default;
+         ~transaction() = default;
+         void upsert(std::string_view k, std::string_view v) { changes_.upsert(k, v); }
+         bool remove(std::string_view k) { return changes_.remove(k) == 0; }
+         template <class F> bool get(std::string_view k, F&& fn) const
+         { return changes_.get(k, std::forward<F>(fn)); }
          template <class T> std::optional<T> get(std::string_view k) const
          {
             std::optional<T> result;
             get(k, [&](std::string_view v) { result.emplace(v); });
             return result;
          }
-         cursor create_cursor()
-         { return cursor(std::make_shared<snapshot>(db_, index_, true)); }
+         cursor create_cursor() { return cursor(changes_.snapshot_cursor()); }
+         cursor snapshot_cursor() { return create_cursor(); }
          void commit()
          {
-            // Submit the record while DWAL still owns the root's writer lock.
-            tx_.commit(sal::sync_type::none);
+            if (!writer_.owns_lock()) return;
+            {
+               auto tx = db_->dwal.start_write_transaction(index_);
+               changes_.apply_to(tx);
+               tx.commit(sal::sync_type::none);
+            }
+            changes_.reset();
+            writer_.unlock();
          }
-         void abort() { tx_.abort(); }
+         void abort()
+         {
+            if (!writer_.owns_lock()) return;
+            changes_.reset();
+            writer_.unlock();
+         }
       };
 
       class write_session
@@ -188,8 +263,16 @@ namespace psitri::dwal
 
       class database : public std::enable_shared_from_this<database>
       {
+         std::mutex                    writers_mutex_;
+         std::map<uint32_t, std::mutex> writers_;
        public:
          dwal_type dwal;
+         // The writer lock of root `index`: one transaction at a time.
+         std::mutex& writer(uint32_t index)
+         {
+            std::lock_guard guard(writers_mutex_);
+            return writers_[index];
+         }
          database(std::shared_ptr<typename Base::database> base,
                   const std::filesystem::path& path, const dwal_config& cfg)
              : dwal(std::move(base), path / "wal", cfg) {}

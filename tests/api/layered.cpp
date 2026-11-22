@@ -38,41 +38,7 @@ namespace
 // The tiered engine has one root, so it runs the cases that need only root 0.
 #define WRITER_ENGINES buffered_engine
 #define WRITER_ROOT0_ENGINES buffered_engine, tiered_engine
-#define WRITER_FREE_READER_ENGINES tiered_engine
 #include "writer_cases.inc"
-
-// KNOWN GAP. The buffered layer's transaction changes a shared in-memory layer
-// in place and undoes it on abort, so a reader that wants only committed data
-// waits until the transaction ends. This case records the rule it breaks and
-// is expected to fail until that transaction keeps its changes aside and
-// applies them at commit.
-TEST_CASE("Readers: the buffered layer holds a reader up behind an open transaction",
-          "[api][writers][readers][!shouldfail]")
-{
-   using E = buffered_engine;
-   temporary_directory temp;
-   auto db = E::database::open(temp.path / "db", psitri::open_mode::create_only, writer_config<E>());
-   auto writer = db->start_write_session();
-   auto tx     = writer->start_transaction(0);
-   tx.upsert("k", "uncommitted");
-
-   std::atomic<bool> done{false};
-   std::thread       reader_thread(
-       [&]
-       {
-          auto reader = db->start_read_session();
-          auto cursor = reader->create_cursor(0);
-          cursor.seek_begin();
-          done = true;
-       });
-   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-   while (!done && std::chrono::steady_clock::now() < deadline)
-      std::this_thread::sleep_for(std::chrono::milliseconds(5));
-   const bool while_open = done;
-   tx.abort();
-   reader_thread.join();
-   REQUIRE(while_open);
-}
 
 TEST_CASE("Tiered: roots other than the one keyspace are refused", "[api][writers][tiered]")
 {

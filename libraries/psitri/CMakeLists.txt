@@ -22,7 +22,7 @@ target_include_directories( psitri
 # Define XXH_INLINE_ALL to use xxhash as header-only
 target_compile_definitions(psitri PUBLIC XXH_INLINE_ALL)
 
-target_link_libraries( psitri PUBLIC sal ucc art)
+target_link_libraries( psitri PUBLIC sal ucc art psitri_api_transactions)
 
 option(PSITRI_BUILD_TESTS "Build the psitri test suite" ${BUILD_TESTS})
 if(PSITRI_BUILD_TESTS)

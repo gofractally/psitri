@@ -153,3 +153,123 @@ TEST_CASE("shared_tree: readers on shared snapshots run beside the writer", "[sh
    REQUIRE(db->engine_for_testing().object_count() == baseline);
    std::filesystem::remove_all(dir);
 }
+
+#include <map>
+#include <random>
+
+// An embedder that keeps each version as a shared tree edits it one key at a
+// time: adopt the tree, change a key, share the result, and keep older
+// versions to return to. Every seek into the newest version, from every
+// possible key, has to agree with a plain map, and so does every point read.
+TEST_CASE("shared_tree: seeks and point reads agree after single-key edits of kept versions",
+          "[shared_tree][versions]")
+{
+   const auto dir = std::filesystem::temp_directory_path() / "heart_shared_tree_versions";
+   std::filesystem::remove_all(dir);
+   {
+      auto db     = engine::database::open(dir, sal::open_mode::create_only);
+      auto writer = db->start_write_session();
+      auto reader = db->start_read_session();
+      using model = std::map<std::string, std::string>;
+
+      std::vector<std::string> all_keys;  // every key of 1..3 letters from a..d
+      for (int len = 1; len <= 3; ++len)
+         for (int n = 0, end = 1 << (2 * len); n < end; ++n)
+         {
+            std::string k(size_t(len), 'a');
+            for (int p = 0; p < len; ++p)
+               k[size_t(p)] = char('a' + ((n >> (2 * p)) & 3));
+            all_keys.push_back(k);
+         }
+
+      std::mt19937 rng(20261122);
+      auto random_key = [&]
+      {
+         std::string k(1 + rng() % 3, 'a');
+         for (auto& c : k)
+            c = char('a' + rng() % 4);
+         return k;
+      };
+      auto edit = [&](engine::shared_tree& tree, auto&& change)
+      {
+         auto tx = writer->start_write_transaction(tree ? writer->adopt(tree)
+                                                        : writer->create_temporary_tree());
+         change(tx);
+         tree = writer->share(tx.get_tree());
+      };
+      auto verify = [&](const engine::shared_tree& tree, const model& expected, int step)
+      {
+         INFO("step " << step);
+         if (!tree)
+         {
+            REQUIRE(expected.empty());
+            return;
+         }
+         auto c = reader->borrow_cursor(tree);
+         // A full scan.
+         model seen;
+         for (bool ok = c.lower_bound(std::string_view{}); ok; ok = c.next())
+            seen[std::string(c.key())] = *c.value<std::string>();
+         REQUIRE(seen == expected);
+         // Every seek and point read, from every possible key.
+         for (const auto& k : all_keys)
+         {
+            INFO("key " << k);
+            auto it = expected.lower_bound(k);
+            REQUIRE(c.lower_bound(k) == (it != expected.end()));
+            if (it != expected.end())
+               REQUIRE(std::string(c.key()) == it->first);
+            // The key just after `k`: how an embedder steps to the next key.
+            std::string after = k;
+            after.push_back('\0');
+            auto next = expected.upper_bound(k);
+            REQUIRE(c.lower_bound(after) == (next != expected.end()));
+            if (next != expected.end())
+               REQUIRE(std::string(c.key()) == next->first);
+            auto exact = expected.find(k);
+            auto got   = c.get<std::string>(k);
+            REQUIRE(bool(got) == (exact != expected.end()));
+            if (got)
+               REQUIRE(*got == exact->second);
+         }
+      };
+
+      std::vector<engine::shared_tree> versions(1);
+      std::vector<model>               models(1);
+      for (int step = 0; step < 4000; ++step)
+      {
+         const auto roll = rng() % 100;
+         if (roll < 55)
+         {
+            const auto k = random_key();
+            const auto v = "s" + std::to_string(step);
+            edit(versions.back(), [&](auto& tx) { tx.upsert(k, v); });
+            models.back()[k] = v;
+         }
+         else if (roll < 75)
+         {
+            const auto k = random_key();
+            if (versions.back())
+               edit(versions.back(), [&](auto& tx) { tx.remove(k); });
+            models.back().erase(k);
+         }
+         else if (roll < 85 && versions.size() < 5)
+         {
+            versions.push_back(versions.back());  // keep the version to return to
+            models.push_back(models.back());
+         }
+         else if (roll < 90 && versions.size() > 1)
+         {
+            versions.erase(versions.end() - 2);  // keep the newest
+            models.erase(models.end() - 2);
+         }
+         else if (roll < 95 && versions.size() > 1)
+         {
+            versions.pop_back();  // return to the one before
+            models.pop_back();
+         }
+         verify(versions.back(), models.back(), step);
+      }
+   }
+   std::filesystem::remove_all(dir);
+}

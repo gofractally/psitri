@@ -598,12 +598,22 @@ namespace sal
       void*  unmap_start = static_cast<char*>(_mapped_base) + new_size;
       size_t unmap_size  = _file_size - new_size;
 
-      if (::mmap(unmap_start, unmap_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1,
-                 0) == MAP_FAILED)
+      if (_reserved_base && _reserved_base != MAP_FAILED && _reservation_size > 0)
       {
-         SAL_WARN("Failed to return part of the file mapping to the reservation: {}",
-                  strerror(errno));
-         // Continue anyway - the file will still be truncated
+         // Same flags as the reservation itself, which this becomes part of again.
+         if (::mmap(unmap_start, unmap_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+                    -1, 0) == MAP_FAILED)
+         {
+            SAL_WARN("Failed to return part of the file mapping to the reservation: {}",
+                     strerror(errno));
+            // Continue anyway - the file will still be truncated
+         }
+      }
+      else if (::munmap(unmap_start, unmap_size) != 0)
+      {
+         // Without a reservation there is nothing to keep: the range goes back
+         // to the process.
+         SAL_WARN("Failed to unmap portion of file during truncate: {}", strerror(errno));
       }
 
       // Truncate the file to the new size

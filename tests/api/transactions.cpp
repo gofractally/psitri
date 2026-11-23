@@ -571,6 +571,62 @@ TEMPLATE_TEST_CASE("Transactions: a nested transaction's changes fold into the o
    require_same_scan(writer->get_root(5).snapshot_cursor(), expected);
 }
 
+TEST_CASE("Transactions: a store of changes can be read as it was at each mark",
+          "[transactions][delta_store]")
+{
+   // An embedder that folds its changes into a tree while savepoints are open
+   // needs the changes as of each savepoint, not only as they are now.
+   psitri::delta_store                              store;
+   std::vector<psitri::delta_store::mark>           marks;
+   std::vector<std::map<std::string, std::string>>  expected;  // "" stands for removed
+   std::map<std::string, std::string>               model;
+   std::mt19937                                     rng(7);
+   REQUIRE(store.bytes() == 0);
+   for (int level = 0; level < 6; ++level)
+   {
+      marks.push_back(store.save());
+      expected.push_back(model);
+      for (int i = 0; i < 200; ++i)
+      {
+         std::string key = "k" + std::to_string(rng() % 300);
+         if (rng() % 4 == 0)
+         {
+            store.erase(key);
+            model[key] = "";
+         }
+         else
+         {
+            std::string value = "v" + std::to_string(level) + "-" + std::to_string(i);
+            store.put(key, value);
+            model[key] = value;
+         }
+      }
+   }
+   auto contents = [](psitri::delta_store::view view)
+   {
+      std::map<std::string, std::string> result;
+      for (auto it = view.begin(), end = view.end(); it != end; ++it)
+         result[std::string(it.key())] =
+             it.value().removed ? std::string() : std::string(it.value().value());
+      return result;
+   };
+   for (std::size_t i = 0; i < marks.size(); ++i)
+      REQUIRE(contents(store.at(marks[i])) == expected[i]);
+   REQUIRE(contents(store.freeze()) == model);
+
+   // Rolling back leaves the earlier marks readable and does not shrink the region.
+   const auto used = store.bytes();
+   REQUIRE(used > 0);
+   store.restore(marks[3]);
+   REQUIRE(contents(store.freeze()) == expected[3]);
+   for (std::size_t i = 0; i <= 3; ++i)
+      REQUIRE(contents(store.at(marks[i])) == expected[i]);
+   REQUIRE(store.bytes() >= used);
+   store.clear();
+   REQUIRE(store.bytes() == 0);
+   REQUIRE(store.empty());
+}
+
 TEMPLATE_TEST_CASE("Cursors: an empty root is both ended and reverse-ended after a failed seek",
                    "[api][cursors]",
                    psitri::small_engine,

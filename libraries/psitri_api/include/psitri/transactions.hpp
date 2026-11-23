@@ -140,6 +140,16 @@ namespace psitri
          _map.set_size(m.size);
          _map.bump_cow_seq();
       }
+      /// The contents as they were at a mark that has not been rolled back
+      /// past. Valid until the store is cleared.
+      view at(const mark& m) noexcept { return view(&_map.get_arena(), m.root); }
+
+      /// Bytes of the store's region in use. Rolling back does not lower it;
+      /// clearing does. The region holds at most 4 GiB.
+      std::uint32_t bytes() const noexcept
+      {
+         return const_cast<map_type&>(_map).get_arena().bytes_used();
+      }
 
       void clear() noexcept { _map.clear(); }
       /// Forget the contents but keep their memory, so that views frozen

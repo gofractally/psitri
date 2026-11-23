@@ -202,9 +202,23 @@ namespace sal_hybrid
          _nseg.store(s + 1, std::memory_order_release);
          return s;
       }
-      // Pull a recyclable (>50%-free, sealed) segment OF CLASS `cls`, or MAX. A
-      // recycled segment keeps its class: its live leftovers sit on class-aligned
-      // slot boundaries, so it can only be re-filled at the same size.
+      // A sealed segment with nothing live in it. Sealed means no cursor is
+      // bumping it, so _seg_alloced is fixed; _seg_freed only rises toward it.
+      // free() publishes ref=0 before it counts the grains, so once the two
+      // counters meet every slot in the segment reads ref==0.
+      bool empty_(uint32_t s) const noexcept
+      {
+         return _seg_alloced[s].load(std::memory_order_acquire) ==
+                _seg_freed[s].load(std::memory_order_acquire);
+      }
+      // Pull a recyclable (>50%-free, sealed) segment for class `cls`, or MAX.
+      //
+      // A segment that still holds live objects keeps its class: the leftovers
+      // sit on class-aligned slot boundaries, so it can only be re-filled at the
+      // same size. An EMPTY segment has no leftovers and no stride to respect, so
+      // any class may take it. Without that, a workload whose object sizes drift
+      // strands one mostly-empty segment after another in classes it no longer
+      // allocates, and the region grows without bound at constant live data.
       uint32_t take_recyclable_(uint8_t cls) noexcept
       {
          const uint32_t words = (_nseg.load(std::memory_order_acquire) + 63) >> 6;
@@ -215,13 +229,19 @@ namespace sal_hybrid
             {
                const uint32_t s   = w * 64 + uint32_t(std::countr_zero(m));
                const uint64_t bit = 1ull << (s & 63);
-               if (_seg_class[s].load(std::memory_order_relaxed) != cls)
+               const bool other_class = _seg_class[s].load(std::memory_order_relaxed) != cls;
+               if (other_class && !empty_(s))
                {
                   m &= ~bit;
                   continue;
                }
                if (_recyc[w].fetch_and(~bit, std::memory_order_acquire) & bit)
                {
+                  // The bit is ours, so no other session can take this segment.
+                  // Emptiness cannot be lost once seen: nothing allocates into
+                  // a sealed segment.
+                  if (other_class)
+                     _seg_class[s].store(cls, std::memory_order_relaxed);
                   _seg_sealed[s].store(0, std::memory_order_relaxed);
                   return s;
                }
@@ -324,7 +344,9 @@ namespace sal_hybrid
             if (live <= recycle_below)
                _a->_recyc[c.seg >> 6].fetch_or(1ull << (c.seg & 63), std::memory_order_relaxed);
          }
-         const uint32_t r = _a->take_recyclable_(uint8_t(g));
+         uint32_t r = _a->take_recyclable_(uint8_t(g));
+         if (r == UINT32_MAX)
+            r = take_idle_(g);
          if (r != UINT32_MAX)
          {
             c.seg   = r;
@@ -339,6 +361,24 @@ namespace sal_hybrid
          }
          c.active = true;
          return alloc_g_(g);
+      }
+      // A cursor keeps its segment until that segment fills, so a class this
+      // session has stopped allocating would hold a segment forever, out of
+      // reach of take_recyclable_ because it was never sealed. Before growing,
+      // take over such a segment once everything in it has been freed. Only
+      // this session bumps its own cursors, so an empty one stays empty.
+      uint32_t take_idle_(uint32_t g) noexcept
+      {
+         for (uint32_t other = 1; other <= max_run; ++other)
+         {
+            cursor& o = _cls[other];
+            if (other == g || !o.active || !_a->empty_(o.seg))
+               continue;
+            o.active = false;
+            _a->_seg_class[o.seg].store(uint8_t(g), std::memory_order_relaxed);
+            return o.seg;
+         }
+         return UINT32_MAX;
       }
       SlotIdx finish_(uint32_t seg, uint32_t local, uint32_t g) noexcept
       {

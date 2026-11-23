@@ -197,6 +197,34 @@ namespace psitri
       }
    }  // namespace detail
 
+   /// A delta_store taken from the calling thread's idle stores and handed
+   /// back, cleared, to the thread that destroys this. For an embedder that
+   /// keeps changes aside itself instead of through the transaction types.
+   class pooled_delta_store
+   {
+     public:
+      pooled_delta_store() : _store(detail::take_delta_store()) {}
+      pooled_delta_store(pooled_delta_store&&) noexcept = default;
+      pooled_delta_store& operator=(pooled_delta_store&& other) noexcept
+      {
+         if (this != &other)
+         {
+            detail::give_delta_store(std::move(_store));
+            _store = std::move(other._store);
+         }
+         return *this;
+      }
+      ~pooled_delta_store() { detail::give_delta_store(std::move(_store)); }
+
+      delta_store&       operator*() noexcept { return *_store; }
+      const delta_store& operator*() const noexcept { return *_store; }
+      delta_store*       operator->() noexcept { return _store.get(); }
+      const delta_store* operator->() const noexcept { return _store.get(); }
+
+     private:
+      std::unique_ptr<delta_store> _store;
+   };
+
    /// A cursor over a frozen delta merged with a base cursor. It has the
    /// positioning rules of an engine cursor: `lower_bound` finds the first key
    /// at or after its argument and `upper_bound` the last key at or before it.

@@ -467,6 +467,12 @@ TEST_CASE("Chunked long keys and snapshots survive observed compaction", "[api][
    auto           cfg                       = config();
    cfg.compact_pinned_unused_threshold_mb   = 1;
    cfg.compact_unpinned_unused_threshold_mb = 1;
+   // Pin nothing. Pinned and unpinned segments are compacted separately, and
+   // each kind needs a whole segment of freed space of its own before the
+   // compactor acts on it. Which segments get pinned varies from run to run,
+   // so with pinning on, the target could be the only pinned segment with
+   // freed space and never be reached.
+   cfg.max_pinned_cache_size_mb = 0;
    auto db = E::database::open(temp.path, psitri::open_mode::create_only, cfg);
    db->underlying_allocator().stop_compactor_thread();  // capture both original locations first
    auto              ws    = db->start_write_session();

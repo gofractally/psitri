@@ -57,8 +57,11 @@ namespace sal
                                               .count(),
                                           std::memory_order_relaxed);
 
-                   // Sleep for 1 microsecond
-                   std::this_thread::sleep_for(std::chrono::microseconds(100));
+                   // The value is in milliseconds and its readers age cache
+                   // entries by it, so one update per millisecond is all it
+                   // can express. This slept 100 microseconds: ten thousand
+                   // wakeups a second, in every process, for nothing.
+                   std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
              });
 

@@ -198,6 +198,9 @@ namespace start_ref
       transaction_t(transaction_t&& o) noexcept : _s(o._s) { o._s = nullptr; }
       transaction_t(const transaction_t&) = delete;
       ~transaction_t();
+      /// The transaction is finished: its session may start another one even
+      /// while this object is still alive.
+      void close() noexcept;
 
       line_idx alloc_lines(uint32_t n);  // 1..64, word-confined; all n refs = 1
       void     commit();
@@ -778,8 +781,14 @@ namespace start_ref
    template <class Geo>
    inline transaction_t<Geo>::~transaction_t()
    {
+      close();
+   }
+   template <class Geo>
+   inline void transaction_t<Geo>::close() noexcept
+   {
       if (_s)
          _s->_txn_open = false;
+      _s = nullptr;
    }
    template <class Geo>
    inline arena_t<Geo>& transaction_t<Geo>::store() noexcept

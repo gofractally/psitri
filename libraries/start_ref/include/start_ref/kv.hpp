@@ -1324,6 +1324,8 @@ namespace start_ref::kv
          it->lock.unlock();  // reverse order
       }
       _roots.clear();
+      _tx.close();  // the session may start its next transaction
+      _large_tx.close();
    }
    inline void transaction::commit()
    {
@@ -1351,6 +1353,8 @@ namespace start_ref::kv
       for (auto it = _roots.rbegin(); it != _roots.rend(); ++it)
          it->lock.unlock();
       _roots.clear();
+      _tx.close();  // the session may start its next transaction
+      _large_tx.close();
    }
 
    inline cursor transaction::snapshot_cursor()

@@ -246,6 +246,10 @@ int  mdbx_env_set_maxdbs(MDBX_env* env, MDBX_dbi dbs);
 int  mdbx_env_set_maxreaders(MDBX_env* env, unsigned readers);
 int  mdbx_env_sync_ex(MDBX_env* env, int force, int nonblock);
 int  mdbx_env_get_flags(MDBX_env* env, unsigned* flags);
+/* Largest value, in bytes, that mdbx_put accepts; a larger one is rejected with
+ * MDBX_BAD_VALSIZE. The limit depends on the storage backend the library was
+ * built with. `flags` is accepted for libmdbx compatibility and ignored. */
+int  mdbx_env_get_maxvalsize_ex(const MDBX_env* env, MDBX_db_flags_t flags);
 int  mdbx_env_stat_ex(const MDBX_env* env, const MDBX_txn* txn,
                       MDBX_stat* stat, size_t bytes);
 int  mdbx_env_info_ex(const MDBX_env* env, const MDBX_txn* txn,

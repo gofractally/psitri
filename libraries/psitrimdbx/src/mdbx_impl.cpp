@@ -2882,6 +2882,11 @@ int mdbx_env_get_flags(MDBX_env* env, unsigned* flags)
    return MDBX_SUCCESS;
 }
 
+int mdbx_env_get_maxvalsize_ex(const MDBX_env*, MDBX_db_flags_t)
+{
+   return static_cast<int>(max_backend_value_size);
+}
+
 int mdbx_env_stat_ex(const MDBX_env* env, const MDBX_txn* /*txn*/,
                      MDBX_stat* stat, size_t bytes)
 {

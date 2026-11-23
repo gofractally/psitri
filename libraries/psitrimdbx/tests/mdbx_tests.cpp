@@ -2442,8 +2442,24 @@ TEST_CASE("C API: large values", "[mdbx][c-api]")
    MDBX_dbi dbi = 0;
    mdbx_dbi_open(txn, nullptr, MDBX_DB_DEFAULTS, &dbi);
 
-   // Test various value sizes: 1B, 100B, 1KB, 10KB, 100KB, 1MB
-   std::vector<size_t> sizes = {1, 100, 1024, 10240, 102400, 1048576};
+   // The largest value depends on the backend: about 0.5 MB on the default
+   // one, several MB on gcart/rcart.
+   const size_t max_value = static_cast<size_t>(mdbx_env_get_maxvalsize_ex(env, MDBX_DB_DEFAULTS));
+   REQUIRE(max_value >= 102400);
+
+   // Sizes from 1 B up to the limit itself; 1 MB only where the backend takes it.
+   std::vector<size_t> sizes = {1, 100, 1024, 10240, 102400, max_value};
+   if (max_value > 1048576)
+      sizes.push_back(1048576);
+
+   // One byte over the limit is refused, as libmdbx refuses an oversize value.
+   {
+      std::string too_big(max_value + 1, 'x');
+      std::string key = "too_big";
+      MDBX_val    k{key.data(), key.size()};
+      MDBX_val    v{too_big.data(), too_big.size()};
+      REQUIRE(mdbx_put(txn, dbi, &k, &v, MDBX_UPSERT) == MDBX_BAD_VALSIZE);
+   }
 
    for (size_t sz : sizes)
    {

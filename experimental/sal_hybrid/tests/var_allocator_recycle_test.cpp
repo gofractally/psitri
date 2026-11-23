@@ -22,6 +22,8 @@ static uint32_t churn(const char* label, uint64_t ops, uint64_t target_grains,
                       VA& va, VA::session& ses, uint32_t (*size_at)(uint64_t))
 {
    uint64_t live_grains = 0;
+   for (auto [slot, bytes] : live)  // objects carried over from an earlier call
+      live_grains += VA::grains_for(bytes);
    uint32_t warmup_seg = 0, maxseg = 0;
    const uint64_t warmup = ops / 4;
    std::printf("  [%s] target_live=%lluG ops=%lluM\n", label,
@@ -82,11 +84,23 @@ int main()
    // ── B: DRIFTING size distribution (32B..2048B sweeping). Steady churn. ──
    // Simulates Ethereum leaf-size drift across blocks. If A bounds but B does not,
    // the failure is per-class segment stranding.
+   //
+   // A segment holds one size class, so every class with a live object pins a
+   // whole segment however little of it is used. The floor for this design is
+   // therefore the live data plus one segment per class, not a multiple of the
+   // live data. What must hold is (1) the count stays under that floor and
+   // (2) it stops rising: more sweeps at the same live size add nothing.
+   // Getting below the floor needs survivors to be moved, which this allocator
+   // does not do.
    std::printf("=== B: drifting multi-class steady churn (32B..2KB sweep) ===\n");
-   uint32_t b = churn("B", 4'000'000, TARGET, r, live, va, ses,
-                      [](uint64_t i){ return uint32_t(32 + (i / 2000) % 2016); });
-   if (b > need * 8) { ++fails; std::printf("  B FAIL: %u segs >> %llu need (size-drift stranding)\n", b, (unsigned long long)(need*8)); }
-   else std::printf("  B OK: drift recycle bounded\n");
+   auto drift = [](uint64_t i){ return uint32_t(32 + (i / 2000) % 2016); };
+   const uint64_t sweep = 2000ull * 2016;  // operations for one pass over every size
+   uint32_t b1 = churn("B sweep 1", sweep, TARGET, r, live, va, ses, drift);
+   uint32_t b3 = churn("B sweeps 2-3", 2 * sweep, TARGET, r, live, va, ses, drift);
+   const uint64_t floor = need + VA::max_run;
+   if (b3 > floor) { ++fails; std::printf("  B FAIL: %u segs > %llu (live need + one per size class)\n", b3, (unsigned long long)floor); }
+   else if (b3 > b1 + 2) { ++fails; std::printf("  B FAIL: %u segs after one sweep, %u after three (size-drift stranding: still growing)\n", b1, b3); }
+   else std::printf("  B OK: drift recycle bounded and flat (%u after one sweep, %u after three, floor %llu)\n", b1, b3, (unsigned long long)floor);
 
    for (auto [s,bb] : live) if (va.release_one(s)) va.free(s,bb);
    live.clear();

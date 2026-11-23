@@ -572,6 +572,25 @@ TEST_CASE("Chunked long keys and snapshots survive observed compaction", "[api][
    const bool moved = db->underlying_allocator().resolve(target).second != old_location;
    reader.request_stop();
    reader.join();
+   if (!moved)
+   {
+      // Say why the compactor left the object where it was: which segment it
+      // is in and what the compactor sees for every segment.
+      const auto segment_of = [](auto location) { return location.absolute_address() / sal::segment_size; };
+      std::string report = "target stayed in segment " + std::to_string(segment_of(old_location)) +
+                           (compact_head ? " (head)" : " (continuation)") +
+                           "\n seg  alloc_pos     freed  pinned  read_only  finalized  free\n";
+      for (const auto& seg : db->underlying_allocator().dump().segments)
+      {
+         char line[128];
+         std::snprintf(line, sizeof(line), "%4u %10lld %9llu  %6d  %9d  %9d  %4d\n",
+                       unsigned(*seg.segment_num), (long long)seg.alloc_pos,
+                       (unsigned long long)seg.freed_bytes, int(seg.is_pinned),
+                       int(seg.is_read_only), int(seg.is_finalized), int(seg.is_free));
+         report += line;
+      }
+      UNSCOPED_INFO(report);
+   }
    REQUIRE(reads.load() > 0);
    REQUIRE_FALSE(failed.load());
    REQUIRE(moved);  // exercise actual relocation, not merely an enabled compactor

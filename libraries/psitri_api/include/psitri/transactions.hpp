@@ -151,6 +151,12 @@ namespace psitri
          return const_cast<map_type&>(_map).get_arena().bytes_used();
       }
 
+      /// Bytes of memory the store holds on to, in use or not.
+      std::uint64_t bytes_held() const noexcept
+      {
+         return const_cast<map_type&>(_map).get_arena().bytes_held();
+      }
+
       void clear() noexcept { _map.clear(); }
       /// Forget the contents but keep their memory, so that views frozen
       /// earlier can still be read.
@@ -173,6 +179,7 @@ namespace psitri
          thread_local std::vector<std::unique_ptr<delta_store>> stores;
          return stores;
       }
+      inline constexpr std::uint64_t max_idle_delta_bytes = 8u << 20;
       inline std::unique_ptr<delta_store> take_delta_store()
       {
          auto& idle = idle_delta_stores();
@@ -185,6 +192,11 @@ namespace psitri
       inline void give_delta_store(std::unique_ptr<delta_store> store) noexcept
       {
          if (!store)
+            return;
+         // A store that grew large is freed, not kept: an idle store holds on
+         // to its region, and one outsized transaction should not pin that
+         // much memory on the thread for good.
+         if (store->bytes_held() > max_idle_delta_bytes)
             return;
          store->clear();
          try

@@ -67,6 +67,8 @@ namespace art
       }
 
       uint32_t bytes_used() const noexcept { return _cursor; }
+      /// The most that has ever been in use; clear() does not lower it.
+      uint64_t bytes_held() const noexcept { return _data.size(); }
 
      private:
       std::vector<char> _data;

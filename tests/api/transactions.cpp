@@ -624,6 +624,7 @@ TEST_CASE("Transactions: a store of changes can be read as it was at each mark",
    REQUIRE(store.bytes() >= used);
    store.clear();
    REQUIRE(store.bytes() == 0);
+   REQUIRE(store.bytes_held() >= used);  // the region is kept for reuse
    REQUIRE(store.empty());
 }
 

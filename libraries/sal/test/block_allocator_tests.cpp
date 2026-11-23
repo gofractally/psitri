@@ -421,7 +421,7 @@ TEST_CASE("Block allocator truncate operations", "[block_allocator]")
       REQUIRE(*new_block == 2);
    }
 
-   SECTION("Truncate to larger size (should call reserve)")
+   SECTION("Truncate to larger size grows the block count")
    {
       sal::block_allocator allocator(temp_path, BLOCK_SIZE, MAX_BLOCKS);
 
@@ -429,22 +429,17 @@ TEST_CASE("Block allocator truncate operations", "[block_allocator]")
       allocator.alloc();
       REQUIRE(allocator.num_blocks() == 1);
 
-      // Truncate to larger size
+      // truncate() sets the block count in both directions: growing is a
+      // resize(), so the new blocks exist without being handed out by alloc().
       allocator.truncate(3);
-
-      // Size should be updated, but blocks aren't allocated until used
-      REQUIRE(allocator.num_blocks() == 1);
-
-      // We should now be able to allocate up to block 2 without resizing
-      auto [block1, offset1] = allocator.alloc();
-      REQUIRE(*block1 == 1);
-
-      auto [block2, offset2] = allocator.alloc();
-      REQUIRE(*block2 == 2);
-
       REQUIRE(allocator.num_blocks() == 3);
+      REQUIRE(fs::file_size(temp_path) >= 3 * BLOCK_SIZE);
 
-      // Should be able to allocate beyond original truncate size
+      // Blocks 1 and 2 are addressable
+      REQUIRE(allocator.get(sal::block_allocator::block_number(1)) != nullptr);
+      REQUIRE(allocator.get(sal::block_allocator::block_number(2)) != nullptr);
+
+      // alloc() continues after the grown count
       auto [block3, offset3] = allocator.alloc();
       REQUIRE(*block3 == 3);
       REQUIRE(allocator.num_blocks() == 4);

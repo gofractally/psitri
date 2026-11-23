@@ -569,10 +569,10 @@ namespace sal
       // Calculate the new file size
       uint64_t new_size = static_cast<uint64_t>(nblocks) * _block_size;
 
-      // If the new size is larger than current, use reserve instead
+      // Growing sets the block count as well as the file size, like the other
+      // two cases below. resize() takes the lock itself.
       if (new_size > _file_size)
       {
-         // Release the lock and call reserve
          l.unlock();
          resize(nblocks);
          return;

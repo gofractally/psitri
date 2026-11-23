@@ -535,14 +535,28 @@ TEST_CASE("Chunked long keys and snapshots survive observed compaction", "[api][
    while (reads.load() == 0 && !failed.load())
       std::this_thread::yield();
    REQUIRE_FALSE(failed.load());
-   const auto garbage = payload(24 * MiB);
-   const auto keep    = payload(3 * MiB);
+   const auto         garbage     = payload(24 * MiB);
+   const auto         keep        = payload(3 * MiB);
+   const auto         mixed       = payload(MiB);
+   constexpr unsigned mixed_pairs = 64;
    {
       auto tx = ws->start_transaction(0);
       for (unsigned i = 0; i < 8; ++i)
       {
          tx.upsert("garbage/" + std::to_string(i), garbage);
          tx.upsert("keep/" + std::to_string(i), keep);
+      }
+      // The compactor only starts when the segments it may compact hold a whole
+      // segment of freed space between them, and a segment whose contents are
+      // all removed is released outright instead of being compacted. The large
+      // garbage above mostly ends up in segments of its own, so how much is left
+      // for the compactor depended on where values happened to land. These
+      // small values pack side by side, so removing every other one leaves well
+      // over a segment of freed space in segments that still hold live data.
+      for (unsigned i = 0; i < mixed_pairs; ++i)
+      {
+         tx.upsert("mixed-garbage/" + std::to_string(i), mixed);
+         tx.upsert("mixed-keep/" + std::to_string(i), mixed);
       }
       // Force page splitting with external values and external full-key comparisons.
       for (unsigned i = 0; i < 40; ++i)
@@ -554,11 +568,47 @@ TEST_CASE("Chunked long keys and snapshots survive observed compaction", "[api][
       auto tx = ws->start_transaction(0);
       for (unsigned i = 0; i < 8; ++i)
          REQUIRE(tx.remove("garbage/" + std::to_string(i)) == 0);
+      for (unsigned i = 0; i < mixed_pairs; ++i)
+         REQUIRE(tx.remove("mixed-garbage/" + std::to_string(i)) == 0);
       tx.upsert(key, "current replacement");
       tx.commit();
    }
    ses->next_allocation_segment();
    ses->sync(sal::sync_type::none);
+   // What the compactor sees for each segment, and the precondition for it to
+   // act on the target's segment: among the segments it may compact on the
+   // same path (pinned or not), at least one whole segment of freed space.
+   const auto segment_of = [](auto location) { return location.absolute_address() / sal::segment_size; };
+   const auto describe   = [&](uint64_t& reclaimable)
+   {
+      const auto  segments = db->underlying_allocator().dump().segments;
+      const auto  home     = segment_of(old_location);
+      const bool  pinned   = home < segments.size() && segments[home].is_pinned;
+      std::string report   = "target is in segment " + std::to_string(home) +
+                             (compact_head ? " (head)" : " (continuation)") +
+                             "\n seg  alloc_pos     freed  pinned  read_only  finalized  free\n";
+      reclaimable = 0;
+      for (const auto& seg : segments)
+      {
+         char line[128];
+         std::snprintf(line, sizeof(line), "%4u %10lld %9llu  %6d  %9d  %9d  %4d\n",
+                       unsigned(*seg.segment_num), (long long)seg.alloc_pos,
+                       (unsigned long long)seg.freed_bytes, int(seg.is_pinned),
+                       int(seg.is_read_only), int(seg.is_finalized), int(seg.is_free));
+         report += line;
+         if (seg.is_read_only && !seg.is_free && seg.is_pinned == pinned &&
+             seg.freed_bytes >= uint64_t(cfg.compact_unpinned_unused_threshold_mb) * MiB)
+            reclaimable += seg.freed_bytes;
+      }
+      return report;
+   };
+   uint64_t reclaimable = 0;
+   {
+      INFO(describe(reclaimable));
+      INFO("the compactor needs " << sal::segment_size << " reclaimable bytes to start; found "
+                                  << reclaimable);
+      REQUIRE(reclaimable >= sal::segment_size);
+   }
    db->underlying_allocator().start_background_threads();
    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
    while (db->underlying_allocator().resolve(target).second == old_location &&
@@ -572,25 +622,9 @@ TEST_CASE("Chunked long keys and snapshots survive observed compaction", "[api][
    const bool moved = db->underlying_allocator().resolve(target).second != old_location;
    reader.request_stop();
    reader.join();
-   if (!moved)
-   {
-      // Say why the compactor left the object where it was: which segment it
-      // is in and what the compactor sees for every segment.
-      const auto segment_of = [](auto location) { return location.absolute_address() / sal::segment_size; };
-      std::string report = "target stayed in segment " + std::to_string(segment_of(old_location)) +
-                           (compact_head ? " (head)" : " (continuation)") +
-                           "\n seg  alloc_pos     freed  pinned  read_only  finalized  free\n";
-      for (const auto& seg : db->underlying_allocator().dump().segments)
-      {
-         char line[128];
-         std::snprintf(line, sizeof(line), "%4u %10lld %9llu  %6d  %9d  %9d  %4d\n",
-                       unsigned(*seg.segment_num), (long long)seg.alloc_pos,
-                       (unsigned long long)seg.freed_bytes, int(seg.is_pinned),
-                       int(seg.is_read_only), int(seg.is_finalized), int(seg.is_free));
-         report += line;
-      }
-      UNSCOPED_INFO(report);
-   }
+   // Stays attached to every assertion below, so a timeout says what the
+   // compactor was looking at.
+   INFO(describe(reclaimable));
    REQUIRE(reads.load() > 0);
    REQUIRE_FALSE(failed.load());
    REQUIRE(moved);  // exercise actual relocation, not merely an enabled compactor

@@ -250,15 +250,10 @@ namespace sal
       {
          auto prot = (mode == access_mode::read_only) ? PROT_READ : (PROT_READ | PROT_WRITE);
 
-         // Map the file at the beginning of our reserved space
-         // Release the protection on the portion we need
-         if (::munmap(_reserved_base, _file_size.load(std::memory_order_relaxed)) != 0)
-         {
-            SAL_WARN("Failed to release protection on reserved space: {}", strerror(errno));
-            // Continue anyway, trying to map
-         }
-
-         // Map the file at the exact address of our reserved space.
+         // Map the file at the beginning of our reserved space, directly over
+         // the reservation: MAP_FIXED replaces it atomically. The range is
+         // never unmapped first, so no other mmap in the process can be placed
+         // in it.
          // MAP_NORESERVE: the file on disk is the backing store, so there is no
          // need to reserve swap — avoids exhausting the kernel's commit charge
          // and destabilising the OS on repeated runs.
@@ -298,13 +293,18 @@ namespace sal
    {
       if (_fd >= 0)
       {
-         // Unmap the entire file at once if we have a mapped base
-         if (_mapped_base && _mapped_base != MAP_FAILED &&
+         // The file is mapped inside the reservation, which is released as a
+         // whole below. Unmapping the file's part separately first would free
+         // that range for other threads' mappings, which the release of the
+         // reservation would then unmap from under them.
+         const bool inside_reservation =
+             _reserved_base && _reserved_base != MAP_FAILED && _reservation_size > 0;
+         if (!inside_reservation && _mapped_base && _mapped_base != MAP_FAILED &&
              _file_size.load(std::memory_order_relaxed) > 0)
          {
             ::munmap(_mapped_base, _file_size.load());
-            _mapped_base = nullptr;
          }
+         _mapped_base = nullptr;
 
          ::close(_fd);
       }
@@ -458,14 +458,11 @@ namespace sal
              " map_size=" + std::to_string(map_size) + ")");
       }
 
-      // Release the protection on the portion we need
-      if (::munmap(map_addr, map_size) != 0)
-      {
-         SAL_WARN("Failed to release protection on reserved space: {}", strerror(errno));
-         // Continue anyway, trying to map
-      }
-
-      // Map the file at the specified address.
+      // Map the file over the reservation in one step. MAP_FIXED replaces the
+      // PROT_NONE pages atomically. Unmapping them first left a moment in which
+      // the range belonged to nobody: another thread's mmap (a 128 KiB malloc is
+      // one) could be placed there, be overwritten by this mapping, and later
+      // punch a hole in the file's mapping when it was freed.
       // MAP_NORESERVE: file-backed mapping doesn't need swap reservation.
       void* addr = ::mmap(map_addr, map_size, prot, MAP_SHARED | MAP_FIXED | MAP_NORESERVE, _fd, map_offset);
 
@@ -594,13 +591,18 @@ namespace sal
       // 2. Truncate the file
       // 3. Update our state variables
 
-      // Unmap the part we're removing
+      // Take the part being removed out of the file mapping by putting the
+      // reservation back over it, in one step. It must never be simply
+      // unmapped: the address range would be free for any other mmap in the
+      // process until it was reserved again.
       void*  unmap_start = static_cast<char*>(_mapped_base) + new_size;
       size_t unmap_size  = _file_size - new_size;
 
-      if (::munmap(unmap_start, unmap_size) != 0)
+      if (::mmap(unmap_start, unmap_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1,
+                 0) == MAP_FAILED)
       {
-         SAL_WARN("Failed to unmap portion of file during truncate: {}", strerror(errno));
+         SAL_WARN("Failed to return part of the file mapping to the reservation: {}",
+                  strerror(errno));
          // Continue anyway - the file will still be truncated
       }
 

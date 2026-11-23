@@ -1,4 +1,6 @@
 #pragma once
+#include <cstdio>
+#include <cstdlib>
 #include <atomic>
 #include <bit>
 #include <cstdint>
@@ -14,6 +16,17 @@
 
 namespace sal
 {
+   [[noreturn, gnu::cold, gnu::noinline]] inline void sal_release_underflow_abort(
+       const void* cb,
+       uint64_t    prior_word)
+   {
+      fprintf(stderr,
+              "sal: release of control block %p whose reference count was already zero "
+              "(word 0x%llx): a reference was released twice\n",
+              cb, (unsigned long long)prior_word);
+      ::abort();
+   }
+
 #if PSITRI_DEEP_INVARIANTS
    [[noreturn]] inline void sal_debug_resurrection_abort(const void* cb, uint64_t prior_word)
    {
@@ -217,11 +230,15 @@ namespace sal
          // and we are synchronziing with the cas_move below.
          control_block_data prior(_data.fetch_sub(1, std::memory_order_relaxed));
          //         SAL_WARN("release cb{} : pre ref: {}", this, int(prior.ref));
-         assert(prior.ref > 0);
-         if constexpr (debug_memory)
+         if (prior.ref == 0) [[unlikely]]
          {
-            if (prior.ref == 0)
-               abort();
+            // Someone released a reference it did not hold. Left alone, the
+            // count wraps to its maximum in the mapped file and the damage
+            // shows up much later, as a retain that "exceeds limits" on some
+            // other thread or after a restart. Put the count back and stop here,
+            // where the caller is still on the stack.
+            _data.fetch_add(1, std::memory_order_relaxed);
+            sal_release_underflow_abort(this, prior.to_int());
          }
          if (prior.ref == 1)
          {

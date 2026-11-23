@@ -22,7 +22,7 @@ TEST_CASE("Small and Large Engine tiering preserves snapshots, tombstones and re
         tx.upsert("a", "one"); tx.upsert("b", "two"); tx.commit(); }
       auto old_rs = db->start_read_session(); auto old = old_rs->create_cursor(0);
       CHECK(db->flush_now() == 2); CHECK(db->base_commit_count() == 2);
-      auto base_rs = db->start_read_session(); auto base = base_rs->create_cursor(1);
+      auto base_rs = db->start_read_session(); auto base = base_rs->create_base_cursor(0);
       CHECK(base.get<std::string>("a") == "one");
       { auto tx = ws->start_transaction(0);
         tx.upsert("a", "aborted"); tx.remove("b"); tx.abort(); }

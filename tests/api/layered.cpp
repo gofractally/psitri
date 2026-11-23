@@ -35,27 +35,61 @@ namespace
    }
 }  // namespace
 
-// The tiered engine has one root, so it runs the cases that need only root 0.
-#define WRITER_ENGINES buffered_engine
-#define WRITER_ROOT0_ENGINES buffered_engine, tiered_engine
+#define WRITER_ENGINES buffered_engine, tiered_engine
 #include "writer_cases.inc"
 
-TEST_CASE("Tiered: roots other than the one keyspace are refused", "[api][writers][tiered]")
+TEST_CASE("Tiered: each root is tiered on its own, and its base can be read alone",
+          "[api][writers][tiered]")
 {
    temporary_directory temp;
    auto db = tiered_engine::database::open(temp.path / "db", psitri::open_mode::create_only,
                                            writer_config<tiered_engine>());
    auto writer = db->start_write_session();
    auto reader = db->start_read_session();
-   REQUIRE_THROWS_AS(writer->start_transaction(1), std::out_of_range);
-   REQUIRE_THROWS_AS(writer->start_transaction(2), std::out_of_range);
-   REQUIRE_THROWS_AS(reader->create_cursor(2), std::out_of_range);
+   const std::uint32_t roots = 8;
+   REQUIRE_THROWS_AS(writer->start_transaction(roots), std::out_of_range);
+   REQUIRE_THROWS_AS(reader->create_cursor(roots), std::out_of_range);
+
+   auto count = [](auto cursor, std::uint32_t root, bool& foreign)
+   { return count_own_keys(cursor, root, foreign); };
+   for (int pass = 0; pass < 3; ++pass)
    {
-      auto tx = writer->start_transaction(0);
-      tx.upsert("k", "v");
+      for (std::uint32_t root = 0; root < roots; ++root)
+      {
+         auto tx = writer->start_transaction(root);
+         for (std::uint32_t i = 0; i < 50; ++i)
+            tx.upsert(key(root, pass, i), "v");
+         tx.commit();
+      }
+      // Merged or not, every root shows exactly its own keys.
+      for (std::uint32_t root = 0; root < roots; ++root)
+      {
+         bool foreign = false;
+         REQUIRE(count(reader->create_cursor(root), root, foreign) == 50u * (pass + 1));
+         REQUIRE_FALSE(foreign);
+      }
+      // Move everything written so far into the base tier.
+      db->flush_now();
+      for (std::uint32_t root = 0; root < roots; ++root)
+      {
+         bool foreign = false;
+         REQUIRE(count(reader->create_cursor(root), root, foreign) == 50u * (pass + 1));
+         REQUIRE(count(reader->create_base_cursor(root), root, foreign) == 50u * (pass + 1));
+         REQUIRE_FALSE(foreign);
+      }
+   }
+   // Removals in one root reach its base and leave the other roots alone.
+   {
+      auto tx = writer->start_transaction(3);
+      for (std::uint32_t i = 0; i < 50; ++i)
+         tx.remove(key(3, 0, i));
       tx.commit();
    }
-   auto cursor = reader->create_cursor(0);
-   REQUIRE(cursor.seek_begin());
-   REQUIRE(cursor.key() == "k");
+   db->flush_now();
+   for (std::uint32_t root = 0; root < roots; ++root)
+   {
+      bool foreign = false;
+      REQUIRE(count(reader->create_base_cursor(root), root, foreign) == (root == 3 ? 100u : 150u));
+      REQUIRE_FALSE(foreign);
+   }
 }

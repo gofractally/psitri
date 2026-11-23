@@ -68,13 +68,13 @@ TEST_CASE("delta_art: write/read through the delta, flush to base, both views ag
       auto lat = rs->create_cursor(0);
       for (auto& [k, v] : oracle)
          REQUIRE(lat.get<std::string>(k).value() == v);
-      auto stb = rs->create_cursor(1);
+      auto stb = rs->create_base_cursor(0);
       REQUIRE_FALSE(stb.seek_begin());
    }
    SECTION("flush: stable converges; latest unchanged; re-flush is idempotent")
    {
       REQUIRE(db->flush_now() == oracle.size());
-      auto stb = rs->create_cursor(1);
+      auto stb = rs->create_base_cursor(0);
       uint64_t n = 0;
       for (bool ok = stb.seek_begin(); ok; ok = stb.next(), void())
       {
@@ -168,7 +168,7 @@ TEST_CASE("delta_art: tombstones mask the base in point reads and BOTH scan dire
    REQUIRE(rit == oracle.rend());
    // flush applies the deletes to the base and the tombstones never reach B
    db->flush_now();
-   auto stb = rs->create_cursor(1);
+   auto stb = rs->create_base_cursor(0);
    uint64_t n = 0;
    for (bool ok = stb.seek_begin(); ok; ok = stb.next(), void())
    {

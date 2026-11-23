@@ -69,7 +69,7 @@ int main(int argc, char** argv)
       while (!stop.load(std::memory_order_relaxed))
       {
          auto rs  = db->start_read_session();
-         auto cur = rs->create_cursor(1);  // stable = cold base ONLY (sal_art_ref traversal)
+         auto cur = rs->create_base_cursor(0);  // stable = cold base ONLY (sal_art_ref traversal)
          uint64_t n = 0;
          for (bool ok = cur.seek_begin(); ok && n < 200000; ok = cur.next())
          {

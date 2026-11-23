@@ -43,7 +43,7 @@ open another engine's files as a conversion mechanism. Existence checks use
 engine marker files and do not provide a universal format detector or an atomic
 multi-process create protocol.
 
-Root indices `0..7` form the portable range; the Small Engine has eight roots and the Large Engine
+Root indices `0..7` form the portable range; the Small Engine has sixteen roots and the Large Engine
 has 1,024. A root index is a slot, not a revision number. Use root `0` unless you
 need the multi-root extension. Supplying out-of-range indices is a caller error.
 A default-constructed empty tree may be assigned with `set_root({})`; it is not

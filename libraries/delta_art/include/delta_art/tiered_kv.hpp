@@ -17,6 +17,7 @@
 // reopen and re-flush whatever W still holds (idempotent upserts/removes).
 #pragma once
 
+#include <array>
 #include <stdexcept>
 #include <sal/config.hpp>  // sal::open_mode (the unified open clause)
 #include <sal/diag.hpp>    // PSITRI_DEBUG(...) gate + sal::env cached env reader
@@ -103,6 +104,24 @@ namespace delta_art
                     "B::cursor must be a bool-returning bidirectional (mergeable) cursor");
 
      public:
+      // Each root of this engine is a keyspace of its own. In the hot tier W
+      // it takes two roots, one being written and one being merged; in the
+      // base tier B it takes one.
+      static constexpr uint32_t max_roots = []
+      {
+         if constexpr (requires { W::root_count; })
+            return uint32_t(W::root_count) / 2;
+         else
+            return uint32_t(4);  // a hot tier with the eight portable roots
+      }();
+      static constexpr uint32_t hot_root(uint32_t root) noexcept { return 2 * root; }
+      static constexpr uint32_t warm_root(uint32_t root) noexcept { return 2 * root + 1; }
+      static void check_root(uint32_t root)
+      {
+         if (root >= max_roots)
+            throw std::out_of_range("root index out of range for the tiered engine");
+      }
+
       class database;
       class write_session;
       class read_session;
@@ -463,25 +482,29 @@ namespace delta_art
       class read_session
       {
         public:
-         // root_index 0 = latest (W ∪ B), 1 = stable (B only).
-         // Snapshot order under _rot_m (consistency vs rotation/clear): HOT
-         // first, then WARM, then BASE — a rotation between hot and warm makes
-         // an in-flight key appear in both (dedup), and clear strictly follows
-         // the base commit, so a base cursor taken after warm never misses it.
+         // Each root is its own keyspace: its hot and warm trees in W and its
+         // tree in B. Snapshot order under _rot_m (consistency vs rotation/
+         // clear): HOT first, then WARM, then BASE — a rotation between hot and
+         // warm makes an in-flight key appear in both (dedup), and clear
+         // strictly follows the base commit, so a base cursor taken after warm
+         // never misses it.
          cursor create_cursor(uint32_t root_index)
          {
-            if (root_index == 1)
-               return cursor(_brs->create_cursor(0));
-            // This engine tiers one keyspace. Any other index used to read
-            // that same keyspace, as if it were a root of its own.
-            if (root_index != 0)
-               throw std::out_of_range("the tiered engine has one root (0); 1 reads its base");
+            check_root(root_index);
             std::lock_guard rg(_db->_rot_m);  // legs sampled atomically vs rotation
-            auto hot = _wrs->create_cursor(0);
-            if (_db->_warm_active)
-               return cursor(std::move(hot), _db->_warm_handle.snapshot_cursor(),
-                             _db->_warm_handle, _brs->create_cursor(0));
-            return cursor(std::move(hot), _brs->create_cursor(0));
+            auto  hot  = _wrs->create_cursor(hot_root(root_index));
+            auto& root = _db->_roots[root_index];
+            if (root.warm_active)
+               return cursor(std::move(hot), root.warm_handle.snapshot_cursor(), root.warm_handle,
+                             _brs->create_cursor(root_index));
+            return cursor(std::move(hot), _brs->create_cursor(root_index));
+         }
+         // The root as last merged into the base tier, without what is still
+         // in the hot and warm trees.
+         cursor create_base_cursor(uint32_t root_index)
+         {
+            check_root(root_index);
+            return cursor(_brs->create_cursor(root_index));
          }
 
         private:
@@ -552,11 +575,11 @@ namespace delta_art
                return true;
             if (dead)
                return false;
-            if (_db->warm_get_(_warm, _warm_h, k, hit, dead, f))
+            if (_db->warm_get_(_root, _warm, _warm_h, k, hit, dead, f))
                return hit && !dead ? true : hit;
             if (dead)
                return false;
-            return _db->base_get_(k, std::forward<F>(f));
+            return _db->base_get_(_root, k, std::forward<F>(f));
          }
          template <class S = std::string>
          std::optional<S> get(key_view k) const
@@ -568,13 +591,14 @@ namespace delta_art
 
         private:
          friend class write_session;
-         transaction(database* db, write_session* ws, std::unique_lock<std::mutex>&& lk,
-                     typename W::transaction&& tx)
-             : _db(db), _ws(ws), _lk(std::move(lk)), _tx(std::move(tx))
+         transaction(database* db, write_session* ws, uint32_t root,
+                     std::unique_lock<std::mutex>&& lk, typename W::transaction&& tx)
+             : _db(db), _ws(ws), _root(root), _lk(std::move(lk)), _tx(std::move(tx))
          {
          }
          database*                          _db;
          write_session*                     _ws;
+         uint32_t                           _root = 0;
          std::unique_lock<std::mutex>       _lk;  // writer serialization (user <-> merger)
          mutable std::optional<typename W::cursor> _warm;  // lazy warm leg (this txn)
          mutable warm_tree_t                        _warm_h;  // keeps the snapshot alive
@@ -588,13 +612,10 @@ namespace delta_art
         public:
          transaction start_transaction(uint32_t root_index)
          {
-            // One keyspace: the hot tier's other roots are this engine's own
-            // (root 1 holds the batch being merged), so a transaction on them
-            // would overwrite it or write data that is never merged or read.
-            if (root_index != 0)
-               throw std::out_of_range("the tiered engine has one root (0)");
+            check_root(root_index);
             std::unique_lock lk(_db->_writer_m);  // released at commit/abort
-            return transaction(_db, this, std::move(lk), _ws->start_transaction(root_index));
+            return transaction(_db, this, root_index, std::move(lk),
+                               _ws->start_transaction(hot_root(root_index)));
          }
 
         private:
@@ -674,43 +695,20 @@ namespace delta_art
             // FROZEN snapshot (get_root(1)); the writer mutates the private
             // newborn root 0 — nobody shares a mutating delta (the in-place
             // retire WAS the write-amp). No freeze/pin/clear shims.
-            warm_tree_t warm_snap;
             {
-               std::scoped_lock lk(_writer_m, _rot_m);
-               if (_warm_active)
+               std::lock_guard lk(_rot_m);
+               if (_flushing)
                   return 0;  // a flush is already in flight
-               // rotate hot -> warm (only when root 0 actually holds data; an
-               // empty rotation just wastes a version)
-               auto tx = _wws->start_transaction(0);
-               auto h0 = tx.primary();
-               auto h1 = tx.open_root(1);
-               h1.set_root(h0.set_root({}));  // THE exchange
-               tx.commit();
-               warm_snap    = _wws->get_root(1);  // owned, frozen warm snapshot
-               _warm_handle = warm_snap;          // reader/writer warm legs copy THIS
-               _warm_active = true;
+               _flushing = true;
             }
-            // Stream the frozen warm snapshot into B (independent of _wws now;
-            // the writer keeps mutating root 0 the whole time).
-            const uint64_t n = drain_warm_(warm_snap);
-            // The warm data is durable in B. CLEAR the warm slot (set_root({})
-            // on root 1) — the displaced warm tree ARMS and W's GC reclaims it
-            // when the last snapshot handle (reader warm legs + our copies)
-            // drops. Stop handing out warm legs under _rot_m. Snapshot order
-            // (clear AFTER the base commits) is what lets a reader's base
-            // cursor never miss an in-flight key.
-            {
-               std::scoped_lock lk(_writer_m, _rot_m);
-               _warm_active = false;
-               _warm_handle = warm_tree_t{};  // OUR shared ref; readers keep theirs
-               auto tx = _wws->start_transaction(1);
-               tx.primary().set_root({});  // empty the warm slot
-               tx.commit();
-            }
+            uint64_t n = 0;
+            for (uint32_t r = 0; r < max_roots; ++r)
+               n += flush_root_(r);
             _unflushed.store(0, std::memory_order_relaxed);
-            // warm_snap drops at return: when the LAST holder (reader warm
-            // legs included) lets go, W's GC frees the tree — the merger does
-            // no garbage collection (Dan).
+            {
+               std::lock_guard lk(_rot_m);
+               _flushing = false;
+            }
             return n;
          }
 
@@ -752,7 +750,49 @@ namespace delta_art
          }
          // Stream a frozen warm snapshot into B in sorted chunks (the flush
          // body, shared by flush_now and recovery). Returns keys applied.
-         uint64_t drain_warm_(warm_tree_t& warm_snap)
+         // Flush one root: rotate its hot tree into its warm slot, stream that
+         // into the base tier, then clear the slot.
+         uint64_t flush_root_(uint32_t r)
+         {
+            warm_tree_t warm_snap;
+            {
+               std::scoped_lock lk(_writer_m, _rot_m);
+               {
+                  // nothing written to this root since its last flush
+                  auto hot   = _wws->get_root(hot_root(r));
+                  auto probe = hot.snapshot_cursor();
+                  if (!probe.seek_begin())
+                     return 0;
+               }
+               auto tx = _wws->start_transaction(hot_root(r));
+               auto h0 = tx.primary();
+               auto h1 = tx.open_root(warm_root(r));
+               h1.set_root(h0.set_root({}));  // THE exchange
+               tx.commit();
+               warm_snap             = _wws->get_root(warm_root(r));  // owned, frozen
+               _roots[r].warm_handle = warm_snap;  // reader/writer warm legs copy THIS
+               _roots[r].warm_active = true;
+            }
+            // Stream the frozen warm snapshot into B (independent of _wws now;
+            // the writer keeps mutating the hot root the whole time).
+            const uint64_t n = drain_warm_(warm_snap, r);
+            // The warm data is durable in B. CLEAR the warm slot — the displaced
+            // warm tree ARMS and W's GC reclaims it when the last snapshot
+            // handle (reader warm legs + our copies) drops. Stop handing out
+            // warm legs under _rot_m. Snapshot order (clear AFTER the base
+            // commits) is what lets a reader's base cursor never miss an
+            // in-flight key.
+            {
+               std::scoped_lock lk(_writer_m, _rot_m);
+               _roots[r].warm_active = false;
+               _roots[r].warm_handle = warm_tree_t{};  // OUR shared ref; readers keep theirs
+               auto tx = _wws->start_transaction(warm_root(r));
+               tx.primary().set_root({});  // empty the warm slot
+               tx.commit();
+            }
+            return n;
+         }
+         uint64_t drain_warm_(warm_tree_t& warm_snap, uint32_t r)
          {
             if (!_bws)
                _bws = _b->start_write_session();
@@ -761,7 +801,7 @@ namespace delta_art
             bool     more = warm.seek_begin();
             while (more)
             {
-               auto     btx   = _bws->start_transaction(0);
+               auto     btx   = _bws->start_transaction(r);
                uint64_t in_tx = 0;
                while (!warm.is_end() && in_tx < _k.flush_chunk)
                {
@@ -787,14 +827,17 @@ namespace delta_art
          // recovery. Empty root 1 = clean shutdown, nothing to do.
          void recover_()
          {
-            warm_tree_t warm_snap = _wws->get_root(1);
-            auto        probe     = warm_snap.snapshot_cursor();
-            if (!probe.seek_begin())
-               return;  // empty warm slot
-            drain_warm_(warm_snap);
-            auto tx = _wws->start_transaction(1);
-            tx.primary().set_root({});
-            tx.commit();
+            for (uint32_t r = 0; r < max_roots; ++r)
+            {
+               warm_tree_t warm_snap = _wws->get_root(warm_root(r));
+               auto        probe     = warm_snap.snapshot_cursor();
+               if (!probe.seek_begin())
+                  continue;  // empty warm slot
+               drain_warm_(warm_snap, r);
+               auto tx = _wws->start_transaction(warm_root(r));
+               tx.primary().set_root({});
+               tx.commit();
+            }
          }
          // Flush trigger: bytes-written backstop, plus (when W exposes it) the
          // arena footprint at HALF the budget — flush EARLY, memory keeps
@@ -817,15 +860,15 @@ namespace delta_art
          // warm-leg point get for the writer's 3-way cursor: lazily pin the
          // current warm boundary for THIS transaction; envelope-decoded.
          template <class F>
-         bool warm_get_(std::optional<typename W::cursor>& leg, warm_tree_t& legh, key_view k,
-                        bool& hit, bool& dead, F&& f)
+         bool warm_get_(uint32_t r, std::optional<typename W::cursor>& leg, warm_tree_t& legh,
+                        key_view k, bool& hit, bool& dead, F&& f)
          {
             if (!leg)
             {
                std::lock_guard rg(_rot_m);
-               if (!_warm_active)
+               if (!_roots[r].warm_active)
                   return false;
-               legh = _warm_handle;  // hold the snapshot (W's GC counts handles)
+               legh = _roots[r].warm_handle;  // hold the snapshot (W's GC counts handles)
                leg.emplace(legh.snapshot_cursor());
             }
             leg->get(k, [&](value_view v) {
@@ -840,10 +883,12 @@ namespace delta_art
             return hit || dead;
          }
          template <class F>
-         bool base_get_(key_view k, F&& f)
+         bool base_get_(uint32_t r, key_view k, F&& f)
          {
             if (!_bget_rs)
                _bget_rs = _b->start_read_session();
+            auto& _bget_cur   = _roots[r].bget_cur;
+            auto& _bget_epoch = _roots[r].bget_epoch;
             // The cached cursor pins ONE base root: it must be re-seated every
             // time the merger publishes, or post-retire reads see PRE-FLUSH
             // values (caught by the bank balance check: stale reads inflate).
@@ -851,7 +896,7 @@ namespace delta_art
             if (!_bget_cur || _bget_epoch != e)
             {
                _bget_cur.reset();
-               _bget_cur.emplace(_bget_rs->create_cursor(0));
+               _bget_cur.emplace(_bget_rs->create_cursor(r));
                _bget_epoch = e;
             }
             return _bget_cur->get(k, std::forward<F>(f));
@@ -877,12 +922,18 @@ namespace delta_art
          std::atomic<uint64_t>                 _unflushed{0};
          std::mutex                            _writer_m;  // user txns <-> merger rotation txns
          std::mutex  _rot_m;          // warm-state flips vs reader-leg sampling
-         bool        _warm_active = false;
-         warm_tree_t _warm_handle;    // the shared frozen warm snapshot (get_root(1))
+         bool        _flushing = false;  // a flush is in flight (under _rot_m)
+         // Per root: its warm slot, and the writer thread's cursor on its base tree.
+         struct root_state
+         {
+            bool                              warm_active = false;
+            warm_tree_t                       warm_handle;  // the shared frozen warm snapshot
+            std::optional<typename B::cursor> bget_cur;
+            uint64_t                          bget_epoch = 0;
+         };
+         std::array<root_state, max_roots>                _roots;
          std::shared_ptr<typename B::read_session>        _bget_rs;   // writer-thread base reads
-         std::optional<typename B::cursor>                _bget_cur;
          std::atomic<uint64_t>                            _base_epoch{0};
-         uint64_t                                         _bget_epoch = 0;
          std::thread             _merger;
          std::mutex              _m;
          std::condition_variable _cv;

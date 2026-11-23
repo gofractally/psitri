@@ -33,7 +33,7 @@ identify their storage model, not a limit on the size of an individual value.
 | Snapshot tree traversal | No node mutexes | No node mutexes; atomic residency tracking |
 | Committed snapshots / byte CRUD | Yes | Yes |
 | Reverse traversal | Forward rescan; reverse operations are O(n) | Native reverse traversal |
-| Root slots | 8 | 1,024 |
+| Root slots | 16 | 1,024 |
 | Native subtree ownership | No | Yes |
 | Primary-root savepoints | No | Native `sub_transaction()`; scope below |
 | Read-only open | Rejected | Supported with separate-process locking restrictions |

@@ -95,7 +95,7 @@ namespace start_ref::kv
    // SAME root/snapshot model — a tree is an index + a held refcount;
    // start_ref's control block is refcount-only (address-stable arena, no
    // relocation indirection). docs/start_ref_multiroot_design.md.
-   inline constexpr uint32_t kMaxRoots = 8;
+   inline constexpr uint32_t kMaxRoots = 16;
 
    class database;
    class write_session;
@@ -1137,6 +1137,8 @@ namespace start_ref::kv
 
    inline cursor read_session::create_cursor(uint32_t root_index)
    {
+      if (root_index >= kMaxRoots)
+         throw std::out_of_range("root index out of range");
       // Every live cursor needs a slot to itself: sharing one would leave all
       // but the latest snapshot unprotected.
       std::unique_ptr<start_ref::read_session> own;
@@ -1362,12 +1364,19 @@ namespace start_ref::kv
          throw std::runtime_error("start_ref::kv: root retain refused");
       return cursor(&db->_arena, root, nullptr, &db->_vh);
    }
+   inline void check_root_index(uint32_t root_index)
+   {
+      if (root_index >= kMaxRoots)
+         throw std::out_of_range("root index out of range");
+   }
    inline transaction write_session::start_transaction(uint32_t root_index)
    {
+      check_root_index(root_index);
       return transaction(this, root_index, _ses.start_transaction(0));
    }
    inline tree write_session::get_root(uint32_t root_index)
    {
+      check_root_index(root_index);
       return _db->get_root_owned(root_index);
    }
    inline engine_t& write_session::refresh_tree(uint32_t i)
@@ -1450,6 +1459,7 @@ namespace start_ref::kv
    struct engine
    {
       static constexpr uint64_t max_value_size = large_value_detail::max_value_size;
+      static constexpr uint32_t root_count     = kMaxRoots;
       using database      = start_ref::kv::database;
       using write_session = start_ref::kv::write_session;
       using read_session  = start_ref::kv::read_session;

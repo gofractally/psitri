@@ -13,6 +13,9 @@
 // inline byte strings (<= 126 B): COW clones are memcpys and every value byte
 // lives in the arena.
 #pragma once
+#include <system_error>
+#include <pthread.h>
+#include <functional>
 #include <adb/value_range.hpp>
 #include <cassert>
 #include <cstring>
@@ -101,6 +104,58 @@ namespace start_ref::kv
    class write_session;
    class transaction;
    class tree_handle;
+
+   // A thread with a stack of a stated size. Releasing a tree descends one
+   // call level per level of the tree, and a tree is as deep as its longest
+   // key allows (about one level per two key bytes), so the stack this needs
+   // is bounded by the key length limit: a few hundred kilobytes in an
+   // optimized build and well over a megabyte in an unoptimized one. A
+   // platform's default for threads other than the first can be smaller than
+   // that (512 KiB on macOS), so the engine does not rely on it.
+   class sized_thread
+   {
+     public:
+      sized_thread() = default;
+      template <class F>
+      sized_thread(std::size_t stack_bytes, F&& body)
+      {
+         auto fn = std::make_unique<std::function<void()>>(std::forward<F>(body));
+         pthread_attr_t attr;
+         pthread_attr_init(&attr);
+         pthread_attr_setstacksize(&attr, stack_bytes);
+         const int rc = pthread_create(&_thread, &attr, &run_, fn.get());
+         pthread_attr_destroy(&attr);
+         if (rc != 0)
+            throw std::system_error(rc, std::generic_category(), "start_ref::kv: pthread_create");
+         fn.release();
+         _joinable = true;
+      }
+      sized_thread(const sized_thread&)            = delete;
+      sized_thread& operator=(const sized_thread&) = delete;
+      sized_thread& operator=(sized_thread&& o) noexcept
+      {
+         _thread     = o._thread;
+         _joinable   = o._joinable;
+         o._joinable = false;
+         return *this;
+      }
+      bool joinable() const noexcept { return _joinable; }
+      void join()
+      {
+         pthread_join(_thread, nullptr);
+         _joinable = false;
+      }
+
+     private:
+      static void* run_(void* arg)
+      {
+         std::unique_ptr<std::function<void()>> fn(static_cast<std::function<void()>*>(arg));
+         (*fn)();
+         return nullptr;
+      }
+      pthread_t _thread{};
+      bool      _joinable = false;
+   };
 
    // ── typed values (the LOCKED adb API) ─────────────────────────────────
    // EVERY stored slot is [u16 LE typenum][payload]. Typenum 0 = raw bytes
@@ -921,7 +976,7 @@ namespace start_ref::kv
          if (cfg.background_release)
          {
             _arena.set_defer(&defer_cb_, this);
-            _rel_thread = std::thread([this] { rel_loop_(); });
+            _rel_thread = sized_thread(release_stack_bytes, [this] { rel_loop_(); });
          }
       }
       static bool defer_cb_(void* ctx, uint64_t raw) noexcept
@@ -1031,7 +1086,9 @@ namespace start_ref::kv
       std::atomic<uint32_t>     _rel_head{0}, _rel_tail{0};
       std::mutex                _rel_mx;
       std::condition_variable   _rel_cv;
-      std::thread               _rel_thread;
+      // Room for releasing a tree of the deepest keys in any build type.
+      static constexpr std::size_t release_stack_bytes = 8u << 20;
+      sized_thread              _rel_thread;
       std::atomic<bool>         _rel_stop{false};
 
       start_ref::arena      _arena;

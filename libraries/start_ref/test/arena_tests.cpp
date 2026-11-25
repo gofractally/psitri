@@ -502,47 +502,175 @@ TEST_CASE("the reserve holds runs when the rest of the arena has none", "[arena]
    REQUIRE_THROWS_AS(tx3.alloc_lines(2), arena_full);
 }
 
-// While more than half the reserve is lent out, ordinary allocation stops
-// early, so that removes and refills taking turns cannot use the reserve up.
-TEST_CASE("ordinary allocation stops early while most of the reserve is lent out",
-          "[arena][limit][reserve]")
+namespace
 {
-   arena_config c  = cfg(tmp_dir("rsvgate"));
-   c.max_segments  = 1;
-   c.reserve_lines = 1024;
-   arena a(c);
-   auto  ses = a.start_session();
-   auto  tx  = ses.start_transaction(0);
-   std::vector<line_idx> taken;
-   try
+   // One segment, every ordinary line taken in runs of `run`, committed.
+   std::vector<line_idx> take_everything(session& ses, uint32_t run)
    {
-      for (;;)
-         taken.push_back(tx.alloc_lines(1));
+      std::vector<line_idx> taken;
+      auto                  tx = ses.start_transaction(0);
+      try
+      {
+         for (;;)
+            taken.push_back(tx.alloc_lines(run));
+      }
+      catch (const arena_full&)
+      {
+      }
+      tx.commit();
+      tx.close();
+      return taken;
    }
-   catch (const arena_full&)
+   arena_config one_segment_with_reserve(const fs::path& dir)
    {
+      arena_config c  = cfg(dir);
+      c.max_segments  = 1;
+      c.reserve_lines = 1024;
+      return c;
    }
-   std::vector<line_idx> lent;
+}  // namespace
+
+// What a remove draws from the reserve is owed, and the next frees repay it
+// before the free map sees them: with a run of the same length when one is
+// freed, and line for line when only shorter ones are.
+TEST_CASE("what the reserve lends is repaid by the next frees", "[arena][limit][reserve]")
+{
+   arena a(one_segment_with_reserve(tmp_dir("repay")));
+   auto  ses   = a.start_session();
+   auto  taken = take_everything(ses, 4);  // ordinary data in runs of four
+   REQUIRE(a.reserve_free_lines() == 1024);
+   REQUIRE(a.reserve_owed_lines() == 0);
+   REQUIRE(a.reserve_longest_run() == 64);
+   const uint64_t used = a.used_bytes();
+
+   auto tx = ses.start_transaction(0);
+   std::vector<std::pair<line_idx, uint32_t>> drawn;
    {
       auto use = ses.use_reserve();
-      for (int k = 0; k < 600; ++k)
-         lent.push_back(tx.alloc_lines(1));
+      for (uint32_t n : {2u, 3u, 4u, 1u, 2u})
+         drawn.emplace_back(tx.alloc_lines(n), n);
    }
+   REQUIRE(a.reserve_free_lines() == 1024 - 12);
+   REQUIRE(a.reserve_owed_lines() == 12);
+   REQUIRE(a.used_bytes() == used + 12 * line_bytes);  // what was drawn is ordinary data now
    tx.commit();
    tx.close();
-   // 3,000 ordinary lines come free: fewer than four reserves' worth
-   for (int k = 0; k < 3000; ++k)
-      a.release(taken[k]);
+
+   // Three ordinary four-line runs are freed (the "old versions"). The
+   // reserve takes exactly what it is owed, 4 + 3 + 2 + 2 + 1, and the
+   // free map gets nothing.
+   for (int k = 0; k < 3; ++k)
+      a.release_run(taken[k], 4);
+   REQUIRE(a.reserve_free_lines() == 1024);
+   REQUIRE(a.reserve_owed_lines() == 0);
+   REQUIRE(a.used_bytes() == used);
    {
       auto tx2 = ses.start_transaction(0);
-      REQUIRE_THROWS_AS(tx2.alloc_lines(1), arena_full);  // 600 of 1,024 still lent
-      auto use = ses.use_reserve();
-      REQUIRE(tx2.alloc_lines(1) < lines_per_segment - 1024);  // a remove uses ordinary room first
+      REQUIRE_THROWS_AS(tx2.alloc_lines(1), arena_full);  // none of it reached the free map
    }
-   // the reserve comes back: ordinary allocation carries on to the end
-   for (line_idx g : lent)
-      a.release(g);
-   auto tx3 = ses.start_transaction(0);
-   for (int k = 0; k < 2900; ++k)
-      REQUIRE(tx3.alloc_lines(1) != null_idx);
+   // nothing owed: the next free is an ordinary free
+   a.release_run(taken[3], 4);
+   REQUIRE(a.reserve_free_lines() == 1024);
+   REQUIRE(a.used_bytes() == used - 4 * line_bytes);
+   {
+      auto tx2 = ses.start_transaction(0);
+      REQUIRE(tx2.alloc_lines(4) == taken[3]);
+   }
+   // what the reserve can lend is what it could before: the same runs again
+   {
+      auto tx2 = ses.start_transaction(0);
+      auto use = ses.use_reserve();
+      for (uint32_t n : {2u, 3u, 4u, 1u, 2u})
+         REQUIRE(tx2.alloc_lines(n) != null_idx);
+      REQUIRE(tx2.alloc_lines(64) != null_idx);  // and whole words are still there
+   }
+}
+
+// Only shorter runs come free than the one that was lent: the reserve's line
+// count still comes back, and the debt is settled in pieces.
+TEST_CASE("the reserve's line count is restored by shorter runs too", "[arena][limit][reserve]")
+{
+   arena a(one_segment_with_reserve(tmp_dir("pieces")));
+   auto  ses   = a.start_session();
+   auto  taken = take_everything(ses, 1);
+   {
+      auto tx  = ses.start_transaction(0);
+      auto use = ses.use_reserve();
+      REQUIRE(tx.alloc_lines(8) != null_idx);
+      tx.commit();
+   }
+   REQUIRE(a.reserve_owed_lines() == 8);
+   for (int k = 0; k < 16; k += 2)  // eight single lines, none adjacent
+      a.release(taken[k]);
+   REQUIRE(a.reserve_owed_lines() == 0);
+   REQUIRE(a.reserve_free_lines() == 1024);
+}
+
+// A run drawn from the reserve and freed again inside the same transaction
+// goes back to the reserve. It must not wait in the session's private cache,
+// where the next ordinary allocation of that size would take it.
+TEST_CASE("a reserve run freed in its own transaction is not handed to an ordinary allocation",
+          "[arena][limit][reserve]")
+{
+   arena a(one_segment_with_reserve(tmp_dir("samettx")));
+   auto  ses   = a.start_session();
+   auto  taken = take_everything(ses, 1);
+   auto  tx    = ses.start_transaction(0);
+   line_idx g = null_idx;
+   {
+      auto use = ses.use_reserve();
+      g        = tx.alloc_lines(2);
+   }
+   REQUIRE(a.reserve_free_lines() == 1022);
+   ses.release_run(g, 2);  // e.g. the node was replaced later in the transaction
+   REQUIRE(a.reserve_free_lines() == 1024);
+   REQUIRE(a.reserve_owed_lines() == 0);
+   REQUIRE_THROWS_AS(tx.alloc_lines(2), arena_full);  // an ordinary allocation gets nothing of it
+}
+
+// Nothing about the reserve is kept across an open: it goes back to the free
+// map at a clean close and is collected again, longest runs first. A store
+// too full to fill it says so, and the first lines freed go to it.
+TEST_CASE("the reserve is collected again at every open", "[arena][limit][reserve]")
+{
+   const auto            dir = tmp_dir("reopen-reserve");
+   std::vector<line_idx> taken;
+   line_idx              lent = null_idx;
+   {
+      arena a(one_segment_with_reserve(dir));
+      auto  ses = a.start_session();
+      taken     = take_everything(ses, 1);
+      auto tx   = ses.start_transaction(0);
+      auto use  = ses.use_reserve();
+      lent      = tx.alloc_lines(40);  // still lent at the close: 40 lines owed
+      tx.commit();
+      REQUIRE(a.reserve_owed_lines() == 40);
+   }
+   {
+      arena a(one_segment_with_reserve(dir));
+      REQUIRE(a.was_clean());
+      // 984 lines were free; that is all there is, and the rest is owed
+      REQUIRE(a.reserve_free_lines() == 984);
+      REQUIRE(a.reserve_owed_lines() == 40);
+      REQUIRE(a.reserve_longest_run() == 64);
+      auto ses = a.start_session();
+      {
+         auto tx = ses.start_transaction(0);
+         REQUIRE_THROWS_AS(tx.alloc_lines(1), arena_full);
+      }
+      for (int k = 0; k < 50; ++k)
+         a.release(taken[k]);
+      REQUIRE(a.reserve_free_lines() == 1024);  // the first forty went to the reserve
+      REQUIRE(a.reserve_owed_lines() == 0);
+      auto tx = ses.start_transaction(0);
+      for (int k = 0; k < 10; ++k)
+         REQUIRE(tx.alloc_lines(1) != null_idx);  // the other ten are ordinary room
+      REQUIRE_THROWS_AS(tx.alloc_lines(1), arena_full);
+   }
+   {
+      arena a(one_segment_with_reserve(dir));
+      REQUIRE(a.reserve_free_lines() == 1024);
+      REQUIRE(a.reserve_owed_lines() == 0);
+      (void)lent;
+   }
 }

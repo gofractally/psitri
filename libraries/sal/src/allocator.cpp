@@ -2137,6 +2137,11 @@ namespace sal
          return;
       }
 
+      // Set when a live object could not be moved out (it failed its checksum, or the
+      // references its move gives up did not fit): the segment still holds it and must not
+      // be handed out again.
+      bool left_behind = false;
+
       // define a lambda to help copy nodes and facilitate early exit
       auto try_copy_node = [&](const alloc_header* nh, msec_timestamp vage)
       {
@@ -2154,7 +2159,8 @@ namespace sal
                SAL_ERROR("corruption detected: obj {} size: {} checksum: {:x} expected: {:x}",
                          nh->address(), nh->size(), nh->checksum(), nh->calculate_checksum());
                signal_corruption();
-               return;  // stop compacting, don't touch corrupt data
+               left_behind = true;
+               return;  // don't touch corrupt data
             }
          }
 
@@ -2178,6 +2184,7 @@ namespace sal
          {
             if (not ses.unalloc(head->size()))
                ses.record_freed_space(head, "compactor_segment_release_failed");
+            left_behind = true;
             return;
          }
 
@@ -2239,6 +2246,17 @@ namespace sal
       // ensures that the segment will not get selected for compaction again until
       // after it is reused by the provider thread.
       _mapped_state->_segment_data.added_to_read_lock_queue(seg_num);
+
+      if (left_behind)
+      {
+         // The state just set keeps the compactor from choosing the segment again; not
+         // queueing it keeps the provider from reusing it. It stays as it is, with the
+         // object nothing could move, until recovery rebuilds the segment states.
+         SAL_ERROR("segment {} keeps an object the compactor could not move; it will not be "
+                   "recycled",
+                   seg_num);
+         return;
+      }
 
       // only one thread can move the end_ptr or this will break
       // std::cerr<<"done freeing end_ptr: " << _mapped_state->end_ptr.load() <<" <== " << seg_num <<"\n";

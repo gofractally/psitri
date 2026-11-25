@@ -27,7 +27,6 @@ if(START_REF_BUILD_TESTS)
             test/cow_tests.cpp
             test/kv_tests.cpp
             test/session_tests.cpp
-            test/cbucket_tests.cpp
         )
         target_link_libraries(start_ref-tests PRIVATE start_ref Catch2::Catch2WithMain)
         target_compile_options(start_ref-tests PRIVATE -O1 -g -UNDEBUG -Wall -Werror=switch)

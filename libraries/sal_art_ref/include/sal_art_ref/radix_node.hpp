@@ -160,13 +160,12 @@ namespace sal_art_ref
       }
    } __attribute__((packed));
 
-   // The 256-branch space is split into RANGE_COUNT ranges (top 3 bits of the branch byte); each
-   // range's branch-SET has one refcount in the SAL implicit_ref_pool (how many node-versions
-   // share that set). 8 ranges × 32 branches.
-   // Number of per-range branch-set refcounts a big node carries (over the 256-branch space).
-   // Tunable resolution knob: 8 ranges × 32 branches (header 18B) or 16 × 16 (header 34B). Higher
-   // resolution halves the per-divergence kept-children retain but doubles clone/destroy/birth
-   // counter ops — measure both. range_of is branch-uniform: byte / (256/range_count).
+   // The 256-branch space is split into range_count ranges (the top bits of the branch byte);
+   // each range's branch-SET has one refcount in the SAL implicit_ref_pool (how many
+   // node-versions share that set). 16 ranges of 16 branches, a 34-byte header. (8 ranges of 32
+   // would be an 18-byte header: half the counter operations per clone, destroy and birth, twice
+   // the children retained when one range diverges.) range_of is branch-uniform:
+   // byte / (256 / range_count).
    inline constexpr int range_count = 16;
    inline constexpr int range_of(unsigned byte) noexcept
    {
@@ -175,10 +174,10 @@ namespace sal_art_ref
 
    /**
     * Per-range counter handles for the large_radix family: ONE region + RANGE_COUNT offsets
-    * (sal::implicit_ref_addr) — the compact form of 8 per-range counters living in the SAL
-    * implicit_ref_pool. Replaces the packed-nibble refcount_roots. 18 bytes. region == no_region
+    * (sal::implicit_ref_addr) — the compact form of the per-range counters living in the SAL
+    * implicit_ref_pool. 2 + 2 * range_count bytes. region == no_region
     * means "no counters yet" (fresh/half-built node → destroy falls back to direct release).
-    * See doc/micro_refcount.md + doc/task24_handoff.md.
+    * See doc/micro_refcount.md.
     */
    struct range_ctrs
    {
@@ -193,7 +192,7 @@ namespace sal_art_ref
    static_assert(sizeof(range_ctrs) == 2 + 2 * range_count, "region(2) + range_count offsets(2 each)");
 
    /**
-    * Base for dense radix nodes (bitset1/r2/r4, full_radix) that batch child retain/release into
+    * Base for dense radix nodes (bitset_r2/r4, full_radix) that batch child retain/release into
     * RANGE_COUNT per-range refcounts. FixedHeader is the range_ctrs handle. K is vestigial (the
     * old packed tier count) — kept only so existing `large_radix<Derived, K>` instantiations
     * compile and `refcount_block_count` stays a marker for is_big. Sparse tiers (setlist*,
@@ -202,7 +201,7 @@ namespace sal_art_ref
    template <typename Derived, int K>
    struct large_radix : radix_impl<Derived, range_ctrs>
    {
-      static constexpr int refcount_block_count = range_count;  // is_big marker (8 ranges)
+      static constexpr int refcount_block_count = range_count;  // is_big marker (the number of ranges)
 
       sal::implicit_ref_region rc_region() const noexcept { return this->fixed.region; }
       void rc_set_region(sal::implicit_ref_region r) noexcept { this->fixed.region = r; }

@@ -83,8 +83,10 @@ namespace sal_art_ref
       static constexpr int      max_inline_entry = 128;  // suffix+value > this => key_val_node
       static constexpr uint16_t ext_code_base    = 0xFF00;
       static constexpr uint16_t max_suffix_len   = 255;  // inline_value u8 field (inline records)
-      // An extern record keeps a comparison FRAGMENT of the suffix, capped so the record
-      // honors the 128-byte item limit: 3 (header) + fragment + 2 (cbase code) <= 128.
+      // A full-key external record (vt_extern) keeps a comparison FRAGMENT of the suffix,
+      // capped so the record is at most 128 bytes: 3 (header) + fragment + 2 (cbase code).
+      // A value-only external record (vt_extern_val) keeps its whole suffix, up to
+      // max_suffix_len, so it can reach 3 + 255 + 2 = 260 bytes: the largest page record.
       static constexpr uint16_t ext_frag_cap = 123;
       // The key limit (key_val_node::max_key_len; radix_engine.hpp asserts they agree). A
       // page's common prefix and divider together never take more tail than one key.

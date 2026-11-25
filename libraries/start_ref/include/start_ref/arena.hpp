@@ -35,6 +35,7 @@
 #include <atomic>
 #include <bit>
 #include <cassert>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -44,6 +45,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <sal/block_allocator.hpp>
@@ -222,6 +224,8 @@ namespace start_ref
       // skips the freeset round trip entirely. Flushed at commit: holes behind
       // the next floor must wait for segment recycle (two-state page model).
       static constexpr uint32_t max_reclaim_rounds = 16;  // per allocation, before giving up
+      // how long an allocation waits for a segment another writer is in
+      static constexpr std::chrono::milliseconds max_busy_wait{20};
       static constexpr uint32_t fcache_max_size = 16;  // run length, in lines
       std::vector<line_idx>     _fcache[fcache_max_size + 1];
 
@@ -826,13 +830,14 @@ namespace start_ref
       // going round from the one after `cur` and ending with `cur` itself, so
       // that repeated calls visit every segment once per lap. Throws
       // arena_full when no segment has n free lines.
-      uint32_t claim_(uint32_t cur, bool prefer_grow = false, uint32_t n = 1, bool sweep = false)
+      uint32_t claim_(uint32_t cur, bool prefer_grow = false, uint32_t n = 1, bool sweep = false,
+                      bool* busy = nullptr)
       {
          std::lock_guard g(_claim_mutex);
          const uint32_t  nseg = num_segments();
          const bool      can_grow = nseg < _cfg.max_segments;
          if (sweep && !can_grow)
-            return sweep_locked_(cur, n);
+            return sweep_locked_(cur, n, busy);
          // Anti-livelock: a large (multi-line) alloc that keeps failing on
          // "qualifying" but FRAGMENTED reuse segments (free lines exist but no
          // contiguous run) must grow a fresh segment to make progress, rather
@@ -875,12 +880,12 @@ namespace start_ref
          }
          if (can_grow)
             return grow_locked_();
-         return sweep_locked_(cur, n);
+         return sweep_locked_(cur, n, busy);
       }
 
       // At the ceiling: the next unowned segment after `cur` (wrapping, `cur`
       // last) that has n free lines at all.
-      uint32_t sweep_locked_(uint32_t cur, uint32_t n)
+      uint32_t sweep_locked_(uint32_t cur, uint32_t n, bool* busy)
       {
          const uint32_t nseg  = num_segments();
          const uint32_t start = cur == UINT32_MAX ? 0 : cur + 1;
@@ -889,6 +894,8 @@ namespace start_ref
             const uint32_t s = (start + k) % nseg;
             if (freeset_(s).free_lines() < n)
                continue;
+            if (busy && _segs[s].state.load(std::memory_order_relaxed) == SEG_OWNED)
+               *busy = true;  // room, but a writer is in it right now
             // An idle session's segment may be taken: its owner notices at
             // its next transaction and claims afresh. (Its owner may also be
             // starting a transaction this instant, hence the exchange.)
@@ -1344,16 +1351,33 @@ namespace start_ref
             return true;
          return reclaims++ < max_reclaim_rounds && a.try_reclaim();
       };
+      // A segment with room that another writer is in right now is not a
+      // full arena: writers leave their segment idle between transactions,
+      // so a short wait usually gets one. Bounded, because a writer may also
+      // sit in a transaction for as long as it likes.
+      std::chrono::steady_clock::time_point busy_until{};
       auto claim = [&](uint32_t cur, bool prefer_grow, bool sweep) -> uint32_t
       {
          for (;;)
          {
+            bool busy = false;
             try
             {
-               return a.claim_(cur, prefer_grow, n, sweep);
+               return a.claim_(cur, prefer_grow, n, sweep, &busy);
             }
             catch (const arena_full&)
             {
+               if (busy)
+               {
+                  const auto now = std::chrono::steady_clock::now();
+                  if (busy_until == std::chrono::steady_clock::time_point{})
+                     busy_until = now + max_busy_wait;
+                  if (now < busy_until)
+                  {
+                     std::this_thread::yield();
+                     continue;
+                  }
+               }
                if (!reclaim_helped())
                   throw;
             }

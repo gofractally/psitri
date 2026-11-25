@@ -42,6 +42,14 @@ segment is claimed again once an eighth of its 8-line groups are free.
     limit is reached at 100% use for small values; running out of room for a
     multi-line node is `storage_full`; a writer ahead of the releaser waits;
   - a multi-root commit whose reference is refused publishes nothing;
+  - a store filled to refusal one upsert at a time is emptied one remove at
+    a time (removes allocate from a reserve), can drop its root, and can be
+    reopened with a higher limit;
+  - room held by a version whose reader has gone, or by an idle session's
+    segment, is found before the store is declared full; an allocation that
+    can never fit gives up after a bounded number of reclaim rounds;
+  - two writers aborting large transactions at once (the release queue has
+    many producers);
   - what a reader sees of a two-root commit;
   - read-only open refused; second open of an open store refused;
   - more owned snapshots of one version than a writer reference can join.
@@ -73,6 +81,10 @@ change to how nodes own their lines has to be made in both.
 - Read-only open is not implemented. (A store that is open is locked: a
   second open of its directory throws.)
 - A multi-root commit publishes its root slots one at a time.
+- Each writer that is in a transaction needs a segment to itself; with more
+  simultaneous writers than segments the extra ones are refused.
+- A single transaction that removes very many keys from a full store can use
+  up the remove reserve before it commits.
 - At the ceiling a session takes free lines from any segment, which gives up
   the placement policy's low write amplification for as long as it lasts.
 - `session_t::_fill_end` is not reset when a session moves to a lower-numbered

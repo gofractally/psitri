@@ -1512,6 +1512,7 @@ TEST_CASE("Small Engine: a writer ahead of the releaser waits instead of reporti
 // as long as only one of them uses it at a time. The root's writer lock goes
 // with the transaction, not with a thread: the first thread asking for the
 // same root through another session waits for the hand-over's commit.
+// Worker threads only record what they saw; every check is made here.
 TEST_CASE("Small Engine: a transaction handed to another thread keeps its root",
           "[small][threads][handover]")
 {
@@ -1522,52 +1523,82 @@ TEST_CASE("Small Engine: a transaction handed to another thread keeps its root",
    auto b = db->start_write_session();
    for (int round = 0; round < 20; ++round)
    {
+      // Started here, finished by another thread, while this thread asks for
+      // the same root through session b.
       auto tx = std::make_unique<engine::transaction>(a->start_transaction(0));
       tx->upsert("k", "from-starter-" + std::to_string(round));
-      std::promise<void> go;
-      std::atomic<bool>  committed{false};
-      // the finisher gets the transaction and commits it after a pause
-      std::thread finisher([&, handed = std::move(tx), ready = go.get_future()]() mutable {
-         ready.wait();
-         std::this_thread::sleep_for(std::chrono::milliseconds(5));
-         handed->upsert("k", "from-finisher-" + std::to_string(round));
-         committed = true;
-         handed->commit();
-         handed.reset();
+      std::promise<void> asking;        // this thread is about to ask for the root
+      std::atomic<bool>  committing{false};
+      std::string        finisher_error;
+      std::thread finisher([&, handed = std::move(tx), go = asking.get_future()]() mutable {
+         try
+         {
+            go.wait();
+            handed->upsert("k", "from-finisher-" + std::to_string(round));
+            committing = true;  // set before the root can possibly be released
+            handed->commit();
+            handed.reset();
+         }
+         catch (const std::exception& e)
+         {
+            finisher_error = e.what();
+         }
       });
-      go.set_value();
-      // the starting thread now wants the same root through another session:
-      // it must wait for the commit, then see it
+      asking.set_value();
+      bool                       refused = false, waited = false;
+      std::optional<std::string> seen;
+      try
       {
-         auto mine = b->start_transaction(0);
-         REQUIRE(committed.load());
-         REQUIRE(mine.get<std::string>("k") ==
-                 std::optional<std::string>("from-finisher-" + std::to_string(round)));
+         auto mine = b->start_transaction(0);  // must wait for the finisher's commit
+         waited    = committing.load();
+         seen      = mine.get<std::string>("k");
          mine.abort();
       }
+      catch (const std::logic_error&)
+      {
+         refused = true;
+      }
       finisher.join();
+      REQUIRE(finisher_error.empty());
+      REQUIRE_FALSE(refused);
+      REQUIRE(waited);
+      REQUIRE(seen == std::optional<std::string>("from-finisher-" + std::to_string(round)));
    }
-   // and the reverse: started elsewhere, finished here, while that thread waits
    for (int round = 0; round < 20; ++round)
    {
+      // Started elsewhere, finished here, while a third thread waits for the
+      // root. The waiter announces itself, then blocks in start_transaction;
+      // it can only get through after the commit below, so the value it reads
+      // proves the order without any timing.
       std::unique_ptr<engine::transaction> tx;
       std::thread starter([&] {
          tx = std::make_unique<engine::transaction>(a->start_transaction(0));
-         tx->upsert("r", std::to_string(round));
+         tx->upsert("r", "uncommitted-" + std::to_string(round));
       });
       starter.join();
-      std::atomic<bool> got{false};
-      std::thread       waiter([&] {
-         auto mine = b->start_transaction(0);
-         got       = true;
-         REQUIRE(mine.get<std::string>("r") == std::optional<std::string>(std::to_string(round)));
-         mine.abort();
+      std::promise<void>         about_to_ask;
+      std::optional<std::string> seen;
+      std::string                waiter_error;
+      std::thread waiter([&] {
+         try
+         {
+            about_to_ask.set_value();
+            auto mine = b->start_transaction(0);
+            seen      = mine.get<std::string>("r");
+            mine.abort();
+         }
+         catch (const std::exception& e)
+         {
+            waiter_error = e.what();
+         }
       });
-      std::this_thread::sleep_for(std::chrono::milliseconds(2));
-      REQUIRE_FALSE(got.load());
-      tx->commit();
+      about_to_ask.get_future().wait();
+      tx->upsert("r", "committed-" + std::to_string(round));
+      tx->commit();  // on a thread that did not start it
       tx.reset();
       waiter.join();
+      REQUIRE(waiter_error.empty());
+      REQUIRE(seen == std::optional<std::string>("committed-" + std::to_string(round)));
    }
 }
 
@@ -1594,4 +1625,451 @@ TEST_CASE("Small Engine: transaction start/commit throughput", "[.bench]")
       std::printf("bench: %llu one-upsert transactions, %.0f tx/s\n", (unsigned long long)n,
                   double(n) / secs);
    }
+}
+
+
+namespace
+{
+   // Fill a 4-segment store with one-upsert transactions until it refuses.
+   std::vector<std::string> fill_to_the_brim(database& db, engine::write_session& ws)
+   {
+      std::vector<std::string> keys;
+      for (uint64_t n = 0;; ++n)
+      {
+         try
+         {
+            auto tx = ws.start_transaction(0);
+            tx.upsert(scattered_key("s", n), std::string(100, char('a' + n % 26)));
+            tx.commit();
+            keys.push_back(scattered_key("s", n));
+         }
+         catch (const engine::storage_full&)
+         {
+            break;
+         }
+         if (n > 5'000'000)
+            throw std::runtime_error("the limit never arrived");
+      }
+      db.flush_releases();
+      return keys;
+   }
+}  // namespace
+
+// A store filled until it refuses, with nothing aborted to make room, must
+// still let keys be removed: a remove copies the path to its key before the
+// old version is freed, and that copy comes out of a reserve that ordinary
+// writes cannot touch.
+TEST_CASE("Small Engine: a brim-full store can be emptied one remove at a time",
+          "[small][limit][brim]")
+{
+   temporary_directory tmp;
+   const auto          cfg = small_config(psitri::sync_mode::none, 4);
+   auto db   = database::open(tmp.path, psitri::open_mode::create_only, cfg);
+   auto ws   = db->start_write_session();
+   auto keys = fill_to_the_brim(*db, *ws);
+   const auto full = db->usage();
+   std::printf("brim: %zu keys; used %.2f of %.2f MiB, reserve %.2f MiB\n", keys.size(),
+               full.used_bytes / 1048576.0, full.limit_bytes / 1048576.0,
+               full.reserve_bytes / 1048576.0);
+   REQUIRE(full.used_bytes + full.reserve_bytes + (64u << 10) >= full.limit_bytes);
+   // ordinary writes are still refused, from this session and from a new one
+   // (a session can have a few dozen lines of its own left, so not
+   // necessarily the very first of them)
+   auto refused = [](engine::write_session& w) {
+      try
+      {
+         auto tx = w.start_transaction(0);
+         for (int j = 0; j < 200; ++j)
+            tx.upsert("more/" + std::to_string(j), std::string(100, 'x'));
+      }
+      catch (const engine::storage_full&)
+      {
+         return true;
+      }
+      return false;
+   };
+   REQUIRE(refused(*ws));
+   {
+      auto fresh = db->start_write_session();
+      REQUIRE(refused(*fresh));
+   }
+   // every key goes, one transaction each, alternating sessions
+   auto     other   = db->start_write_session();
+   uint64_t removed = 0;
+   for (const auto& key : keys)
+   {
+      auto tx = (removed % 2 ? other : ws)->start_transaction(0);
+      REQUIRE(tx.remove(key) == 0);
+      tx.commit();
+      ++removed;
+      if (removed == keys.size() / 2)
+      {
+         // half way: room made by removing is room for writing
+         auto fill = ws->start_transaction(0);
+         for (int j = 0; j < 1000; ++j)
+            fill.upsert("again/" + std::to_string(j), std::string(100, 'z'));
+         fill.commit();
+         auto drop = ws->start_transaction(0);
+         for (int j = 0; j < 1000; ++j)
+            REQUIRE(drop.remove("again/" + std::to_string(j)) == 0);
+         drop.commit();
+      }
+   }
+   {
+      auto rs  = db->start_read_session();
+      auto cur = rs->create_cursor(0);
+      REQUIRE_FALSE(cur.seek_begin());
+   }
+   ws.reset();
+   other.reset();
+   db->flush_releases();
+   REQUIRE(db->usage().used_bytes <= 64 * 128);
+}
+
+// Two other ways out of a full store: drop the whole root, or reopen with a
+// higher limit.
+TEST_CASE("Small Engine: a brim-full store can drop its root or be reopened larger",
+          "[small][limit][brim]")
+{
+   {
+      temporary_directory tmp;
+      auto db   = database::open(tmp.path, psitri::open_mode::create_only,
+                                 small_config(psitri::sync_mode::none, 4));
+      auto ws   = db->start_write_session();
+      auto keys = fill_to_the_brim(*db, *ws);
+      {
+         auto tx = ws->start_transaction(0);
+         tx.primary().set_root({});
+         REQUIRE_NOTHROW(tx.commit());
+      }
+      db->flush_releases();
+      REQUIRE(db->usage().used_bytes <= 64 * 128);
+      auto tx = ws->start_transaction(0);
+      for (int j = 0; j < 1000; ++j)
+         tx.upsert(keys[j], "back");
+      tx.commit();
+   }
+   {
+      temporary_directory tmp;
+      size_t              count = 0;
+      {
+         auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                                  small_config(psitri::sync_mode::none, 4));
+         auto ws = db->start_write_session();
+         count   = fill_to_the_brim(*db, *ws).size();
+      }
+      auto db = database::open(tmp.path, psitri::open_mode::open_existing,
+                               small_config(psitri::sync_mode::none, 8));
+      REQUIRE(db->usage().limit_bytes == 8ull * 8 * 1024 * 1024);
+      auto ws = db->start_write_session();
+      for (int round = 0; round < 50; ++round)
+      {
+         auto tx = ws->start_transaction(0);
+         for (int j = 0; j < 200; ++j)
+            tx.upsert("grown/" + std::to_string(round * 200 + j), std::string(100, 'g'));
+         tx.commit();
+      }
+      auto     rs  = db->start_read_session();
+      auto     cur = rs->create_cursor(0);
+      uint64_t n   = 0;
+      for (cur.seek_begin(); !cur.is_end(); cur.next())
+         ++n;
+      REQUIRE(n == count + 10000);
+   }
+}
+
+// A version kept alive by a reader is released when the reader lets go, but
+// the release itself runs at a commit. A writer that needs the room before
+// its next commit must get it: retired versions nobody reads any more are
+// drained before the store is declared full.
+TEST_CASE("Small Engine: room held by a version no reader uses any more is found",
+          "[small][limit][retired]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 4));
+   auto           ws   = db->start_write_session();
+   const uint64_t keys = 75000;
+   auto rewrite = [&](char fill) {
+      auto tx = ws->start_transaction(0);
+      for (uint64_t j = 0; j < keys; ++j)
+         tx.upsert(scattered_key("s", j), std::string(100, fill));
+      tx.commit();
+   };
+   for (uint64_t j = 0; j < keys; j += 200)
+   {
+      auto tx = ws->start_transaction(0);
+      for (uint64_t k = j; k < j + 200; ++k)
+         tx.upsert(scattered_key("s", k), std::string(100, 'a'));
+      tx.commit();
+   }
+   db->flush_releases();
+   const auto one_version = db->usage().used_bytes;
+   REQUIRE(one_version * 2 < db->usage().limit_bytes - db->usage().reserve_bytes);
+   REQUIRE(one_version * 3 > db->usage().limit_bytes);
+   for (int round = 0; round < 5; ++round)
+   {
+      {
+         auto rs  = db->start_read_session();
+         auto cur = rs->create_cursor(0);  // keeps the current version
+         rewrite(char('b' + round));       // two versions now
+         REQUIRE(cur.get<std::string>(scattered_key("s", 7)).has_value());
+      }
+      // the reader is gone; nothing has committed since
+      REQUIRE_NOTHROW(rewrite(char('B' + round)));
+   }
+}
+
+// Sessions that are not in a transaction do not hold storage hostage.
+TEST_CASE("Small Engine: idle write sessions do not use up the store", "[small][limit][idle]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 4));
+   std::vector<std::shared_ptr<engine::write_session>> sessions;
+   for (int i = 0; i < 12; ++i)
+   {
+      sessions.push_back(db->start_write_session());
+      auto tx = sessions.back()->start_transaction(0);
+      REQUIRE_NOTHROW(tx.upsert("key" + std::to_string(i), "v"));
+      tx.commit();
+   }
+   // and each of them can still write afterwards
+   for (int i = 0; i < 12; ++i)
+   {
+      auto tx = sessions[i]->start_transaction(0);
+      tx.upsert("again" + std::to_string(i), "v");
+      tx.commit();
+   }
+   auto     rs  = db->start_read_session();
+   auto     cur = rs->create_cursor(0);
+   uint64_t n   = 0;
+   for (cur.seek_begin(); !cur.is_end(); cur.next())
+      ++n;
+   REQUIRE(n == 24);
+}
+
+namespace
+{
+   // A typed value two kilobytes wide whose release is slow on the background
+   // releaser: a few thousand dead ones are megabytes the writer cannot have
+   // until the releaser gets to them.
+   struct wide_slow_value
+   {
+      static constexpr uint16_t type_id = 78;
+      struct t_pod
+      {
+         uint64_t n;
+         char     filler[2000];
+         static void retain(void*, const t_pod&) {}
+         static void release(void*, const t_pod&)
+         {
+            if (std::this_thread::get_id() != writer.load())
+            {
+               std::this_thread::sleep_for(std::chrono::microseconds(100));
+               released_in_background.fetch_add(1, std::memory_order_relaxed);
+            }
+         }
+      };
+      t_pod pod{};
+      t_pod take_pod() && { return pod; }
+      static wide_slow_value make_from_pod(const t_pod& p, bool) { return {p}; }
+      static inline std::atomic<std::thread::id> writer{};
+      static inline std::atomic<uint64_t>        released_in_background{0};
+   };
+}  // namespace
+
+// The wait itself: dead versions queued for a releaser that is far behind
+// are most of the store. Only waiting for the releaser gets the room back;
+// taking free lines from other segments cannot, because there are none.
+TEST_CASE("Small Engine: a writer waits for queued releases before reporting full",
+          "[small][limit][releaser][wait]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 4));
+   db->register_value_types<wide_slow_value>();
+   wide_slow_value::writer                 = std::this_thread::get_id();
+   wide_slow_value::released_in_background = 0;
+   const uint64_t live = 2000, upserts = 40000;  // 4 MiB live, 80 MiB written
+   {
+      auto     ws = db->start_write_session();
+      uint64_t n  = 0;
+      while (n < upserts)
+      {
+         auto tx = ws->start_transaction(0);
+         for (int j = 0; j < 200; ++j, ++n)
+         {
+            wide_slow_value v;
+            v.pod.n = n;
+            tx.upsert(scattered_key("w", n % live), std::move(v));
+         }
+         REQUIRE_NOTHROW(tx.commit());
+      }
+   }
+   db->flush_releases();
+   std::printf("wait: %llu wide upserts, %llu released in the background, settled %.1f MiB\n",
+               (unsigned long long)upserts,
+               (unsigned long long)wide_slow_value::released_in_background.load(),
+               db->usage().used_bytes / 1048576.0);
+   REQUIRE(db->usage().used_bytes * 4 < db->usage().limit_bytes);
+}
+
+// Two writers on two roots at the ceiling, each overwriting its own keys and
+// both feeding the releaser. When one is refused it aborts and removes a
+// batch of its keys to make room; those removes must always go through.
+// Also the releaser queue's only multi-writer exercise: at the end every key
+// is accounted for and, once both roots are emptied, so is every line.
+TEST_CASE("Small Engine: two writers at the ceiling recover by removing",
+          "[small][limit][releaser][two-writers]")
+{
+   const uint64_t upserts = env_u64("PSITRI_SMALL_TWO_WRITER_UPSERTS", 1'200'000);
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 4));
+   struct outcome
+   {
+      std::map<std::string, std::string> expect;
+      uint64_t                           refused = 0;
+      std::string                        error;
+   };
+   outcome results[2];
+   auto writer = [&](uint32_t root) {
+      outcome& out = results[root];
+      try
+      {
+         auto           ws   = db->start_write_session();
+         const uint64_t span = 100000;  // more than half the store each, if all were live
+         uint64_t       n    = 0;
+         while (n < upserts)
+         {
+            std::vector<std::pair<std::string, std::string>> batch;
+            try
+            {
+               auto tx = ws->start_transaction(root);
+               for (int j = 0; j < 200; ++j, ++n)
+               {
+                  batch.emplace_back(scattered_key(root ? "b" : "a", n % span),
+                                     std::string(100, char('a' + n % 26)));
+                  tx.upsert(batch.back().first, batch.back().second);
+               }
+               tx.commit();
+               for (auto& kv : batch)
+                  out.expect[kv.first] = kv.second;
+            }
+            catch (const engine::storage_full&)
+            {
+               ++out.refused;
+               // make room: drop a tenth of what this writer has, one
+               // transaction per 100 keys; a remove is never refused
+               uint64_t drop = out.expect.size() / 10 + 1;
+               while (drop && !out.expect.empty())
+               {
+                  auto tx = ws->start_transaction(root);
+                  for (int j = 0; j < 100 && drop && !out.expect.empty(); ++j, --drop)
+                  {
+                     auto it = out.expect.begin();
+                     if (tx.remove(it->first) != 0)
+                        throw std::runtime_error("a committed key was missing");
+                     out.expect.erase(it);
+                  }
+                  tx.commit();
+               }
+            }
+         }
+      }
+      catch (const std::exception& e)
+      {
+         out.error = e.what();
+      }
+   };
+   std::thread t0(writer, 0), t1(writer, 1);
+   t0.join();
+   t1.join();
+   std::printf("two writers: refused %llu and %llu times; %zu and %zu keys live\n",
+               (unsigned long long)results[0].refused, (unsigned long long)results[1].refused,
+               results[0].expect.size(), results[1].expect.size());
+   REQUIRE(results[0].error.empty());
+   REQUIRE(results[1].error.empty());
+   for (uint32_t root = 0; root < 2; ++root)
+   {
+      auto rs  = db->start_read_session();
+      auto cur = rs->create_cursor(root);
+      require_matches(cur, results[root].expect);
+   }
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.primary().set_root({});
+      tx.open_root(1).set_root({});
+      tx.commit();
+   }
+   db->flush_releases();
+   REQUIRE(db->usage().used_bytes <= 64 * 128);
+}
+
+// The releaser's queue is fed by every writer thread. Aborting a large
+// transaction hands its private subtrees to the queue outside any shared
+// lock, so two writers on two roots aborting at once push concurrently. A
+// queue that loses or duplicates an entry leaks storage or frees it twice.
+TEST_CASE("Small Engine: two writers feed the release queue at once",
+          "[small][release-queue]")
+{
+   const uint64_t rounds = env_u64("PSITRI_SMALL_QUEUE_ROUNDS", 400);
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 64));
+   std::string errors[2];
+   auto writer = [&](uint32_t root) {
+      try
+      {
+         auto ws = db->start_write_session();
+         {
+            auto tx = ws->start_transaction(root);
+            for (int j = 0; j < 500; ++j)
+               tx.upsert(scattered_key("keep", j), std::string(60, 'k'));
+            tx.commit();
+         }
+         for (uint64_t r = 0; r < rounds; ++r)
+         {
+            auto tx = ws->start_transaction(root);
+            for (int j = 0; j < 3000; ++j)
+               tx.upsert(scattered_key("gone", r * 3000 + j), std::string(60, 'g'));
+            tx.abort();  // thousands of private nodes die here, most via the queue
+         }
+      }
+      catch (const std::exception& e)
+      {
+         errors[root] = e.what();
+      }
+   };
+   std::thread t0(writer, 0), t1(writer, 1);
+   t0.join();
+   t1.join();
+   REQUIRE(errors[0].empty());
+   REQUIRE(errors[1].empty());
+   db->flush_releases();
+   for (uint32_t root = 0; root < 2; ++root)
+   {
+      auto     rs  = db->start_read_session();
+      auto     cur = rs->create_cursor(root);
+      uint64_t n   = 0;
+      for (cur.seek_begin(); !cur.is_end(); cur.next())
+      {
+         REQUIRE(cur.key().starts_with("keep/"));
+         REQUIRE(cur.value<std::string>() == std::optional<std::string>(std::string(60, 'k')));
+         ++n;
+      }
+      REQUIRE(n == 500);
+   }
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.primary().set_root({});
+      tx.open_root(1).set_root({});
+      tx.commit();
+   }
+   db->flush_releases();
+   // every line is accounted for: nothing lost in the queue, nothing freed twice
+   REQUIRE(db->usage().used_bytes <= 64 * 128);
 }

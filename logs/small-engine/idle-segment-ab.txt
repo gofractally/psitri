@@ -1,0 +1,12 @@
+570aadc engine (old) and the engine with the second-review fixes (new), interleaved; machine load average 40-65.
+Five repetitions of 2,000,000 one-upsert transactions (tx/s), then the churn test without a reader (100k rows, 3M updates, 100 updates per transaction).
+old: 3967085 4029769 4029205 3981853 4106811  churn 352215 updates/s
+new: 3664361 3414776 3545592 3364679 3124978  churn 375172 updates/s
+old: 4129729 4139965 4048004 4092981 4102156  churn 388687 updates/s
+new: 4040260 4062013 4126731 3898029 3713244  churn 370143 updates/s
+old: 4167227 4089920 4088456 4081797 4143016  churn 387287 updates/s
+new: 4280643 4170694 3885336 3702058 3849405  churn 344336 updates/s
+old: 3848237 3893451 3730610 3312690 3468136  churn 331126 updates/s
+new: 4043376 4050103 3736464 3787156 3545422  churn 381033 updates/s
+old: 4090662 4304233 4175421 4138630 4185948  churn 382839 updates/s
+new: 3898657 3892863 3925493 3922521 3962648  churn 270294 updates/s

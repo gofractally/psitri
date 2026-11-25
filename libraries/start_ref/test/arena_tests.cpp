@@ -261,3 +261,140 @@ TEST_CASE("reopen after clean close trusts the freeset; rebuild reconstructs it"
       REQUIRE(a.freeset_of(0).free_lines() == lines_per_segment - 3);
    }
 }
+
+namespace
+{
+   // One segment, every line allocated, then every other line freed: plenty
+   // of free lines and not one run of two.
+   void fragment_whole_arena(arena& a, session& ses)
+   {
+      auto tx = ses.start_transaction(0);
+      for (uint32_t k = 0; k < lines_per_segment; ++k)
+         tx.alloc_lines(1);
+      tx.commit();
+      for (line_idx i = 0; i < lines_per_segment; i += 2)
+         a.release(i);
+   }
+   arena_config one_segment(const fs::path& dir)
+   {
+      arena_config c  = cfg(dir);
+      c.max_segments  = 1;
+      c.reserve_lines = 0;
+      return c;
+   }
+}  // namespace
+
+TEST_CASE("a session whose claim failed holds no segment", "[arena][limit]")
+{
+   arena a(one_segment(tmp_dir("noclaim")));
+   auto  first = a.start_session();
+   fragment_whole_arena(a, first);
+   {
+      auto tx = first.start_transaction(0);
+      REQUIRE_THROWS_AS(tx.alloc_lines(2), arena_full);  // no run of two anywhere
+      // Another session now takes the only segment and works in it.
+      auto second = a.start_session();
+      auto tx2    = second.start_transaction(0);
+      tx2.alloc_lines(1);
+      REQUIRE(a.segment_state(0) == arena::SEG_OWNED);
+      // The first session ending its transaction, or going away, must not
+      // touch a segment it no longer holds.
+      tx.close();
+      REQUIRE(a.segment_state(0) == arena::SEG_OWNED);
+      tx2.alloc_lines(1);
+      tx2.commit();
+   }
+}
+
+TEST_CASE("an allocation that can never fit gives up even if reclaim keeps reporting work",
+          "[arena][limit]")
+{
+   arena a(one_segment(tmp_dir("spin")));
+   auto  ses = a.start_session();
+   fragment_whole_arena(a, ses);
+   static uint64_t calls;
+   calls = 0;
+   // A reclaim hook that always says it freed something, as it would while
+   // another writer keeps queueing releases, and frees nothing this
+   // allocation can use.
+   a.set_reclaim([](void*) noexcept { ++calls; return true; }, nullptr);
+   auto tx = ses.start_transaction(0);
+   REQUIRE_THROWS_AS(tx.alloc_lines(2), arena_full);
+   REQUIRE(calls > 0);
+   REQUIRE(calls < 1000);
+   REQUIRE(tx.alloc_lines(1) != null_idx);  // single lines still fit
+   a.set_reclaim(nullptr, nullptr);
+}
+
+TEST_CASE("the reserve is kept from ordinary allocations and given to reclaiming ones",
+          "[arena][limit]")
+{
+   arena_config c  = cfg(tmp_dir("reserve"));
+   c.max_segments  = 1;
+   c.reserve_lines = 1000;
+   arena a(c);
+   auto  ses = a.start_session();
+   auto  tx  = ses.start_transaction(0);
+   uint32_t got = 0;
+   try
+   {
+      for (;; ++got)
+         tx.alloc_lines(1);
+   }
+   catch (const arena_full&)
+   {
+   }
+   // ordinary allocation stopped at the reserve, give or take one window
+   REQUIRE(got >= lines_per_segment - 1000 - 64);
+   REQUIRE(got <= lines_per_segment - 1000 + 64);
+   REQUIRE_THROWS_AS(tx.alloc_lines(1), arena_full);
+   {
+      auto use = ses.use_reserve();
+      for (int k = 0; k < 500; ++k)
+         REQUIRE(tx.alloc_lines(1) != null_idx);
+   }
+   // without the guard: at most the session's private window, then refused
+   uint32_t extra = 0;
+   try
+   {
+      for (; extra < 1000; ++extra)
+         tx.alloc_lines(1);
+   }
+   catch (const arena_full&)
+   {
+   }
+   REQUIRE(extra < 64);
+}
+
+TEST_CASE("a segment left idle by one session can be taken by another at the ceiling",
+          "[arena][limit]")
+{
+   arena_config c  = cfg(tmp_dir("idle"));
+   c.max_segments  = 2;
+   c.reserve_lines = 0;
+   arena a(c);
+   auto  s1 = a.start_session();
+   auto  s2 = a.start_session();
+   {
+      auto t1 = s1.start_transaction(0);
+      t1.alloc_lines(1);
+      t1.commit();
+      auto t2 = s2.start_transaction(0);
+      t2.alloc_lines(1);
+      t2.commit();
+   }
+   REQUIRE(a.num_segments() == 2);
+   auto s3 = a.start_session();
+   auto t3 = s3.start_transaction(0);
+   line_idx got = null_idx;
+   REQUIRE_NOTHROW(got = t3.alloc_lines(1));
+   t3.commit();
+   t3.close();  // idle again: three sessions, two segments, two at a time
+   // the sessions it was taken from carry on, somewhere
+   auto t1 = s1.start_transaction(0);
+   auto t2 = s2.start_transaction(0);
+   const line_idx l1 = t1.alloc_lines(1), l2 = t2.alloc_lines(1);
+   REQUIRE(l1 != l2);
+   REQUIRE(l1 != got);
+   REQUIRE(l2 != got);
+}

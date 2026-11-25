@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -104,11 +105,39 @@ namespace sal
                                 .count());
                                 */
    }
-   inline usec_timestamp get_current_time_usec()
+   namespace detail
    {
-      return usec_timestamp(std::chrono::duration_cast<std::chrono::microseconds>(
-                                std::chrono::steady_clock::now().time_since_epoch())
-                                .count());
+      inline std::atomic<uint64_t> last_commit_stamp{0};
+   }
+
+   /// The stamp a commit's sync header carries. Power-loss recovery orders the commits it
+   /// finds by it, so it must keep increasing across a restart of the machine, which a
+   /// steady clock (time since boot) does not. It is wall-clock microseconds, never less
+   /// than one more than the last stamp given out in this process; recovery raises that
+   /// floor above every stamp it finds on disk (commit_stamp_at_least). What is left: a
+   /// wall clock set backwards across a restart in which no recovery ran.
+   inline usec_timestamp next_commit_stamp() noexcept
+   {
+      const uint64_t wall = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                                         std::chrono::system_clock::now().time_since_epoch())
+                                         .count());
+      uint64_t last = detail::last_commit_stamp.load(std::memory_order_relaxed);
+      uint64_t next;
+      do
+      {
+         next = std::max(wall, last + 1);
+      } while (!detail::last_commit_stamp.compare_exchange_weak(last, next,
+                                                                std::memory_order_relaxed));
+      return usec_timestamp(next);
+   }
+   /// Recovery: no later commit may be stamped at or below `stamp`.
+   inline void commit_stamp_at_least(usec_timestamp stamp) noexcept
+   {
+      uint64_t last = detail::last_commit_stamp.load(std::memory_order_relaxed);
+      while (last < *stamp && !detail::last_commit_stamp.compare_exchange_weak(
+                                  last, *stamp, std::memory_order_relaxed))
+      {
+      }
    }
 
 }  // namespace sal

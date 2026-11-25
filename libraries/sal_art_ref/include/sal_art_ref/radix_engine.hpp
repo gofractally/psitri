@@ -1111,7 +1111,7 @@ namespace sal_art_ref::radix
          ptr_address a = _ses->alloc<N>(hint, pfx);
          N*          n = _ses->get_ref<N>(a).modify().get();
          n->alloc_tail(tail_reserve);  // tail offsets >=16
-         rr_birth<N>(n);               // big tier → 8 per-range counters (empty node, =1 each)
+         rr_birth<N>(n);               // big tier → its per-range counters (empty node, =1 each)
          stamp<N>(a);
          ++_cc.node_allocs;
          return a;
@@ -1148,7 +1148,7 @@ namespace sal_art_ref::radix
       template <class N>
       static constexpr bool is_big = requires { N::refcount_block_count; };
 
-      // Birth: give a fresh big node its 8 per-range counters (each = 1, this version), co-located
+      // Birth: give a fresh big node its range_count per-range counters (each = 1, this version), co-located
       // in one region. The builder's per-child placement supplies each counter's base (cb.ref=1
       // per child). Re-homes if a region fills mid-birth (counters are unique=1 here, safe).
       template <class N>
@@ -1279,7 +1279,7 @@ namespace sal_art_ref::radix
          blit<N>(nn, src);
          if constexpr (is_big<N>)
          {
-            if (nn->rc_has_ctrs())  // share the 8 per-range counters (blit copied region+offsets)
+            if (nn->rc_has_ctrs())  // share the per-range counters (blit copied region+offsets)
             {
                // A counter is one byte: it can stand for 255 versions of a range's branch
                // set. When this clone would be one more (many versions kept alive at once,
@@ -2113,7 +2113,7 @@ namespace sal_art_ref::radix
          assert(kb.size() <= key_val_node::max_key_len && "keys are <= 1024 bytes (psitri parity)");
          // Classify by the would-be suffix (post-cpfx). A rebuild can only shorten cpfx to
          // common(cpfx, key), which is exactly what we compute → stable. ANY item whose
-         // suffix+payload exceeds the 128-byte in-page cap — big value OR big key, any value
+         // suffix+payload exceeds the in-page cap (leaf_page::max_inline_entry) — big value OR big key, any value
          // type — gets an external record; the page keeps a fragment + code.
          auto     cp  = pg->common_prefix();
          uint32_t ncp = 0;
@@ -2135,7 +2135,8 @@ namespace sal_art_ref::radix
          // ONCE EXTERNAL, STAYS EXTERNAL: an extern record's in-page fragment may be a
          // truncated prefix of the real key — inlining it on a shrinking update would lose
          // key bytes. (Fresh classification: any item whose suffix+payload exceeds the
-         // 128-byte in-page cap moves whole into its own key_val_node.)
+         // in-page cap gets an external record: the value alone, or key and value when the
+         // suffix does not fit the page record's one-byte length.)
          const bool old_ext =
              idx >= 0 && inline_value::external_value(pg->record(uint32_t(idx))->value_type);
          // A record whose FULL KEY lives in its external node (vt_extern) keeps only a
@@ -6290,7 +6291,7 @@ namespace sal_art_ref::radix
          ptr_address na = _ses->alloc<To>(need, hint, cn->prefix());
          To*         nn = mut<To>(na);
          nn->alloc_tail(tail_reserve);
-         rr_birth<To>(nn);  // big tier → 8 counters; the term+branch retains below are the base
+         rr_birth<To>(nn);  // big tier → its counters; the term+branch retains below are the base
          stamp<To>(na);
          ok = true;
          smart_address tv = cn->term_value();
@@ -6380,7 +6381,7 @@ namespace sal_art_ref::radix
          ptr_address na = _ses->alloc<To>(need, hint, bytes{});
          To*         nn = mut<To>(na);
          nn->alloc_tail(tail_reserve);
-         rr_birth<To>(nn);  // big tier → 8 counters; the term+branch retains below are the base
+         rr_birth<To>(nn);  // big tier → its counters; the term+branch retains below are the base
          nn->set_window_base(uint8_t(lo));
          stamp<To>(na);
          ok               = true;
@@ -6483,7 +6484,7 @@ namespace sal_art_ref::radix
          ptr_address na = _ses->alloc<To>(need, sal::alloc_hint{}, cn->prefix());
          To*         nn = mut<To>(na);
          nn->alloc_tail(tail_reserve);
-         rr_birth<To>(nn);  // big tier → 8 counters; the term+branch retains below are the base
+         rr_birth<To>(nn);  // big tier → its counters; the term+branch retains below are the base
          stamp<To>(na);
          ok               = true;
          smart_address tv = cn->term_value();
@@ -6763,7 +6764,7 @@ namespace sal_art_ref::radix
                                                        bytes{pbuf, size_t(pl)});
          full_radix_node* nn = mut<full_radix_node>(np);
          _ses->get_ref<full_radix_node>(rp).obj()->copy_to(nn);  // re-resolve rp AFTER the alloc
-         rr_birth<full_radix_node>(nn);  // 8 counters; the for_each_child retains below are the base
+         rr_birth<full_radix_node>(nn);  // its counters; the for_each_child retains below are the base
          nn->for_each_child([&](ptr_address c) { _ses->retain(c); });
          stamp<full_radix_node>(np);  // dispatch shape (find reads cb_type) — copy_to didn't set it
          _ses->release(rp);  // drop old router (its destroy releases each child once → net no change)
@@ -7456,7 +7457,9 @@ namespace sal_art_ref::radix
       // Data-layout selector (default = page model). Exposed so benches/tools can A/B the
       // legacy byte-radix engine against radix-indexed leaf pages on identical workloads.
       void set_page_mode(bool on) { _engine.set_page_mode(on); }
-      // Drain the background releaser so a post-op object_count is exact (psitri parity).
+      // Waits until the background RELEASE queue is empty, so that an object count taken
+      // afterwards is exact. It does not wait for the compactor: the name is the one the
+      // engines share.
       bool wait_for_compactor(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000))
       {
          auto end = std::chrono::steady_clock::now() + timeout;

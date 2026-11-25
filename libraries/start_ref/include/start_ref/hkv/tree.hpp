@@ -878,8 +878,13 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   return insert_impl_<Assign, true>(key, std::forward<VF>(v), slot, depth,
                                                     lowfan);
             if constexpr (cow_enabled && Shared)
-               if (cur.tag() != K::value_inline)
-                  cur = cow_clone_into_(slot, cur);  // eager: every hop is shared
+               // eager: every hop is shared. A raw-bytes leaf is NOT cloned: the
+               // leaf code below never edits a shared leaf, it builds the leaf's
+               // successor straight from the shared bytes and drops one reference
+               // (leaf_unshared_). Cloning it first copied the whole value, up
+               // to 2 MiB, only to free the copy in the same call.
+               if (cur.tag() != K::value_inline && !(leaf_no_clone_ && is_leaf(cur.tag())))
+                  cur = cow_clone_into_(slot, cur);
             const K k = cur.tag();
             // Adaptive: track the deep-narrow signature. Uniform data widens fast
             // (high fanout → lowfan resets), so it never trips; clustered/deep data
@@ -3146,11 +3151,13 @@ namespace detail  // implementation types & node helpers — not part of the pub
          size_t           depth = 0;
          path.ensure(n + 1);
          path[n++] = {&root_, 0};
-         auto free_leaf         = [&](char* L, K tag = K::value_ptr) {
+         // A leaf shared with another version (cow_remove no longer clones it
+         // first) only loses this tree's reference.
+         auto free_leaf         = [&](packed_ptr lp) {
+            char* L = static_cast<char*>(deref_(lp));
             if constexpr (!raw_vals)
                v_destroy(alloc_, leaf_val(L));
-            vh_leaf_dies_(L);
-            leaf_free_(L, leaf_alloc_size(L), tag);  // routes value_large to the large arena
+            leaf_drop_(lp, L, leaf_alloc_size(L), lp.tag());  // routes value_large to the large arena
          };
          for (;;)
          {
@@ -3166,7 +3173,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   if (std::string_view(reinterpret_cast<const char*>(leaf_suf(L)), leaf_slen(L)) !=
                       key.substr(depth))
                      return false;
-                  free_leaf(L, cur.tag());
+                  free_leaf(cur);
                   --count_;
                   if (n >= 2) rm_unwind_(path, n, n - 2);  // n-2: the leaf's parent
                   else root_ = packed_ptr::null();         // the leaf WAS the root
@@ -3308,7 +3315,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             if (rh->term.is_null())
                return false;
             if (is_leaf(rh->term.tag()))  // leaf("",v); an inline term has nothing to free
-               free_leaf(static_cast<char*>(deref_(rh->term)), rh->term.tag());
+               free_leaf(rh->term);
             rh->term         = packed_ptr::null();
             rh->hdr.has_term = 0;
             --count_;
@@ -4778,7 +4785,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
          {
             if constexpr (Assign)
             {
-               if constexpr (cow_enabled)  // fused privatize: own the term leaf
+               if constexpr (cow_enabled && !leaf_no_clone_)  // fused privatize: own the term leaf
                   if (is_leaf(rh->term.tag()) && cow_shared_(rh->term))
                      cow_clone_into_(&rh->term, rh->term);
                if (rh->term.tag() == K::value_inline)
@@ -4787,9 +4794,11 @@ namespace detail  // implementation types & node helpers — not part of the pub
                {
                   char* tl = static_cast<char*>(deref_(rh->term));
                   if constexpr (raw_vals)
-                  {  // same-size: bytes in place; else rebuild the term leaf
+                  {  // same-size and ours alone: bytes in place; else the term
+                     // leaf is rebuilt and the old one loses a reference (a
+                     // shared leaf is never written, and never copied first)
                      const size_t sz = vf_emit_size_(val);
-                     if (sz == leaf_vlen(tl))
+                     if (sz == leaf_vlen(tl) && leaf_unshared_(rh->term))
                      {
                         vh_leaf_dies_(tl);  // old bytes clobbered in place
                         vf_emit_(val, tl + leaf_value_off());
@@ -4852,13 +4861,14 @@ namespace detail  // implementation types & node helpers — not part of the pub
                if constexpr (raw_vals)
                {
                   const size_t sz = vf_emit_size_(val);
-                  if (sz == leaf_vlen(L))
+                  if (sz == leaf_vlen(L) && leaf_unshared_(cur))
                   {
                      vh_leaf_dies_(L);  // old bytes clobbered in place
                      vf_emit_(val, L + leaf_value_off());
                   }
                   else
-                  {  // size changed: rebuild the leaf verbatim around new bytes
+                  {  // size changed, or the leaf is shared with another version:
+                     // rebuild the leaf verbatim around new bytes
                      const size_t Lsz = leaf_alloc_size(L);
                      const Ptr    np  = leaf_has_full(L)
                                             ? make_leaf_full(
@@ -4872,8 +4882,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                                                       reinterpret_cast<const char*>(leaf_suf(L)),
                                                       leaf_slen(L)),
                                                   std::forward<VF>(val));
-                     vh_leaf_dies_(L);  // old bytes die with the old leaf
-                     leaf_free_(L, Lsz, lt);  // routes value_large to the large arena
+                     leaf_drop_(cur, L, Lsz, lt);  // ours alone: bytes die; shared: one reference less
                      inserted = false;
                      return np;
                   }
@@ -4905,16 +4914,39 @@ namespace detail  // implementation types & node helpers — not part of the pub
             setlist_set(r, uint8_t(R[c]), make_value_at(key, depth + c + 1, std::forward<VF>(val)));
          partial = apply_prefix(r, key.substr(depth, c));             // (3) shared prefix (== S[0..c])
          if constexpr (raw_vals)
-         {  // bytes MOVE out of the OLD leaf into exactly one new node, then the
-            // old leaf is freed — one live copy throughout, so no vh hooks fire
-            const T ov{leaf_bytes(L)};
+         {  // The leaf is ours alone: its bytes MOVE into exactly one new node and
+            // the old leaf is freed, one live copy throughout, so no vh hooks
+            // fire. The leaf is shared with another version: the new node holds
+            // a second copy (the copy hook fires, as it does for a clone) and
+            // the old leaf only loses this tree's reference.
+            const bool mine = leaf_unshared_(cur);
+            const T    ov{leaf_bytes(L)};
+            packed_ptr moved;
             if (c == S.size())  // (4) old value, LAST
-               set_term(&r->rh, ov);
+               moved = make_value(std::string_view{}, ov);
             else if (oldfull)
-               setlist_set(r, uint8_t(S[c]), make_value_at(ofv, depth + c + 1, ov));
+               moved = make_value_at(ofv, depth + c + 1, ov);
             else
-               setlist_set(r, uint8_t(S[c]), make_value(S.substr(c + 1), ov));
-            leaf_free_(L, Lsize, lt);  // routes value_large to the large arena
+               moved = make_value(S.substr(c + 1), ov);
+            if constexpr (vh_on)
+               if (!mine)
+               {
+                  try { vh_copy_(leaf_bytes(static_cast<const char*>(deref_(moved)))); }
+                  catch (...)
+                  {  // the copy was refused: the new leaf's bytes never lived
+                     char* M = static_cast<char*>(deref_(moved));
+                     leaf_free_(M, leaf_alloc_size(M), moved.tag());
+                     throw;
+                  }
+               }
+            if (c == S.size())
+               set_term_ptr_(&r->rh, moved);
+            else
+               setlist_set(r, uint8_t(S[c]), moved);
+            if (mine)
+               leaf_free_(L, Lsize, lt);  // routes value_large to the large arena
+            else
+               cow_release(cur);
          }
          else
          {
@@ -8644,19 +8676,59 @@ namespace detail  // implementation types & node helpers — not part of the pub
          return alloc_.hkv_ref(line_of(p)) >= 2;
       }
 
+      // ── leaves under copy-on-write ────────────────────────────────────────
+      // A raw-bytes leaf is never cloned on the way to being replaced or
+      // removed (gofractally/psitri#33): cloning copied the whole value only
+      // for the caller to free the copy, and on a full store the copy could
+      // not be allocated at all, so a remove was refused. The writer reads a
+      // shared leaf where it is, builds what replaces it, and drops this
+      // tree's one reference. Composed-bucket creation edits the leaf's
+      // neighbourhood in place and keeps the eager clone.
+      static constexpr bool leaf_no_clone_ = cow_enabled && raw_vals && !cb_create;
+      // True when this tree holds the only reference to the leaf at p, so its
+      // bytes may be overwritten or freed in place.
+      bool leaf_unshared_(Ptr p) const noexcept
+      {
+         if constexpr (cow_enabled)
+            return !cow_shared_(p);
+         else
+            return true;
+      }
+      // The leaf at p (deref'd L, alloc size bytes) leaves this tree: its bytes
+      // die when the leaf was ours alone; a shared leaf loses one reference.
+      void leaf_drop_(Ptr p, char* L, size_t bytes, K tag) noexcept
+      {
+         if constexpr (cow_enabled)
+            if (cow_shared_(p))
+            {
+               cow_release(p);
+               return;
+            }
+         vh_leaf_dies_(L);
+         leaf_free_(L, bytes, tag);
+      }
+      void set_term_ptr_(router_hdr* rh, Ptr leaf) noexcept
+      {
+         rh->term         = leaf;
+         rh->hdr.has_term = 1;
+      }
+
       // Privatize the terminal leaf hanging off a router header (in-place value
       // overwrite mutates it).
       void cow_privatize_term_(router_hdr* rh)
       {
+         if constexpr (leaf_no_clone_)
+            return;  // the term leaf is dropped by remove(), not edited
          const Ptr t = rh->term;
          if (!t.is_null() && is_leaf(t.tag()) && cow_shared_(t))
             cow_clone_into_(&rh->term, t);
       }
 
-      // Walk the key's path, cloning every shared node top-down. Stops where the
-      // descent stops: everything an in-place insert/remove can touch — path
-      // routers, the diverging prefix node, the terminal leaf/bucket, the router
-      // whose term gets overwritten — is exclusively owned afterwards.
+      // Walk the key's path for cow_remove, cloning every shared node top-down.
+      // Stops where the descent stops: everything an in-place remove can touch
+      // (path routers, the diverging prefix node, the router whose term is
+      // dropped) is exclusively owned afterwards. A raw-bytes leaf, at the
+      // end of the path or as a router's term, is left as it is.
       void cow_privatize_(std::string_view key)
       {
          if (root_.is_null())
@@ -8668,6 +8740,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
             Ptr cur = *slot;
             if (cur.is_null() || cur.tag() == K::value_inline)
                return;
+            if constexpr (leaf_no_clone_)
+               if (is_leaf(cur.tag()))
+                  return;  // terminal reached: remove() drops a reference, never edits it
             if (cow_shared_(cur))
                cur = cow_clone_into_(slot, cur);
             const K k = cur.tag();

@@ -414,3 +414,35 @@ TEST_CASE("review: aborting a savepoint undoes writes through subtrees opened be
    CHECK_FALSE(committed.get<std::string>("in-frame"));
    CHECK(committed.get_subtree("nested").count_keys() == 1);
 }
+
+// gofractally/psitri#30 (3): cursor::subtree_shared() bound the shared tree to the
+// writer context of the session the cursor came from. A shared tree is meant to
+// outlive sessions; this one read the session's freed context when it was copied
+// or dropped. (Shown by AddressSanitizer; without it the freed memory usually
+// still holds the pointer.)
+TEST_CASE("review: a shared subtree outlives the write session it was taken through", "[review]")
+{
+   temp_dir                        dir("shared-subtree");
+   auto                            db = engine::database::open(dir.path);
+   sal_art_ref::radix::shared_tree held;
+   {
+      auto ws = db->start_write_session();
+      {
+         auto tx = ws->start_transaction(0);
+         tx.create_subtree("sub").upsert("inside", "v");
+         tx.commit();
+      }
+      auto root = ws->get_root(0);
+      auto c    = root.snapshot_cursor();
+      REQUIRE(c.lower_bound("sub"));
+      REQUIRE(c.is_subtree());
+      held = c.subtree_shared();
+   }  // the write session and its writer context are gone
+   sal_art_ref::radix::shared_tree copy = held;
+   auto                            rs   = db->start_read_session();
+   auto                            c    = rs->create_cursor(copy);
+   REQUIRE(c.seek_begin());
+   CHECK(std::string(c.key()) == "inside");
+   held.reset();
+   copy.reset();
+}

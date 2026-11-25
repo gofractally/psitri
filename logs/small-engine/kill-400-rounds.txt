@@ -1,0 +1,12 @@
+Filters: [kill]
+Randomness seeded to: 17469056
+kill test: sync=none big=1 kills=101 transactions=34559 used: settled 599936, after last kill 599808, after removing every key 0 (large 0) bytes; 7.4s
+kill test: sync=fsync big=1 kills=101 transactions=11847 used: settled 599936, after last kill 599936, after removing every key 0 (large 0) bytes; 5.0s
+kill test: sync=none big=0 kills=400 transactions=277959 used: settled 599808, after last kill 599680, after removing every key 0 (large 0) bytes; 12.5s
+kill test: sync=msync_async big=0 kills=400 transactions=151748 used: settled 599680, after last kill 599808, after removing every key 0 (large 0) bytes; 17.9s
+kill test: sync=msync_sync big=0 kills=400 transactions=84839 used: settled 599808, after last kill 599680, after removing every key 0 (large 0) bytes; 15.3s
+kill test: sync=fsync big=0 kills=400 transactions=74576 used: settled 599680, after last kill 599808, after removing every key 0 (large 0) bytes; 18.2s
+kill test: sync=full big=0 kills=400 transactions=3516 used: settled 599552, after last kill 599808, after removing every key 0 (large 0) bytes; 48.4s
+===============================================================================
+All tests passed (30920 assertions in 4 test cases)
+

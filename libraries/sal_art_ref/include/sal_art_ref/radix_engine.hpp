@@ -4069,7 +4069,9 @@ namespace sal_art_ref::radix
          bool        is_subtree() const noexcept { return _valid && _is_subtree; }  // value is a subtree
          read_handle subtree() const;                                    // the nested tree (handle)
          /// The nested tree as a thread-safe owning reference (alive: this cursor pins its parent).
-         shared_tree subtree_shared() const { return shared_tree(_t, _subtree); }
+         /// Bound to the store, like share(): it may outlive the session this cursor reads
+         /// through, whose own context it must therefore not name.
+         shared_tree subtree_shared() const { return shared_tree(_t->store(), _subtree); }
          /// The tree this cursor reads, as a thread-safe owning reference.
          shared_tree share() const { return shared_tree(_t->store(), _root.address()); }
          cursor      subtree_cursor() const  // iterate it (pinned via THIS cursor's session)

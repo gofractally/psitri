@@ -504,6 +504,20 @@ namespace sal_art_ref::radix
       // descents — under NDEBUG an oversized key would overflow those buffers (silent stack
       // corruption), so it is rejected as bad input, never trusted as an invariant. The throw
       // is safe at every call site: mutate_root restores the root on exception.
+      // An object reached as a router is not one of the router kinds: the store is damaged
+      // or the engine has a bug. Following it as some other kind would read and write
+      // through the wrong layout, so the mutating descents stop here in every build. (The
+      // read-side dispatch, dispatch_hdr, still tells the compiler the case cannot happen:
+      // it is on the path of every lookup, and what a checked default costs there is to be
+      // measured before it is added.)
+      [[noreturn, gnu::cold, gnu::noinline]] static void unknown_node_kind() noexcept
+      {
+         std::fputs("sal_art_ref: an object in the tree is not a node the engine can route "
+                    "through; stopping\n",
+                    stderr);
+         std::abort();
+      }
+
       static void check_key_contract(size_t klen)
       {
          if (klen > key_val_node::max_key_len) [[unlikely]]
@@ -650,7 +664,7 @@ namespace sal_art_ref::radix
                   assert(false && "find_in on a page-model tree (use page_find_in)");
                   return false;
                case radix_kind::bitset1:
-                  __builtin_unreachable();  // not produced by the engine
+                  unknown_node_kind();  // not produced by the engine
             }
             if (!cont)
                return found;
@@ -2354,7 +2368,7 @@ namespace sal_art_ref::radix
             case radix_kind::page:  // callers resolve pages before descending
                break;
          }
-         __builtin_unreachable();
+         unknown_node_kind();
       }
       template <upsert_mode mode, class N, class Op>
       ptr_address page_router_mut(ptr_address addr, bytes D, uint32_t depth, Op&& op)
@@ -2450,7 +2464,7 @@ namespace sal_art_ref::radix
             case radix_kind::page:
                break;
          }
-         __builtin_unreachable();
+         unknown_node_kind();
       }
       // The divider's tail past `depth` compresses into a CHAIN of fresh children: each
       // node holds up to prefix_capacity tail bytes (long dividers — deep nested-prefix
@@ -2721,7 +2735,7 @@ namespace sal_art_ref::radix
             case radix_kind::page:
                break;
          }
-         __builtin_unreachable();
+         unknown_node_kind();
       }
       template <upsert_mode mode, class N>
       ptr_address divider_remove_in(ptr_address addr, bytes D, uint32_t depth,
@@ -5405,7 +5419,7 @@ namespace sal_art_ref::radix
             case radix_kind::bitset1:  // not produced by the engine
                break;
          }
-         __builtin_unreachable();
+         unknown_node_kind();
       }
 
       // ── remove descent (mirrors insert_node dispatch; routers only — a terminal value
@@ -5452,7 +5466,7 @@ namespace sal_art_ref::radix
             case radix_kind::bitset1:  // not produced by the engine
                break;
          }
-         __builtin_unreachable();
+         unknown_node_kind();
       }
 
       // Remove `key` from the subtree rooted at `addr`. Sets _removed (was it found) and,

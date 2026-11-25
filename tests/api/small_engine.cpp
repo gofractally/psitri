@@ -2154,3 +2154,59 @@ TEST_CASE("Small Engine: reopening with a limit below the store's size is refuse
       REQUIRE(m.verify(cur) == 400);
    }
 }
+
+// A session keeps its segment from one transaction to the next, whichever
+// segment that is. It used to keep it only while the segment was the highest
+// it had ever written to: after its first move to a lower-numbered one,
+// every transaction started by abandoning the segment and claiming again,
+// under the claim mutex, with a scan of all segments.
+TEST_CASE("Small Engine: a session keeps its segment across transactions after reusing one",
+          "[small][segments]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 64));
+   auto        ws = db->start_write_session();
+   const auto& st = db->store().stats();
+   const std::string value(16, 'x');
+   uint64_t          t = 0;
+   auto run = [&](uint64_t txns) {
+      for (uint64_t end = t + txns; t < end; ++t)
+      {
+         auto tx = ws->start_transaction(0);
+         tx.upsert("acct/" + std::to_string((t * 7919) % 20000), value);
+         tx.commit();
+      }
+   };
+   {
+      auto tx = ws->start_transaction(0);
+      for (int i = 0; i < 20000; ++i)
+         tx.upsert("acct/" + std::to_string(i), value);
+      tx.commit();
+   }
+   // churn until the session has gone back to a segment used before
+   const uint64_t reused_at_start = st.segments_reused.load();
+   while (st.segments_reused.load() == reused_at_start)
+   {
+      run(10000);
+      REQUIRE(t < 2'000'000);
+   }
+   const uint64_t reused_after = t;
+   const uint64_t switches     = st.range_switches.load();
+   const uint64_t claims       = st.segments_reused.load() + st.segments_grown.load();
+   const auto t0 = std::chrono::steady_clock::now();
+   run(100000);
+   const double secs =
+       std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+   const uint64_t more_switches = st.range_switches.load() - switches;
+   const uint64_t more_claims = st.segments_reused.load() + st.segments_grown.load() - claims;
+   std::printf("segments: first reuse within %llu transactions; over the next 100,000: %llu "
+               "segment switches, %llu claims, %.0f tx/s; mapped %.0f MiB\n",
+               (unsigned long long)reused_after, (unsigned long long)more_switches,
+               (unsigned long long)more_claims, 100000 / secs,
+               db->usage().mapped_bytes / 1048576.0);
+   // a switch happens when a segment fills, a few times in 100,000 small
+   // transactions; not once per transaction
+   REQUIRE(more_switches < 200);
+   REQUIRE(more_claims < 200);
+}

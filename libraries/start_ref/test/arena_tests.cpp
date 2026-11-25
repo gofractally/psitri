@@ -398,3 +398,47 @@ TEST_CASE("a segment left idle by one session can be taken by another at the cei
    REQUIRE(l1 != got);
    REQUIRE(l2 != got);
 }
+
+TEST_CASE("a run recycled from a segment the session has left does not move its fill position",
+          "[arena][segments]")
+{
+   arena_config c  = cfg(tmp_dir("fillpos"));
+   c.max_segments  = 2;
+   c.reserve_lines = 0;
+   arena a(c);
+   auto  ses = a.start_session();
+   {
+      // fill segment 0, spill into segment 1
+      auto tx = ses.start_transaction(0);
+      for (uint32_t k = 0; k < lines_per_segment + 64; ++k)
+         tx.alloc_lines(1);
+      tx.commit();
+   }
+   REQUIRE(a.num_segments() == 2);
+   for (line_idx i = 0; i < lines_per_segment; ++i)
+      a.release(i);  // segment 0 is empty again and qualifies for reuse
+   line_idx parked = null_idx;
+   {
+      auto tx = ses.start_transaction(0);
+      parked  = tx.alloc_lines(1);
+      REQUIRE(a.segment_of(parked) == 1);
+      ses.release_run(parked, 1);  // freed this transaction: parked in the hot-hole cache
+      // use up segment 1 in pairs (the parked single stays parked), moving to segment 0
+      line_idx g = 0;
+      do
+         g = tx.alloc_lines(2);
+      while (a.segment_of(g) == 1);
+      REQUIRE(a.segment_of(g) == 0);
+      // the parked line, in segment 1, comes back out while the session is in segment 0
+      REQUIRE(tx.alloc_lines(1) == parked);
+      tx.commit();
+   }
+   // The next transaction carries on in segment 0. If the recycled line had
+   // dragged the fill position up into segment 1, its floor would lie outside
+   // segment 0 and the first allocation would abandon the segment.
+   const uint64_t switches = a.stats().range_switches.load();
+   auto           tx       = ses.start_transaction(0);
+   for (int k = 0; k < 200; ++k)
+      REQUIRE(a.segment_of(tx.alloc_lines(2)) == 0);
+   REQUIRE(a.stats().range_switches.load() == switches);
+}

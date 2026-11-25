@@ -1221,14 +1221,27 @@ namespace start_ref::kv
       {
          return static_cast<database*>(ctx)->rel_push_(raw);
       }
+      // The release queue: many producers, one consumer. Any writer thread
+      // can push (writers on different roots run at the same time, and each
+      // hands over the subtrees its own operations and commits kill), so a
+      // producer first claims a position by advancing the head with a
+      // compare-exchange and only then fills its slot. The releaser treats a
+      // claimed slot that is still zero as "not written yet" and waits for
+      // it; it zeroes each slot before advancing the tail, so a position is
+      // never claimed while its slot still holds an unconsumed entry.
+      static constexpr uint64_t kRelFilled = uint64_t(1) << 63;  // a handle can itself be 0
       bool rel_push_(uint64_t raw) noexcept
       {
-         const uint32_t h = _rel_head.load(std::memory_order_relaxed);
-         const uint32_t t = _rel_tail.load(std::memory_order_acquire);
-         if (h - t >= kRelRing)
-            return false;  // full: the caller releases in the foreground
-         _rel[h % kRelRing].store(raw, std::memory_order_relaxed);
-         _rel_head.store(h + 1, std::memory_order_release);
+         uint32_t h = _rel_head.load(std::memory_order_relaxed);
+         uint32_t t;
+         do
+         {
+            t = _rel_tail.load(std::memory_order_acquire);
+            if (h - t >= kRelRing)
+               return false;  // full: the caller releases in the foreground
+         } while (!_rel_head.compare_exchange_weak(h, h + 1, std::memory_order_acq_rel,
+                                                   std::memory_order_relaxed));
+         _rel[h % kRelRing].store(raw | kRelFilled, std::memory_order_release);
          if (h == t)
             _rel_cv.notify_one();  // was empty: wake the releaser
          return true;
@@ -1248,9 +1261,15 @@ namespace start_ref::kv
                _rel_cv.wait_for(lk, std::chrono::milliseconds(2));
                continue;
             }
-            const uint64_t raw = _rel[t % kRelRing].load(std::memory_order_relaxed);
+            const uint64_t raw = _rel[t % kRelRing].load(std::memory_order_acquire);
+            if (!(raw & kRelFilled))
+            {
+               std::this_thread::yield();  // claimed, about to be written
+               continue;
+            }
             const root_ptr p = decode_root(raw);
             v.cow_release(p);  // non-deferring allocator: full cascade here
+            _rel[t % kRelRing].store(0, std::memory_order_release);
             _rel_tail.store(t + 1, std::memory_order_release);
          }
       }

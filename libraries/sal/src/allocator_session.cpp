@@ -37,6 +37,23 @@ namespace sal
       if (_session_num == allocator_session_number(-1))
          return;
       finalize_active_segment();
+      // The queue belongs to the session NUMBER, in mapped state. Left
+      // undrained, the segment just finalized stays flagged active for good:
+      // the next open resets the queue, and a later session that is given
+      // this number only finds it if it happens to sync. So it is drained
+      // here, at the allocator's configured sync level: everything committed
+      // in the segment was already synced at the level its commit asked for,
+      // and what follows the last commit is not part of any commit.
+      try
+      {
+         drain_dirty_segments(_sega._mapped_state->_config.sync_mode, _sega._mapped_state->_config,
+                              {});
+      }
+      catch (...)
+      {
+         // A destructor cannot report it; the segments stay flagged active
+         // (never compacted), which wastes space and loses nothing.
+      }
       _sega.release_session_num(_session_num);
       _session_num = allocator_session_number(-1);
    }
@@ -124,10 +141,21 @@ namespace sal
              "active_sync_padding");
       }
 
-      // Process finalized dirty segments
-      segment_number seg_num = _alloc_seg_num;
-      if (seg_num != segment_number(-1))
-         seg_num = _dirty_segments.pop();
+      drain_dirty_segments(st, cfg, user_data);
+      _sega.sync(st);
+   }
+
+   // Every segment this session finalized since its last sync: write its
+   // terminal sync header, make it read-only, sync it at `st`, and hand it to
+   // the compactor. This runs whether or not the session has an active
+   // segment: after next_allocation_segment() (a big value's chunk placement)
+   // it has none, and the commit that follows must still make what it wrote
+   // read-only and durable.
+   void allocator_session::drain_dirty_segments(sync_type             st,
+                                                const runtime_config& cfg,
+                                                std::span<char>       user_data)
+   {
+      segment_number seg_num = _dirty_segments.pop();
       while (seg_num != segment_number(-1))
       {
          auto seg = _sega.get_segment(seg_num);
@@ -191,6 +219,5 @@ namespace sal
                 seg_num, seg->age_accumulator.average());
          seg_num = _dirty_segments.pop();
       }
-      _sega.sync(st);
    }
 }  // namespace sal

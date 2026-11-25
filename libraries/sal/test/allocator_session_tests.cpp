@@ -157,3 +157,87 @@ TEST_CASE("allocator destroys its utility session before unmapping state", "[sal
    }
    fs::remove_all(path);
 }
+
+namespace
+{
+   sal::seg_alloc_dump::segment_info segment_info_of(sal::allocator& a, sal::segment_number s)
+   {
+      auto d = a.dump();
+      for (auto& i : d.segments)
+         if (i.segment_num == s)
+            return i;
+      FAIL("segment not in the dump");
+      return {};
+   }
+}  // namespace
+
+// gofractally/psitri#25. A session that has just abandoned its active segment
+// (next_allocation_segment: a big value's chunk placement does this) has no
+// active segment when the commit's sync runs. The sync must still drain the
+// segment it finalized: make what was written read-only, sync it, and hand it
+// to the compactor.
+TEST_CASE("sync drains finalized segments when the session has no active segment",
+          "[sal][session][dirty]")
+{
+   const auto path = temp_dir("sal_sync_without_active_segment_test");
+   {
+      sal::runtime_config cfg;
+      cfg.max_pinned_cache_size_mb             = 0;
+      cfg.compact_pinned_unused_threshold_mb   = 255;
+      cfg.compact_unpinned_unused_threshold_mb = 255;
+      sal::allocator a(path, cfg, false);
+      a.register_type_ops<tail_test_node>();
+      a.start_background_threads();
+
+      auto ses = a.create_session();
+      auto z   = ses->alloc<tail_test_node>(uint32_t(1 << 20), sal::alloc_hint{});
+      auto seg = a.resolve(z).second.segment();
+      ses->next_allocation_segment();
+      ses->sync(sal::sync_type::none);
+
+      auto info = segment_info_of(a, seg);
+      CHECK(ses->is_read_only(z));
+      CHECK(info.is_finalized);
+      CHECK(info.hdr_read_only);
+      CHECK(info.is_read_only);  // the compactor may take it
+      ses->release(z);
+   }
+   fs::remove_all(path);
+}
+
+// gofractally/psitri#25. The segment a session held when it was destroyed must
+// not stay flagged active for good: nothing would ever compact it.
+TEST_CASE("the last segment of a destroyed session becomes compactable", "[sal][session][dirty]")
+{
+   const auto path = temp_dir("sal_destroyed_session_segment_test");
+   {
+      sal::runtime_config cfg;
+      cfg.max_pinned_cache_size_mb             = 0;
+      cfg.compact_pinned_unused_threshold_mb   = 255;
+      cfg.compact_unpinned_unused_threshold_mb = 255;
+      sal::allocator a(path, cfg, false);
+      a.register_type_ops<tail_test_node>();
+      a.start_background_threads();
+
+      sal::segment_number seg;
+      {
+         auto ses = a.create_session();
+         auto z   = ses->alloc<tail_test_node>(uint32_t(1 << 20), sal::alloc_hint{});
+         seg      = a.resolve(z).second.segment();
+         ses->sync(sal::sync_type::none);
+         ses->release(z);
+      }
+      auto info = segment_info_of(a, seg);
+      CHECK(info.is_finalized);
+      CHECK(info.hdr_read_only);
+      CHECK(info.is_read_only);
+
+      // A session given the same number finds nothing left over to drain.
+      auto next = a.create_session();
+      next->sync(sal::sync_type::none);
+      auto again = segment_info_of(a, seg);
+      CHECK(again.is_read_only);
+      CHECK(again.freed_bytes == info.freed_bytes);
+   }
+   fs::remove_all(path);
+}

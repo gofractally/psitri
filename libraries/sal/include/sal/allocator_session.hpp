@@ -333,6 +333,7 @@ namespace sal
 
       void init_active_segment();
       void finalize_active_segment();
+      void drain_dirty_segments(sync_type st, const runtime_config& cfg, std::span<char> user_data);
 
       //   void end_modify();
       //   bool try_modify_segment(segment_number segment_num);

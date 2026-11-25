@@ -16,59 +16,28 @@ namespace sal_art_ref
    // radix_node_headroom + the default node lifecycle (alloc_size/head_bytes/head_size/
    // free_heap/destroy) live on radix_impl in radix_node.hpp; nodes inherit them and only
    // setlist overrides head_size()/free_heap() for its wide (index-past-CL0) layout.
-   // The concrete node taxonomy (type-only; layouts byte-pinned by static_assert,
-   // no algorithm bodies). Maps to ART's N4/N16/N48/N256 dispatch classes:
+   // The concrete router nodes the engine produces (layouts byte-pinned by static_assert).
+   // They map to ART's N16/N48/N256 dispatch classes:
    //
-   //   encoding         N        total CL   dispatch_shape   refcount
-   //   suffix_value     terminal     1       r1              none
-   //   prefix_next      1            1       r1              none
-   //   setlist_tiny    <4            1       r1 (linear)     none
-   //   setlist<T>      <=16          1       r1 (SIMD)       none
-   //   bitset1         ~16..50       1       r1              large_radix K=1
-   //   bitset_r2       ~45..179      3       r2 (b>>7)       large_radix K=2
-   //   bitset_r4       ~96..256      5       r4 (b>>6)       large_radix K=4
-   //   full_radix      256           9       r8 (b>>5)       large_radix K=4
+   //   encoding         N        total CL   dispatch_shape   child ownership
+   //   setlist<T>      <=16          1       r1 (SIMD)       one reference per child
+   //   bitset_c1_*     see radix_c1.hpp
+   //   bitset_r2       ~45..179      3       r2 (b>>7)       per-range counters
+   //   bitset_r4       ~96..256      5       r4 (b>>6)       per-range counters
+   //   full_radix      256           9       r8 (b>>5)       per-range counters
    //
-   // The CL0 "variable region" (radix_impl::prefix_data) holds the inline prefix,
-   // and for the in-CL0 encodings (setlist*, bitset1, suffix_value) the branch
-   // payload as well; the multi-cacheline encodings put branches in trailing CLs.
+   // The CL0 "variable region" (radix_impl::prefix_data) holds the inline prefix, and for
+   // setlist the branch payload as well; the multi-cacheline encodings put branches in
+   // trailing cachelines. (Type id base+4 was a one-cacheline bitset that was never
+   // produced; the id stays reserved, see radix_type_ids.hpp.)
 
    // ---- fixed-field structs (separate complete types for the CRTP param) ----
-   struct empty_fixed
-   {
-   };
-   struct prefix_next_fixed
-   {
-      smart_address next;  // the single child (node ptr or inline tail)
-   };
-   struct setlist_tiny_fixed
-   {
-      uint8_t nstems;
-   };
    struct setlist_fixed
    {
       uint16_t nstems;
    };
 
    // ---- R1, sparse (no refcount tree) ----
-
-   /// A terminal: inline key suffix + value live in the CL0 variable region.
-   struct suffix_value_node : radix_impl<suffix_value_node, empty_fixed>
-   {
-      static constexpr dispatch_shape tier = dispatch_shape::r1;
-   };
-
-   /// Path compression: shared prefix + a single `next` child.
-   struct prefix_next_node : radix_impl<prefix_next_node, prefix_next_fixed>
-   {
-      static constexpr dispatch_shape tier = dispatch_shape::r1;
-   };
-
-   /// ART Node4 analogue: < 4 stems, linear (unrolled) dispatch.
-   struct setlist_tiny_node : radix_impl<setlist_tiny_node, setlist_tiny_fixed>
-   {
-      static constexpr dispatch_shape tier = dispatch_shape::r1;
-   };
 
    /// ART Node16 analogue (also the multi-byte stem variant): up to ~16 stems,
    /// SIMD dispatch. StemType u8/u16/u32 consumes 1/2/4 key bytes per node.
@@ -396,12 +365,6 @@ namespace sal_art_ref
 
    // ---- bitset family (large_radix; group-counter COW) ----
 
-   /// 1 cacheline: present<256> + compact branches share the CL0 variable region.
-   struct bitset1_node : large_radix<bitset1_node, 1>
-   {
-      static constexpr dispatch_shape tier = dispatch_shape::r1;
-   };
-
    /// The segmented bitset tier, parameterized by `SegShift` (key bits per segment):
    ///   SegShift=7 → r2 (2 × radix_bitset<128>, byte>>7), 3 cachelines;
    ///   SegShift=6 → r4 (4 × radix_bitset<64>,  byte>>6), 5 cachelines.
@@ -591,12 +554,8 @@ namespace sal_art_ref
       // alloc_size / head_bytes / head_size / free_heap / destroy: inherited from radix_impl.
    };
 
-   static_assert(sizeof(suffix_value_node) == 128);
-   static_assert(sizeof(prefix_next_node) == 128);
-   static_assert(sizeof(setlist_tiny_node) == 128);
    static_assert(sizeof(setlist_node<uint8_t>) == 128);
    static_assert(sizeof(setlist_node<uint32_t>) == 128);
-   static_assert(sizeof(bitset1_node) == 128, "1 cacheline");
    static_assert(sizeof(bitset_r2_node) == 384, "3 cachelines");
    static_assert(sizeof(bitset_r4_node) == 640, "5 cachelines");
    static_assert(sizeof(full_radix_node) == 1152, "9 cachelines");

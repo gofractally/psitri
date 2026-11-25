@@ -66,6 +66,7 @@ if(SAL_BUILD_TESTS)
         test/implicit_ref_pool_tests.cpp
         test/min_index_tests.cpp
         test/allocator_session_tests.cpp
+        test/release_tests.cpp
         test/read_cache_tests.cpp
         test/atomic_ptr_tests.cpp
     )

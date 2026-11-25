@@ -146,3 +146,53 @@ TEST_CASE("the three roles of the read lock queue never see more to pop than was
    CHECK(bad.load() == 0);
    CHECK(pops.load() > 0);
 }
+
+#include <sal/mapped_memory/segment.hpp>
+
+// A segment's pinned flag is set and cleared by one thread while another moves
+// the segment through its life cycle in the same word. Neither may undo the
+// other's change.
+TEST_CASE("a segment's pinned flag survives concurrent state changes", "[sal][segment_meta]")
+{
+   auto meta = std::make_unique<sal::mapped_memory::segment_meta>();
+   meta->recovered_free();
+
+   std::atomic<int>  round{0};
+   std::atomic<int>  done{0};
+   std::atomic<bool> stop{false};
+   const int         rounds = 200000;
+   int               lost   = 0;
+
+   std::thread cycler(
+       [&]
+       {
+          int seen = 0;
+          while (!stop.load(std::memory_order_relaxed))
+          {
+             int r = round.load(std::memory_order_acquire);
+             if (r == seen)
+                continue;
+             seen = r;
+             meta->added_to_provider_queue();
+             meta->allocated_by_session();
+             meta->prepare_for_compaction(1);
+             meta->added_to_read_lock_queue();
+             meta->added_to_free_list();
+             done.store(r, std::memory_order_release);
+          }
+       });
+   for (int r = 1; r <= rounds; ++r)
+   {
+      const bool pin = r & 1;
+      round.store(r, std::memory_order_release);
+      meta->set_pinned(pin);
+      while (done.load(std::memory_order_acquire) != r)
+      {
+      }
+      if (meta->is_pinned() != pin)
+         ++lost;
+   }
+   stop = true;
+   cycler.join();
+   CHECK(lost == 0);
+}

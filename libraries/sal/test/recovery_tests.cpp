@@ -232,3 +232,51 @@ TEST_CASE("a commit stamp converts to the age clock by how long ago it was", "[s
    CHECK(*sal::age_time_of_commit_stamp(sal::usec_timestamp(*just + 3'600'000'000ull)) <=
          now_age + 50);
 }
+
+// A finalized segment is closed by a sync header that runs to the end of its
+// usable space, which is 64 bytes short of a grain boundary, so that header's
+// size is not a whole number of grains. Power-loss recovery that keeps only
+// what was flushed must still accept it: what lies in front of it was flushed
+// with it. (It was rejected, and everything between the last ordinary header
+// and the closing one was dropped: after a clean close, the objects the
+// compactor had moved last.)
+TEST_CASE("recovery keeps what the closing sync header of a segment covers",
+          "[sal][recovery][durable_prefix]")
+{
+   const auto path = fs::temp_directory_path() / "sal_recover_closing_header_test";
+   fs::remove_all(path);
+   fs::create_directories(path);
+   {
+      sal::allocator a(path, recovery_test_config(), false);
+      a.register_type_ops<recovery_test_node>();
+      a.start_background_threads();
+      auto committer = a.create_session();
+      {
+         // Another session writes the object and never syncs: like the compactor's copy of
+         // a moved object when the store is closed.
+         auto other = a.create_session();
+         auto first =
+             other->alloc<recovery_test_node>(uint32_t(128), sal::alloc_hint{}, uint64_t(0x1111));
+         other->sync(sal::sync_type::none);  // an ordinary header, then more data
+         auto adr =
+             other->alloc<recovery_test_node>(uint32_t(128), sal::alloc_hint{}, uint64_t(0xEEEE));
+         (void)committer->set_root(sal::root_object_number(0),
+                                   sal::smart_ptr<recovery_test_node>(committer, adr),
+                                   sal::sync_type::none);
+         other->release(first);
+      }  // the session ends: its segment is finalized and closed with a header
+   }
+   {
+      sal::allocator             a(path, recovery_test_config(), false);
+      sal::allocator::recovery_hooks hooks;
+      hooks.truncate_unsynced_tails = true;
+      hooks.fail_on_unresolved      = true;
+      hooks.restart_threads         = false;
+      a.set_recovery_hooks(hooks);
+      a.register_type_ops<recovery_test_node>();
+      REQUIRE_NOTHROW(a.recover_from_power_loss());
+      auto ses = a.create_session();
+      CHECK(root_magic(a, *ses) == 0xEEEE);
+   }
+   fs::remove_all(path);
+}

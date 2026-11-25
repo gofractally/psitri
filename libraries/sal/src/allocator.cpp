@@ -1217,7 +1217,11 @@ namespace sal
       {
          const auto* ah   = reinterpret_cast<const alloc_header*>(seg->data + pos);
          const auto  size = ah->size();
-         if (size == 0 || size % cacheline_size != 0 || size > limit - pos)
+         // Every object is a whole number of grains, except the sync header that closes a
+         // finalized segment: it runs to the end of the usable space, which is one footer
+         // (64 bytes) short of a grain boundary.
+         const bool whole_grains = size % cacheline_size == 0 || size == limit - pos;
+         if (size == 0 || !whole_grains || size > limit - pos)
             break;
          if (ah->type() == header_type::sync_head)
          {

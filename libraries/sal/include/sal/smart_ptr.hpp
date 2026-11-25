@@ -415,12 +415,8 @@ namespace sal
    {
       if (_observed_ptr) [[likely]]
       {
-         // if (_obj._asession->config_update_checksum_on_modify())
-         //    _observed_ptr->update_checksum();
-         // else
-         _observed_ptr->clear_checksum();
+         _observed_ptr->clear_checksum();  // the object changed; the compactor recomputes it
       }
-      // perform post modify actions here, like update checksum
    }
 
 }  // namespace sal

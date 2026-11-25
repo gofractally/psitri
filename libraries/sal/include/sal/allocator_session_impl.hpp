@@ -396,27 +396,35 @@ namespace sal
    inline void allocator_session::release(ptr_address adr) noexcept
    {
       assert(check_thread_ownership());
-      auto& cb   = get(adr);
-      auto  pre  = cb.load(std::memory_order_relaxed);  // custom marker, before the decrement
-      auto  prev = cb.release();                         // single atomic decrement
-      if (prev.ref > 1)                                  // others still own it — fast path, done
+      auto& cb = get(adr);
+      // Others still own it: one decrement and done.
+      if (cb.release_if_shared())
          return;
-      // We took the last reference: `adr` is at ref 0 and EXCLUSIVELY ours (no thread can hold or
-      // acquire a reference to a zero-ref object), so we destroy it with no races.
+      // We hold the ONLY reference, so no other thread can hold or acquire one and the count
+      // stays at 1 until this thread changes it. It must not reach zero before the object's
+      // bytes are safe from recycling: the compactor treats a zero count as already freed and
+      // leaves the object behind when it empties the segment, after which the segment can be
+      // reused while the destroy below, or the release thread's, still reads the object from
+      // it. Reading recycled bytes as a node releases references that belong to live objects
+      // of another tree. So: either the reference is handed on as it is, or the read lock is
+      // taken first and only then is the count dropped.
+      auto pre = cb.load(std::memory_order_relaxed);  // custom marker, before the decrement
       if (is_custom_cb(pre))  // custom CB: no object to destroy, just notify + free
       {
+         (void)cb.release();
          if (_sega._on_custom_cb_released) [[unlikely]]
             _sega._on_custom_cb_released(pre.cacheline_offset);
          _ptr_alloc.free(adr);
          return;
       }
-      // Mid-cascade and out of budget → spill: reclaim to ref 1 (safe, we own it) and hand to the
-      // background release thread so a huge drop can't stall this thread unboundedly. A session
-      // marked defer_destroy (read sessions: dropping a pinned snapshot must never run the dead
-      // lineage's destroy cascade on the reader thread) spills EVERY last-ref release.
+      // Mid-cascade and out of budget → spill: hand our one reference to the background
+      // release thread so a huge drop can't stall this thread unboundedly. A session marked
+      // defer_destroy (read sessions: dropping a pinned snapshot must never run the dead
+      // lineage's destroy cascade on the reader thread) spills EVERY last-ref release. The
+      // count is not touched: the queue entry now owns the reference, and the release thread
+      // drops it under its own read lock.
       if (_defer_destroy || _destroy_budget == 0)
       {
-         cb.set_ref(1);
          if (_release_queue.try_push(adr)) [[likely]]
          {
 #ifdef SAL_RELEASE_DEBUG_COUNTERS
@@ -426,21 +434,13 @@ namespace sal
 #endif
             return;
          }
-         // queue full (rare): fall through and destroy inline anyway. We just published
-         // ref=1 for the queue's benefit — RECLAIM it (CAS, racing only the compactor's
-         // cas_move) or the control stays resurrected at (ref=1, loc=freed-bytes) after
-         // the inline destroy below: every later compaction then re-moves the corpse and
-         // double-counts its bytes (freed_space overflow, file bloat, child re-release).
-         // The CAS also refreshes loc — the compactor may have relocated the object
-         // between set_ref(1) and here, so destroy must use the CURRENT location.
+         // queue full (rare): destroy inline. We still hold the one reference.
 #ifdef SAL_RELEASE_DEBUG_COUNTERS
          ++g_sal_spill_fallthrough;
 #endif
 #if PSITRI_DEEP_INVARIANTS
-         fprintf(stderr, "SPILL-FALLTHROUGH: adr=%u queue full — reclaiming for inline destroy\n",
-                 *adr);
+         fprintf(stderr, "SPILL-FALLTHROUGH: adr=%u queue full — destroying inline\n", *adr);
 #endif
-         prev = cb.take_for_destroy();
       }
       const bool top = (_destroy_budget == UINT32_MAX);
       if (top)
@@ -450,6 +450,12 @@ namespace sal
       }
       if (_destroy_budget != UINT32_MAX && _destroy_budget != 0)
          --_destroy_budget;
+
+      // The read lock is held (taken above when this is the top of a cascade, by the top
+      // otherwise), so the bytes cannot be recycled from now on. Drop the last reference: the
+      // word returned carries the object's CURRENT location, wherever the compactor moved it
+      // while it was still referenced; at zero it is not moved again.
+      auto prev = cb.release();
 
       // Destroy `adr` via the fast templated per-tier destroy (NOT the std::function vtable
       // visit_children) — it releases each child through release() above, so the cascade unwinds

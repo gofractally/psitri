@@ -3792,3 +3792,434 @@ TEST_CASE("Small Engine: three writers on two segments at the limit can always r
    db->flush_releases();
    REQUIRE(db->usage().used_bytes <= 64 * 128);
 }
+
+// ── the remove reserve over time (gofractally/psitri#39) ───────────────────
+namespace
+{
+   struct reserve_run
+   {
+      uint64_t    rounds = 0, refused_removes = 0, mixed_refused = 0;
+      uint64_t    start_room = 0, least_room = UINT64_MAX, keys = 0;
+      std::string error;
+   };
+   std::string reserve_key(bool binary, const char* prefix, uint64_t n)
+   {
+      if (!binary)
+         return scattered_key(prefix, n);
+      // eight scrambled bytes: every branch width, no shared prefixes to speak of
+      uint64_t h = (n + 1) * 0x9E3779B97F4A7C15ull;
+      h ^= h >> 29;
+      h *= 0xBF58476D1CE4E5B9ull;
+      h ^= uint64_t(uint8_t(prefix[0])) << 56;
+      return std::string(reinterpret_cast<const char*>(&h), 8);
+   }
+   // The store at `dir` (two segments) is kept at its limit. Each round
+   // removes one randomly chosen key in a transaction of its own and then
+   // writes new keys, one per transaction, until refused. After the releases
+   // of each round have settled the reserve must hold what it held at the
+   // start, and no remove may ever be refused. `mixed` adds, every tenth
+   // round, a transaction that removes two keys and then tries an upsert.
+   void reserve_rounds(database& db, reserve_run& out, uint64_t rounds, uint64_t seed, bool binary,
+                       bool mixed)
+   {
+      auto                     ws = db.start_write_session();
+      std::mt19937_64          rng(seed);
+      std::vector<std::string> keys;
+      {
+         auto rs  = db.start_read_session();
+         auto cur = rs->create_cursor(0);
+         for (cur.seek_begin(); !cur.is_end(); cur.next())
+            keys.emplace_back(cur.key());
+      }
+      uint64_t next = seed << 32;  // fresh keys every call
+      auto     fill = [&](const char* prefix) {
+         for (;;)
+         {
+            const std::string k = reserve_key(binary, prefix, next);
+            try
+            {
+               auto tx = ws->start_transaction(0);
+               tx.upsert(k, std::string(20 + rng() % 171, char('a' + rng() % 26)));
+               tx.commit();
+            }
+            catch (const engine::storage_full&)
+            {
+               return;
+            }
+            ++next;
+            keys.push_back(k);
+         }
+      };
+      auto room = [&] {
+         db.flush_releases();
+         return uint64_t(db.store().reserve_free_lines());
+      };
+      fill("c");
+      if (!out.start_room)
+         out.start_room = room();
+      for (uint64_t r = 0; r < rounds && out.error.empty(); ++r, ++out.rounds)
+      {
+         auto take = [&] {
+            const size_t      pick = rng() % keys.size();
+            const std::string k    = keys[pick];
+            keys[pick]             = keys.back();
+            keys.pop_back();
+            return k;
+         };
+         try
+         {
+            auto tx = ws->start_transaction(0);
+            if (tx.remove(take()) != 0)
+               out.error = "a committed key was missing";
+            if (mixed && r % 10 == 9)
+            {
+               if (tx.remove(take()) != 0)
+                  out.error = "a committed key was missing";
+               const std::string k = reserve_key(binary, "m", next++);
+               try
+               {
+                  tx.upsert(k, std::string(150, 'm'));  // ordinary: may be refused, may not
+                  keys.push_back(k);
+               }
+               catch (const engine::storage_full&)
+               {
+                  ++out.mixed_refused;
+                  tx.abort();  // an ordinary write was refused: the transaction is the caller's to end
+                  continue;    // (its two removes are undone; the keys are simply forgotten here)
+               }
+            }
+            tx.commit();
+         }
+         catch (const engine::storage_full& e)
+         {
+            ++out.refused_removes;
+            out.error = std::string("a remove was refused in round ") + std::to_string(out.rounds) +
+                        ": " + e.what();
+            break;
+         }
+         fill("r");
+         const uint64_t now = room();
+         out.least_room     = std::min(out.least_room, now);
+         if (now < out.start_room)
+            out.error = "reserve room fell to " + std::to_string(now) + " lines from " +
+                        std::to_string(out.start_room) + " in round " + std::to_string(out.rounds);
+      }
+      out.keys = keys.size();
+   }
+   void report(const char* what, const reserve_run& run)
+   {
+      std::printf("%s: %llu rounds, %llu keys; reserve room at the start %llu lines, least seen "
+                  "after a round %llu; removes refused %llu\n",
+                  what, (unsigned long long)run.rounds, (unsigned long long)run.keys,
+                  (unsigned long long)run.start_room, (unsigned long long)run.least_room,
+                  (unsigned long long)run.refused_removes);
+      std::fflush(stdout);
+   }
+}  // namespace
+
+// The review's reproduction: digit keys, values of 20 to 190 bytes, one
+// session, a clean close and reopen every 300 rounds. The reserve used to
+// lose a little at every open until nothing was left (by round 12,327) and
+// every remove was refused. PSITRI_SMALL_RESERVE_ROUNDS scales it.
+TEST_CASE("Small Engine: the remove reserve is whole after every round, across clean reopens",
+          "[small][limit][reserve][reserve-reopen]")
+{
+   const uint64_t rounds = env_u64("PSITRI_SMALL_RESERVE_ROUNDS", 30000);
+   temporary_directory tmp;
+   const auto          cfg = small_config(psitri::sync_mode::none, 2);
+   reserve_run         run;
+   for (uint64_t epoch = 0; run.rounds < rounds && run.error.empty(); ++epoch)
+   {
+      auto db = database::open(tmp.path, psitri::open_mode::create_or_open, cfg);
+      REQUIRE_FALSE(db->recovered_on_open());
+      reserve_rounds(*db, run, std::min<uint64_t>(300, rounds - run.rounds), epoch + 1, false, false);
+   }
+   report("reserve, clean reopens", run);
+   INFO(run.error);
+   REQUIRE(run.error.empty());
+   REQUIRE(run.refused_removes == 0);
+   REQUIRE(run.start_room == 2048);  // a sixty-fourth of two segments
+   REQUIRE(run.least_room >= run.start_room);
+}
+
+// The same with every epoch ending in SIGKILL in the middle of a
+// transaction, so that every open is a recovery.
+TEST_CASE("Small Engine: the remove reserve is whole after every round, across kills",
+          "[small][limit][reserve][reserve-kill]")
+{
+   const uint64_t rounds = env_u64("PSITRI_SMALL_RESERVE_ROUNDS", 30000);
+   temporary_directory tmp;
+   const auto          cfg = small_config(psitri::sync_mode::none, 2);
+   reserve_run         total;
+   for (uint64_t epoch = 0; total.rounds < rounds && total.error.empty(); ++epoch)
+   {
+      int fds[2];
+      REQUIRE(::pipe(fds) == 0);
+      std::fflush(nullptr);
+      const pid_t pid = ::fork();
+      REQUIRE(pid >= 0);
+      if (pid == 0)
+      {
+         ::close(fds[0]);
+         reserve_run run;
+         run.start_room = total.start_room;
+         try
+         {
+            auto db = database::open(tmp.path, psitri::open_mode::create_or_open, cfg);
+            if (epoch && !db->recovered_on_open())
+               run.error = "the open after a kill did not recover";
+            reserve_rounds(*db, run, 250, epoch + 1, false, false);
+            // die with a transaction half done
+            auto ws = db->start_write_session();
+            auto tx = ws->start_transaction(0);
+            tx.upsert("half-done", std::string(100, 'h'));
+            uint64_t numbers[5] = {run.rounds, run.refused_removes, run.start_room,
+                                   run.least_room, run.keys};
+            (void)!::write(fds[1], numbers, sizeof(numbers));
+            (void)!::write(fds[1], run.error.data(), run.error.size());
+            ::kill(::getpid(), SIGKILL);
+         }
+         catch (const std::exception& e)
+         {
+            std::fprintf(stderr, "reserve kill child: %s\n", e.what());
+         }
+         ::_exit(3);
+      }
+      ::close(fds[1]);
+      uint64_t numbers[5] = {};
+      REQUIRE(::read(fds[0], numbers, sizeof(numbers)) == ssize_t(sizeof(numbers)));
+      char    text[512];
+      ssize_t n;
+      while ((n = ::read(fds[0], text, sizeof(text))) > 0)
+         total.error.append(text, size_t(n));
+      ::close(fds[0]);
+      int status = 0;
+      ::waitpid(pid, &status, 0);
+      REQUIRE(WIFSIGNALED(status));
+      total.rounds += numbers[0];
+      total.refused_removes += numbers[1];
+      total.start_room = numbers[2];
+      total.least_room = std::min(total.least_room, numbers[3]);
+      total.keys       = numbers[4];
+   }
+   report("reserve, kills", total);
+   INFO(total.error);
+   REQUIRE(total.error.empty());
+   REQUIRE(total.refused_removes == 0);
+   REQUIRE(total.least_room >= total.start_room);
+   // and what is left is a whole store
+   auto db = database::open(tmp.path, psitri::open_mode::open_existing, cfg);
+   REQUIRE(db->recovered_on_open());
+   REQUIRE(db->store().reserve_free_lines() >= total.start_room);
+}
+
+// Eight-byte binary keys: a store like this reports full with thousands of
+// scattered lines free, which is exactly when a count of free lines says
+// nothing about whether a remove can get a run.
+TEST_CASE("Small Engine: the remove reserve is whole after every round with binary keys",
+          "[small][limit][reserve][reserve-binary]")
+{
+   const uint64_t rounds = env_u64("PSITRI_SMALL_RESERVE_ROUNDS", 30000) / 3;
+   temporary_directory tmp;
+   const auto          cfg = small_config(psitri::sync_mode::none, 2);
+   reserve_run         run;
+   for (uint64_t epoch = 0; run.rounds < rounds && run.error.empty(); ++epoch)
+   {
+      auto db = database::open(tmp.path, psitri::open_mode::create_or_open, cfg);
+      reserve_rounds(*db, run, std::min<uint64_t>(500, rounds - run.rounds), epoch + 1, true, false);
+      if (epoch == 0)
+      {
+         db->flush_releases();
+         const auto u = db->usage();
+         std::printf("reserve, binary keys: full at %.2f of %.2f MiB used, reserve %.2f MiB\n",
+                     u.used_bytes / 1048576.0, u.limit_bytes / 1048576.0,
+                     u.reserve_bytes / 1048576.0);
+      }
+   }
+   report("reserve, binary keys", run);
+   INFO(run.error);
+   REQUIRE(run.error.empty());
+   REQUIRE(run.refused_removes == 0);
+   REQUIRE(run.least_room >= run.start_room);
+   // and from there the store can be emptied, one key per transaction
+   auto db = database::open(tmp.path, psitri::open_mode::open_existing, cfg);
+   {
+      auto                     ws = db->start_write_session();
+      std::vector<std::string> keys;
+      {
+         auto rs  = db->start_read_session();
+         auto cur = rs->create_cursor(0);
+         for (cur.seek_begin(); !cur.is_end(); cur.next())
+            keys.emplace_back(cur.key());
+      }
+      for (const auto& k : keys)
+      {
+         auto tx = ws->start_transaction(0);
+         REQUIRE(tx.remove(k) == 0);
+         tx.commit();
+      }
+   }
+   db->flush_releases();
+   REQUIRE(db->usage().used_bytes <= 64 * 128);
+}
+
+// Transactions that remove and then write. Lines a remove drew from the
+// reserve and then let go again inside the transaction must not be picked up
+// by its ordinary writes: after every such transaction, committed or
+// aborted, the reserve is whole.
+TEST_CASE("Small Engine: a transaction's ordinary writes get nothing from the reserve",
+          "[small][limit][reserve][reserve-mixed]")
+{
+   const uint64_t rounds = env_u64("PSITRI_SMALL_RESERVE_ROUNDS", 30000) / 6;
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 2));
+   reserve_run run;
+   reserve_rounds(*db, run, rounds, 1, false, true);
+   report("reserve, removes and writes mixed", run);
+   std::printf("reserve, mixed: %llu of the mixed transactions had their write refused\n",
+               (unsigned long long)run.mixed_refused);
+   INFO(run.error);
+   REQUIRE(run.error.empty());
+   REQUIRE(run.refused_removes == 0);
+   REQUIRE(run.least_room >= run.start_room);
+}
+
+// A remove at the ceiling claims no segment, sweeps nothing and waits for
+// nothing, so a writer sitting in a transaction on another root cannot hold
+// it up; and a write that has to be refused is refused at once.
+TEST_CASE("Small Engine: a remove at the ceiling is not held up by another writer",
+          "[small][limit][reserve][no-wait]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 2));
+   auto a = db->start_write_session();
+   auto b = db->start_write_session();
+   {
+      auto tx = a->start_transaction(1);
+      for (int j = 0; j < 500; ++j)
+         tx.upsert(scattered_key("a", j), std::string(100, 'a'));
+      tx.commit();
+   }
+   std::vector<std::string> keys;
+   for (uint64_t n = 0;; ++n)
+   {
+      try
+      {
+         auto tx = b->start_transaction(0);
+         tx.upsert(scattered_key("b", n), std::string(100, 'b'));
+         tx.commit();
+         keys.push_back(scattered_key("b", n));
+      }
+      catch (const engine::storage_full&)
+      {
+         break;
+      }
+   }
+   // writer A sits in a transaction on root 1, in its segment, for the duration
+   auto held = a->start_transaction(1);
+   REQUIRE(held.remove(scattered_key("a", 7)) == 0);
+
+   using clock = std::chrono::steady_clock;
+   auto ms = [](clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+   std::vector<double> removes, refusals;
+   for (int k = 0; k < 400; ++k)
+   {
+      const auto t0 = clock::now();
+      auto       tx = b->start_transaction(0);
+      REQUIRE(tx.remove(keys[size_t(k) * 37 % keys.size()]) >= -1);
+      tx.commit();
+      removes.push_back(ms(clock::now() - t0));
+      if (k % 40 == 0)
+      {
+         const auto t1 = clock::now();
+         bool       refused = false;
+         try
+         {
+            auto tx2 = b->start_transaction(0);
+            for (int j = 0; j < 400; ++j)
+               tx2.upsert("more/" + std::to_string(j), std::string(1500, 'x'));
+         }
+         catch (const engine::storage_full&)
+         {
+            refused = true;
+         }
+         if (refused)
+            refusals.push_back(ms(clock::now() - t1));
+      }
+   }
+   held.abort();
+   std::sort(removes.begin(), removes.end());
+   std::sort(refusals.begin(), refusals.end());
+   double sum = 0;
+   for (size_t i = 0; i < removes.size() * 9 / 10; ++i)
+      sum += removes[i];
+   const double typical = sum / double(removes.size() * 9 / 10);
+   std::printf("no wait: 400 single-key removes beside an open transaction: fastest nine tenths "
+               "average %.3f ms, median %.3f ms, slowest %.3f ms; %zu refused writes, quickest "
+               "%.3f ms\n",
+               typical, removes[removes.size() / 2], removes.back(), refusals.size(),
+               refusals.empty() ? 0.0 : refusals.front());
+   // with the 20 ms wait these were 5 ms on average and 21 ms at the least
+   REQUIRE(typical < 1.0);
+   REQUIRE_FALSE(refusals.empty());
+   REQUIRE(refusals.front() < 10.0);
+}
+
+// A stop while the files were being grown, or trimmed after such a stop, can
+// leave the free map and the count file longer than the recorded segment
+// count even when the data file is not. All three are mapped whole, so all
+// three count towards the size the limit must cover.
+TEST_CASE("Small Engine: map files longer than the segment count are counted against the limit",
+          "[small][open][limit][shrink][trim]")
+{
+   namespace fs = std::filesystem;
+   temporary_directory tmp;
+   const model         m{2000, 20};
+   uint64_t            segments = 0;
+   {
+      auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                               small_config(psitri::sync_mode::none, 8));
+      auto ws = db->start_write_session();
+      for (uint64_t seq = 1; seq <= 150; ++seq)
+      {
+         auto tx = ws->start_transaction(0);
+         m.apply(tx, seq);
+         tx.commit();
+      }
+      segments = db->usage().mapped_bytes / (8ull * 1024 * 1024);
+      REQUIRE(segments == 4);
+   }
+   // two more blocks on the free map and on the count file, as a stop would leave them
+   uintmax_t sizes[2];
+   int       k = 0;
+   for (const char* name : {"free.part", "refs.part"})
+   {
+      sizes[k]              = fs::file_size(tmp.path / name);
+      const uintmax_t block = sizes[k] / segments;
+      fs::resize_file(tmp.path / name, sizes[k] + 2 * block);
+      ++k;
+   }
+   // at exactly the recorded count the longer files would be mapped past the reservation
+   REQUIRE_THROWS_AS(database::open(tmp.path, psitri::open_mode::open_existing,
+                                    small_config(psitri::sync_mode::none, 4)),
+                     std::runtime_error);
+   REQUIRE(database::closed_cleanly(tmp.path));
+   REQUIRE(fs::file_size(tmp.path / "free.part") > sizes[0]);  // refused untouched
+   {
+      // a limit that covers them opens the store and cuts them back
+      auto db = database::open(tmp.path, psitri::open_mode::open_existing,
+                               small_config(psitri::sync_mode::none, 8));
+      auto rs  = db->start_read_session();
+      auto cur = rs->create_cursor(0);
+      REQUIRE(m.verify(cur) == 150);
+   }
+   REQUIRE(fs::file_size(tmp.path / "free.part") == sizes[0]);
+   REQUIRE(fs::file_size(tmp.path / "refs.part") == sizes[1]);
+   auto db = database::open(tmp.path, psitri::open_mode::open_existing,
+                            small_config(psitri::sync_mode::none, 4));
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+   REQUIRE(m.verify(cur) == 150);
+}

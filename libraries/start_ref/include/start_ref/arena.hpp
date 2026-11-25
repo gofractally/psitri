@@ -83,12 +83,10 @@ namespace start_ref
       uint32_t              grow_batch      = 4;     // segments per file growth
       uint32_t              msync_gap_pages = 1;     // merge dirty runs across <= G clean pages
       sync_type             sync_mode       = sync_type::none;
-      // Units set aside for the allocations of operations that free more
-      // than they take (a remove copies the path to its key before the old
-      // path is freed). The reserve is a place, not an amount: the top of
-      // the arena's last possible segment, which ordinary allocations never
-      // enter, so it is contiguous whatever state the rest is in. Rounded up
-      // to a multiple of 64. UINT32_MAX: a sixty-fourth of the arena, at
+      // Units held out of ordinary allocation, once the arena cannot grow,
+      // for the allocations of operations that free more than they take (a
+      // remove copies the path to its key before the old path is freed). See
+      // "the reserve" in arena_t. UINT32_MAX: a sixty-fourth of the arena, at
       // least 1,024 and at most 8,192 units. 0: no reserve.
       uint32_t              reserve_lines   = UINT32_MAX;
    };
@@ -209,6 +207,11 @@ namespace start_ref
       bool                  _txn_open     = false;
       bool                  _seg_idle     = false;  // _segment was marked SEG_IDLE at txn end
       uint32_t              _reserve_ok   = 0;      // live reserve_use guards
+      // Runs this transaction drew from the reserve. One of them freed again
+      // before the transaction ends goes straight back (see release_run): it
+      // must not sit in the hot-hole cache, where an ordinary allocation of
+      // this session would pick it up.
+      std::vector<line_idx> _drawn;
       std::vector<uint32_t> _touched;  // segments dirtied by the open txn
 
       // Word window: the slow path reserves the remainder of the l0 word it
@@ -234,7 +237,9 @@ namespace start_ref
       void     flush_window_() noexcept;
       line_idx alloc_slow_(uint32_t n);
       line_idx alloc_public_(uint32_t n);
-      void     finish_alloc_(line_idx g, uint32_t n) noexcept;
+      void     finish_alloc_(line_idx g, uint32_t n, bool in_segment = true) noexcept;
+      line_idx try_segment_(uint32_t n) noexcept;
+      line_idx alloc_reserved_(uint32_t n);
       void     flush_stats_() noexcept;
    };
 
@@ -296,15 +301,9 @@ namespace start_ref
             throw std::runtime_error("part: max_segments crosses the sentinel index band");
          _cfg.reserve_lines =
              std::min<uint32_t>((_cfg.reserve_lines + 63) / 64 * 64, lines_per_segment / 2);
-         if (_cfg.reserve_lines && _cfg.max_segments)
-         {
-            _rsv_words = _cfg.reserve_lines / 64;
-            _rsv_base  = line_idx(uint64_t(_cfg.max_segments) * lines_per_segment -
-                                  _cfg.reserve_lines);
-            _rsv_map   = std::make_unique<std::atomic<uint64_t>[]>(_rsv_words);
-            for (uint32_t k = 0; k < _rsv_words; ++k)
-               _rsv_map[k].store(0, std::memory_order_relaxed);
-         }
+         // every list the reserve can ever need, so that it never allocates
+         for (uint32_t k = 1; k <= max_alloc_lines; ++k)
+            _pool.stock[k].reserve(_cfg.reserve_lines / k + 1);
          namespace fs = std::filesystem;
          fs::create_directories(_cfg.dir);
          // An existing arena larger than the requested ceiling cannot be
@@ -387,7 +386,8 @@ namespace start_ref
              const_cast<void*>(_refs->mapped_base()));
          for (uint32_t s = 0; s < nseg; ++s)
             _segs[s].state.store(SEG_UNOWNED, std::memory_order_relaxed);
-         set_reserve_aside_();
+         if (nseg >= _cfg.max_segments)
+            pool_establish_(0, nseg);
       }
 
       ~arena_t()
@@ -405,10 +405,9 @@ namespace start_ref
             // The mark below is always synced, whatever the mode, so the
             // maps are always written out first, and synchronously: an
             // asynchronous request could still let the mark arrive first.
-            // On storage there is no reserve: its free lines go back to the
-            // free map, and the next open sets them aside again. (The limit,
-            // and so the reserve's place, can differ from one open to the next.)
-            return_reserve_();
+            // On storage there is no reserve: its lines go back to the free
+            // map, and the next open collects it again from what is free.
+            pool_return_();
             if (_derived_ok && _free && _refs)
             {
                const sync_type st = std::max(_cfg.sync_mode, sync_type::msync_sync);
@@ -596,11 +595,17 @@ namespace start_ref
       // already zero — e.g. the tail lines of a dying node, batched).
       void free_lines_now(line_idx i, uint32_t n) noexcept
       {
-         if (i >= _rsv_base) [[unlikely]]  // the reserve keeps its own lines
-            return reserve_free_(i, n);
+         _stats.bytes_freed.fetch_add(uint64_t(n) * line_bytes, std::memory_order_relaxed);
+         if (_pool.need.load(std::memory_order_relaxed)) [[unlikely]]
+         {  // the reserve is owed lines: it is repaid before the free map sees any
+            const uint32_t taken = pool_take_(i, n);
+            i += taken;
+            n -= taken;
+            if (!n)
+               return;
+         }
          const uint32_t s = i / lines_per_segment;
          freeset_(s).free_run(i % lines_per_segment, n);
-         _stats.bytes_freed.fetch_add(uint64_t(n) * line_bytes, std::memory_order_relaxed);
       }
 
       // ── sessions ───────────────────────────────────────────────────────────
@@ -649,9 +654,7 @@ namespace start_ref
       void rebuild_begin()
       {
          _derived_ok = false;  // until rebuild_end: a rebuild that stops half-way is not clean
-         _rsv_live.store(false, std::memory_order_relaxed);  // re-made in rebuild_end
-         for (uint32_t k = 0; k < _rsv_words; ++k)
-            _rsv_map[k].store(0, std::memory_order_relaxed);
+         pool_forget_();  // the maps are rebuilt from the tree; so is the reserve, in rebuild_end
          const uint32_t nseg = num_segments();
          for (uint32_t s = 0; s < nseg; ++s)
             freeset_(s).init(true);
@@ -726,7 +729,8 @@ namespace start_ref
             for (auto& d : _segs[s].dirty)
                d.store(0, std::memory_order_relaxed);
          }
-         set_reserve_aside_();
+         if (nseg >= _cfg.max_segments)
+            pool_establish_(0, nseg);
          _derived_ok = true;
       }
 
@@ -748,19 +752,32 @@ namespace start_ref
             freeU += const_cast<arena_t*>(this)->freeset_(s).free_lines();
          return (uint64_t(nseg) * lines_per_segment - freeU - reserve_free_lines()) * line_bytes;
       }
-      // Lines of the reserve nobody is using (0 until the arena has its last segment).
+      // Lines the reserve holds ready for removes (0 until the arena is at its ceiling).
       uint64_t reserve_free_lines() const noexcept
       {
-         uint64_t n = 0;
-         if (_rsv_live.load(std::memory_order_acquire))
-            for (uint32_t k = 0; k < _rsv_words; ++k)
-               n += uint64_t(std::popcount(_rsv_map[k].load(std::memory_order_relaxed)));
-         return n;
+         return _pool.free_lines.load(std::memory_order_relaxed);
+      }
+      // Lines the reserve is waiting to get back: lent to removes whose old
+      // versions have not been freed yet, or never found at open.
+      uint64_t reserve_owed_lines() const noexcept
+      {
+         return _pool.need.load(std::memory_order_relaxed);
+      }
+      // The longest run the reserve can hand out right now, in lines.
+      uint32_t reserve_longest_run() const noexcept
+      {
+         std::lock_guard g(_pool.mx);
+         for (uint32_t k = max_alloc_lines; k >= 1; --k)
+            if (!_pool.stock[k].empty())
+               return k;
+         return 0;
       }
       // Segments are never returned to the OS: this is the high-water mark.
       uint64_t mapped_bytes() const noexcept { return uint64_t(num_segments()) * segment_bytes; }
       uint64_t limit_bytes() const noexcept { return uint64_t(_cfg.max_segments) * segment_bytes; }
       uint64_t reserve_bytes() const noexcept { return uint64_t(_cfg.reserve_lines) * line_bytes; }
+      uint64_t reserve_free_bytes() const noexcept { return reserve_free_lines() * line_bytes; }
+      uint64_t reserve_owed_bytes() const noexcept { return reserve_owed_lines() * line_bytes; }
       seg_freeset& freeset_of(uint32_t s) noexcept { return freeset_(s); }
       const arena_stats& stats() const noexcept { return _stats; }
       const void* refs_base_dbg() const noexcept { return _ref_base; }
@@ -946,82 +963,173 @@ namespace start_ref
          }
          throw_full_();
       }
-      // ── the reserve: the top reserve_lines of the last possible segment ────
-      // Its lines are marked taken in the free map, so nothing ordinary can
-      // be put there, and handed out from a small map of its own to sessions
-      // inside use_reserve(). A line freed there comes back here, not to the
-      // free map (free_lines_now), so the region stays whole.
+      // ── the reserve ────────────────────────────────────────────────────────
+      // A pool of free runs, each inside one map word like any allocation,
+      // held out of ordinary allocation (taken in the free map) once the
+      // arena is at its ceiling. A session inside use_reserve() draws from it
+      // when its own segment has no room: no segment claim, no waiting.
       //
-      // Single-threaded callers only (constructor, growth before the segment
-      // is published, end of a rebuild).
-      void set_reserve_aside_(bool last_segment_being_created = false) noexcept
+      // What is drawn is OWED. Every run that is freed anywhere in the arena
+      // is offered to the reserve first while anything is owed, and a debt is
+      // repaid with a run of the same length whenever a freed run is long
+      // enough: the old versions of the nodes a remove copied are exactly
+      // such runs. Lines a remove wrote on are ordinary data from then on,
+      // wherever they are, so nothing about the reserve depends on which
+      // nodes stay cold; and nothing about it is remembered across an open:
+      // at a clean close the pool goes back to the free map, a rebuild
+      // discards it, and each open collects it again from what is free
+      // (longest runs first), recording any shortfall as owed.
+      struct alignas(128) reserve_pool  // its counters are written often: keep them to themselves
       {
-         if (!_rsv_words ||
-             (!last_segment_being_created && num_segments() < _cfg.max_segments))
-            return;
-         seg_freeset&   fs = freeset_(_cfg.max_segments - 1);
-         const uint32_t w0 = (lines_per_segment - _cfg.reserve_lines) / 64;
-         for (uint32_t k = 0; k < _rsv_words; ++k)
-         {
-            // free lines become the reserve's; lines in use there (a store
-            // that was opened with another limit before) join it when freed
-            const uint64_t free_bits = fs.l0[w0 + k].exchange(0, std::memory_order_relaxed);
-            _rsv_map[k].store(free_bits, std::memory_order_relaxed);
-         }
-         fs.rebuild_from_l0();
-         _rsv_out.store(0, std::memory_order_relaxed);
-         _rsv_live.store(true, std::memory_order_release);
-      }
-      void return_reserve_() noexcept
+         std::atomic<uint32_t> need{0};        // lines owed: the only thing a free looks at
+         std::atomic<uint32_t> free_lines{0};  // lines in stock
+         std::atomic<bool>     live{false};
+         mutable std::mutex    mx;             // held for one list operation, never across a wait
+         std::vector<line_idx> stock[max_alloc_lines + 1];  // free runs, by exact length
+         uint32_t              debt[max_alloc_lines + 1] = {};  // runs owed, by length
+         uint32_t              short_lines = 0;  // owed with no record of lengths (found short at open)
+      };
+      // Collect the reserve from the free lines of segments [first, end).
+      // Single-threaded: the constructor, the end of a rebuild, or growth
+      // creating the last segments before anyone can see them.
+      void pool_establish_(uint32_t first, uint32_t end) noexcept
       {
-         if (!_rsv_live.exchange(false, std::memory_order_acq_rel))
-            return;
-         seg_freeset&   fs = freeset_(_cfg.max_segments - 1);
-         const uint32_t w0 = (lines_per_segment - _cfg.reserve_lines) / 64;
-         for (uint32_t k = 0; k < _rsv_words; ++k)
-            fs.l0[w0 + k].fetch_or(_rsv_map[k].exchange(0, std::memory_order_relaxed),
-                                   std::memory_order_relaxed);
-         fs.rebuild_from_l0();
-      }
-      // n consecutive lines of the reserve within one map word, or null_idx.
-      line_idx reserve_alloc_(uint32_t n) noexcept
-      {
-         if (!_rsv_live.load(std::memory_order_acquire))
-            return null_idx;
-         const uint64_t ones = n >= 64 ? ~0ull : ((1ull << n) - 1);
-         for (uint32_t k = 0; k < _rsv_words; ++k)
-         {
-            uint64_t cur = _rsv_map[k].load(std::memory_order_relaxed);
-            for (;;)
+         std::lock_guard g(_pool.mx);
+         uint32_t        want = _cfg.reserve_lines;
+         for (uint32_t k = 1; k <= max_alloc_lines; ++k)
+            want -= std::min<uint32_t>(want, uint32_t(_pool.stock[k].size()) * k);
+         // longest runs first: whole words, then halves, and so on down
+         for (uint32_t least = max_alloc_lines; least >= 1 && want; least /= 2)
+            for (uint32_t s = end; s-- > first && want;)
             {
-               uint64_t runs = cur;  // bit i set iff n free lines start at i
-               for (uint32_t j = 1; j < n && runs; ++j)
-                  runs &= cur >> j;
-               if (!runs)
-                  break;
-               const uint32_t pos = uint32_t(std::countr_zero(runs));
-               if (_rsv_map[k].compare_exchange_weak(cur, cur & ~(ones << pos),
-                                                     std::memory_order_acq_rel,
-                                                     std::memory_order_relaxed))
+               seg_freeset& fs      = freeset_(s);
+               bool         touched = false;
+               for (uint32_t w = seg_freeset::W0; w-- > 0 && want;)
                {
-                  _rsv_out.fetch_add(n, std::memory_order_relaxed);
-                  return _rsv_base + k * 64 + pos;
+                  uint64_t bits = fs.l0[w].load(std::memory_order_relaxed);
+                  while (bits && want)
+                  {
+                     const uint32_t pos = uint32_t(std::countr_zero(bits));
+                     const uint32_t run = uint32_t(std::countr_one(bits >> pos));
+                     const uint64_t run_mask = (run >= 64 ? ~0ull : ((1ull << run) - 1)) << pos;
+                     bits &= ~run_mask;  // looked at, whether taken or not
+                     if (run < least)
+                        continue;
+                     const uint32_t take = std::min(run, want);
+                     const uint64_t mask = (take >= 64 ? ~0ull : ((1ull << take) - 1)) << pos;
+                     fs.l0[w].fetch_and(~mask, std::memory_order_relaxed);
+                     _pool.stock[take].push_back(line_idx(s) * lines_per_segment + w * 64 + pos);
+                     want -= take;
+                     touched = true;
+                  }
                }
+               if (touched)
+                  fs.rebuild_from_l0();
             }
+         _pool.short_lines = want;
+         uint32_t owed = want;
+         for (uint32_t k = 1; k <= max_alloc_lines; ++k)
+            owed += _pool.debt[k] * k;
+         _pool.need.store(owed, std::memory_order_relaxed);
+         _pool.free_lines.store(_cfg.reserve_lines - want, std::memory_order_relaxed);
+         _pool.live.store(_cfg.reserve_lines != 0, std::memory_order_release);
+      }
+      // Clean close: nothing of the reserve stays on storage.
+      void pool_return_() noexcept
+      {
+         std::lock_guard g(_pool.mx);
+         if (!_pool.live.exchange(false, std::memory_order_acq_rel))
+            return;
+         _pool.need.store(0, std::memory_order_relaxed);
+         for (uint32_t k = 1; k <= max_alloc_lines; ++k)
+         {
+            for (line_idx i : _pool.stock[k])
+               freeset_(i / lines_per_segment).free_run(i % lines_per_segment, k);
+            _pool.stock[k].clear();
+            _pool.debt[k] = 0;
+         }
+         _pool.short_lines = 0;
+         _pool.free_lines.store(0, std::memory_order_relaxed);
+      }
+      // A rebuild re-derives the free map from the tree: the pool's lines are
+      // simply free again there.
+      void pool_forget_() noexcept
+      {
+         std::lock_guard g(_pool.mx);
+         _pool.live.store(false, std::memory_order_relaxed);
+         _pool.need.store(0, std::memory_order_relaxed);
+         _pool.free_lines.store(0, std::memory_order_relaxed);
+         for (uint32_t k = 1; k <= max_alloc_lines; ++k)
+         {
+            _pool.stock[k].clear();
+            _pool.debt[k] = 0;
+         }
+         _pool.short_lines = 0;
+      }
+      // n consecutive lines from the reserve, or null_idx. The shortest run
+      // that fits is used; what is left of it stays in stock.
+      line_idx pool_draw_(uint32_t n) noexcept
+      {
+         if (!_pool.live.load(std::memory_order_acquire))
+            return null_idx;
+         std::lock_guard g(_pool.mx);
+         for (uint32_t m = n; m <= max_alloc_lines; ++m)
+         {
+            if (_pool.stock[m].empty())
+               continue;
+            const line_idx i = _pool.stock[m].back();
+            _pool.stock[m].pop_back();
+            if (m > n)
+               _pool.stock[m - n].push_back(i + n);
+            ++_pool.debt[n];
+            _pool.free_lines.fetch_sub(n, std::memory_order_relaxed);
+            _pool.need.fetch_add(n, std::memory_order_relaxed);
+            return i;
          }
          return null_idx;
       }
-      void reserve_free_(line_idx i, uint32_t n) noexcept
+      // A run of n lines at i is being freed while the reserve is owed
+      // something. Returns how many of its leading lines the reserve kept.
+      uint32_t pool_take_(line_idx i, uint32_t n) noexcept
       {
-         const uint32_t off  = i - _rsv_base;
-         const uint64_t ones = n >= 64 ? ~0ull : ((1ull << n) - 1);
-         _rsv_map[off / 64].fetch_or(ones << (off % 64), std::memory_order_release);
-         // lent-out count: lines that were here before this open were never counted
-         uint32_t out = _rsv_out.load(std::memory_order_relaxed);
-         while (!_rsv_out.compare_exchange_weak(out, out > n ? out - n : 0,
-                                                std::memory_order_relaxed))
-            ;
-         _stats.bytes_freed.fetch_add(uint64_t(n) * line_bytes, std::memory_order_relaxed);
+         std::lock_guard g(_pool.mx);
+         if (!_pool.live.load(std::memory_order_relaxed))
+            return 0;
+         uint32_t kept = 0;
+         auto     keep = [&](uint32_t k)
+         {
+            _pool.stock[k].push_back(i);
+            i += k, n -= k, kept += k;
+         };
+         // debts of the same length or shorter, longest first
+         for (uint32_t k = std::min(n, max_alloc_lines); k >= 1 && n; --k)
+            while (k <= n && _pool.debt[k])
+            {
+               --_pool.debt[k];
+               keep(k);
+            }
+         // lines missing since the open
+         if (n && _pool.short_lines)
+         {
+            const uint32_t k = std::min(n, _pool.short_lines);
+            _pool.short_lines -= k;
+            keep(k);
+         }
+         // shorter than everything still owed: it counts against the
+         // shortest debt, so that the reserve's line count comes back even
+         // when a run of the owed length does not
+         if (n)
+            for (uint32_t k = n + 1; k <= max_alloc_lines; ++k)
+               if (_pool.debt[k])
+               {
+                  --_pool.debt[k];
+                  ++_pool.debt[k - n];
+                  keep(n);
+                  break;
+               }
+         _pool.free_lines.fetch_add(kept, std::memory_order_relaxed);
+         _pool.need.fetch_sub(kept, std::memory_order_relaxed);
+         return kept;
       }
       // Whether at least `need` units are free across the arena. Stops at
       // the first segments that add up, so it is cheap unless the arena is
@@ -1065,7 +1173,7 @@ namespace start_ref
             _stats.segments_grown.fetch_add(1, std::memory_order_relaxed);
          }
          if (first + batch == _cfg.max_segments)
-            set_reserve_aside_(true);  // before the segment can be seen
+            pool_establish_(first, first + batch);  // before the new segments can be seen
          _hdr->num_segments.store(first + batch, std::memory_order_release);
          _segs[first].state.store(SEG_OWNED, std::memory_order_relaxed);
          return first;
@@ -1138,12 +1246,6 @@ namespace start_ref
       std::byte*                            _base = nullptr;
       defer_fn                              _defer_fn  = nullptr;
       void*                                 _defer_ctx = nullptr;
-      // the reserve (see set_reserve_aside_)
-      line_idx                                 _rsv_base  = null_idx;  // first line; none: null_idx
-      uint32_t                                 _rsv_words = 0;
-      std::unique_ptr<std::atomic<uint64_t>[]> _rsv_map;   // 1 = free for a reserve allocation
-      std::atomic<uint32_t>                    _rsv_out{0};  // lines lent out since this open
-      std::atomic<bool>                        _rsv_live{false};
       reclaim_fn                            _reclaim_fn  = nullptr;
       void*                                 _reclaim_ctx = nullptr;
       std::byte*                            _free_base = nullptr;
@@ -1159,6 +1261,7 @@ namespace start_ref
       bool                                  _was_clean = false;
       bool                                  _derived_ok = false;  // free map + counts may be marked clean at close
       void*                                 _companion = nullptr;  // -> large_arena (type-erased)
+      reserve_pool                          _pool;  // last: on cache lines of its own
    };
 
    // ── session / transaction / read_session bodies ──────────────────────────
@@ -1218,6 +1321,7 @@ namespace start_ref
          // for any other size) until its next commit.
          _s->flush_fcache_();
          _s->flush_window_();
+         _s->_drawn.clear();
          if (_s->_segment != UINT32_MAX && !_s->_seg_idle)
          {
             // A plain store: while the session is in a transaction the
@@ -1257,7 +1361,7 @@ namespace start_ref
    }
 
    template <class Geo>
-   inline void session_t<Geo>::finish_alloc_(line_idx g, uint32_t n) noexcept
+   inline void session_t<Geo>::finish_alloc_(line_idx g, uint32_t n, bool in_segment) noexcept
    {
       arena_t<Geo>& a = *_a;
       for (uint32_t k = 0; k < n; ++k)
@@ -1276,7 +1380,7 @@ namespace start_ref
       // segment. A run recycled from the hot-hole cache can lie in a segment
       // the session has since left; it must not move them there, or the next
       // transaction's floor lands outside the segment and forces a switch.
-      if (g / lines_per_segment == _segment)
+      if (in_segment && g / lines_per_segment == _segment)
       {
          if (g + n > _fill_end)
             _fill_end = g + n;
@@ -1296,6 +1400,14 @@ namespace start_ref
             _a->_ref_base[i + k].store(0, std::memory_order_release);
             destroy(i + k);
          }
+         if (!_drawn.empty()) [[unlikely]]
+            if (auto it = std::find(_drawn.begin(), _drawn.end(), i); it != _drawn.end())
+            {
+               *it = _drawn.back();
+               _drawn.pop_back();
+               _a->free_lines_now(i, n);  // repays the reserve
+               return;
+            }
          if (cache_freed_(i, n))
             return;
          _a->free_lines_now(i, n);
@@ -1449,93 +1561,14 @@ namespace start_ref
       return alloc_slow_(N);
    }
 
+   // First-fit for n lines in the session's current segment, at or after the
+   // transaction's floor. null_idx when it has no such run.
    template <class Geo>
-   inline line_idx session_t<Geo>::alloc_slow_(uint32_t n)
-   {
-      try
-      {
-         return alloc_public_(n);
-      }
-      catch (const arena_full&)
-      {
-         // Nothing fits in ordinary storage. An operation that frees more
-         // than it takes gets its lines from the reserve, which is contiguous
-         // and needs no segment of this session's own.
-         if (_reserve_ok)
-         {
-            const line_idx g = _a->reserve_alloc_(n);
-            if (g != null_idx)
-            {
-               finish_alloc_(g, n);
-               return g;
-            }
-         }
-         throw;
-      }
-   }
-
-   template <class Geo>
-   inline line_idx session_t<Geo>::alloc_public_(uint32_t n)
+   [[gnu::always_inline]] inline line_idx session_t<Geo>::try_segment_(uint32_t n) noexcept
    {
       session_t<Geo>& s = *this;
       arena_t<Geo>&   a = *s._a;
-      if (s._wmask)
-         s.flush_window_();
-      // Claiming can end in arena_full. Before letting that out, give the
-      // owner's reclaim hook one chance per round to finish frees that are
-      // already queued; only if it had nothing to do is the arena full.
-      // The hook reporting work does not mean this allocation can now be
-      // met (another writer may keep the releaser busy for ever while n
-      // lines in a row exist nowhere), so the number of rounds is bounded.
-      uint32_t   reclaims       = 0;
-      const auto reclaim_helped = [&]() noexcept
       {
-         // Lines this session freed and kept by size are room too: before
-         // anything is called full they go back to the map, where a request
-         // for another size can find them.
-         if (s.unpark_())
-            return true;
-         return reclaims++ < max_reclaim_rounds && a.try_reclaim();
-      };
-      auto claim = [&](uint32_t cur, bool prefer_grow, bool sweep) -> uint32_t
-      {
-         for (;;)
-         {
-            try
-            {
-               return a.claim_(cur, prefer_grow, n, sweep);
-            }
-            catch (const arena_full&)
-            {
-               if (!reclaim_helped())
-                  throw;
-            }
-         }
-      };
-      // The reserve is lent to removes on the understanding that it comes
-      // back (a node placed there leaves when it is next rewritten or
-      // removed). While more than half of it is out, ordinary allocations
-      // stop early, at four reserves' worth of free lines instead of none:
-      // otherwise removes and refills taking turns at the brim could park
-      // nodes there until the reserve itself was used up.
-      if (!s._reserve_ok)
-         while (a._rsv_out.load(std::memory_order_relaxed) > a._cfg.reserve_lines / 2 &&
-                !a.free_at_least_(uint64_t(a._cfg.reserve_lines) * 4 + n))
-            if (!reclaim_helped())
-               a.throw_full_();
-      uint32_t swept = 0;  // segments tried in sweep mode since the last reclaim
-      for (int attempts = 0;; ++attempts)
-      {
-         if (s._segment == UINT32_MAX)
-         {
-            s._segment = claim(UINT32_MAX, false, false);
-            const line_idx base = line_idx(s._segment) * lines_per_segment;
-            // A segment claimed afresh is written from its start: the floor
-            // only ever applied to the segment it was set in.
-            s._floor    = base;
-            s._cursor   = base;
-            s._fill_end = base;  // the fill position restarts with the segment
-         }
          const line_idx seg_base = line_idx(s._segment) * lines_per_segment;
          seg_freeset&   fs       = a.freeset_(s._segment);
          uint32_t local_floor = s._floor > seg_base ? uint32_t(s._floor - seg_base) : 0u;
@@ -1587,6 +1620,99 @@ namespace start_ref
             finish_alloc_(g, n);
             return g;
          }
+         return null_idx;
+      }
+   }
+
+   template <class Geo>
+   inline line_idx session_t<Geo>::alloc_slow_(uint32_t n)
+   {
+      if (_reserve_ok) [[unlikely]]
+         if (const line_idx g = alloc_reserved_(n); g != null_idx)
+            return g;
+      return alloc_public_(n);
+   }
+
+   // An operation that frees more than it takes (a remove), on an arena at
+   // its ceiling: room in the session's own segment if there is some,
+   // otherwise the reserve. It claims nothing, sweeps nothing and waits for
+   // nothing, so it cannot be held up by other writers, and it does not need
+   // a segment of its own. null_idx: not at the ceiling, or the reserve
+   // cannot meet it either; the caller goes the ordinary way, which can fail.
+   template <class Geo>
+   [[gnu::noinline]] inline line_idx session_t<Geo>::alloc_reserved_(uint32_t n)
+   {
+      if (!_a->_pool.live.load(std::memory_order_relaxed))
+         return null_idx;
+      if (_wmask)
+         flush_window_();
+      if (_segment != UINT32_MAX)
+         if (const line_idx g = try_segment_(n); g != null_idx)
+            return g;
+      if (_drawn.size() == _drawn.capacity())  // before anything is drawn: this can throw
+         _drawn.reserve(std::max<size_t>(64, _drawn.capacity() * 2));
+      const line_idx g = _a->pool_draw_(n);
+      if (g != null_idx)
+      {
+         _drawn.push_back(g);
+         finish_alloc_(g, n, /*in_segment=*/false);
+      }
+      return g;
+   }
+
+   template <class Geo>
+   [[gnu::always_inline]] inline line_idx session_t<Geo>::alloc_public_(uint32_t n)
+   {
+      session_t<Geo>& s = *this;
+      arena_t<Geo>&   a = *s._a;
+      if (s._wmask)
+         s.flush_window_();
+      // Claiming can end in arena_full. Before letting that out, give the
+      // owner's reclaim hook one chance per round to finish frees that are
+      // already queued; only if it had nothing to do is the arena full.
+      // The hook reporting work does not mean this allocation can now be
+      // met (another writer may keep the releaser busy for ever while n
+      // lines in a row exist nowhere), so the number of rounds is bounded.
+      uint32_t   reclaims       = 0;
+      const auto reclaim_helped = [&]() noexcept
+      {
+         // Lines this session freed and kept by size are room too: before
+         // anything is called full they go back to the map, where a request
+         // for another size can find them.
+         if (s.unpark_())
+            return true;
+         return reclaims++ < max_reclaim_rounds && a.try_reclaim();
+      };
+      auto claim = [&](uint32_t cur, bool prefer_grow, bool sweep) -> uint32_t
+      {
+         for (;;)
+         {
+            try
+            {
+               return a.claim_(cur, prefer_grow, n, sweep);
+            }
+            catch (const arena_full&)
+            {
+               if (!reclaim_helped())
+                  throw;
+            }
+         }
+      };
+      uint32_t swept = 0;  // segments tried in sweep mode since the last reclaim
+      for (int attempts = 0;; ++attempts)
+      {
+         if (s._segment == UINT32_MAX)
+         {
+            s._segment = claim(UINT32_MAX, false, false);
+            const line_idx base = line_idx(s._segment) * lines_per_segment;
+            // A segment claimed afresh is written from its start: the floor
+            // only ever applied to the segment it was set in.
+            s._floor    = base;
+            s._cursor   = base;
+            s._fill_end = base;  // the fill position restarts with the segment
+         }
+         if (const line_idx g = try_segment_(n); g != null_idx)
+            return g;
          // This segment can't satisfy n ahead of the floor: switch (SPEC §8).
          // After a few failed reuse switches the qualifying segments are too
          // fragmented to hold this (multi-line) alloc — grow a fresh segment so a

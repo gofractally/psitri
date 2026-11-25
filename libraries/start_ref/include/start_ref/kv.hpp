@@ -127,6 +127,13 @@ namespace start_ref::kv
       uint64_t mapped_bytes = 0;  // segments created so far; never shrinks (high-water mark)
       uint64_t limit_bytes  = 0;  // max_segments x 8 MiB: allocation beyond this throws
       uint64_t reserve_bytes = 0; // of the limit, kept for removes once the store cannot grow
+      // Of the reserve: what a remove can draw right now, and what it is
+      // still waiting to get back (lent to removes whose old versions are not
+      // freed yet, or not found free when the store was opened). The two add
+      // up to reserve_bytes once the store is at its ceiling; watch
+      // reserve_free_bytes to act before removes run out of room.
+      uint64_t reserve_free_bytes = 0;
+      uint64_t reserve_owed_bytes = 0;
       // The companion arena that holds values too large for a 64-line run.
       uint64_t large_used_bytes   = 0;
       uint64_t large_mapped_bytes = 0;
@@ -1083,6 +1090,8 @@ namespace start_ref::kv
          u.mapped_bytes       = _arena.mapped_bytes();
          u.limit_bytes        = _arena.limit_bytes();
          u.reserve_bytes      = _arena.reserve_bytes();
+         u.reserve_free_bytes = _arena.reserve_free_bytes();
+         u.reserve_owed_bytes = _arena.reserve_owed_bytes();
          u.large_used_bytes   = _large.used_bytes();
          u.large_mapped_bytes = _large.mapped_bytes();
          u.large_limit_bytes  = _large.limit_bytes();

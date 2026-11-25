@@ -1139,12 +1139,13 @@ namespace start_ref::kv
          // writer release inline (graceful degradation to the old behavior).
          // OPTIONAL: without the thread the hook is never registered and the
          // queue is permanently "blocked" — everything runs synchronously.
+         // A writer that is about to be told the store is full first gets
+         // back what is already dead: versions no reader uses any more, and
+         // whatever the releaser has queued.
+         _arena.set_reclaim(&reclaim_cb_, this);
+         _large.set_reclaim(&reclaim_cb_, this);
          if (cfg.background_release)
          {
-            // A writer that outruns the releaser must wait for it rather
-            // than be told the store is full.
-            _arena.set_reclaim(&reclaim_cb_, this);
-            _large.set_reclaim(&reclaim_cb_, this);
             _arena.set_defer(&defer_cb_, this);
             _rel_thread = sized_thread(release_stack_bytes, [this] { rel_loop_(); });
          }
@@ -1209,15 +1210,30 @@ namespace start_ref::kv
                 "the next open tries again (the free map and reference counts, which this "
                 "rebuild resets, are derived from them)");
       }
-      // True if the releaser had queued work, after waiting for it to finish.
+      // Called by an allocation that found no room, on the writer's thread,
+      // with no arena lock held. Releases retired versions that no reader
+      // publishes any more (normally done at the next commit, which this
+      // writer may never reach without the room), then waits for the
+      // releaser's queue. True if either had anything to do.
       static bool reclaim_cb_(void* ctx) noexcept
       {
-         auto* db = static_cast<database*>(ctx);
-         if (db->_rel_tail.load(std::memory_order_acquire) ==
-             db->_rel_head.load(std::memory_order_acquire))
-            return false;
-         db->flush_releases();
-         return true;
+         auto* db      = static_cast<database*>(ctx);
+         bool  drained = false;
+         {
+            // try_lock: never wait here for a commit that is publishing
+            std::unique_lock lock(db->_root_mx, std::try_to_lock);
+            if (lock.owns_lock() && !db->_retired.empty())
+            {
+               const size_t before = db->_retired.size();
+               db->drain_retired_();
+               drained = db->_retired.size() != before;
+            }
+         }
+         const bool queued = db->_rel_tail.load(std::memory_order_acquire) !=
+                             db->_rel_head.load(std::memory_order_acquire);
+         if (queued || drained)
+            db->flush_releases();
+         return queued || drained;
       }
       static bool defer_cb_(void* ctx, uint64_t raw) noexcept
       {

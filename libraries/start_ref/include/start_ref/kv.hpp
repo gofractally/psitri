@@ -940,7 +940,10 @@ namespace start_ref::kv
                   throw std::runtime_error("database does not exist: " + dir.generic_string());
                break;
             case sal::open_mode::read_only:
-               throw std::runtime_error("part: read-only opens not implemented yet");
+               throw std::runtime_error(
+                   "start_ref::kv: the Small Engine does not support read-only open "
+                   "(open_mode::read_only) of " + dir.generic_string() +
+                   "; open it read-write from the one process that owns it");
             case sal::open_mode::create_or_open:
                break;
          }

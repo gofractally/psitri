@@ -858,3 +858,117 @@ TEST_CASE("Small Engine: the 65th reader is refused with a clear error", "[small
    auto cur     = another->create_cursor(0);
    REQUIRE(cur.get<std::string>("k") == std::optional<std::string>("v20"));
 }
+
+// What a reader can see of a transaction that commits two roots. The roots
+// are published one after the other. A reader that takes its two snapshots
+// through a read session can land between them and see the first root new
+// and the second old; whole commits can also fall between any two snapshots.
+// Each root on its own is always a committed state. The test records how
+// often the torn view was seen; it asserts only what always holds.
+TEST_CASE("Small Engine: roots committed together are published one at a time",
+          "[small][multiroot]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 16));
+   auto counter = [](std::optional<std::string> v) {
+      uint64_t n = 0;
+      if (v)
+         std::memcpy(&n, v->data(), 8);
+      return n;
+   };
+   std::atomic<bool>     stop{false};
+   std::atomic<uint64_t> looks{0}, torn{0}, ahead{0}, impossible{0}, owned_looks{0},
+       owned_behind{0};
+   std::thread reader([&] {
+      auto rs = db->start_read_session();
+      auto ws = db->start_write_session();  // for owned snapshots
+      while (!stop.load(std::memory_order_relaxed))
+      {
+         {
+            uint64_t a, b;
+            {
+               auto c0 = rs->create_cursor(0);
+               a       = counter(c0.get<std::string>("n"));
+            }
+            {
+               auto c1 = rs->create_cursor(1);
+               b       = counter(c1.get<std::string>("n"));
+            }
+            ++looks;
+            if (b + 1 == a)
+               ++torn;  // root 0 of commit n, root 1 still of commit n-1
+            else if (b > a)
+               ++ahead;  // one or more whole commits in between
+            else if (b != a)
+               ++impossible;
+         }
+         {
+            // Owned snapshots are taken under the publication lock, so the
+            // second can be later than the first but never behind it.
+            auto t0 = ws->get_root(0);
+            auto t1 = ws->get_root(1);
+            ++owned_looks;
+            if (counter(t1.get<std::string>("n")) < counter(t0.get<std::string>("n")))
+               ++owned_behind;
+         }
+      }
+   });
+   auto     ws = db->start_write_session();
+   uint64_t n  = 0;
+   const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
+   while (std::chrono::steady_clock::now() < until)
+   {
+      ++n;
+      auto tx = ws->start_transaction(0);
+      tx.upsert("n", std::string_view(reinterpret_cast<const char*>(&n), 8));
+      tx.open_root(1).upsert("n", std::string_view(reinterpret_cast<const char*>(&n), 8));
+      tx.commit();
+   }
+   stop = true;
+   reader.join();
+   std::printf("multi-root: %llu commits; read-session pairs: %llu, torn (root 0 new, root 1 "
+               "old) %llu, second later %llu; owned-snapshot pairs: %llu, second behind %llu\n",
+               (unsigned long long)n, (unsigned long long)looks.load(),
+               (unsigned long long)torn.load(), (unsigned long long)ahead.load(),
+               (unsigned long long)owned_looks.load(), (unsigned long long)owned_behind.load());
+   REQUIRE(impossible.load() == 0);
+   REQUIRE(owned_behind.load() == 0);
+   REQUIRE(looks.load() > 0);
+}
+
+// Read-only open is not implemented. It must say so, and must not create or
+// change anything.
+TEST_CASE("Small Engine: read-only open is refused with a clear error", "[small][open]")
+{
+   temporary_directory tmp;
+   const auto          cfg = small_config(psitri::sync_mode::none, 16);
+   auto refused = [&] {
+      try
+      {
+         database::open(tmp.path, psitri::open_mode::read_only, cfg);
+         FAIL("read-only open returned a database");
+      }
+      catch (const std::runtime_error& e)
+      {
+         const std::string what = e.what();
+         REQUIRE(what.find("read-only") != std::string::npos);
+         REQUIRE(what.find("Small Engine") != std::string::npos);
+      }
+   };
+   refused();
+   REQUIRE(std::filesystem::is_empty(tmp.path));  // nothing was created
+   {
+      auto db = database::open(tmp.path, psitri::open_mode::create_only, cfg);
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("k", "v");
+      tx.commit();
+   }
+   refused();
+   REQUIRE(database::closed_cleanly(tmp.path));  // and the refusal did not touch it
+   auto db  = database::open(tmp.path, psitri::open_mode::open_existing, cfg);
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+   REQUIRE(cur.get<std::string>("k") == std::optional<std::string>("v"));
+}

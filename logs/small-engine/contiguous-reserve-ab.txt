@@ -1,0 +1,12 @@
+Engine at c92fa25 (old: reserve counted in free lines) and with the contiguous reserve (new), interleaved, load average 20-25.
+bench: five repetitions of 2,000,000 one-upsert transactions on one key (tx/s); churn: no reader, 100k rows, 3M updates.
+old: bench 4495618 4381791 4497922 4436716 4468628  churn 593650 updates/s
+new: bench 4566099 4561013 4590872 4468220 4640968  churn 593375 updates/s
+old: bench 4337760 4350944 4413906 4352659 4380683  churn 607936 updates/s
+new: bench 4260773 4282352 4315402 4199472 4226686  churn 607512 updates/s
+old: bench 4390717 4425791 4504351 4544852 4514835  churn 609699 updates/s
+new: bench 4503719 4496783 4471897 4547159 4622478  churn 569671 updates/s
+old: bench 4482552 4538247 4516506 4504611 4519879  churn 564652 updates/s
+new: bench 4453058 4489785 4292387 4520037 4537027  churn 557302 updates/s
+old: bench 4504411 4454695 4484178 4486801 4441598  churn 546636 updates/s
+new: bench 4433795 4435794 4372153 4417321 4419925  churn 611758 updates/s

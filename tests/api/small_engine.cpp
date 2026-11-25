@@ -2817,7 +2817,10 @@ TEST_CASE("Small Engine: lines a session parked are room again after it aborts",
    };
    {
       auto held = parker->start_transaction(1);
-      park_lines(held, 4000);  // a megabyte, taken and let go inside the transaction
+      // most of a megabyte, taken and let go inside the transaction (the
+      // room left is spread over all four segments, and not all of it is in
+      // two-line runs)
+      park_lines(held, 3200);
       REQUIRE_FALSE(wants("during/"));
       held.abort();
    }
@@ -2846,7 +2849,7 @@ TEST_CASE("Small Engine: a session uses the lines it parked before reporting ful
       REQUIRE(n < 2'000'000);
    }
    auto tx = ws->start_transaction(0);
-   park_lines(tx, 4000);  // two-line runs, now in this session's cache
+   park_lines(tx, 3200);  // two-line runs, now in this session's cache
    // the same transaction wants one-line leaves: three quarters of a megabyte
    // of them fit in what it has just let go
    REQUIRE_NOTHROW([&] {
@@ -3524,4 +3527,268 @@ TEST_CASE("Small Engine model: killed mid-transaction, recovered, continued", "[
    std::printf("drained: used %llu bytes, large used %llu bytes\n", (unsigned long long)db->usage().used_bytes, (unsigned long long)db->usage().large_used_bytes);
    REQUIRE(db->usage().used_bytes <= 64 * 128);
    REQUIRE(db->usage().large_used_bytes == 0);
+}
+
+// A full store whose free lines are scattered singles (gofractally/psitri#39).
+// Fill to refusal, remove every third key (the freed leaves are single lines
+// spread through both segments), fill to refusal again so that those scattered
+// lines are all that is left, and then remove every key, one transaction
+// each. A remove needs runs of two or more lines for some of the nodes it
+// copies; they must come from room that is contiguous by construction.
+TEST_CASE("Small Engine: a fragmented full store can be emptied one remove at a time",
+          "[small][limit][brim][fragmented]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 2));
+   auto ws   = db->start_write_session();
+   auto keys = fill_to_the_brim(*db, *ws);
+   std::vector<std::string> live;
+   for (size_t i = 0; i < keys.size();)
+   {
+      auto tx = ws->start_transaction(0);
+      for (int j = 0; j < 300 && i < keys.size(); ++j, ++i)
+      {
+         if (i % 3 == 0)
+            REQUIRE(tx.remove(keys[i]) == 0);
+         else
+            live.push_back(keys[i]);
+      }
+      tx.commit();
+   }
+   db->flush_releases();
+   // top up with single upserts until refused again
+   for (uint64_t n = 0;; ++n)
+   {
+      try
+      {
+         auto tx = ws->start_transaction(0);
+         tx.upsert(scattered_key("t", n), std::string(100, 'T'));
+         tx.commit();
+         live.push_back(scattered_key("t", n));
+      }
+      catch (const engine::storage_full&)
+      {
+         break;
+      }
+      REQUIRE(n < 2'000'000);
+   }
+   db->flush_releases();
+   const auto u = db->usage();
+   std::printf("fragmented: %zu keys; used %.2f of %.2f MiB\n", live.size(),
+               u.used_bytes / 1048576.0, u.limit_bytes / 1048576.0);
+   // deterministic but not in insertion order
+   std::mt19937_64 rng(7);
+   std::shuffle(live.begin(), live.end(), rng);
+   uint64_t removed = 0;
+   for (const auto& key : live)
+   {
+      INFO("remove " << removed << " of " << live.size());
+      auto tx = ws->start_transaction(0);
+      REQUIRE(tx.remove(key) == 0);
+      tx.commit();
+      ++removed;
+   }
+   {
+      auto rs  = db->start_read_session();
+      auto cur = rs->create_cursor(0);
+      REQUIRE_FALSE(cur.seek_begin());
+   }
+   ws.reset();
+   db->flush_releases();
+   REQUIRE(db->usage().used_bytes <= 64 * 128);
+}
+
+// The shape the review found it with: two segments, three sessions taking
+// turns, values under 200 bytes, the store kept at its limit. Each round
+// removes two keys in one transaction and then writes until refused again.
+// A remove transaction is never refused. PSITRI_SMALL_FRAG_ROUNDS scales it.
+TEST_CASE("Small Engine: removes are never refused on a store kept at its limit",
+          "[small][limit][brim][kept-full]")
+{
+   const uint64_t rounds = env_u64("PSITRI_SMALL_FRAG_ROUNDS", 12000);
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 2));
+   std::shared_ptr<engine::write_session> sessions[3] = {
+       db->start_write_session(), db->start_write_session(), db->start_write_session()};
+   std::mt19937_64                    rng(20261125);
+   std::map<std::string, std::string> expect;
+   std::vector<std::string>           order;  // keys, for picking victims
+   uint64_t                           next = 0, turn = 0, refused_writes = 0;
+   auto value = [&] { return std::string(20 + rng() % 170, char('a' + rng() % 26)); };
+   auto write_until_refused = [&] {
+      for (;;)
+      {
+         auto&             ws = *sessions[turn++ % 3];
+         const std::string k  = scattered_key("k", next), v = value();
+         try
+         {
+            auto tx = ws.start_transaction(0);
+            tx.upsert(k, v);
+            tx.commit();
+         }
+         catch (const engine::storage_full&)
+         {
+            ++refused_writes;
+            return;
+         }
+         ++next;
+         expect[k] = v;
+         order.push_back(k);
+      }
+   };
+   write_until_refused();
+   const size_t at_full = expect.size();
+   uint64_t     round   = 0;
+   std::string  failure;
+   for (; round < rounds && failure.empty(); ++round)
+   {
+      auto& ws = *sessions[turn++ % 3];
+      try
+      {
+         auto tx = ws.start_transaction(0);
+         for (int j = 0; j < 2 && !order.empty(); ++j)
+         {
+            const size_t pick = rng() % order.size();
+            if (tx.remove(order[pick]) != 0)
+               throw std::runtime_error("a committed key was missing");
+            expect.erase(order[pick]);
+            order[pick] = order.back();
+            order.pop_back();
+         }
+         tx.commit();
+      }
+      catch (const std::exception& e)
+      {
+         failure = e.what();
+         break;
+      }
+      write_until_refused();
+   }
+   std::printf("kept full: %zu keys at the limit; %llu two-remove transactions, %llu refused "
+               "writes; %zu keys at the end\n",
+               at_full, (unsigned long long)round, (unsigned long long)refused_writes,
+               expect.size());
+   INFO("after " << round << " remove transactions: " << failure);
+   REQUIRE(failure.empty());
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+   require_matches(cur, expect);
+}
+
+// The shape the defect was found with (gofractally/psitri#39): two segments,
+// three writers at once on three roots, values under 200 bytes. Each writer
+// writes until it is refused, then removes two keys in one transaction, over
+// and over. There are more writers than segments, and the store is at its
+// limit throughout; a remove transaction is never refused, and no writer is
+// shut out. PSITRI_SMALL_FRAG_ROUNDS scales it.
+TEST_CASE("Small Engine: three writers on two segments at the limit can always remove",
+          "[small][limit][brim][three-writers]")
+{
+   const uint64_t rounds = env_u64("PSITRI_SMALL_FRAG_ROUNDS", 12000) / 6;
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 2));
+   struct outcome
+   {
+      std::map<std::string, std::string> expect;
+      uint64_t                           removes = 0, refused_writes = 0, written = 0;
+      std::string                        error;
+   };
+   outcome results[3];
+   auto writer = [&](uint32_t root) {
+      outcome& out = results[root];
+      try
+      {
+         auto                     ws = db->start_write_session();
+         std::mt19937_64          rng(1000 + root);
+         std::vector<std::string> order;
+         uint64_t                 next = 0;
+         const char*              prefix = root == 0 ? "a" : root == 1 ? "b" : "c";
+         for (uint64_t round = 0; round < rounds; ++round)
+         {
+            // write until refused (in small transactions, so that the other
+            // writers get their turns)
+            for (bool full = false; !full;)
+            {
+               std::vector<std::pair<std::string, std::string>> batch;
+               try
+               {
+                  auto tx = ws->start_transaction(root);
+                  for (int j = 0; j < 20; ++j)
+                  {
+                     batch.emplace_back(scattered_key(prefix, next + j),
+                                        std::string(20 + rng() % 170, char('a' + rng() % 26)));
+                     tx.upsert(batch.back().first, batch.back().second);
+                  }
+                  tx.commit();
+                  next += 20;
+                  out.written += 20;
+                  for (auto& kv : batch)
+                  {
+                     out.expect[kv.first] = kv.second;
+                     order.push_back(kv.first);
+                  }
+               }
+               catch (const engine::storage_full&)
+               {
+                  ++out.refused_writes;
+                  full = true;
+               }
+            }
+            // two removes in one transaction: never refused
+            auto tx = ws->start_transaction(root);
+            for (int j = 0; j < 2 && !order.empty(); ++j)
+            {
+               const size_t pick = rng() % order.size();
+               if (tx.remove(order[pick]) != 0)
+                  throw std::runtime_error("a committed key was missing");
+               out.expect.erase(order[pick]);
+               order[pick] = order.back();
+               order.pop_back();
+            }
+            tx.remove("never-there");  // a remove that finds nothing allocates too
+            tx.commit();
+            ++out.removes;
+         }
+      }
+      catch (const std::exception& e)
+      {
+         out.error = e.what();
+      }
+   };
+   std::thread t0(writer, 0), t1(writer, 1), t2(writer, 2);
+   t0.join();
+   t1.join();
+   t2.join();
+   for (uint32_t root = 0; root < 3; ++root)
+   {
+      std::printf("three writers: root %u wrote %llu keys, refused %llu times, %llu remove "
+                  "transactions, %zu keys at the end\n",
+                  root, (unsigned long long)results[root].written,
+                  (unsigned long long)results[root].refused_writes,
+                  (unsigned long long)results[root].removes, results[root].expect.size());
+      INFO("root " << root << " after " << results[root].removes
+                   << " remove transactions: " << results[root].error);
+      REQUIRE(results[root].error.empty());
+      REQUIRE(results[root].removes == rounds);
+      REQUIRE(results[root].written > 0);  // nobody was shut out
+      auto rs  = db->start_read_session();
+      auto cur = rs->create_cursor(root);
+      require_matches(cur, results[root].expect);
+   }
+   // and from there everything can be removed, one key per transaction
+   {
+      auto ws = db->start_write_session();
+      for (uint32_t root = 0; root < 3; ++root)
+         for (auto& kv : results[root].expect)
+         {
+            auto tx = ws->start_transaction(root);
+            REQUIRE(tx.remove(kv.first) == 0);
+            tx.commit();
+         }
+   }
+   db->flush_releases();
+   REQUIRE(db->usage().used_bytes <= 64 * 128);
 }

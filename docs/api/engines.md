@@ -91,26 +91,51 @@ limit throws `psitri::small_engine::storage_full` (a `std::runtime_error`)
 from the write call. Abort the transaction: it rolls back completely and what
 was committed before is untouched.
 
-What "full" means: once every segment exists, ordinary writes are refused when
-the free space left is no more than the reserve (a sixty-fourth of the store,
-between 128 KiB and 1 MiB; 512 KiB of a 32 MiB store), or when no segment has
-a free run of lines long enough for the allocation. Before refusing, the
-writer releases versions that no reader holds any more, waits for the
-background releaser to finish what is queued, and looks for free lines in
-every segment, including segments held by sessions that are between
-transactions. In the tests a store of 100-byte values took 174,000 keys and
-was 98% used when it first refused. A node that needs many lines in a row (a
-value of several KiB) can be refused earlier on a fragmented store, and each
-writer that is in a transaction at the same moment needs a segment of its own.
+What "full" means: the reserve is a place, not an amount. It is the top of the
+store's last possible segment (a sixty-fourth of the store, between 128 KiB
+and 1 MiB; 512 KiB of a 32 MiB store), it is counted in `limit_bytes` but
+never in `used_bytes`, and ordinary writes are never put there. An ordinary
+write is refused when no segment has a free run of lines long enough for the
+allocation. Before refusing, the writer releases versions that no reader holds
+any more, waits for the background releaser to finish what is queued, looks
+for free lines in every segment, including segments held by sessions that are
+between transactions, and waits up to 20 ms for a segment that another writer
+is in at that moment. In the tests a store of 100-byte values took 174,000
+keys and was 98% used (everything but the reserve) when it first refused. A
+node that needs many lines in a row (a value of several KiB) can be refused
+earlier on a fragmented store.
 
 A full store is never stuck:
 
-- **Remove keys.** `remove` and `remove_range_counted` may allocate from the
-  reserve, because a remove has to copy the path to its key before the old
-  path is freed. `tests/api/small_engine.cpp` fills a store one upsert per
-  transaction until it refuses and then removes every key, one transaction
-  each, down to empty. A single transaction that removes very many keys can
-  outrun the reserve; commit in batches.
+- **Remove keys.** `remove` and `remove_range_counted` first look for room
+  like any write and, when there is none, take it from the reserve: a remove
+  has to copy the path to its key before the old path is freed. The reserve
+  is contiguous by construction, so this does not depend on how scattered
+  the store's free lines are, and it needs no segment of the session's own,
+  so it does not depend on how many writers are active. Lines of the reserve
+  go back to the reserve when the node that used them is next rewritten or
+  removed.
+
+  What is guaranteed: on a store that has reported `storage_full`, a
+  transaction that only removes keys succeeds as long as the nodes it has to
+  copy fit in what is free in the reserve at that moment. One remove copies
+  the nodes on the path to its key, a few lines for keys of ordinary length
+  whatever the size of the values (values are not copied by a remove, and
+  values above 8 KiB live in the other arena). The reserve holds at least
+  1,024 lines, enough for hundreds of such paths before any of it has come
+  back. `tests/api/small_engine.cpp` fills a two-segment store to refusal,
+  scatters its free lines, refills it, and removes every key one transaction
+  at a time down to empty; and runs three writers on two segments at the limit
+  for thousands of remove transactions without one being refused.
+
+  What is not guaranteed: a single transaction that removes very many keys
+  can need more than the reserve before it commits (commit in batches; a
+  refused transaction rolls back and can be retried smaller); and keys near
+  the 1,024-byte limit have paths of hundreds of nodes, so a remove of such a
+  key can need a large part of a small reserve. To keep the reserve from
+  being used up by removes and refills taking turns at the brim, ordinary
+  writes are refused a little early (at four reserves' worth of free lines
+  instead of none) while more than half the reserve is lent out.
 - **Drop the root.** `tx.primary().set_root({})` followed by `commit()`
   allocates nothing and frees the whole tree.
 - **Raise the limit.** Close the store and open it with a larger

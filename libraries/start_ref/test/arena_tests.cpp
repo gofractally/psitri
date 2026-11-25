@@ -442,3 +442,142 @@ TEST_CASE("a run recycled from a segment the session has left does not move its 
       REQUIRE(a.segment_of(tx.alloc_lines(2)) == 0);
    REQUIRE(a.stats().range_switches.load() == switches);
 }
+
+#include <future>
+#include <thread>
+
+// gofractally/psitri#39: the reserve is contiguous room, not a count of free
+// lines. Every ordinary line taken and every other one freed again leaves
+// thousands of free lines and not one run of two; a reclaiming allocation of
+// two or more lines still succeeds, out of the reserve.
+TEST_CASE("the reserve holds runs when the rest of the arena has none", "[arena][limit][reserve]")
+{
+   arena_config c  = cfg(tmp_dir("rsvrun"));
+   c.max_segments  = 1;
+   c.reserve_lines = 1024;
+   arena a(c);
+   auto  ses = a.start_session();
+   auto  tx  = ses.start_transaction(0);
+   std::vector<line_idx> taken;
+   try
+   {
+      for (;;)
+         taken.push_back(tx.alloc_lines(1));
+   }
+   catch (const arena_full&)
+   {
+   }
+   REQUIRE(taken.size() == lines_per_segment - 1024);  // all of it, and none of the reserve
+   for (line_idx i : taken)
+      REQUIRE(i < lines_per_segment - 1024);
+   tx.commit();
+   tx.close();
+   for (size_t k = 0; k < taken.size(); k += 2)
+      a.release(taken[k]);
+   REQUIRE(a.used_bytes() == uint64_t(taken.size() / 2) * line_bytes);
+   REQUIRE(a.reserve_free_lines() == 1024);
+
+   auto tx2 = ses.start_transaction(0);
+   REQUIRE_THROWS_AS(tx2.alloc_lines(2), arena_full);  // ordinary: no run of two anywhere
+   REQUIRE(tx2.alloc_lines(1) != null_idx);            // single lines there are
+   std::vector<std::pair<line_idx, uint32_t>> lent;
+   {
+      auto use = ses.use_reserve();
+      for (uint32_t n : {2u, 3u, 5u, 8u, 16u, 64u, 2u, 7u})
+      {
+         const line_idx g = tx2.alloc_lines(n);
+         REQUIRE(g >= lines_per_segment - 1024);  // from the reserve
+         REQUIRE((g % 64) + n <= 64);             // one map word, like any allocation
+         lent.emplace_back(g, n);
+      }
+   }
+   REQUIRE(a.reserve_free_lines() == 1024 - 107);
+   tx2.commit();
+   tx2.close();
+   // lines of the reserve go back to the reserve, not to the ordinary map
+   const uint64_t ordinary_used = a.used_bytes();
+   for (auto [g, n] : lent)
+      a.release_run(g, n);
+   REQUIRE(a.reserve_free_lines() == 1024);
+   REQUIRE(a.used_bytes() == ordinary_used - 107 * line_bytes);
+   auto tx3 = ses.start_transaction(0);
+   REQUIRE_THROWS_AS(tx3.alloc_lines(2), arena_full);
+}
+
+// While more than half the reserve is lent out, ordinary allocation stops
+// early, so that removes and refills taking turns cannot use the reserve up.
+TEST_CASE("ordinary allocation stops early while most of the reserve is lent out",
+          "[arena][limit][reserve]")
+{
+   arena_config c  = cfg(tmp_dir("rsvgate"));
+   c.max_segments  = 1;
+   c.reserve_lines = 1024;
+   arena a(c);
+   auto  ses = a.start_session();
+   auto  tx  = ses.start_transaction(0);
+   std::vector<line_idx> taken;
+   try
+   {
+      for (;;)
+         taken.push_back(tx.alloc_lines(1));
+   }
+   catch (const arena_full&)
+   {
+   }
+   std::vector<line_idx> lent;
+   {
+      auto use = ses.use_reserve();
+      for (int k = 0; k < 600; ++k)
+         lent.push_back(tx.alloc_lines(1));
+   }
+   tx.commit();
+   tx.close();
+   // 3,000 ordinary lines come free: fewer than four reserves' worth
+   for (int k = 0; k < 3000; ++k)
+      a.release(taken[k]);
+   {
+      auto tx2 = ses.start_transaction(0);
+      REQUIRE_THROWS_AS(tx2.alloc_lines(1), arena_full);  // 600 of 1,024 still lent
+      auto use = ses.use_reserve();
+      REQUIRE(tx2.alloc_lines(1) < lines_per_segment - 1024);  // a remove uses ordinary room first
+   }
+   // the reserve comes back: ordinary allocation carries on to the end
+   for (line_idx g : lent)
+      a.release(g);
+   auto tx3 = ses.start_transaction(0);
+   for (int k = 0; k < 2900; ++k)
+      REQUIRE(tx3.alloc_lines(1) != null_idx);
+}
+
+// A segment with room that another writer is in for a moment is waited for.
+TEST_CASE("an allocation waits briefly for a segment another writer is in", "[arena][limit]")
+{
+   arena_config c  = cfg(tmp_dir("busy"));
+   c.max_segments  = 1;
+   c.reserve_lines = 0;
+   arena a(c);
+   auto  first = a.start_session();
+   auto  tx    = first.start_transaction(0);
+   tx.alloc_lines(1);  // the only segment is this writer's now
+   std::promise<void> asking;
+   bool               got = false, refused = false;
+   std::thread other([&] {
+      auto second = a.start_session();
+      auto tx2    = second.start_transaction(0);
+      asking.set_value();
+      try
+      {
+         got = tx2.alloc_lines(1) != null_idx;
+      }
+      catch (const arena_full&)
+      {
+         refused = true;
+      }
+   });
+   asking.get_future().wait();
+   tx.commit();
+   tx.close();  // the segment is idle: the waiting writer takes it
+   other.join();
+   REQUIRE_FALSE(refused);
+   REQUIRE(got);
+}

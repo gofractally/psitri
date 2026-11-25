@@ -256,6 +256,16 @@ namespace start_ref::kv
          __builtin_unreachable();
       }
    };
+   // A tagged value that records whether its bytes were gathered into a leaf.
+   struct tracked_val : tagged_val
+   {
+      bool* gathered;
+      void  write(char* d) const noexcept
+      {
+         tagged_val::write(d);
+         *gathered = true;
+      }
+   };
    struct chunked_val : tagged_val
    {
       large_value_detail::source chunks;
@@ -1588,9 +1598,28 @@ namespace start_ref::kv
          // [type_id][pod] gathered straight into the leaf. cow_insert copies the
          // pod synchronously (descends + materializes before returning) — the pod
          // local outlives the call, so a view over it is safe.
-         _ws->tree_for(_roots[0].index)
-             .cow_insert(k, tagged_val{U::type_id, value_view(reinterpret_cast<const char*>(&pod),
-                                                              sizeof(pod))});
+         //
+         // The value's reference is the engine's from take_pod() on. A write
+         // that fails after the leaf was built gives it back when that leaf
+         // is torn down (the release hook); one that fails earlier, on the
+         // way to the leaf, never built anything to tear down, so the
+         // reference is given back here. Either way a refused upsert leaves
+         // the caller owing nothing and owning nothing.
+         bool gathered = false;
+         try
+         {
+            _ws->tree_for(_roots[0].index)
+                .cow_insert(k, tracked_val{{U::type_id,
+                                            value_view(reinterpret_cast<const char*>(&pod),
+                                                       sizeof(pod))},
+                                           &gathered});
+         }
+         catch (...)
+         {
+            if (!gathered)
+               U::t_pod::release(_ws->_db, pod);
+            throw;
+         }
       }
    }
    inline any_value transaction::get_any(key_view k) const

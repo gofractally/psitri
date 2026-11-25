@@ -2604,3 +2604,44 @@ TEST_CASE("Small Engine: overwrite throughput by value size", "[.bench][overwrit
       db->flush_releases();
    }
 }
+
+// gofractally/psitri#35 item 3. A typed value's reference becomes the
+// engine's when the value is handed to upsert. An upsert that is refused must
+// give it back, wherever on the way to the leaf the refusal happens.
+TEST_CASE("Small Engine: a refused typed upsert gives the value's reference back",
+          "[small][typed][limit]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 4));
+   db->register_value_types<counted_value>();
+   auto ws   = db->start_write_session();
+   auto keys = fill_to_the_brim(*db, *ws);
+   counted_value::retains  = 0;
+   counted_value::releases = 0;
+   uint64_t stored = 0, refused = 0;
+   for (uint64_t round = 0; round < 40; ++round)
+   {
+      auto tx = ws->start_transaction(0);
+      try
+      {
+         for (uint64_t j = 0; j < 2000; ++j)
+         {
+            tx.upsert(scattered_key("typed", round * 2000 + j), counted_value{j});
+            ++stored;
+         }
+      }
+      catch (const engine::storage_full&)
+      {
+         ++refused;
+      }
+      tx.abort();  // the stored values die with the aborted transaction
+   }
+   db->flush_releases();
+   std::printf("typed upserts on a full store: %llu stored then aborted, %llu refused\n",
+               (unsigned long long)stored, (unsigned long long)refused);
+   REQUIRE(refused > 0);
+   // every value handed over was released exactly once
+   CHECK(counted_value::releases.load() == stored + refused);
+   CHECK(counted_value::retains.load() == 0);
+}

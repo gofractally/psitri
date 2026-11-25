@@ -77,9 +77,18 @@ namespace start_ref
       }
    }  // namespace detail
 
-   // Probe counter for tests: descent iterations of the most recent alloc on
-   // this thread. Proves O(1) behavior without wall clocks.
+   // Probe counter for the library's own tests: descent iterations of the most
+   // recent alloc on this thread, to show O(1) behaviour without wall clocks.
+   // Compiled in only where START_REF_PROBES is defined; an ordinary build
+   // writes no thread-local on its allocation path.
+#ifdef START_REF_PROBES
    inline thread_local uint32_t g_freeset_probes = 0;
+#define START_REF_PROBE_RESET() (::start_ref::g_freeset_probes = 0)
+#define START_REF_PROBE_STEP() (++::start_ref::g_freeset_probes)
+#else
+#define START_REF_PROBE_RESET() ((void)0)
+#define START_REF_PROBE_STEP() ((void)0)
+#endif
 
    // Grain-AGNOSTIC: templated on UNITS-per-segment (bits in l0), never on bytes.
    // The line arena and the large-value arena instantiate the SAME freeset (both
@@ -197,7 +206,7 @@ namespace start_ref
       uint32_t alloc(uint32_t n, uint32_t from) noexcept
       {
          assert(n >= 1 && n <= max_alloc_lines);
-         g_freeset_probes = 0;
+         START_REF_PROBE_RESET();
          // (ported from vpart, Dan: apples-to-apples) the per-case constant IS
          // ctz(n); callers with COMPILE-TIME n use alloc_c<N> below.
          if (n <= 8 && (n & (n - 1)) == 0)
@@ -348,7 +357,7 @@ namespace start_ref
          uint64_t mword = meta[k][m].load(std::memory_order_relaxed) & (~0ull << (from_word % 64));
          while (true)
          {
-            ++g_freeset_probes;
+            START_REF_PROBE_STEP();
             if (mword)
                return m * 64 + uint32_t(std::countr_zero(mword));
             if (mw == 1)
@@ -378,7 +387,7 @@ namespace start_ref
                cand &= ~0ull << (gfrom % 64);
             while (cand)
             {
-               ++g_freeset_probes;
+               START_REF_PROBE_STEP();
                uint64_t pick = cand & ~parent_full_(k, hw);
                if (!pick)
                   pick = cand;
@@ -410,7 +419,7 @@ namespace start_ref
             uint64_t cand = c8 & (c8 >> 1) & 0x5555555555555555ull & 0x7f7f7f7f7f7f7f7full;
             while (cand)
             {
-               ++g_freeset_probes;
+               START_REF_PROBE_STEP();
                const uint32_t bit  = uint32_t(std::countr_zero(cand));
                const uint32_t line = (hw * 64 + bit) << 3;
                if (try_take_(line, 16))
@@ -440,7 +449,7 @@ namespace start_ref
             const uint32_t w_lo = hw << k, w_hi = ((hw + 1) << k);
             for (uint32_t w = (w_lo > wfrom ? w_lo : wfrom); w < w_hi && w < W0; ++w)
             {
-               ++g_freeset_probes;
+               START_REF_PROBE_STEP();
                const uint64_t v = l0[w].load(std::memory_order_relaxed);
                uint64_t       r = runs_(v, n);
                if (w == from / 64)

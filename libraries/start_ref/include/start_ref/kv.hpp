@@ -404,7 +404,8 @@ namespace start_ref::kv
             _view(std::move(o._view)),
             _it(_view.end()),
             _own_slot(std::move(o._own_slot)),
-            _session_slot_busy(o._session_slot_busy)
+            _session_slot_busy(o._session_slot_busy),
+            _borrowed(o._borrowed)
       {
          o._a  = nullptr;  // moved-from cursor owns no pin; position resets
          o._hp = nullptr;
@@ -419,7 +420,7 @@ namespace start_ref::kv
          _view.adopt_root(root_ptr::null());  // the view owns nothing
          if (_hp)
             _hp->store(0, std::memory_order_seq_cst);  // readers only clear their slot:
-         else if (!r.is_null())                        // reclamation is the writer's job
+         else if (!r.is_null() && !_borrowed)          // reclamation is the writer's job
             _view.cow_release(r);  // write-side pinned cursor (scan_all path)
          if (_session_slot_busy)
             *_session_slot_busy = false;
@@ -636,6 +637,10 @@ namespace start_ref::kv
       mutable engine_t         _view;
       engine_t::const_iterator _it;
       bool                     _rend = false;  // retreated past first
+      // Reads through a reference somebody else holds for at least as long as
+      // this cursor lives (a point read through an owned tree): nothing to
+      // release, and no spare reference needed to read.
+      bool                     _borrowed = false;
    };
 
    // A reader thread's handle: one start_ref::read_session slot for the lifetime of
@@ -790,6 +795,7 @@ namespace start_ref::kv
       }
       ~tree() { release_(); }
       cursor snapshot_cursor() const;  // out-of-line (needs database)
+      cursor borrowed_cursor_() const; // for point reads: uses this tree's own reference
       template <class S = std::string>
       std::optional<S> get(key_view k, uint64_t offset = 0, uint64_t length = adb::read_all) const;
       explicit operator bool() const noexcept { return _db != nullptr; }
@@ -797,7 +803,7 @@ namespace start_ref::kv
          requires adb::detail::value_callback<F>
       bool get(key_view k, F&& fn, uint64_t offset = 0, uint64_t length = adb::read_all) const
       {
-         return _db && snapshot_cursor().get(k, std::forward<F>(fn), offset, length);
+         return _db && borrowed_cursor_().get(k, std::forward<F>(fn), offset, length);
       }
 
      private:
@@ -1483,6 +1489,12 @@ namespace start_ref::kv
          _db->retain_root_(_root);
       return cursor(&_db->_arena, _root, nullptr, &_db->_vh);
    }
+   inline cursor tree::borrowed_cursor_() const
+   {
+      cursor c(&_db->_arena, _root, nullptr, &_db->_vh);
+      c._borrowed = true;
+      return c;
+   }
    inline void tree::release_()
    {
       if (!_db || _root.is_null())
@@ -1504,7 +1516,7 @@ namespace start_ref::kv
    {
       if (!_db)
          return std::nullopt;
-      return snapshot_cursor().template get<S>(k, offset, length);
+      return borrowed_cursor_().template get<S>(k, offset, length);
    }
 
    inline void transaction::upsert(key_view k, value_view v)
@@ -1666,27 +1678,57 @@ namespace start_ref::kv
       if (_done)
          throw std::logic_error("start_ref::kv: commit on a finished transaction");
       write_session::use_scope use(_ws);
+      database* db = _ws->_db;
+      // Take the root slots' references to the new roots BEFORE anything is
+      // published, so that a refusal (a version at its reference ceiling)
+      // leaves every root as it was and this transaction still open: the
+      // caller aborts it, or frees references and commits again. A root this
+      // transaction holds but did not change needs nothing: the slot already
+      // references that very node (it cannot have been freed and its line
+      // reused while the slot holds it, and nobody else can publish this root
+      // while we hold its writer lock).
+      const size_t count = _roots.size();
+      size_t       taken = 0;
+      for (; taken < count; ++taken)
+      {
+         const root_state& r  = _roots[taken];
+         engine_t&         t  = _ws->tree_for(r.index);
+         const root_ptr    nr = t.root_handle();
+         if (nr.is_null() || nr.raw() == db->_live_root[r.index].raw())
+            continue;
+         if (!t.cow_retain(nr))
+            break;
+      }
+      if (taken != count)
+      {
+         for (size_t i = 0; i < taken; ++i)
+         {
+            engine_t&      t  = _ws->tree_for(_roots[i].index);
+            const root_ptr nr = t.root_handle();
+            if (!nr.is_null() && nr.raw() != db->_live_root[_roots[i].index].raw())
+               t.cow_release(nr);  // the working tree still holds its own
+         }
+         throw_root_references();
+      }
       _done = true;
       _large_tx.commit(); // continuation/head data must precede root publication
       _tx.commit();  // data msync + floor advance (layer 1)
-      database*       db = _ws->_db;
-      std::lock_guard g(db->_root_mx);
-      // publish every held root: cow_retain the working root (the _live_root
-      // ref), swap the slot, retire the old. UNCONDITIONAL (line-recycle ABA).
-      for (auto& r : _roots)
       {
-         engine_t&      t   = _ws->tree_for(r.index);
-         const root_ptr nr  = t.root_handle();
-         const root_ptr old = db->_live_root[r.index];
-         if (!nr.is_null() && !t.cow_retain(nr))
-            throw_root_references();
-         db->_live_root[r.index] = nr;
-         db->_live_raw[r.index].store(encode_root(nr), std::memory_order_seq_cst);
-         db->_arena.set_root(r.index, encode_root(nr));
-         if (!old.is_null())
-            db->_retired.push_back(encode_root(old));
+         std::lock_guard g(db->_root_mx);
+         for (auto& r : _roots)
+         {
+            const root_ptr nr  = _ws->tree_for(r.index).root_handle();
+            const root_ptr old = db->_live_root[r.index];
+            if (nr.raw() == old.raw())
+               continue;  // unchanged: nothing to publish, nothing to retire
+            db->_live_root[r.index] = nr;
+            db->_live_raw[r.index].store(encode_root(nr), std::memory_order_seq_cst);
+            db->_arena.set_root(r.index, encode_root(nr));
+            if (!old.is_null())
+               db->_retired.push_back(encode_root(old));
+         }
+         db->drain_retired_();
       }
-      db->drain_retired_();
       for (auto it = _roots.rbegin(); it != _roots.rend(); ++it)
          it->lock.unlock();
       _roots.clear();
@@ -1703,7 +1745,7 @@ namespace start_ref::kv
       // The cursor holds its own reference, so the transaction's next write
       // copies instead of changing what the cursor reads.
       if (!root.is_null() && !tree.cow_retain(root))
-         throw std::runtime_error("start_ref::kv: root retain refused");
+         throw_root_references();
       return cursor(&db->_arena, root, nullptr, &db->_vh);
    }
    inline transaction write_session::start_transaction(uint32_t root_index)

@@ -53,7 +53,12 @@ namespace start_ref
 {
    struct ref_overflow : std::runtime_error
    {
-      ref_overflow() : std::runtime_error("part: refcount would reach the 255 sentinel") {}
+      ref_overflow()
+          : std::runtime_error("start_ref: a node has reached its limit of 254 references "
+                               "(too many owned snapshots or copies of one version); release "
+                               "some before taking more")
+      {
+      }
    };
 
    // The arena has reached its configured ceiling (arena_config::max_segments)

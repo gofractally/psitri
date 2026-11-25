@@ -1,5 +1,6 @@
 // rcart::kv adb adapter — CRUD + snapshot isolation + concurrent MVCC
 // (4 readers + writer, lock-free across the 3 regions). 0 fails expected.
+#include <unistd.h>
 #include <adb/concepts.hpp>
 #include <adb/testing/kv_conformance.hpp>
 #include <atomic>
@@ -37,7 +38,26 @@ static_assert(adb::multi_root_transaction<transaction>,
 int main()
 {
    namespace fs = std::filesystem;
-   auto dir     = fs::temp_directory_path() / "sk_test";
+
+   // Directories of this test process's own: the name carries the engine and the process
+   // id, so two engines' tests, or two runs of one, never share a store. Removed at exit.
+   struct test_dirs
+   {
+      std::vector<fs::path> made;
+      fs::path operator()(const char* name)
+      {
+         made.push_back(fs::temp_directory_path() /
+                        (std::string("rcart_") + name + "_" + std::to_string(::getpid())));
+         return made.back();
+      }
+      ~test_dirs()
+      {
+         std::error_code ignored;
+         for (auto& dir : made)
+            fs::remove_all(dir, ignored);
+      }
+   } test_dir;
+   auto dir     = test_dir("sk_test");
    fs::remove_all(dir);
    auto                               db = database::create(dir);
    auto                               ws = db->start_write_session();
@@ -178,8 +198,8 @@ int main()
       }
       // empty-tree cursor → seek_begin false + is_end
       {
-         auto edb = database::create(fs::temp_directory_path() / "sk_empty");
-         fs::remove_all(fs::temp_directory_path() / "sk_empty");
+         auto edb = database::create(test_dir("sk_empty"));
+         fs::remove_all(test_dir("sk_empty"));
          auto ec = edb->start_write_session();
          auto t  = ec->get_root(0);
          auto c  = t.snapshot_cursor();
@@ -224,7 +244,7 @@ int main()
    // ── multi-root transactions (adb::multi_root_transaction): isolation, abort-all,
    //    set_root rotation — on a fresh db so it doesn't pollute the oracle ─────────
    {
-      auto mdir = fs::temp_directory_path() / "sk_mr";
+      auto mdir = test_dir("sk_mr");
       fs::remove_all(mdir);
       auto mdb = database::create(mdir);
       auto mws = mdb->start_write_session();
@@ -519,7 +539,7 @@ int main()
    // (mmap-backed root table + allocator adopt_existing_). This is the Silkworm
    // requirement — it closes+reopens the env during startup.
    {
-      auto rdir = fs::temp_directory_path() / "sk_reopen";
+      auto rdir = test_dir("sk_reopen");
       fs::remove_all(rdir);
       const int                          N = 8000;
       std::map<std::string, std::string> exp;

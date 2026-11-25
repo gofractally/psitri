@@ -3,6 +3,7 @@
 // call is made natively and identically: DB::create → start_write_session → start_transaction →
 // upsert/remove/commit, and reads via transaction::get(key, lambda). Each result is
 // cross-checked against std::map. Exit 0 iff both engines pass every check.
+#include <unistd.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -137,7 +138,24 @@ namespace
          v[j] = char(uint8_t(seed * 31 + j));
       return v;
    }
-   std::filesystem::path tmp(const char* n) { return std::filesystem::temp_directory_path() / n; }
+   // Named for this process too: two runs of the suite on one machine must not open,
+   // or remove, each other's stores. What was made is removed when the process ends.
+   struct temp_dirs
+   {
+      std::vector<std::filesystem::path> made;
+      ~temp_dirs()
+      {
+         std::error_code ignored;
+         for (auto& dir : made)
+            std::filesystem::remove_all(dir, ignored);
+      }
+   } made_dirs;
+   std::filesystem::path tmp(const char* n)
+   {
+      made_dirs.made.push_back(std::filesystem::temp_directory_path() /
+                               (std::string(n) + "_" + std::to_string(::getpid())));
+      return made_dirs.made.back();
+   }
 
    // ── the lifecycle test type: exact retain/release accounting ─────────────
    // Stored payload = 8-byte id. The registry hooks count per id; quiesced

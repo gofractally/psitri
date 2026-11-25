@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <atomic>
 #include <filesystem>
+#include <chrono>
 #include <thread>
 #include <vector>
 
@@ -140,6 +141,12 @@ TEST_CASE("atomic_ptr: cross-thread handoff transfers the refcount", "[sal][atom
              slot.store(ses->smart_alloc<probe>(i));  // releases the displaced value
              published.store(i, std::memory_order_release);
           }
+          // The stores above can all finish before the consumer thread has run at all.
+          // Keep the last value in the slot until the consumer has loaded something, so
+          // "the handoff actually happened" does not depend on the scheduler.
+          for (int waited = 0; consumed.load(std::memory_order_relaxed) == 0 && waited < 20000;
+               ++waited)
+             std::this_thread::sleep_for(std::chrono::microseconds(100));
           done.store(true, std::memory_order_release);
        });
    std::atomic<uint64_t> bad_tags{0};  // Catch2 macros are not thread-safe — collect, assert after join

@@ -494,7 +494,7 @@ namespace sal
       control_block& get_or_alloc(ptr_address address)
       {
          assert(address != null_ptr_address);
-         SAL_WARN("get_or_alloc: {}", address);
+         SAL_INFO("get_or_alloc: {}", address);
          if (auto ptr = try_get(address))
             return *ptr;
 

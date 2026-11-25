@@ -121,7 +121,7 @@ namespace sal
 
       while (azone < num_zones)
       {
-         SAL_WARN("growing control_block capacity: {} ", azone);
+         SAL_INFO("growing control_block capacity: {} ", azone);
          char* c = _zone_allocator->get(block_allocator::block_number(azone));
          char* f = _zone_free_list->get(block_allocator::block_number(azone));
          std::memset(c, 0xff, _zone_allocator->block_size());

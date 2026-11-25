@@ -4337,7 +4337,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                             [&](uint32_t)
                             {
                                vh_node_dies_(p);  // refcount-zero: bytes die
-                               cow_destroy_dead_(p);
+                               return cow_destroy_dead_(p);
                             });
       }
       // Call levels a release may descend before parking the rest. Each level
@@ -4749,7 +4749,12 @@ namespace detail  // implementation types & node helpers — not part of the pub
          return 0;
       }
 
-      void cow_destroy_dead_(Ptr p) noexcept
+      // Returns how many lines after the head belong to the dead node alone
+      // and are still to be freed: the release that ran this frees them
+      // together with the head, as the one run the node was allocated as.
+      // (Freed head and tail apart, a node of n lines came back as a run of
+      // one and a run of n - 1, and nothing that wanted n lines could use it.)
+      [[nodiscard]] uint32_t cow_destroy_dead_(Ptr p) noexcept
       {
          const K      k     = p.tag();
          const size_t bytes = cow_node_bytes_(p);
@@ -4787,7 +4792,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   cx_release_line_(Ptr::from_off(size_t(base_line + sg) << 7, K::node_full),
                                    lg);
                // tail lines freed via their own refcounts — only CL0 remains
-               return;
+               return 0;
             }
             case K::node_full:
             {
@@ -4797,7 +4802,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
                for (unsigned li = 0; li < full_lines_v<Ptr>; ++li)
                   fx_release_line_(
                       Ptr::from_off(size_t(base_line + li) << 7, K::node_full));
-               return;
+               return 0;
             }
             case K::full_x:
             {
@@ -4817,11 +4822,10 @@ namespace detail  // implementation types & node helpers — not part of the pub
             }
             case K::value_inline:
             case K::null:
-               return;
+               return 0;
          }
          const uint32_t nl = uint32_t((bytes + 127) / 128);
-         if (nl > 1)  // the head line is freed by the release that ran this hook
-            alloc_.hkv_free_run(line_of(p) + 1, nl - 1);
+         return nl > 1 ? nl - 1 : 0;
       }
 
       // Release one reference to a shareable direct line of a full_x; when the

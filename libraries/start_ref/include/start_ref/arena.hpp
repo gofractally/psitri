@@ -44,6 +44,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include <sal/block_allocator.hpp>
@@ -550,8 +551,31 @@ namespace start_ref
          assert(prior >= 1 && "release of a dead line");
          if (prior != 1)
             return false;
-         destroy(i);
-         free_lines_now(i, 1);
+         if constexpr (std::is_void_v<std::invoke_result_t<Destroy&, line_idx>>)
+         {
+            destroy(i);
+            free_lines_now(i, 1);
+         }
+         else
+         {
+            // The hook reports how many lines after i die with it: a node of
+            // several lines is freed as the one run it was allocated as.
+            const uint32_t tail  = destroy(i);
+            bool           whole = true;
+            for (uint32_t k = 1; k <= tail; ++k)
+               whole &= _ref_base[i + k].load(std::memory_order_relaxed) == 1;
+            if (whole)
+            {
+               for (uint32_t k = 1; k <= tail; ++k)
+                  _ref_base[i + k].store(0, std::memory_order_release);
+               free_lines_now(i, 1 + tail);
+            }
+            else
+            {
+               release_run(i + 1, tail);
+               free_lines_now(i, 1);
+            }
+         }
          return true;
       }
       bool release(line_idx i) noexcept

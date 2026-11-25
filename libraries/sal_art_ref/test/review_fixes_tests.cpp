@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <filesystem>
+#include <algorithm>
 #include <map>
 #include <optional>
 #include <random>
@@ -184,5 +185,103 @@ TEST_CASE("review: updating a long key keeps the key", "[review]")
       put(*ws, model, k, big);
       put(*ws, model, k, "v3");
    }
+   check_against(*ws, model);
+}
+
+// gofractally/psitri#27: a page keeps its keys' common prefix and its divider in
+// its own 2 KB, and nothing checked that they and the records fit. Keys sharing
+// about 700 bytes overflowed the page (the prefix once, the divider again); a
+// key outside a prefix of more than 255 bytes could never be added to the page
+// it routed to ("split invariant violated", forever).
+TEST_CASE("review: keys that share a long prefix", "[review]")
+{
+   // Shared prefix lengths around every boundary: the one-byte suffix length
+   // (255/256), where prefix plus divider passed a page (700, 800), and the key
+   // limit (keys of exactly 1,024 bytes).
+   for (int shared : {100, 255, 256, 300, 700, 800, 1020})
+   {
+      INFO("shared prefix of " << shared << " bytes");
+      temp_dir dir("long-prefix");
+      auto     db = engine::database::open(dir.path);
+      auto     ws = db->start_write_session();
+      model_t  model;
+      std::mt19937_64 rng{uint64_t(shared)};
+
+      const std::string prefix(size_t(shared), 'z');
+      auto key_of = [&](int i) {
+         char suf[8];
+         std::snprintf(suf, sizeof suf, "%04d", i);
+         return prefix + suf;
+      };
+      const std::string values[] = {"v", std::string(100, 'm'), std::string(200, 'L'),
+                                    std::string(5000, 'X')};
+      // inserts in an order that splits pages in the middle and at both ends
+      std::vector<int> order(400);
+      for (int i = 0; i < 400; ++i)
+         order[size_t(i)] = i;
+      std::shuffle(order.begin() + 100, order.end(), rng);
+      for (int i : order)
+         put(*ws, model, key_of(i), values[size_t(i) % 4]);
+      check_against(*ws, model);
+
+      // keys outside the prefix: below it, inside it but shorter, and above it
+      for (const std::string& k :
+           {std::string("a"), std::string("zzzzb"), std::string("~"), prefix.substr(0, 50),
+            prefix.substr(0, size_t(shared) - 1) + "y", prefix.substr(0, size_t(shared) - 1) + "{",
+            prefix, std::string(1024, 'z')})
+         put(*ws, model, k, "outside");
+      check_against(*ws, model);
+
+      // updates across every size class, removes, and re-inserts
+      for (int round = 0; round < 3; ++round)
+      {
+         for (int i = 0; i < 400; ++i)
+         {
+            const auto k = key_of(int(rng() % 400));
+            switch (rng() % 3)
+            {
+               case 0: put(*ws, model, k, values[rng() % 4]); break;
+               case 1: del(*ws, model, k); break;
+               default: put(*ws, model, k, values[(rng() % 4)] + "u"); break;
+            }
+         }
+         check_against(*ws, model);
+      }
+      // a second family under a different long prefix, interleaved with the first
+      const std::string other(size_t(shared), 'y');
+      for (int i = 0; i < 200; ++i)
+      {
+         put(*ws, model, other + std::to_string(1000 + i), values[size_t(i) % 4]);
+         if (i % 3 == 0)
+            del(*ws, model, key_of(i));
+      }
+      check_against(*ws, model);
+      // drain it: every page empties and is dropped or reused
+      for (const auto& [k, v] : model_t(model))
+         del(*ws, model, k);
+      check_against(*ws, model);
+      put(*ws, model, "after", "empty");
+      put(*ws, model, key_of(7), "again");
+      check_against(*ws, model);
+   }
+}
+
+// The case that could not make progress: every key shares 300 bytes, so the
+// pages' common prefix is over 255 bytes, and a key outside it is added.
+TEST_CASE("review: a key outside a page's long common prefix gets in", "[review]")
+{
+   temp_dir dir("outside-prefix");
+   auto     db = engine::database::open(dir.path);
+   auto     ws = db->start_write_session();
+   model_t  model;
+   const std::string prefix(300, 'z');
+   for (int i = 0; i < 400; ++i)
+   {
+      char suf[8];
+      std::snprintf(suf, sizeof suf, "%04d", i);
+      put(*ws, model, prefix + suf, "v");
+   }
+   for (const char* k : {"a", "zzzzb", "~"})
+      put(*ws, model, k, "small");
    check_against(*ws, model);
 }

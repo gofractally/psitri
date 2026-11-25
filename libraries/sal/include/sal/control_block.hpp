@@ -428,28 +428,6 @@ namespace sal
       }
 
       /**
-       * Attempts to increment the activity counter in a non-blocking way.
-       * If the object is not marked as active, tries to set the active bit.
-       * If already active, tries to set the pending_cache bit.
-       * May fail if there is contention, which is acceptable since this 
-       * simulates random sampling behavior.
-       *
-       * @return true if successfully incremented activity, false if failed due to contention
-       */
-      bool try_inc_activity() noexcept
-      {
-         uint64_t           expected = _data.load(std::memory_order_relaxed);
-         control_block_data updated(expected);
-         if (updated.pending_cache)
-            return false;
-         if (updated.active)
-            return _data.compare_exchange_weak(expected, updated.set_pending_cache(true).to_int(),
-                                               std::memory_order_relaxed);
-         return _data.compare_exchange_weak(expected, updated.set_active(true).to_int(),
-                                            std::memory_order_relaxed);
-      }
-
-      /**
        * Marks a sampled read. The first sampled hit sets the active bit; a
        * later sampled hit within the decay window sets pending_cache and asks
        * the caller to enqueue the object for promotion.

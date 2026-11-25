@@ -1656,7 +1656,8 @@ namespace sal
       // Set thread name for sal debug system
       sal::set_current_thread_name("compactor");
 
-      auto ses = create_session();
+      // made by start_background_threads
+      allocator_session_ptr ses(_compactor_session.exchange(nullptr));
       auto& sesr = *ses;
 
       /**
@@ -1785,7 +1786,8 @@ namespace sal
    {
       sal::set_current_thread_name("release");
 
-      auto  ses  = create_session();
+      // made by start_background_threads
+      allocator_session_ptr ses(_release_session.exchange(nullptr));
       auto& sesr = *ses;
 
       ptr_address read_ids[1024];
@@ -2755,6 +2757,21 @@ namespace sal
 
       stop_background_threads();
 
+      // The compactor and the release thread each need a session. They are made here, before
+      // this function returns, and not by the threads once they run: a caller that takes
+      // every remaining session slot right after opening must not be able to leave the
+      // database without a compactor or without anything to finish its releases.
+      _compactor_session = new allocator_session(*this, alloc_session_num());
+      try
+      {
+         _release_session = new allocator_session(*this, alloc_session_num());
+      }
+      catch (...)
+      {
+         allocator_session_ptr drop(_compactor_session.exchange(nullptr));
+         throw;
+      }
+
       // Initialize and start all threads after _mapped_state is set
       _compactor_thread.emplace(&_mapped_state->compact_thread_state, "compactor",
                                 [this](segment_thread& thread) { compactor_loop(thread); });
@@ -2813,6 +2830,12 @@ namespace sal
          _segment_provider_thread->stop();
          _segment_provider_thread.reset();
       }
+
+      // A loop that never ran did not take its session.
+      if (auto* unused = _compactor_session.exchange(nullptr))
+         allocator_session_ptr drop(unused);
+      if (auto* unused = _release_session.exchange(nullptr))
+         allocator_session_ptr drop(unused);
    }
    void allocator::set_runtime_config(const runtime_config& cfg)
    {

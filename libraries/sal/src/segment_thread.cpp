@@ -1,3 +1,5 @@
+#include <cstdio>
+#include <cstdlib>
 #include <pthread.h>      // For pthread_setname_np
 #include <signal.h>       // For kill
 #include <string.h>       // For strncpy
@@ -125,13 +127,21 @@ namespace sal
                    // Call the actual thread work
                    _work(*this);
                 }
+                // An exception out of a background loop ends that service for good: no
+                // more segments are provided (writers then wait forever), nothing more is
+                // compacted or released. The process cannot carry on, and a log line that
+                // nobody reads is not an error report. Stop here and say why.
                 catch (const std::exception& e)
                 {
-                   SAL_ERROR("Exception in {} thread: {}", _thread_name, e.what());
+                   fprintf(stderr, "sal: the %s thread ended with an exception: %s\n",
+                           _thread_name.c_str(), e.what());
+                   std::abort();
                 }
                 catch (...)
                 {
-                   SAL_ERROR("Unknown exception in {} thread", _thread_name);
+                   fprintf(stderr, "sal: the %s thread ended with an unknown exception\n",
+                           _thread_name.c_str());
+                   std::abort();
                 }
              }
              catch (...)

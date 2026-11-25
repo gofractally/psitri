@@ -750,6 +750,10 @@ namespace sal
 
       // segment_thread implementation for the compactor
       std::optional<segment_thread> _compactor_thread;
+      // Sessions made by start_background_threads for the two loops, owned here only until
+      // the loop takes them.
+      std::atomic<allocator_session*> _compactor_session{nullptr};
+      std::atomic<allocator_session*> _release_session{nullptr};
       //@}
 
       /**

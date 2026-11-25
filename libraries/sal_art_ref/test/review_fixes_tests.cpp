@@ -335,3 +335,82 @@ TEST_CASE("review: a cursor walks a tree nested as deep as the longest key", "[r
          REQUIRE(std::string(c.key()) == std::prev(it)->first);
    }
 }
+
+// gofractally/psitri#30 (1): commit published the primary root, then flushed and
+// published the other roots one by one, so a later root's flush that threw left
+// the earlier ones published by a commit that failed.
+TEST_CASE("review: a commit that throws publishes no root", "[review]")
+{
+   temp_dir dir("commit-throw");
+   auto     db = engine::database::open(dir.path);
+   auto     ws = db->start_write_session();
+   {
+      auto tx = ws->start_transaction(0);
+      tx.upsert("kept", "old");
+      tx.commit();
+   }
+   {
+      auto tx = ws->start_transaction(0);
+      tx.upsert("kept", "new");
+      tx.upsert("added", "x");
+      // An opened child that cannot be written back: its key is over the limit, which
+      // is found when root 1 is flushed at commit.
+      tx.open_root(1).create_subtree(std::string(2000, 'k')).upsert("a", "b");
+      CHECK_THROWS(tx.commit());
+   }
+   CHECK(ws->get_root(0).get<std::string>("kept") == std::optional<std::string>("old"));
+   CHECK_FALSE(ws->get_root(0).get<std::string>("added"));
+   CHECK(ws->get_root(1).count_keys() == 0);
+   // both roots are free again and a later transaction commits
+   auto tx = ws->start_transaction(0);
+   tx.upsert("added", "y");
+   tx.open_root(1).upsert("r1", "z");
+   tx.commit();
+   CHECK(ws->get_root(0).get<std::string>("added") == std::optional<std::string>("y"));
+   CHECK(ws->get_root(1).count_keys() == 1);
+}
+
+// gofractally/psitri#30 (2): a savepoint saved the transaction's working root and
+// how many subtrees were open, but not the working roots of those open subtrees,
+// so aborting it kept what was written through a subtree opened before it.
+TEST_CASE("review: aborting a savepoint undoes writes through subtrees opened before it",
+          "[review]")
+{
+   temp_dir dir("frame-subtree");
+   auto     db = engine::database::open(dir.path);
+   auto     ws = db->start_write_session();
+   {
+      auto tx = ws->start_transaction(0);
+      tx.create_subtree("sub").upsert("before", "1");
+      tx.commit();
+   }
+   auto  tx  = ws->start_transaction(0);
+   auto& sub = tx.open_subtree("sub");
+   sub.upsert("in-tx", "2");
+   auto& nested = sub.create_subtree("nested");
+   nested.upsert("n1", "3");
+   {
+      auto sp = tx.sub_transaction();
+      sub.upsert("in-frame", "4");                        // through a handle opened before
+      nested.upsert("n2", "5");                           // and one opened below it
+      sub.create_subtree("made-in-frame").upsert("x", "6");
+      sp.upsert("top-in-frame", "7");
+      sp.abort();
+   }
+   CHECK(sub.get<std::string>("in-tx") == std::optional<std::string>("2"));
+   CHECK_FALSE(sub.get<std::string>("in-frame"));
+   CHECK(nested.get<std::string>("n1") == std::optional<std::string>("3"));
+   CHECK_FALSE(nested.get<std::string>("n2"));
+   CHECK_FALSE(tx.get<std::string>("top-in-frame"));
+   {
+      auto sp = tx.sub_transaction();
+      sub.upsert("kept-by-commit", "8");
+      sp.commit();
+   }
+   tx.commit();
+   auto committed = ws->get_root(0).get_subtree("sub");
+   CHECK(committed.count_keys() == 4);  // before, in-tx, nested, kept-by-commit
+   CHECK(committed.get<std::string>("kept-by-commit") == std::optional<std::string>("8"));
+   CHECK_FALSE(committed.get<std::string>("in-frame"));
+   CHECK(committed.get_subtree("nested").count_keys() == 1);
+}

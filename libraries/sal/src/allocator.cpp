@@ -50,6 +50,11 @@ namespace sal
 
       bool should_store(ptr_address addr, uint64_t sequence, location new_loc) noexcept
       {
+         if (!_any_sequence || sequence_newer(sequence, _newest_sequence))
+         {
+            _any_sequence    = true;
+            _newest_sequence = sequence;
+         }
          uint64_t index = *addr;
          uint64_t word  = index >> 6;
          if (word >= _seen.size())
@@ -84,6 +89,20 @@ namespace sal
          return true;
       }
 
+      /// The sequence the allocator must continue from: one past the newest on disk, so
+      /// that an object allocated after this recovery is newer than every copy a later
+      /// recovery can find. (Restarting at 0 made the next recovery prefer a dead object
+      /// over the live one that had reused its address.)
+      ///
+      /// The sequence is 32 bits compared in a signed window, so this ordering holds only
+      /// between copies fewer than 2^31 allocations apart: a dead copy of an address that
+      /// has sat uncompacted and unreused for 2^31 allocations would be taken for the newer
+      /// one. Widening the field changes the object header.
+      uint32_t next_sequence() const noexcept
+      {
+         return _any_sequence ? uint32_t(_newest_sequence) + 1 : 0;
+      }
+
      private:
       static bool sequence_newer(uint64_t candidate, uint64_t current) noexcept
       {
@@ -97,6 +116,8 @@ namespace sal
       std::vector<uint64_t> _seen;
       std::vector<uint64_t> _sequence;
       std::vector<location> _location;
+      uint64_t              _newest_sequence = 0;
+      bool                  _any_sequence    = false;
    };
 
    static constexpr std::size_t passive_relocation_release_capacity = 1024;
@@ -1067,6 +1088,8 @@ namespace sal
          }
       }
 
+      _ptr_alloc.set_next_alloc_sequence(location_index.next_sequence());
+
       // Phase 3.5: Reconstruct custom CBs (version addresses) from root slots
       reconstruct_custom_cbs_from_roots(&version_index);
 
@@ -1421,6 +1444,8 @@ namespace sal
             obj_ptr = obj_ptr->next();
          }
       }
+
+      _ptr_alloc.set_next_alloc_sequence(location_index.next_sequence());
 
       // Phase 5: Rebuild roots from sync headers (newest timestamp wins)
       // Sort by timestamp descending so we encounter newest first

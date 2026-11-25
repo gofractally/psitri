@@ -513,6 +513,11 @@ namespace sal
       /// @{
       // set all meta nodes to empty state
       void clear_all();
+      /// Recovery: the sequence the next allocation gets (see recovery_location_index).
+      void set_next_alloc_sequence(uint32_t next) noexcept
+      {
+         _header_ptr->alloc_seq.store(next, std::memory_order_relaxed);
+      }
 
       // Flush control blocks, free list, and header. They are deliberately not
       // flushed on the commit path; recovery rebuilds them after an unclean stop.

@@ -716,7 +716,7 @@ namespace start_ref::kv
       void abort() noexcept;
       ~transaction() { abort(); }
       transaction(transaction&& o) noexcept
-          : _ws(o._ws), _tx(std::move(o._tx)), _large_tx(std::move(o._large_tx)), _roots(std::move(o._roots)), _done(o._done)
+          : _ws(o._ws), _tx(std::move(o._tx)), _large_tx(std::move(o._large_tx)), _roots(std::move(o._roots)), _held_roots(std::move(o._held_roots)), _done(o._done)
       {
          o._done = true;  // moved-from: nothing to roll back
       }
@@ -745,6 +745,10 @@ namespace start_ref::kv
       start_ref::transaction  _tx;
       start_ref::large_transaction _large_tx;
       std::vector<root_state> _roots;  // [0] = primary; ascending order
+      // References of trees given to set_root, kept until the transaction
+      // ends so that such a root is never uniquely held while written to.
+      std::vector<root_ptr>   _held_roots;
+      void                    release_held_roots_() noexcept;
       bool                    _done = false;
    };
 
@@ -1710,6 +1714,7 @@ namespace start_ref::kv
          it->lock.unlock();  // reverse order
       }
       _roots.clear();
+      release_held_roots_();
       _tx.close();  // the session may start its next transaction
       _large_tx.close();
    }
@@ -1795,6 +1800,7 @@ namespace start_ref::kv
       for (auto it = _roots.rbegin(); it != _roots.rend(); ++it)
          it->lock.unlock();
       _roots.clear();
+      release_held_roots_();
       _tx.close();  // the session may start its next transaction
       _large_tx.close();
    }
@@ -1895,19 +1901,45 @@ namespace start_ref::kv
       slot_visit(out.v, &_tx->_ws->_db->_large, std::forward<F>(fn), offset, length);
       return true;
    }
-   // THE exchange (pure ref transfer): the working handle and the owned tree
-   // swap the ref each already holds — no retain/release. The displaced root
-   // becomes the returned owned tree's ref; the incoming root becomes the
-   // working's ref.
+   // Assign a tree to this root and return the one it displaces.
+   //
+   // The incoming tree keeps the reference it arrived with, held by the
+   // transaction until it ends, and the working tree takes a second one. The
+   // root is therefore never uniquely held while this transaction can write
+   // to it, so the first write copies instead of writing in place. That is
+   // required, not caution: an old version can share storage with newer ones
+   // in a way its root's own count does not show (a wide router that a later
+   // version copied has its tail lines retained by the copy), and a root
+   // handed in with one reference used to be taken for private all the way
+   // down. Trees the working tree builds itself are private for real.
    inline tree tree_handle::set_root(tree t)
    {
+      write_session::use_scope use(_tx->_ws);
       engine_t&      w       = _tx->tree_(_ri);
       const root_ptr old     = w.root_handle();
       const size_t   old_cnt = w.size_hint();
+      if (!t._root.is_null())
+      {
+         _tx->_held_roots.reserve(_tx->_held_roots.size() + 1);  // before any change
+         if (!w.cow_retain(t._root))
+            throw_root_references();
+         _tx->_held_roots.push_back(t._root);  // the incoming tree's reference
+      }
       w.adopt_root(t._root, t._count);  // repoint working to the incoming root
-      t._db   = nullptr;  // the working now owns the incoming's ref
+      t._db   = nullptr;
       t._root = root_ptr::null();
       return tree(_tx->_ws->_db, old, old_cnt);  // owned tree takes the working's old ref
+   }
+   inline void transaction::release_held_roots_() noexcept
+   {
+      if (_held_roots.empty())
+         return;
+      database* db = _ws->_db;
+      engine_t  v{part_alloc<bval>(&db->_arena)};
+      v.allocator_mut().vhooks = &db->_vh;
+      for (const root_ptr r : _held_roots)
+         v.cow_release(r);
+      _held_roots.clear();
    }
 
    // The engine as a kv_engine aggregate (delta_art's W/B type param).

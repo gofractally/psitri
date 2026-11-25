@@ -728,7 +728,11 @@ namespace sal
          // compactor may walk it, and count its unused tail as reclaimable.
          if (!seg->is_finalized())
             seg->finalize();
-         seg->_first_writable_page.store(pages_per_segment, std::memory_order_relaxed);
+         // A segment that is already wholly read-only has its footer
+         // write-protected along with its data (segment::sync); it needs no
+         // store, and one would fault.
+         if (seg->_first_writable_page.load(std::memory_order_relaxed) != pages_per_segment)
+            seg->_first_writable_page.store(pages_per_segment, std::memory_order_relaxed);
          seg_data.recovered_with_data(num, seg->age_accumulator.average(),
                                       static_cast<uint32_t>(seg->end_pos() - live));
          ++with_data;

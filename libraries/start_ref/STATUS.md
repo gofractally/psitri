@@ -87,7 +87,8 @@ change to how nodes own their lines has to be made in both.
   up the remove reserve before it commits (about 9,800 small keys on a
   two-segment store in the tests); `reserve_bytes` sizes it.
 - The reserve's guaranteed runs cover node lengths of 2 to 16 lines exactly
-  and longer ones with a few 64-line runs; a guaranteed run is repaid only by
+  (a remove needs at most 14: it copies routers and key prefixes, never
+  leaves) and keep a few 64-line runs as margin; a guaranteed run is repaid only by
   a freed run at least as long, so a remove that built a longer node than any
   it freed would leave that length owed (no tested shape does).
 - While the reserve is owed a run of some length, every free of a run that

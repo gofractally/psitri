@@ -128,15 +128,21 @@ A full store is never stuck:
   | Compact routers of 2, 4 or 8 lines of branches | 3, 5, 9 |
   | Full 256-way router copied whole | up to 14 |
   | Key prefix of p bytes | (p + 7) / 128, rounded up: 9 for a 1,024-byte key |
-  | Leaf rebuilt beside the removed key | (key bytes kept + value + 8) / 128, rounded up; up to 64 for a value near 8 KiB |
+
+  A remove never copies a leaf, its own or a neighbour's, so the size of the
+  values does not come into it: the longest run a remove can need is 14
+  lines, whatever the keys and values.
 
   So the reserve is kept as runs, in two parts:
 
   - **Guaranteed runs.** For each length from 2 to 16 lines, a fixed number
-    of runs of exactly that length, and separately a few runs of 64 lines
-    for anything longer. A guaranteed run is handed only to a draw of its own
-    length, and its place is refilled only by a freed run at least that long.
-    No number of shorter draws can use them up.
+    of runs of exactly that length. A guaranteed run is handed only to a draw
+    of its own length, and its place is refilled only by a freed run at least
+    that long. No number of shorter draws can use them up. Separately, a few
+    runs of 64 lines are kept for draws of more than 16 lines; no remove
+    needs one as the tree stands, and they are there as margin. What a draw
+    leaves of such a run stays with it, and a run that comes back is joined
+    to what it was cut from.
   - **Flexible room**: the rest, a little over three quarters. Any draw may
     cut a piece from it, and it is refilled line for line with whatever is
     freed, so short draws turn it into short runs over time.
@@ -165,13 +171,14 @@ A full store is never stuck:
   - One transaction that only removes keys can draw at least the flexible
     room in runs of any length up to 64 lines while that room is fresh, and
     always, whatever was drawn before or earlier in the same transaction, the
-    guaranteed number of runs of each length from 2 to 16 and of 64. Single
-    lines come from the flexible room only.
+    guaranteed number of runs of each length from 2 to 16. Single lines come
+    from the flexible room only.
   - After that transaction has committed and the versions it replaced have
     been released, every run it drew has been repaid with a run of the same
     length, provided the versions released contained one, which they do for
     every node a remove copies. The reserve then holds what it held before:
-    indefinitely, across clean reopens and across recoveries.
+    indefinitely, across clean reopens and across recoveries. What it holds
+    and what it is owed always add up to its size.
   - Ordinary writes never get lines of the reserve.
 
   `tests/api/small_engine.cpp` checks the reserve after each of 30,000 rounds
@@ -192,17 +199,20 @@ A full store is never stuck:
   - A remove that has to build a node longer than every run it frees leaves
     that length owed until a run that long is freed anywhere in the store.
     None of the shapes tested does this.
-  - A node of more than 16 lines (a leaf with a value of two kilobytes or
-    more, rebuilt because the key beside it was removed) depends on the few
-    64-line runs.
   - While a reader stays on a version that removes have replaced, what they
     drew stays owed: the old nodes cannot be freed under it. A reader twenty
     rounds behind was seen holding nearly the whole reserve owed.
 
+  When the reserve has no run of the length a remove needs, the remove has
+  the releases that are already queued carried out, waiting at most half a
+  millisecond for the background releaser and never for another writer, and
+  looks once more; after that it looks for a free run in the whole store like
+  an ordinary write, and is refused if there is none.
+
   `usage()` says where things stand: `reserve_free_bytes` is how many lines
   the reserve holds, which is not what a remove can get;
   `reserve_longest_run_bytes` is the longest run it can hand out now, and a
-  remove that must copy a longer node is refused; `reserve_long_runs` is how
+  remove that must copy a longer node gets nothing from the reserve for it; `reserve_long_runs` is how
   many runs of nine lines or more it has; `reserve_owed_bytes` is what it is
   waiting to get back. A store opened too full to collect its reserve shows
   the shortfall as owed, gives the flexible room its share of what was found,

@@ -2931,3 +2931,498 @@ TEST_CASE("Small Engine: writes refused at the limit leak nothing", "[small][lim
    REQUIRE(u.used_bytes == 0);
    REQUIRE(u.large_used_bytes == 0);
 }
+
+// ── model test ───────────────────────────────────────────────────────────
+// Written for the review of the segment-reuse and set_root changes
+// (gofractally/psitri#31, #35) and kept: random transactions against a model
+// of what must be stored.
+namespace rfm
+{
+   uint64_t h64(std::string_view s, uint64_t seed = 1469598103934665603ull)
+   {
+      uint64_t h = seed;
+      for (unsigned char c : s)
+         h = (h ^ c) * 1099511628211ull;
+      h ^= h >> 29; h *= 0xbf58476d1ce4e5b9ull; h ^= h >> 32;
+      return h;
+   }
+   uint64_t kvh(std::string_view k, std::string_view v) { return h64(v, h64(k) | 1); }
+   const std::string man_key = "~manifest";
+   struct manifest { uint64_t seq = 0, count = 0, sum = 0; };
+   std::string enc(const manifest& m) { return std::string(reinterpret_cast<const char*>(&m), sizeof(m)); }
+
+   std::string key_of(uint32_t root, uint64_t id)
+   {
+      std::string k = scattered_key(root == 0 ? "a" : root == 1 ? "b" : "c", id);
+      k.append(id % 37, char('k' + id % 5));  // varied key lengths
+      return k;
+   }
+   std::string value_of(std::mt19937_64& rng)
+   {
+      const uint32_t r = rng() % 100;
+      size_t n;
+      static const uint64_t small_only = env_u64("RFM_SMALL", 0);
+      if (small_only) n = rng() % small_only;
+      else if (r < 45) n = rng() % 64;
+      else if (r < 78) n = 64 + rng() % 600;
+      else if (r < 97) n = 600 + rng() % 2600;
+      else n = 20000 + rng() % 150000;
+      std::string v(n, char('A' + rng() % 26));
+      const uint64_t x = rng();
+      for (size_t i = 0; i + 8 <= n; i += 61) std::memcpy(v.data() + i, &x, 8);
+      return v;
+   }
+   // scan a cursor: returns "" if content is self-consistent with its manifest
+   template <typename Cursor>
+   std::string scan(Cursor& cur, std::map<std::string, std::string>* out, manifest* mo = nullptr)
+   {
+      manifest m, got;
+      bool     have = false;
+      for (cur.seek_begin(); !cur.is_end(); cur.next())
+      {
+         std::string k(cur.key());
+         auto        v = cur.template value<std::string>();
+         if (!v) return "value missing for a key the cursor is on";
+         if (k == man_key)
+         {
+            if (v->size() != sizeof(m)) return "manifest size";
+            std::memcpy(&m, v->data(), sizeof(m));
+            have = true;
+            continue;
+         }
+         ++got.count;
+         got.sum ^= kvh(k, *v);
+         if (out) (*out)[k] = std::move(*v);
+      }
+      if (mo) *mo = m;
+      if (mo) mo->count = got.count, mo->sum = got.sum;
+      if (!have) return "";
+      if (got.count != m.count) return "count " + std::to_string(got.count) + " != manifest " + std::to_string(m.count) + " at seq " + std::to_string(m.seq);
+      if (got.sum != m.sum) return "content hash differs from manifest at seq " + std::to_string(m.seq);
+      return "";
+   }
+   template <typename Cursor>
+   std::string compare(Cursor& cur, const std::map<std::string, std::string>& expect)
+   {
+      auto it = expect.begin();
+      uint64_t n = 0;
+      for (cur.seek_begin(); !cur.is_end(); cur.next())
+      {
+         std::string k(cur.key());
+         if (k == man_key) continue;
+         if (it == expect.end()) return "extra key " + k;
+         if (k != it->first) return "key mismatch: got " + k + " want " + it->first;
+         auto v = cur.template value<std::string>();
+         if (!v || *v != it->second) return "value mismatch at " + k;
+         ++it; ++n;
+      }
+      if (it != expect.end()) return "missing key " + it->first;
+      return "";
+   }
+
+   struct params
+   {
+      uint32_t max_segments = 3;
+      uint64_t keyspace     = 4000;
+      uint64_t txns         = 1500;   // per writer per epoch
+      uint32_t writers      = 3;
+      bool     threads      = true;
+      bool     readers      = true;
+      uint64_t seed         = 1;
+   };
+   struct writer_state
+   {
+      std::map<std::string, std::string> expect;
+      manifest                           man;
+      uint64_t commits = 0, aborts = 0, fulls = 0, purges = 0;
+      uint64_t remove_refused = 0;
+      bool     absent = false;  // the manifest key is not in the store
+      std::string error;
+   };
+
+   // one writer: `txns` transactions on `root` using session ws
+   template <typename DB, typename WS>
+   void run_writer(DB& db, WS& ws, uint32_t root, const params& p, writer_state& st, uint64_t seed,
+                   std::atomic<bool>* stop = nullptr, int report_fd = -1)
+   {
+      std::mt19937_64 rng(seed);
+      struct snap { decltype(ws->get_root(0)) t; std::vector<std::pair<std::string, std::optional<std::string>>> samples; };
+      std::vector<snap> snaps;
+      auto fail = [&](std::string e) { if (st.error.empty()) st.error = "root " + std::to_string(root) + ": " + e; };
+      auto verify = [&] {
+         auto rs  = db->start_read_session();
+         auto cur = rs->create_cursor(root);
+         auto e   = compare(cur, st.expect);
+         if (!e.empty()) fail("after commit " + std::to_string(st.man.seq) + ": " + e);
+         if (auto mv = cur.template get<std::string>(man_key))
+         {
+            manifest m; std::memcpy(&m, mv->data(), sizeof(m));
+            if (st.absent || m.seq != st.man.seq || m.count != st.man.count || m.sum != st.man.sum) fail("manifest differs from model");
+         }
+         else if (st.man.seq && !st.absent) fail("manifest missing");
+      };
+      auto purge = [&] {
+         ++st.purges;
+         uint64_t drop = st.expect.size() / 8 + 1;
+         while (drop && !st.expect.empty())
+         {
+            auto     tx = ws->start_transaction(root);
+            manifest m  = st.man;
+            std::vector<std::string> gone;
+            auto it = st.expect.lower_bound(key_of(root, rng() % p.keyspace));
+            static const int per_txn = int(env_u64("RFM_PURGE", 60));
+            for (int j = 0; j < per_txn && drop; ++j, --drop)
+            {
+               if (it == st.expect.end()) it = st.expect.begin();
+               if (it == st.expect.end() || std::find(gone.begin(), gone.end(), it->first) != gone.end()) break;
+               if (tx.remove(it->first) != 0) { fail("purge: committed key missing"); return; }
+               --m.count; m.sum ^= kvh(it->first, it->second);
+               gone.push_back(it->first);
+               ++it;
+            }
+            // removes only (never refused): the manifest goes too, and comes
+            // back with the next ordinary transaction
+            tx.remove(man_key);
+            m.seq = 0;
+            tx.commit();
+            for (auto& k : gone) st.expect.erase(k);
+            st.man.count = m.count; st.man.sum = m.sum; st.absent = true;
+            ++st.commits;
+            if (gone.empty()) break;
+         }
+      };
+      for (uint64_t t = 0; t < p.txns && st.error.empty() && !(stop && stop->load()); ++t)
+      {
+         std::map<std::string, std::optional<std::string>> pending;
+         manifest m = st.man;
+         auto cur_val = [&](const std::string& k) -> std::optional<std::string> {
+            if (auto i = pending.find(k); i != pending.end()) return i->second;
+            if (auto i = st.expect.find(k); i != st.expect.end()) return i->second;
+            return std::nullopt;
+         };
+         bool full = false;
+         try
+         {
+            auto tx = ws->start_transaction(root);
+            const uint32_t ops = 1 + rng() % (rng() % 8 == 0 ? 150 : 30);
+            for (uint32_t o = 0; o < ops; ++o)
+            {
+               const std::string k   = key_of(root, rng() % p.keyspace);
+               const auto        old = cur_val(k);
+               const uint32_t    r   = rng() % 100;
+               if (r < 62)
+               {
+                  std::string v = value_of(rng);
+                  tx.upsert(k, v);
+                  if (old) { m.sum ^= kvh(k, *old); } else ++m.count;
+                  m.sum ^= kvh(k, v);
+                  pending[k] = std::move(v);
+               }
+               else if (r < 92)
+               {
+                  const int rc = tx.remove(k);
+                  if ((rc == 0) != bool(old)) { fail("remove result wrong for " + k); break; }
+                  if (old) { m.sum ^= kvh(k, *old); --m.count; pending[k] = std::nullopt; }
+               }
+               else
+               {
+                  auto got = tx.template get<std::string>(k);
+                  if (got != old) { fail("in-transaction read wrong for " + k); break; }
+               }
+            }
+            ++m.seq;
+            tx.upsert(man_key, enc(m));
+            static const uint64_t abort_every = env_u64("RFM_ABORT", 4);
+            if (abort_every && rng() % abort_every == 0)
+            {
+               tx.abort();
+               ++st.aborts;
+            }
+            else
+            {
+               tx.commit();
+               for (auto& [k, v] : pending)
+                  if (v) st.expect[k] = *v; else st.expect.erase(k);
+               st.man = m; st.absent = false;
+               ++st.commits;
+               if (report_fd >= 0) (void)!::write(report_fd, &m.seq, 8);
+            }
+         }
+         catch (const engine::storage_full&)
+         {
+            full = true;
+            ++st.fulls;
+         }
+         catch (const std::exception& e)
+         {
+            fail(std::string("exception: ") + e.what());
+         }
+         if (!st.error.empty()) break;
+         try
+         {
+            if (full)
+            {
+               try { purge(); }
+               catch (const engine::storage_full& e)
+               {
+                  ++st.remove_refused;
+                  if (env_u64("RFM_STRICT_REMOVE", 0)) fail(std::string("a remove-only transaction was refused: ") + e.what());
+                  // last way out: drop the root
+                  auto tx = ws->start_transaction(root);
+                  tx.primary().set_root({});
+                  tx.commit();
+                  st.expect.clear(); st.man.count = 0; st.man.sum = 0; st.absent = true;
+               }
+            }
+            verify();
+            // owned snapshots of old versions, checked and dropped later
+            if (rng() % 16 == 0 && snaps.size() < 4)
+            {
+               snap s{ws->get_root(root), {}};
+               for (int i = 0; i < 12; ++i)
+               {
+                  std::string k = key_of(root, rng() % p.keyspace);
+                  auto i2 = st.expect.find(k);
+                  s.samples.emplace_back(k, i2 == st.expect.end() ? std::nullopt : std::optional<std::string>(i2->second));
+               }
+               snaps.push_back(std::move(s));
+            }
+            if (!snaps.empty() && rng() % 24 == 0)
+            {
+               const size_t i = rng() % snaps.size();
+               for (auto& [k, v] : snaps[i].samples)
+                  if (snaps[i].t.template get<std::string>(k) != v) fail("owned snapshot changed at " + k);
+               snaps.erase(snaps.begin() + i);
+            }
+         }
+         catch (const std::exception& e)
+         {
+            fail(std::string("exception (post): ") + e.what());
+         }
+      }
+      for (auto& s : snaps)
+         for (auto& [k, v] : s.samples)
+            if (s.t.template get<std::string>(k) != v) fail("owned snapshot changed at " + k);
+   }
+
+   // one epoch on an open database; returns first error
+   template <typename DB>
+   std::string epoch(DB& db, const params& p, std::vector<writer_state>& st, uint64_t epoch_no,
+                     std::atomic<bool>* stop = nullptr, int report_fd = -1)
+   {
+      std::atomic<bool> readers_stop{false};
+      std::string       reader_error[3];
+      std::vector<std::thread> readers;
+      std::atomic<uint64_t> scans{0};
+      if (p.readers)
+         for (uint32_t r = 0; r < p.writers; ++r)
+            readers.emplace_back([&, r] {
+               auto rs = db->start_read_session();
+               while (!readers_stop.load() && reader_error[r].empty())
+               {
+                  auto cur = rs->create_cursor(r);
+                  reader_error[r] = scan(cur, nullptr);
+                  ++scans;
+               }
+            });
+      if (p.threads)
+      {
+         std::vector<std::thread> ws;
+         for (uint32_t w = 0; w < p.writers; ++w)
+            ws.emplace_back([&, w] {
+               auto s = db->start_write_session();
+               run_writer(db, s, w, p, st[w], p.seed * 1000003 + epoch_no * 131 + w, stop, report_fd);
+            });
+         for (auto& t : ws) t.join();
+      }
+      else
+      {
+         // sessions take turns, and change root every slice
+         std::vector<decltype(db->start_write_session())> ses;
+         for (uint32_t w = 0; w < p.writers; ++w) ses.push_back(db->start_write_session());
+         params slice = p;
+         slice.txns   = 7;
+         for (uint64_t done = 0, turn = 0; done < p.txns * p.writers; done += slice.txns, ++turn)
+         {
+            const uint32_t s = turn % p.writers, root = (turn / p.writers + turn) % p.writers;
+            run_writer(db, ses[s], root, slice, st[root], p.seed * 7919 + epoch_no * 1000 + turn, stop, report_fd);
+            if (!st[root].error.empty()) break;
+         }
+      }
+      readers_stop = true;
+      for (auto& t : readers) t.join();
+      for (auto& s : st) if (!s.error.empty()) return s.error;
+      for (uint32_t r = 0; r < 3; ++r) if (!reader_error[r].empty()) return "reader of root " + std::to_string(r) + ": " + reader_error[r];
+      return "";
+   }
+}  // namespace rfm
+
+namespace rfm
+{
+   // Random transactions on three roots by up to three writers with readers
+   // scanning, checked against a model, over `epochs` closes and reopens;
+   // then every root is emptied and the arenas must drain.
+   void run_model(const params& p, uint64_t epochs, psitri::sync_mode sync)
+   {
+   temporary_directory tmp;
+   std::vector<rfm::writer_state> st(p.writers);
+   for (uint64_t e = 0; e < epochs; ++e)
+   {
+      auto db = database::open(tmp.path, psitri::open_mode::create_or_open, small_config(sync, p.max_segments));
+      REQUIRE_FALSE(db->recovered_on_open());
+      // after reopen: everything is what the model says
+      for (uint32_t r = 0; r < p.writers; ++r)
+      {
+         auto rs  = db->start_read_session();
+         auto cur = rs->create_cursor(r);
+         REQUIRE(rfm::compare(cur, st[r].expect) == "");
+         REQUIRE(rfm::scan(cur, nullptr) == "");
+      }
+      const auto& as = db->store().stats();
+      const std::string err = rfm::epoch(db, p, st, e);
+      std::printf("epoch %llu: commits %llu/%llu/%llu aborts %llu full %llu/%llu/%llu keys %zu/%zu/%zu switches %llu reused %llu grown %llu used %.1f MiB mapped %.0f MiB large used %.1f MiB remove-refused %llu\n",
+                  (unsigned long long)e, (unsigned long long)st[0].commits, (unsigned long long)st[1].commits, (unsigned long long)st[2].commits,
+                  (unsigned long long)(st[0].aborts + st[1].aborts + st[2].aborts),
+                  (unsigned long long)st[0].fulls, (unsigned long long)st[1].fulls, (unsigned long long)st[2].fulls,
+                  st[0].expect.size(), st[1].expect.size(), st[2].expect.size(),
+                  (unsigned long long)as.range_switches.load(), (unsigned long long)as.segments_reused.load(), (unsigned long long)as.segments_grown.load(),
+                  db->usage().used_bytes / 1048576.0, db->usage().mapped_bytes / 1048576.0, db->usage().large_used_bytes / 1048576.0, (unsigned long long)(st[0].remove_refused + st[1].remove_refused + st[2].remove_refused));
+      std::fflush(stdout);
+      REQUIRE(err == "");
+   }
+   // nothing leaked: empty every root, the arenas drain
+   auto db = database::open(tmp.path, psitri::open_mode::open_existing, small_config(sync, p.max_segments));
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.primary().set_root({});
+      tx.open_root(1).set_root({});
+      tx.open_root(2).set_root({});
+      tx.commit();
+   }
+   db->flush_releases();
+   std::printf("drained: used %llu bytes, large used %llu bytes\n", (unsigned long long)db->usage().used_bytes, (unsigned long long)db->usage().large_used_bytes);
+   REQUIRE(db->usage().used_bytes <= 64 * 128);
+   REQUIRE(db->usage().large_used_bytes == 0);
+}
+}  // namespace rfm
+
+// A short run in every suite: three writers on a store small enough that
+// segments are reused and the limit is reached.
+TEST_CASE("Small Engine model: random transactions over reused segments", "[small][model]")
+{
+   rfm::params p;
+   p.max_segments = 3;
+   p.keyspace     = 4000;
+   p.txns         = 300;
+   p.threads      = 1;
+   p.readers      = 1;
+   p.seed         = 1;
+   rfm::run_model(p, 2, psitri::sync_mode::none);
+}
+
+// The same, sized by the environment (RFM_SEGS, RFM_KEYS, RFM_TXNS,
+// RFM_THREADS, RFM_READERS, RFM_SEED, RFM_EPOCHS, RFM_SYNC):
+// `small-engine-tests "[.rfmodel]"`.
+TEST_CASE("Small Engine model: random transactions, sized by the environment", "[.rfmodel]")
+{
+   rfm::params p;
+   p.max_segments = uint32_t(env_u64("RFM_SEGS", 3));
+   p.keyspace     = env_u64("RFM_KEYS", 4000);
+   p.txns         = env_u64("RFM_TXNS", 1500);
+   p.threads      = env_u64("RFM_THREADS", 1);
+   p.readers      = env_u64("RFM_READERS", 1);
+   p.seed         = env_u64("RFM_SEED", 1);
+   rfm::run_model(p, env_u64("RFM_EPOCHS", 4), psitri::sync_mode(env_u64("RFM_SYNC", 0)));
+}
+
+TEST_CASE("Small Engine model: killed mid-transaction, recovered, continued", "[.rfkill]")
+{
+   rfm::params p;
+   p.max_segments = uint32_t(env_u64("RFM_SEGS", 3));
+   p.keyspace     = env_u64("RFM_KEYS", 4000);
+   p.txns         = ~0ull;
+   p.threads      = env_u64("RFM_THREADS", 1);
+   p.readers      = env_u64("RFM_READERS", 1);
+   p.seed         = env_u64("RFM_SEED", 1);
+   const uint64_t kills = env_u64("RFM_KILLS", 12);
+   const auto     sync  = psitri::sync_mode(env_u64("RFM_SYNC", 0));
+   temporary_directory tmp;
+   std::mt19937_64     rng(p.seed);
+   uint64_t            last_seq[3] = {0, 0, 0};
+   for (uint64_t k = 0; k < kills; ++k)
+   {
+      int fds[2];
+      REQUIRE(::pipe(fds) == 0);
+      const pid_t pid = ::fork();
+      REQUIRE(pid >= 0);
+      if (pid == 0)
+      {
+         ::close(fds[0]);
+         try
+         {
+            auto db = database::open(tmp.path, psitri::open_mode::create_or_open, small_config(sync, p.max_segments));
+            std::vector<rfm::writer_state> st(p.writers);
+            for (uint32_t r = 0; r < p.writers; ++r)
+            {
+               auto rs  = db->start_read_session();
+               auto cur = rs->create_cursor(r);
+               auto e   = rfm::scan(cur, &st[r].expect, &st[r].man);
+               if (!e.empty()) { std::fprintf(stderr, "child: after recovery root %u: %s\n", r, e.c_str()); ::_exit(41); }
+               st[r].absent = st[r].man.seq == 0;
+               if (st[r].absent) st[r].man.seq = (k + 1) << 32;  // keeps rising across kills
+            }
+            const uint64_t ready = ~0ull;
+            (void)!::write(fds[1], &ready, 8);
+            auto e = rfm::epoch(db, p, st, k, nullptr, -1);
+            std::fprintf(stderr, "child: %s\n", e.c_str());
+         }
+         catch (const std::exception& e) { std::fprintf(stderr, "child exception: %s\n", e.what()); }
+         ::_exit(42);
+      }
+      ::close(fds[1]);
+      uint64_t ready = 0;
+      REQUIRE(::read(fds[0], &ready, 8) == 8);
+      ::usleep(useconds_t(20000 + rng() % 1500000));
+      ::kill(pid, SIGKILL);
+      int status = 0;
+      ::waitpid(pid, &status, 0);
+      ::close(fds[0]);
+      INFO("kill " << k << " status " << status);
+      REQUIRE(WIFSIGNALED(status));
+      // reopen: recovered, self-consistent, never older than before
+      auto db = database::open(tmp.path, psitri::open_mode::open_existing, small_config(sync, p.max_segments));
+      REQUIRE(db->recovered_on_open());
+      uint64_t seqs[3];
+      for (uint32_t r = 0; r < p.writers; ++r)
+      {
+         auto rs  = db->start_read_session();
+         auto cur = rs->create_cursor(r);
+         rfm::manifest m;
+         REQUIRE(rfm::scan(cur, nullptr, &m) == "");
+         if (m.seq)
+         {
+            REQUIRE(m.seq >= last_seq[r]);
+            last_seq[r] = m.seq;
+         }
+         seqs[r] = m.seq;
+      }
+      std::printf("kill %llu: seq %llu/%llu/%llu used %.1f MiB mapped %.0f MiB\n", (unsigned long long)k,
+                  (unsigned long long)seqs[0], (unsigned long long)seqs[1], (unsigned long long)seqs[2],
+                  db->usage().used_bytes / 1048576.0, db->usage().mapped_bytes / 1048576.0);
+      std::fflush(stdout);
+   }
+   auto db = database::open(tmp.path, psitri::open_mode::open_existing, small_config(sync, p.max_segments));
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.primary().set_root({});
+      tx.open_root(1).set_root({});
+      tx.open_root(2).set_root({});
+      tx.commit();
+   }
+   db->flush_releases();
+   std::printf("drained: used %llu bytes, large used %llu bytes\n", (unsigned long long)db->usage().used_bytes, (unsigned long long)db->usage().large_used_bytes);
+   REQUIRE(db->usage().used_bytes <= 64 * 128);
+   REQUIRE(db->usage().large_used_bytes == 0);
+}

@@ -722,13 +722,22 @@ namespace sal_art_ref::radix
       // root's 4 address bytes; the terminal takes ownership of the caller's DONATED ref (no
       // retain here). BORROWS `root` like every *_step (the caller owns the pre-image; null is
       // the valid empty tree). Shared stash discipline: _ins_value_type set and restored.
+      // `sub` arrives as a reference its caller gave up (taken out of its owning pointer):
+      // it is this function's until a record holds it. If the insert throws (the key is
+      // refused, an allocation fails) the subtree is released here; nobody else can.
       [[nodiscard]] ptr_address attach_subtree_step(ptr_address root, key_view k, ptr_address sub)
       {
-         _ins_value_type = inline_value::vt_subtree;
+         sal::smart_ptr<sal::alloc_header> held(_ses, sub);
+         struct subtree_kind  // the stashed value kind does not outlive this call, throw or not
+         {
+            uint8_t& kind;
+            explicit subtree_kind(uint8_t& k) : kind(k) { kind = inline_value::vt_subtree; }
+            ~subtree_kind() { kind = inline_value::vt_bytes; }
+         } as_subtree{_ins_value_type};
          uint32_t    raw = *sub;
          ptr_address nr =
              upsert_step(root, as_bytes(k), bytes{reinterpret_cast<const uint8_t*>(&raw), sizeof(raw)});
-         _ins_value_type = inline_value::vt_bytes;
+         (void)held.take();  // stored: the record owns it now
          return nr;
       }
 

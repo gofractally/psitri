@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <algorithm>
+#include <chrono>
 #include <map>
 #include <optional>
 #include <random>
@@ -445,4 +446,50 @@ TEST_CASE("review: a shared subtree outlives the write session it was taken thro
    CHECK(std::string(c.key()) == "inside");
    held.reset();
    copy.reset();
+}
+
+// gofractally/psitri#30 (4): the subtree handed to upsert_subtree was taken out of
+// its owning pointer before the insert that could throw, so a refused insert (here:
+// a key over the limit) left the whole subtree allocated with nothing referring to it.
+TEST_CASE("review: a subtree whose attach is refused is not leaked", "[review]")
+{
+   temp_dir dir("attach-leak");
+   auto     db = engine::database::open(dir.path);
+   auto     ws = db->start_write_session();
+   {
+      auto tx = ws->start_transaction(0);
+      tx.upsert("base", "v");
+      tx.commit();
+   }
+   auto settle = [&] { REQUIRE(db->wait_for_compactor(std::chrono::milliseconds(30000))); };
+   settle();
+   const uint64_t baseline = ws->get_total_allocated_objects();
+
+   const std::string too_long(2000, 'k');
+   {
+      // a detached tree attached under a key that is refused
+      auto edit = ws->start_write_transaction(ws->create_temporary_tree());
+      for (int i = 0; i < 500; ++i)
+         edit.upsert("key" + std::to_string(i), std::string(300, 'v'));
+      auto tx = ws->start_transaction(0);
+      CHECK_THROWS(tx.upsert_subtree(too_long, edit.get_tree()));
+      tx.abort();
+   }
+   settle();
+   CHECK(ws->get_total_allocated_objects() == baseline);
+   {
+      // an opened child that cannot be written back at commit
+      auto  tx    = ws->start_transaction(0);
+      auto& child = tx.create_subtree(too_long);
+      for (int i = 0; i < 500; ++i)
+         child.upsert("key" + std::to_string(i), std::string(300, 'v'));
+      CHECK_THROWS(tx.commit());
+   }
+   settle();
+   CHECK(ws->get_total_allocated_objects() == baseline);
+   // and a plain write afterwards is a plain write
+   auto tx = ws->start_transaction(0);
+   tx.upsert("after", "bytes");
+   tx.commit();
+   CHECK(ws->get_root(0).get<std::string>("after") == std::optional<std::string>("bytes"));
 }

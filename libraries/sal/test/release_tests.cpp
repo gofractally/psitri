@@ -101,3 +101,70 @@ TEST_CASE("the last reference is never dropped to zero before the object is prot
    }
    fs::remove_all(path);
 }
+
+// gofractally/psitri#24. Running out of session slots is an error the caller
+// can handle (an embedder falls back to sharing sessions), not the end of the
+// process.
+TEST_CASE("the 65th session is refused with an exception and a freed slot can be reused",
+          "[sal][session][limit]")
+{
+   const auto path = fs::temp_directory_path() / "sal_session_limit_test";
+   fs::remove_all(path);
+   fs::create_directories(path);
+   {
+      sal::runtime_config cfg;
+      cfg.max_pinned_cache_size_mb = 0;
+      sal::allocator a(path, cfg, false);
+      a.register_type_ops<release_test_node>();
+
+      std::vector<sal::allocator_session_ptr> sessions;
+      for (;;)
+      {
+         try
+         {
+            sessions.push_back(a.create_session());
+         }
+         catch (const sal::session_limit_error&)
+         {
+            break;
+         }
+         REQUIRE(sessions.size() <= 64);
+      }
+      CHECK(sessions.size() == 64);
+      CHECK_THROWS_AS(a.create_session(), std::runtime_error);
+
+      sessions.pop_back();
+      CHECK_NOTHROW(sessions.push_back(a.create_session()));
+      CHECK_THROWS_AS(a.create_session(), sal::session_limit_error);
+   }
+   fs::remove_all(path);
+}
+
+// gofractally/psitri#24. One object cannot take more than 262,080 references.
+// The retain that would pass the limit throws and leaves the count alone.
+TEST_CASE("a retain past the reference limit throws and changes nothing", "[sal][release][limit]")
+{
+   const auto path = fs::temp_directory_path() / "sal_reference_limit_test";
+   fs::remove_all(path);
+   fs::create_directories(path);
+   {
+      sal::runtime_config cfg;
+      cfg.max_pinned_cache_size_mb = 0;
+      sal::allocator a(path, cfg, false);
+      a.register_type_ops<release_test_node>();
+      a.start_background_threads();
+
+      auto ses = a.create_session();
+      auto adr = ses->alloc<release_test_node>(uint32_t(128), sal::alloc_hint{});
+      const auto limit = sal::control_block::max_ref_count;
+      for (uint64_t i = 1; i < limit; ++i)
+         ses->retain(adr);
+      CHECK(ses->get_ref<release_test_node>(adr).ref() == limit);
+      CHECK_THROWS_AS(ses->retain(adr), sal::reference_limit_error);
+      CHECK_THROWS_AS(ses->retain(adr), std::runtime_error);
+      CHECK(ses->get_ref<release_test_node>(adr).ref() == limit);
+      for (uint64_t i = 0; i < limit; ++i)
+         ses->release(adr);
+   }
+   fs::remove_all(path);
+}

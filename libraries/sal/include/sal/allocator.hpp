@@ -706,7 +706,7 @@ namespace sal
              _block_alloc.get(block_allocator::block_number(*seg)));
       }
 
-      allocator_session_number alloc_session_num() noexcept;
+      allocator_session_number alloc_session_num();  // throws session_limit_error
       void                     release_session_num(allocator_session_number sn) noexcept;
 
       /**

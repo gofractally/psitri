@@ -273,3 +273,37 @@ TEST_CASE("shared_tree: seeks and point reads agree after single-key edits of ke
    }
    std::filesystem::remove_all(dir);
 }
+
+// gofractally/psitri#24: an embedder that gives each reader thread its own
+// session relies on running out of sessions being an exception it can catch.
+TEST_CASE("starting more read sessions than the allocator has slots throws", "[shared_tree][limit]")
+{
+   const auto dir = std::filesystem::temp_directory_path() / "heart_session_limit";
+   std::filesystem::remove_all(dir);
+   {
+      auto db = engine::database::open(dir, sal::open_mode::create_only);
+      std::vector<decltype(db->start_read_session())> readers;
+      bool                                            refused = false;
+      for (int i = 0; i < 80 && !refused; ++i)
+      {
+         try
+         {
+            readers.push_back(db->start_read_session());
+         }
+         catch (const std::runtime_error&)
+         {
+            refused = true;
+         }
+      }
+      CHECK(refused);
+      CHECK(readers.size() < 64);  // the engine's own threads hold sessions too
+      CHECK(readers.size() > 32);
+
+      // The ones that were made still work, and a freed one can be replaced.
+      readers.pop_back();
+      CHECK_NOTHROW(readers.push_back(db->start_read_session()));
+      auto cursor = readers.front()->create_cursor(0);
+      CHECK_FALSE(cursor.get("absent"));
+   }
+   std::filesystem::remove_all(dir);
+}

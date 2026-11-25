@@ -581,3 +581,32 @@ TEST_CASE("review: a transaction started on one thread ends on another", "[revie
    std::thread([&] { ws->set_root(0, ws->create_temporary_tree()); }).join();
    CHECK(ws->get_root(0).count_keys() == 0);
 }
+
+// max_key, the upper bound that means "to the end", was 256 bytes of 0xFF: not
+// above a key of 0xFF bytes that is longer, and keys go up to 1,024 bytes. The
+// engine's own transaction recognised the constant itself; anything that only
+// compared keys with it stopped short (tests/api/transactions.cpp shows that for
+// the transactions that keep their changes aside).
+TEST_CASE("review: the upper bound above every key is above every key", "[review]")
+{
+   temp_dir dir("max-key");
+   auto     db = engine::database::open(dir.path);
+   auto     ws = db->start_write_session();
+   const std::string ff300(300, '\xff'), ff1024(1024, '\xff'), ff256(256, '\xff');
+   {
+      auto tx = ws->start_transaction(0);
+      for (const std::string& k : {std::string("a"), std::string("m"), ff256, ff300, ff1024})
+         tx.upsert(k, "v");
+      tx.commit();
+   }
+   using sal_art_ref::radix::max_key;
+   CHECK(max_key.size() == 1025);
+   CHECK(std::string_view(ff1024) < max_key);
+   auto tx = ws->start_transaction(0);
+   CHECK(tx.remove_range_counted("b", max_key) == 4);
+   CHECK(tx.snapshot_cursor().count_keys() == 1);
+   // an upper bound that merely compares above the keys works the same way
+   CHECK(tx.remove_range_counted("", std::string(1024, '\xff') + '\x01') == 1);
+   tx.commit();
+   CHECK(ws->get_root(0).count_keys() == 0);
+}

@@ -73,16 +73,19 @@ namespace sal_art_ref::radix
 
    namespace detail
    {
-      inline constexpr std::array<char, 256> max_key_data = []()
+      // One byte longer than the longest key, all 0xFF: no key is above it.
+      inline constexpr std::array<char, key_val_node::max_key_len + 1> max_key_data = []()
       {
-         std::array<char, 256> arr{};
+         std::array<char, key_val_node::max_key_len + 1> arr{};
          for (auto& c : arr)
             c = '\xFF';
          return arr;
       }();
    }  // namespace detail
-   /// Sentinel key that compares greater than any real key (psitri parity).
-   /// Use as the upper bound in range operations to mean "unbounded".
+   /// An upper bound above every key: pass it as the end of a range to mean "to the end".
+   /// It really is above every key (it is longer than any key can be), so code that only
+   /// compares keys with it is right too; the engine also recognises it and skips the
+   /// comparison.
    static constexpr key_view max_key{detail::max_key_data.data(), detail::max_key_data.size()};
 
    using setlist_u8  = setlist_node<uint8_t>;

@@ -25,6 +25,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <semaphore>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -664,41 +665,28 @@ namespace start_ref::kv
    class write_session;
 
    // A root's writer lock, held by a transaction from start to commit or
-   // abort. It remembers which thread holds it, so that a thread asking for a
-   // root it already holds is told so instead of waiting for itself forever.
-   // Only the holder can read its own id there, so the check cannot misfire.
+   // abort. It belongs to the transaction, not to a thread: a transaction may
+   // be started on one thread and finished on another (with the hand-over
+   // serialized by the caller), so the lock is a binary semaphore, which any
+   // thread may release, and nothing about it depends on thread identity.
    class root_writer_lock
    {
      public:
-      root_writer_lock(std::mutex& m, std::atomic<std::thread::id>& owner, uint32_t root_index)
-      {
-         const auto me = std::this_thread::get_id();
-         if (owner.load(std::memory_order_relaxed) == me)
-            throw std::logic_error(
-                "start_ref::kv: this thread already has a transaction open on root " +
-                std::to_string(root_index) +
-                "; commit or abort it before starting another on the same root");
-         m.lock();
-         owner.store(me, std::memory_order_relaxed);
-         _m     = &m;
-         _owner = &owner;
-      }
-      root_writer_lock(root_writer_lock&& o) noexcept : _m(o._m), _owner(o._owner) { o._m = nullptr; }
+      explicit root_writer_lock(std::binary_semaphore& gate) : _gate(&gate) { gate.acquire(); }
+      root_writer_lock(root_writer_lock&& o) noexcept : _gate(o._gate) { o._gate = nullptr; }
       root_writer_lock(const root_writer_lock&)            = delete;
       root_writer_lock& operator=(const root_writer_lock&) = delete;
       ~root_writer_lock() { unlock(); }
       void unlock() noexcept
       {
-         if (!_m)
+         if (!_gate)
             return;
-         _owner->store(std::thread::id{}, std::memory_order_relaxed);
-         _m->unlock();
-         _m = nullptr;
+         _gate->release();
+         _gate = nullptr;
       }
 
      private:
-      std::mutex*                   _m     = nullptr;
-      std::atomic<std::thread::id>* _owner = nullptr;
+      std::binary_semaphore* _gate = nullptr;
    };
 
    class transaction
@@ -985,6 +973,8 @@ namespace start_ref::kv
       /// reference counts from the published roots before returning. A
       /// directory with no store in it reports true: there is nothing to
       /// recover.
+      /// A store that is open right now reports false: the mark is cleared at
+      /// open and written back at close. Ask before opening, not during.
       static bool closed_cleanly(const std::filesystem::path& dir)
       {
          const auto lines  = start_ref::arena::read_clean_flag(dir);
@@ -1347,8 +1337,18 @@ namespace start_ref::kv
       // AFTER _arena so it is constructed after (and destroyed before) it.
       start_ref::large_arena _large;
       std::mutex            _root_mx;                  // serializes commit publication
-      std::mutex            _root_locks[kMaxRoots];    // per-root writer locks (ordered)
-      std::atomic<std::thread::id> _root_owner[kMaxRoots] = {};  // thread holding each
+      // per-root writer locks (ordered); one permit each, released by
+      // whichever thread finishes the transaction
+      std::array<std::binary_semaphore, kMaxRoots> _root_locks = make_root_locks_();
+      template <size_t... I>
+      static std::array<std::binary_semaphore, kMaxRoots> make_root_locks_(std::index_sequence<I...>)
+      {
+         return {{(void(I), std::binary_semaphore{1})...}};
+      }
+      static std::array<std::binary_semaphore, kMaxRoots> make_root_locks_()
+      {
+         return make_root_locks_(std::make_index_sequence<kMaxRoots>{});
+      }
       root_ptr              _live_root[kMaxRoots];     // committed root per slot
       std::atomic<uint64_t> _live_raw[kMaxRoots];      // raw per slot (reader publish-validate)
       std::vector<uint64_t> _retired;
@@ -1616,8 +1616,7 @@ namespace start_ref::kv
                                    start_ref::transaction&& tx)
        : _ws(ws), _tx(std::move(tx)), _large_tx(ws->_lses.start_transaction())
    {
-      root_writer_lock lock(ws->_db->_root_locks[root_index], ws->_db->_root_owner[root_index],
-                            root_index);
+      root_writer_lock lock(ws->_db->_root_locks[root_index]);
       auto& t = ws->refresh_tree(root_index);
       _roots.push_back({root_index, t.root_handle(), t.size_hint(), std::move(lock)});
    }
@@ -1636,8 +1635,7 @@ namespace start_ref::kv
              "start_ref::kv: open_root(" + std::to_string(root_index) +
              ") after root " + std::to_string(_roots.back().index) +
              ": a transaction opens each additional root once, in ascending index order");
-      root_writer_lock lock(_ws->_db->_root_locks[root_index], _ws->_db->_root_owner[root_index],
-                            root_index);
+      root_writer_lock lock(_ws->_db->_root_locks[root_index]);
       auto& t = _ws->refresh_tree(root_index);
       _roots.push_back({root_index, t.root_handle(), t.size_hint(), std::move(lock)});
       return tree_handle(this, root_index);
@@ -1756,7 +1754,7 @@ namespace start_ref::kv
          throw std::logic_error(
              "start_ref::kv: this write session already has a transaction open; a session "
              "runs one transaction at a time (use open_root for more roots, or another "
-             "session on another thread)");
+             "session)");
       return transaction(this, root_index, _ses.start_transaction(0));
    }
    inline tree write_session::get_root(uint32_t root_index)

@@ -33,9 +33,15 @@ segment is claimed again once an eighth of its 8-line groups are free.
   - storage use level under churn at constant live size;
   - reaching `max_segments` mid-transaction: exception, rollback, store usable;
   - the 1,024-byte key limit at the boundary;
-  - a second transaction from the thread that holds the root, and a 65th
-    reader, are refused with an exception;
-  - write and read sessions moving between threads with serialized use;
+  - a session's second transaction, misordered `open_root`, and a 65th
+    reader are refused with an exception;
+  - write and read sessions, and a transaction in progress, moving between
+    threads with serialized use (root writer locks are semaphores owned by
+    the transaction);
+  - the session that reached the limit writes again after aborting; the
+    limit is reached at 100% use for small values; running out of room for a
+    multi-line node is `storage_full`; a writer ahead of the releaser waits;
+  - a multi-root commit whose reference is refused publishes nothing;
   - what a reader sees of a two-root commit;
   - read-only open refused; second open of an open store refused;
   - more owned snapshots of one version than a writer reference can join.
@@ -67,6 +73,10 @@ change to how nodes own their lines has to be made in both.
 - Read-only open is not implemented. (A store that is open is locked: a
   second open of its directory throws.)
 - A multi-root commit publishes its root slots one at a time.
+- At the ceiling a session takes free lines from any segment, which gives up
+  the placement policy's low write amplification for as long as it lasts.
+- `session_t::_fill_end` is not reset when a session moves to a lower-numbered
+  segment, so each transaction start there forces one more segment switch.
 - Reverse cursor steps are a series of forward probes (cost follows key
   length); there is no backward link.
 - The large-value arena has no ceiling of its own below

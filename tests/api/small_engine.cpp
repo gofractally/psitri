@@ -20,6 +20,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <future>
+#include <map>
 #include <random>
 #include <string>
 #include <thread>
@@ -124,8 +126,11 @@ namespace
          for (uint64_t j = 0; j < batch; ++j)
          {
             const uint64_t id = (seq * batch + j) % rows;
+            // Thrown, not REQUIREd: this also runs in forked writer children,
+            // which must exit on a failure and not carry on as a test runner.
             if (auto old = tx.template get<std::string>(row_key(id)))
-               REQUIRE(tx.remove(index_key(value_seq(*old), id)) == 0);
+               if (tx.remove(index_key(value_seq(*old), id)) != 0)
+                  throw std::runtime_error("model: a row's index entry is missing");
             tx.upsert(row_key(id), row_value(seq, id));
             tx.upsert(index_key(seq, id), std::string_view());
          }
@@ -698,10 +703,11 @@ TEST_CASE("Small Engine: keys up to 1,024 bytes are stored and longer ones are r
    tx.commit();
 }
 
-// A thread that asks for a root it already holds used to wait for itself
-// forever. These are caller errors, reported as such, and they leave the
-// open transaction and the store untouched.
-TEST_CASE("Small Engine: a second transaction from the holding thread is refused, not hung",
+// What a session can detect about its own misuse is reported as a caller
+// error and leaves the open transaction and the store untouched. (A root held
+// through ANOTHER session is waited for, whichever thread asks: the holder may
+// be finished by a different thread, so there is nothing to detect.)
+TEST_CASE("Small Engine: a session's second transaction and misordered roots are refused",
           "[small][threads]")
 {
    temporary_directory tmp;
@@ -712,8 +718,6 @@ TEST_CASE("Small Engine: a second transaction from the holding thread is refused
    {
       auto tx = first->start_transaction(0);
       tx.upsert("a", "1");
-      // same root, another session, same thread
-      REQUIRE_THROWS_AS(second->start_transaction(0), std::logic_error);
       // same session, any root
       REQUIRE_THROWS_AS(first->start_transaction(0), std::logic_error);
       REQUIRE_THROWS_AS(first->start_transaction(5), std::logic_error);
@@ -724,7 +728,6 @@ TEST_CASE("Small Engine: a second transaction from the holding thread is refused
       REQUIRE_THROWS_AS(tx.open_root(2), std::logic_error);
       REQUIRE_THROWS_AS(tx.open_root(0), std::logic_error);
       REQUIRE_THROWS_AS(tx.open_root(16), std::out_of_range);
-      REQUIRE_THROWS_AS(second->start_transaction(3), std::logic_error);
       // a different root from another session is fine on the same thread
       {
          auto other = second->start_transaction(1);
@@ -1139,4 +1142,456 @@ TEST_CASE("Small Engine: a store that cannot be recovered is refused every time"
       REQUIRE(m.verify(cur) >= killed.acknowledged);
    }
    REQUIRE(usage_after_emptying(tmp.path, cfg).used_bytes <= 64 * 128);
+}
+
+
+// commit() publishes all of a transaction's roots or none. A root the
+// transaction opened but did not change needs no new reference, however many
+// owned snapshots of it exist.
+TEST_CASE("Small Engine: commit is all-or-nothing when a root reference is refused",
+          "[small][refs][commit]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 16));
+   auto ws = db->start_write_session();
+   auto read = [&](uint32_t root, std::string_view key) {
+      auto rs  = db->start_read_session();
+      auto cur = rs->create_cursor(root);
+      return cur.get<std::string>(key);
+   };
+   {
+      auto tx = ws->start_transaction(0);
+      tx.upsert("a", "0");
+      tx.open_root(1).upsert("b", "0");
+      tx.open_root(2).upsert("c", "0");
+      tx.commit();
+   }
+   {
+      std::vector<psitri::snapshot_for<engine>> held;
+      for (int i = 0; i < 195; ++i)
+         held.push_back(ws->get_root(1));
+      {
+         // root 1 opened and left alone
+         auto tx = ws->start_transaction(0);
+         tx.upsert("a", "1");
+         REQUIRE(tx.open_root(1).get<std::string>("b") == std::optional<std::string>("0"));
+         REQUIRE_NOTHROW(tx.commit());
+      }
+      REQUIRE(read(0, "a") == std::optional<std::string>("1"));
+      {
+         // nothing changed at all
+         auto tx = ws->start_transaction(1);
+         REQUIRE_NOTHROW(tx.commit());
+      }
+      // reading through a snapshot at that count needs no further reference
+      for (int i = 0; i < 57; ++i)
+         held.push_back(ws->get_root(1));  // 252 snapshots
+      REQUIRE(held.back().get<std::string>("b") == std::optional<std::string>("0"));
+      bool seen = false;
+      REQUIRE(held.front().get("b", [&](std::string_view v) { seen = v == "0"; }));
+      REQUIRE(seen);
+   }
+   {
+      // A root that cannot be published: root 1 is given a tree whose
+      // version is already at the writer ceiling. Root 0, earlier in the
+      // order, must not be published either.
+      std::vector<psitri::snapshot_for<engine>> held;
+      for (int i = 0; i < 195; ++i)
+         held.push_back(ws->get_root(2));
+      {
+         auto tx = ws->start_transaction(0);
+         tx.upsert("a", "half");
+         tx.open_root(1).set_root(ws->get_root(2));
+         REQUIRE_THROWS_AS(tx.commit(), std::runtime_error);
+         REQUIRE(read(0, "a") == std::optional<std::string>("1"));
+         REQUIRE(read(1, "b") == std::optional<std::string>("0"));
+         // the transaction is still open and still holds its changes
+         REQUIRE(tx.get<std::string>("a") == std::optional<std::string>("half"));
+         tx.abort();
+      }
+      REQUIRE(read(0, "a") == std::optional<std::string>("1"));
+      held.clear();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("a", "2");
+      tx.open_root(1).set_root(ws->get_root(2));
+      tx.commit();
+   }
+   REQUIRE(read(0, "a") == std::optional<std::string>("2"));
+   REQUIRE(read(1, "c") == std::optional<std::string>("0"));
+   REQUIRE_FALSE(read(1, "b"));
+   {
+      auto tx = ws->start_transaction(0);
+      tx.remove("a");
+      tx.open_root(1).set_root({});
+      tx.open_root(2).set_root({});
+      tx.commit();
+   }
+   ws.reset();
+   db->flush_releases();
+   REQUIRE(db->usage().used_bytes <= 64 * 128);
+}
+
+namespace
+{
+   std::string scattered_key(const char* prefix, uint64_t i)
+   {
+      char k[48];
+      std::snprintf(k, sizeof(k), "%s/%010llu", prefix,
+                    (unsigned long long)(i * 2654435761u % 1000000007u));
+      return k;
+   }
+   template <typename Cursor>
+   void require_matches(Cursor& cur, const std::map<std::string, std::string>& expect)
+   {
+      uint64_t n = 0, bad = 0;
+      for (cur.seek_begin(); !cur.is_end(); cur.next())
+      {
+         auto it = expect.find(std::string(cur.key()));
+         if (it == expect.end() || cur.template value<std::string>() != it->second)
+            ++bad;
+         ++n;
+      }
+      REQUIRE(bad == 0);
+      REQUIRE(n == expect.size());
+   }
+}  // namespace
+
+// The session that hit the limit must be able to carry on after aborting,
+// as a new session on the same database can.
+TEST_CASE("Small Engine: the session that reached the storage limit can write again",
+          "[small][limit]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 4));
+   auto ws = db->start_write_session();
+   std::map<std::string, std::string> expect;
+   uint64_t                           n = 0;
+   bool                               full = false;
+   while (!full)
+   {
+      std::vector<std::pair<std::string, std::string>> batch;
+      try
+      {
+         auto tx = ws->start_transaction(0);
+         for (int j = 0; j < 200; ++j, ++n)
+         {
+            batch.emplace_back(scattered_key("s", n), std::string(100, char('a' + n % 26)));
+            tx.upsert(batch.back().first, batch.back().second);
+         }
+         tx.commit();
+         for (auto& kv : batch)
+            expect[kv.first] = kv.second;
+      }
+      catch (const engine::storage_full&)
+      {
+         full = true;
+      }
+      REQUIRE(n < 5'000'000);
+   }
+   db->flush_releases();
+   const auto u = db->usage();
+   std::printf("limit: insert-only 100-byte values reached the limit at %llu keys, %.1f of %.1f "
+               "MiB used (%.0f%%)\n",
+               (unsigned long long)expect.size(), u.used_bytes / 1048576.0,
+               u.limit_bytes / 1048576.0, 100.0 * u.used_bytes / u.limit_bytes);
+   // Full means full: most of the store holds live data when it is refused.
+   REQUIRE(u.used_bytes * 100 >= u.limit_bytes * 75);
+   for (int round = 0; round < 3; ++round)
+   {
+      {
+         auto tx = ws->start_transaction(0);
+         tx.upsert("tiny", std::to_string(round));
+         tx.commit();
+         expect["tiny"] = std::to_string(round);
+      }
+      {
+         auto tx        = ws->start_transaction(0);
+         const auto key = expect.begin()->first == "tiny" ? std::next(expect.begin())->first
+                                                           : expect.begin()->first;
+         REQUIRE(tx.remove(key) == 0);
+         tx.commit();
+         expect.erase(key);
+      }
+   }
+   {
+      auto rs  = db->start_read_session();
+      auto cur = rs->create_cursor(0);
+      require_matches(cur, expect);
+   }
+   // Room made by removing is room that can be used.
+   {
+      auto tx = ws->start_transaction(0);
+      uint64_t removed = 0;
+      for (auto it = expect.begin(); it != expect.end() && removed < 20000;)
+      {
+         REQUIRE(tx.remove(it->first) == 0);
+         it = expect.erase(it);
+         ++removed;
+      }
+      tx.commit();
+   }
+   for (uint64_t i = 0; i < 10000; i += 200)
+   {
+      auto tx = ws->start_transaction(0);
+      for (uint64_t j = i; j < i + 200; ++j)
+      {
+         tx.upsert(scattered_key("again", j), std::string(100, 'z'));
+         expect[scattered_key("again", j)] = std::string(100, 'z');
+      }
+      tx.commit();
+   }
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+   require_matches(cur, expect);
+}
+
+// Multi-line allocations on a fragmented store that is at its limit: the
+// failure is storage_full, like any other way of running out.
+TEST_CASE("Small Engine: running out of room for a large node is storage_full",
+          "[small][limit]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 4));
+   auto ws = db->start_write_session();
+   std::map<std::string, std::string> expect;
+   uint64_t                           seeded = 0;
+   while (db->usage().used_bytes <= db->usage().limit_bytes * 6 / 10)
+   {
+      auto tx = ws->start_transaction(0);
+      for (uint64_t j = seeded; j < seeded + 200; ++j)
+         tx.upsert(scattered_key("s", j), std::string(900, char('a' + j % 26)));
+      tx.commit();
+      for (uint64_t j = seeded; j < seeded + 200; ++j)
+         expect[scattered_key("s", j)] = std::string(900, char('a' + j % 26));
+      seeded += 200;
+   }
+   {
+      auto tx = ws->start_transaction(0);
+      for (uint64_t j = 0; j < seeded; j += 3)
+      {
+         REQUIRE(tx.remove(scattered_key("s", j)) == 0);
+         expect.erase(scattered_key("s", j));
+      }
+      tx.commit();
+   }
+   db->flush_releases();
+   for (int attempt = 0; attempt < 4; ++attempt)
+   {
+      bool        full = false;
+      std::string other;
+      uint64_t    wrote = 0;
+      try
+      {
+         auto tx = ws->start_transaction(0);
+         for (uint64_t j = 0; j < 100000; ++j, ++wrote)
+            tx.upsert(scattered_key("big", j), std::string(7900, char('A' + attempt)));
+      }
+      catch (const engine::storage_full&)
+      {
+         full = true;
+      }
+      catch (const std::exception& e)
+      {
+         other = e.what();
+      }
+      INFO("attempt " << attempt << " wrote " << wrote << " other: " << other);
+      REQUIRE(other.empty());
+      REQUIRE(full);
+      auto rs  = db->start_read_session();
+      auto cur = rs->create_cursor(0);
+      require_matches(cur, expect);
+   }
+   auto tx = ws->start_transaction(0);
+   tx.upsert("tiny", "x");
+   tx.commit();
+}
+
+namespace
+{
+   // A typed value whose release is slow when it runs on the background
+   // releaser, which makes "the writer is ahead of the releaser" a certainty
+   // instead of a matter of timing.
+   struct slow_value
+   {
+      static constexpr uint16_t type_id = 77;
+      struct t_pod
+      {
+         uint64_t n;
+         static void retain(void*, const t_pod&) {}
+         static void release(void*, const t_pod&)
+         {
+            if (std::this_thread::get_id() != writer.load())
+            {
+               std::this_thread::sleep_for(std::chrono::microseconds(20));
+               released_in_background.fetch_add(1, std::memory_order_relaxed);
+            }
+         }
+      };
+      uint64_t n = 0;
+      t_pod    take_pod() && { return {n}; }
+      static slow_value make_from_pod(const t_pod& p, bool) { return {p.n}; }
+      static inline std::atomic<std::thread::id> writer{};
+      static inline std::atomic<uint64_t>        released_in_background{0};
+   };
+}  // namespace
+
+TEST_CASE("Small Engine: a slow releaser makes the writer wait instead of failing",
+          "[small][limit][releaser][slow-releaser]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 4));
+   db->register_value_types<slow_value>();
+   slow_value::writer = std::this_thread::get_id();
+   slow_value::released_in_background = 0;
+   const uint64_t upserts = 160000;
+   {
+      auto     ws = db->start_write_session();
+      uint64_t n  = 0;
+      while (n < upserts)
+      {
+         auto tx = ws->start_transaction(0);
+         for (int j = 0; j < 200; ++j, ++n)
+            tx.upsert(scattered_key("s", n % 20000), slow_value{n});
+         REQUIRE_NOTHROW(tx.commit());
+      }
+   }
+   db->flush_releases();
+   const auto u = db->usage();
+   std::printf("slow releaser: %llu upserts, %llu values released in the background, settled "
+               "%.1f of %.1f MiB\n",
+               (unsigned long long)upserts,
+               (unsigned long long)slow_value::released_in_background.load(),
+               u.used_bytes / 1048576.0, u.limit_bytes / 1048576.0);
+   REQUIRE(slow_value::released_in_background.load() > 0);
+   REQUIRE(u.used_bytes * 4 < u.limit_bytes);
+}
+
+// A writer that overwrites a small live set faster than the background
+// releaser frees the old versions must be made to wait for it, not be told
+// the store is full. PSITRI_SMALL_OVERWRITE_UPSERTS scales the run.
+TEST_CASE("Small Engine: a writer ahead of the releaser waits instead of reporting full",
+          "[small][limit][releaser]")
+{
+   const uint64_t upserts = env_u64("PSITRI_SMALL_OVERWRITE_UPSERTS", 6'000'000);
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 4));
+   auto     ws        = db->start_write_session();
+   uint64_t n         = 0, peak = 0;
+   const auto t0 = std::chrono::steady_clock::now();
+   while (n < upserts)
+   {
+      auto tx = ws->start_transaction(0);
+      for (int j = 0; j < 200; ++j, ++n)
+         tx.upsert(scattered_key("s", n % 20000), std::string(100, char('a' + n % 26)));
+      tx.commit();
+      if (n % 20000 == 0)
+         peak = std::max(peak, db->usage().used_bytes);
+   }
+   const double secs =
+       std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+   db->flush_releases();
+   const auto u = db->usage();
+   std::printf("overwrite: %llu upserts of 20,000 keys in %.1fs; peak used %.1f MiB, settled "
+               "%.1f MiB of %.1f MiB\n",
+               (unsigned long long)n, secs, peak / 1048576.0, u.used_bytes / 1048576.0,
+               u.limit_bytes / 1048576.0);
+   auto     rs  = db->start_read_session();
+   auto     cur = rs->create_cursor(0);
+   uint64_t keys = 0;
+   for (cur.seek_begin(); !cur.is_end(); cur.next())
+      ++keys;
+   REQUIRE(keys == 20000);
+}
+
+// A transaction may be handed from the thread that started it to another,
+// as long as only one of them uses it at a time. The root's writer lock goes
+// with the transaction, not with a thread: the first thread asking for the
+// same root through another session waits for the hand-over's commit.
+TEST_CASE("Small Engine: a transaction handed to another thread keeps its root",
+          "[small][threads][handover]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 16));
+   auto a = db->start_write_session();
+   auto b = db->start_write_session();
+   for (int round = 0; round < 20; ++round)
+   {
+      auto tx = std::make_unique<engine::transaction>(a->start_transaction(0));
+      tx->upsert("k", "from-starter-" + std::to_string(round));
+      std::promise<void> go;
+      std::atomic<bool>  committed{false};
+      // the finisher gets the transaction and commits it after a pause
+      std::thread finisher([&, handed = std::move(tx), ready = go.get_future()]() mutable {
+         ready.wait();
+         std::this_thread::sleep_for(std::chrono::milliseconds(5));
+         handed->upsert("k", "from-finisher-" + std::to_string(round));
+         committed = true;
+         handed->commit();
+         handed.reset();
+      });
+      go.set_value();
+      // the starting thread now wants the same root through another session:
+      // it must wait for the commit, then see it
+      {
+         auto mine = b->start_transaction(0);
+         REQUIRE(committed.load());
+         REQUIRE(mine.get<std::string>("k") ==
+                 std::optional<std::string>("from-finisher-" + std::to_string(round)));
+         mine.abort();
+      }
+      finisher.join();
+   }
+   // and the reverse: started elsewhere, finished here, while that thread waits
+   for (int round = 0; round < 20; ++round)
+   {
+      std::unique_ptr<engine::transaction> tx;
+      std::thread starter([&] {
+         tx = std::make_unique<engine::transaction>(a->start_transaction(0));
+         tx->upsert("r", std::to_string(round));
+      });
+      starter.join();
+      std::atomic<bool> got{false};
+      std::thread       waiter([&] {
+         auto mine = b->start_transaction(0);
+         got       = true;
+         REQUIRE(mine.get<std::string>("r") == std::optional<std::string>(std::to_string(round)));
+         mine.abort();
+      });
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      REQUIRE_FALSE(got.load());
+      tx->commit();
+      tx.reset();
+      waiter.join();
+   }
+}
+
+// Not run by default: the cost of starting and committing a transaction,
+// which is where the root's writer lock is taken and released.
+TEST_CASE("Small Engine: transaction start/commit throughput", "[.bench]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 16));
+   auto           ws = db->start_write_session();
+   const uint64_t n  = env_u64("PSITRI_SMALL_BENCH_TXNS", 3'000'000);
+   for (int rep = 0; rep < 5; ++rep)
+   {
+      const auto t0 = std::chrono::steady_clock::now();
+      for (uint64_t i = 0; i < n; ++i)
+      {
+         auto tx = ws->start_transaction(0);
+         tx.upsert("counter", std::string_view(reinterpret_cast<const char*>(&i), 8));
+         tx.commit();
+      }
+      const double secs =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      std::printf("bench: %llu one-upsert transactions, %.0f tx/s\n", (unsigned long long)n,
+                  double(n) / secs);
+   }
 }

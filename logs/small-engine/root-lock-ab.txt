@@ -1,0 +1,9 @@
+Interleaved old (4e48d58 engine) / new binaries, same test source, machine load average 16-24.
+Columns: five repetitions of 2,000,000 one-upsert transactions (tx/s), then the churn test
+without a reader, 100k rows, 3M updates.
+old: 4072292 4082365 4087663 4145946 4038202  churn 362127 updates/s
+new: 4354040 4445305 4537695 4403724 4446122  churn 380723 updates/s
+old: 4763167 4475131 4749894 4514764 4780302  churn 395545 updates/s
+new: 4939530 4880563 4638478 4829043 4737030  churn 416845 updates/s
+old: 5533824 5538148 5471218 5511528 5680484  churn 626997 updates/s
+new: 5553670 5424182 5525754 5604891 5560166  churn 666119 updates/s

@@ -11,6 +11,7 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <unistd.h>
@@ -540,4 +541,43 @@ TEST_CASE("review: a session does not wait for a root it holds itself", "[review
    tx.commit();
    CHECK(ws->get_root(0).count_keys() == 1);
    // a second session's writer waits as before (not shown: it would be another thread)
+}
+
+// A transaction is not thread-safe, but it may move between threads when its use is
+// serialized. The per-root writer lock it holds was a std::mutex, which only the
+// thread that locked it may unlock: committing on another thread was undefined
+// behaviour (ThreadSanitizer: "unlock of an unlocked mutex (or by a wrong thread)").
+TEST_CASE("review: a transaction started on one thread ends on another", "[review]")
+{
+   temp_dir dir("thread-handover");
+   auto     db = engine::database::open(dir.path);
+   auto     ws = db->start_write_session();
+   using tx_t = sal_art_ref::radix::radix_tree::transaction;
+   for (int round = 0; round < 50; ++round)
+   {
+      std::optional<tx_t> tx;
+      std::thread([&] {
+         tx.emplace(ws->start_transaction(0));
+         tx->upsert("k" + std::to_string(round), "v");
+         tx->open_root(1).upsert("r1", std::to_string(round));
+      }).join();
+      // the main thread carries on with it and ends it: commit, or abort every third
+      tx->upsert("m" + std::to_string(round), "v");
+      if (round % 3 == 2)
+         tx->abort();
+      else
+         tx->commit();
+      tx.reset();
+      // and a third thread takes both roots next, which it can only do if they were released
+      std::thread([&] {
+         auto next = ws->start_transaction(0);
+         next.open_root(1).upsert("seen", "by-another-thread");
+         next.commit();
+      }).join();
+   }
+   CHECK(ws->get_root(0).count_keys() == 2 * 34);  // 34 of 50 rounds committed
+   CHECK(ws->get_root(1).get<std::string>("r1") == std::optional<std::string>("49"));
+   // set_root from a thread that is not the one that opened the store
+   std::thread([&] { ws->set_root(0, ws->create_temporary_tree()); }).join();
+   CHECK(ws->get_root(0).count_keys() == 0);
 }

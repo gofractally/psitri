@@ -15,6 +15,7 @@
 #pragma once
 #include <array>
 #include <mutex>
+#include <semaphore>
 #include <adb/value_range.hpp>
 #include <algorithm>
 #include <array>
@@ -283,6 +284,20 @@ namespace sal_art_ref::radix
       /// The engine the database opened. References that may outlive a write session, such
       /// as shared trees, refer to it and not to the session's writer context.
       radix_tree* store() noexcept { return _store; }
+      // The writer lock of one root: held by a transaction from its start until it commits
+      // or aborts. A transaction may be finished by another thread than the one that
+      // started it (a session is not thread-safe, but it may move between threads when its
+      // use is serialized), and a std::mutex may only be unlocked by the thread that locked
+      // it. A binary semaphore has no owner, so any thread may release it. One per cache
+      // line, so writers of neighbouring roots do not share one.
+      struct alignas(64) writer_gate
+      {
+         std::binary_semaphore free{1};
+         void                  lock() { free.acquire(); }
+         bool                  try_lock() { return free.try_acquire(); }
+         void                  unlock() { free.release(); }
+      };
+
       // Roots held by this writer context's own open transactions. A second claim on
       // one of them by the same context would wait for a lock the context itself holds,
       // which never ends, so it is refused instead. The record belongs to the context (a
@@ -306,7 +321,7 @@ namespace sal_art_ref::radix
             }
       }
       /// The writer lock of root `idx`.
-      std::mutex& root_writer(uint32_t idx)
+      writer_gate& root_writer(uint32_t idx)
       {
          if (idx >= _root_writers->mutex.size())
             throw std::out_of_range("root index out of range");
@@ -5324,10 +5339,10 @@ namespace sal_art_ref::radix
                roots.clear();
             }
          } _claims;
-         std::unique_lock<std::mutex> _writer;
+         std::unique_lock<writer_gate> _writer;
          tree_handle _primary;                                              // the root at _primary_idx
          std::vector<std::pair<uint32_t, std::unique_ptr<tree_handle>>> _extra;  // open_root(idx)
-         std::vector<std::unique_lock<std::mutex>> _extra_writers;
+         std::vector<std::unique_lock<writer_gate>> _extra_writers;
          transaction(radix_tree* t, uint32_t idx)
              : _t(t),
                _primary_idx(idx),
@@ -5460,7 +5475,7 @@ namespace sal_art_ref::radix
                   _extra_writers.emplace_back(_t->root_writer(idx));
                else
                {
-                  std::unique_lock<std::mutex> writer(_t->root_writer(idx), std::try_to_lock);
+                  std::unique_lock<writer_gate> writer(_t->root_writer(idx), std::try_to_lock);
                   if (!writer.owns_lock())
                      throw std::runtime_error(
                          "root is being written; open roots in ascending order to wait for it");
@@ -5655,7 +5670,7 @@ namespace sal_art_ref::radix
             uint32_t    idx;
             ~unclaim() { t->unclaim_root(idx); }
          } done{this, idx};
-         std::lock_guard<std::mutex> writer(root_writer(idx));
+         std::lock_guard<writer_gate> writer(root_writer(idx));
          auto old =
              _ses->set_root<sal::alloc_header>(sal::root_object_number(idx), std::move(t._root), st);
       }
@@ -7598,7 +7613,7 @@ namespace sal_art_ref::radix
       // until it commits or aborts. Shared by every writer context of one store.
       struct root_writers
       {
-         std::array<std::mutex, 1024> mutex;
+         std::array<writer_gate, 1024> mutex;
       };
       std::shared_ptr<root_writers>   _root_writers;
       std::vector<uint32_t>           _held_roots;  // see claim_root

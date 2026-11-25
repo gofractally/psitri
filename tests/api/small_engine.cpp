@@ -2170,6 +2170,105 @@ TEST_CASE("Small Engine: reopening with a limit below the store's size is refuse
    }
 }
 
+// The same when it is the large-value arena that does not fit. It is opened
+// second; the refusal must come before the ordinary arena has been opened and
+// had its clean mark cleared, so that nothing at all is touched.
+TEST_CASE("Small Engine: a limit below the large-value arena's size is refused untouched",
+          "[small][open][limit][shrink][shrink-large]")
+{
+   temporary_directory tmp;
+   // One ordinary segment and no large one to begin with ...
+   {
+      auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                               small_config(psitri::sync_mode::none, 1));
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("small", "value");
+      tx.commit();
+      REQUIRE(db->usage().mapped_bytes == 8ull * 1024 * 1024);
+      REQUIRE(db->usage().large_mapped_bytes == 0);
+   }
+   // ... then large values, which make the large arena grow by four segments.
+   const std::string big(300u << 10, 'L'), chunked(3u << 20, 'C');
+   uint64_t          large_segments = 0;
+   {
+      auto db = database::open(tmp.path, psitri::open_mode::open_existing,
+                               small_config(psitri::sync_mode::none, 16));
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("big", big);
+      tx.upsert("chunked", chunked);
+      tx.commit();
+      const auto u = db->usage();
+      REQUIRE(u.mapped_bytes == 8ull * 1024 * 1024);
+      large_segments = u.large_mapped_bytes / (65536ull * 32 * 1024);
+      REQUIRE(large_segments == 4);
+   }
+   const char* files[] = {"meta.part",       "free.part",       "refs.part",
+                          "large/meta.part", "large/free.part", "large/refs.part"};
+   const char* sized[] = {"data.part", "large/data.part"};
+   std::vector<std::string>                     before;
+   std::vector<std::filesystem::file_time_type> written;
+   std::vector<std::uintmax_t>                  sizes;
+   for (auto f : files)
+   {
+      before.push_back(file_bytes(tmp.path / f));
+      written.push_back(std::filesystem::last_write_time(tmp.path / f));
+   }
+   for (auto f : sized)
+   {
+      sizes.push_back(std::filesystem::file_size(tmp.path / f));
+      written.push_back(std::filesystem::last_write_time(tmp.path / f));
+   }
+   auto untouched = [&] {
+      size_t w = 0;
+      for (size_t i = 0; i < std::size(files); ++i, ++w)
+      {
+         INFO(files[i]);
+         REQUIRE(file_bytes(tmp.path / files[i]) == before[i]);
+         REQUIRE((std::filesystem::last_write_time(tmp.path / files[i]) == written[w]));
+      }
+      for (size_t i = 0; i < std::size(sized); ++i, ++w)
+      {
+         INFO(sized[i]);
+         REQUIRE(std::filesystem::file_size(tmp.path / sized[i]) == sizes[i]);
+         REQUIRE((std::filesystem::last_write_time(tmp.path / sized[i]) == written[w]));
+      }
+   };
+   // max_segments 2 covers the ordinary arena (1 segment) but not the large one (4).
+   for (int attempt = 0; attempt < 2; ++attempt)
+   {
+      std::string what;
+      try
+      {
+         database::open(tmp.path, psitri::open_mode::open_existing,
+                        small_config(psitri::sync_mode::none, 2));
+         FAIL("a store with four large-value segments was opened with max_segments = 2");
+      }
+      catch (const std::runtime_error& e)
+      {
+         what = e.what();
+      }
+      INFO(what);
+      REQUIRE(what.find("max_segments") != std::string::npos);
+      REQUIRE(what.find("4 segments") != std::string::npos);
+      REQUIRE(what.find("large") != std::string::npos);
+      REQUIRE(database::closed_cleanly(tmp.path));
+      untouched();
+   }
+   for (uint32_t limit : {4u, 16u})
+   {
+      auto db = database::open(tmp.path, psitri::open_mode::open_existing,
+                               small_config(psitri::sync_mode::none, limit));
+      REQUIRE_FALSE(db->recovered_on_open());
+      auto rs  = db->start_read_session();
+      auto cur = rs->create_cursor(0);
+      REQUIRE(cur.get<std::string>("small") == std::optional<std::string>("value"));
+      REQUIRE(cur.get<std::string>("big") == std::optional<std::string>(big));
+      REQUIRE(cur.get<std::string>("chunked") == std::optional<std::string>(chunked));
+   }
+}
+
 // A session keeps its segment from one transaction to the next, whichever
 // segment that is. It used to keep it only while the segment was the highest
 // it had ever written to: after its first move to a lower-numbered one,

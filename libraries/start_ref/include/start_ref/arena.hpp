@@ -298,16 +298,7 @@ namespace start_ref
          // files into a reservation sized for the smaller ceiling would put
          // them over whatever lies beyond it. Refuse before anything is
          // opened, locked, mapped or resized.
-         if (const uint64_t existing = existing_segments_(_cfg.dir);
-             existing > _cfg.max_segments)
-            throw std::runtime_error(
-                "start_ref: the store at " + _cfg.dir.generic_string() + " already has " +
-                std::to_string(existing) + " segments (" +
-                std::to_string(existing * segment_bytes / (1024 * 1024)) +
-                " MiB) and cannot be opened with max_segments = " +
-                std::to_string(_cfg.max_segments) + " segments (" +
-                std::to_string(uint64_t(_cfg.max_segments) * segment_bytes / (1024 * 1024)) +
-                " MiB); open it with max_segments of at least " + std::to_string(existing));
+         require_fits(_cfg.dir, _cfg.max_segments);
 
          _data = std::make_unique<sal::block_allocator>(_cfg.dir / "data.part", segment_bytes,
                                                         _cfg.max_segments,
@@ -430,6 +421,21 @@ namespace start_ref
          return raw[offsetof(meta_hdr, clean)] != 0;
       }
 
+      // Throws unless an arena in `dir` (if there is one) fits in max_segments.
+      // Reads only; an owner of several arenas calls it for each of them
+      // before constructing any, so that a refusal has changed nothing.
+      static void require_fits(const std::filesystem::path& dir, uint32_t max_segments)
+      {
+         if (const uint64_t existing = existing_segments_(dir); existing > max_segments)
+            throw std::runtime_error(
+                "start_ref: the store at " + dir.generic_string() + " already has " +
+                std::to_string(existing) + " segments (" +
+                std::to_string(existing * segment_bytes / (1024 * 1024)) +
+                " MiB) and cannot be opened with max_segments = " +
+                std::to_string(max_segments) + " segments (" +
+                std::to_string(uint64_t(max_segments) * segment_bytes / (1024 * 1024)) +
+                " MiB); open it with max_segments of at least " + std::to_string(existing));
+      }
       // How many segments the arena in `dir` occupies, read without mapping
       // or changing anything; 0 when there is none. The larger of the
       // recorded count and what the data file holds, since a stop during

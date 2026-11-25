@@ -1139,7 +1139,7 @@ namespace start_ref::kv
             _arena.add_ref_or_throw(root.index());
       }
       database(std::filesystem::path dir, runtime_config cfg)
-          : _arena(make_cfg_(dir, cfg)), _large(make_large_cfg_(dir, cfg))
+          : _arena(checked_cfg_(dir, cfg)), _large(make_large_cfg_(dir, cfg))
       {
          // Link the large-value arena as _arena's companion BEFORE any tree is
          // built: every part_alloc copy (writer/view/releaser) resolves and frees
@@ -1332,6 +1332,18 @@ namespace start_ref::kv
             _rel[t % kRelRing].store(0, std::memory_order_release);
             _rel_tail.store(t + 1, std::memory_order_release);
          }
+      }
+      // Both arenas must fit the requested limit before either is opened: the
+      // large-value arena is constructed second, and a refusal there would
+      // come after the ordinary arena had been opened and marked in use.
+      static start_ref::arena_config checked_cfg_(const std::filesystem::path& dir,
+                                                  runtime_config               cfg)
+      {
+         const auto lines  = make_cfg_(dir, cfg);
+         const auto grains = make_large_cfg_(dir, cfg);
+         start_ref::arena::require_fits(lines.dir, lines.max_segments);
+         start_ref::large_arena::require_fits(grains.dir, grains.max_segments);
+         return lines;
       }
       static start_ref::arena_config make_cfg_(std::filesystem::path dir, runtime_config cfg)
       {

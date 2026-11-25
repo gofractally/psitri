@@ -240,14 +240,18 @@ namespace start_ref
       {
          return (l0[line / 64].load(std::memory_order_relaxed) >> (line % 64)) & 1;
       }
-      uint32_t free_lines() const noexcept
+      // The counts are advisory and trail the bitmap: a free sets its bits and
+      // then counts them, and a claim of those bits by another thread can be
+      // uncounted first. Until the free catches up the stored count is below
+      // zero, which an unsigned read would report as four billion free lines;
+      // it reads as none.
+      static uint32_t settled_(const std::atomic<uint32_t>& count) noexcept
       {
-         return free_count[0].load(std::memory_order_relaxed);
+         const int32_t v = int32_t(count.load(std::memory_order_relaxed));
+         return v < 0 ? 0 : uint32_t(v);
       }
-      uint32_t free_groups8() const noexcept
-      {
-         return free_count[3].load(std::memory_order_relaxed);
-      }
+      uint32_t free_lines() const noexcept { return settled_(free_count[0]); }
+      uint32_t free_groups8() const noexcept { return settled_(free_count[3]); }
 
       // For the session word-window (arena.hpp): the owner moved word `w` of l0
       // prior->now itself and is the responsible toggler for the transition.

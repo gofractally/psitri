@@ -4,11 +4,14 @@
 // l0 after randomized op tapes.
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <random>
+#include <thread>
 #include <vector>
 
 #include <start_ref/freeset.hpp>
@@ -269,4 +272,64 @@ TEST_CASE("randomized op tape: placements match oracle, derived tiers exact")
    REQUIRE(fs->free_lines() == lines_per_segment);
    REQUIRE(fs->free_groups8() == lines_per_segment / 8);
    check_derived(*fs);
+}
+
+// gofractally/psitri#35 item 7. A line is freed by setting its bit and only
+// then counting it; a session that owns a word of the map claims bits straight
+// out of that word and then uncounts them. A claim that lands between the two
+// steps of a free uncounts a line that was never counted, so the count dips
+// below zero until the free catches up. Readers must see that dip as "none
+// free", not as four billion free lines.
+TEST_CASE("freeset: the free count never reads as wrapped while frees and claims interleave")
+{
+   auto fs = make_fs(false);  // every line allocated
+   const uint32_t        w = 5;
+   std::atomic<uint64_t> owed{~0ull};  // lines of word w the freeing thread holds
+   std::atomic<bool>     stop{false};
+   std::atomic<uint64_t> wrapped{0}, samples{0}, claims{0};
+   std::thread freer([&] {
+      while (!stop.load(std::memory_order_relaxed))
+      {
+         uint64_t mine = owed.exchange(0, std::memory_order_acquire);
+         while (mine)
+         {
+            const uint32_t bit = uint32_t(std::countr_zero(mine));
+            mine &= mine - 1;
+            fs->free_run(w * 64 + bit, 1);
+         }
+      }
+   });
+   std::thread claimer([&] {
+      while (!stop.load(std::memory_order_relaxed))
+      {
+         uint64_t cur = fs->l0[w].load(std::memory_order_relaxed);
+         if (cur && fs->l0[w].compare_exchange_strong(cur, 0, std::memory_order_acquire,
+                                                      std::memory_order_relaxed))
+         {
+            fs->apply_word_transition(w, cur, 0);
+            owed.fetch_or(cur, std::memory_order_release);
+            claims.fetch_add(1, std::memory_order_relaxed);
+         }
+      }
+   });
+   const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+   while (std::chrono::steady_clock::now() < until)
+   {
+      for (int i = 0; i < 4096; ++i)
+      {
+         if (fs->free_lines() > lines_per_segment)
+            wrapped.fetch_add(1, std::memory_order_relaxed);
+         if (fs->free_groups8() > lines_per_segment / 8)
+            wrapped.fetch_add(1, std::memory_order_relaxed);
+      }
+      samples.fetch_add(4096, std::memory_order_relaxed);
+   }
+   stop = true;
+   freer.join();
+   claimer.join();
+   INFO("samples " << samples.load() << ", claims " << claims.load());
+   REQUIRE(claims.load() > 1000);
+   REQUIRE(wrapped.load() == 0);
+   // settled: what is free is what the freeing thread has not been handed back
+   REQUIRE(fs->free_lines() == uint32_t(std::popcount(fs->l0[w].load())));
 }

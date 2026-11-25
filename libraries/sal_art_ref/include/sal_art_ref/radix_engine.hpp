@@ -2434,9 +2434,15 @@ namespace sal_art_ref::radix
          // 128-byte in-page cap moves whole into its own key_val_node.)
          const bool old_ext =
              idx >= 0 && inline_value::external_value(pg->record(uint32_t(idx))->value_type);
+         // A record whose FULL KEY lives in its external node (vt_extern) keeps only a
+         // fragment of the suffix in the page, however short the suffix has since become
+         // (splits tighten the common prefix). Its replacement must carry the full key too:
+         // a value-only node would leave the fragment as the whole key.
+         const bool old_full_key =
+             idx >= 0 && pg->record(uint32_t(idx))->value_type == inline_value::vt_extern;
          if (old_ext || slen + pay0 > leaf_page::max_inline_entry)
          {
-            if (slen <= leaf_page::max_suffix_len)
+            if (slen <= leaf_page::max_suffix_len && !old_full_key)
             {
                // VALUE-ONLY external (psitri's value_node model): the full post-cpfx suffix
                // stays in the page record; only the VALUE moves out, with an EMPTY key. No key duplication; exact-match stays in-page.

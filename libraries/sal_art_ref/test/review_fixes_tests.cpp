@@ -31,6 +31,54 @@ namespace
       }
       ~temp_dir() { std::filesystem::remove_all(path); }
    };
+
+   using model_t = std::map<std::string, std::string>;
+
+   // Every key of the model reads back by key, and a forward and a backward walk
+   // of the committed root return exactly the model's keys and values in order.
+   void check_against(engine::write_session& ws, const model_t& model)
+   {
+      auto tree = ws.get_root(0);
+      for (const auto& [k, v] : model)
+      {
+         auto got = tree.get<std::string>(k);
+         INFO("key of " << k.size() << " bytes");
+         REQUIRE(got.has_value());
+         REQUIRE(*got == v);
+      }
+      auto   c  = tree.snapshot_cursor();
+      auto   it = model.begin();
+      size_t n  = 0;
+      for (bool ok = c.seek_begin(); ok; ok = c.next(), ++it, ++n)
+      {
+         REQUIRE(it != model.end());
+         REQUIRE(std::string(c.key()) == it->first);
+         REQUIRE(*c.value<std::string>() == it->second);
+      }
+      REQUIRE(n == model.size());
+      auto rit = model.rbegin();
+      n        = 0;
+      for (bool ok = c.seek_last(); ok; ok = c.prev(), ++rit, ++n)
+      {
+         REQUIRE(rit != model.rend());
+         REQUIRE(std::string(c.key()) == rit->first);
+      }
+      REQUIRE(n == model.size());
+   }
+   void put(engine::write_session& ws, model_t& model, const std::string& k, const std::string& v)
+   {
+      auto tx = ws.start_transaction(0);
+      tx.upsert(k, v);
+      tx.commit();
+      model[k] = v;
+   }
+   void del(engine::write_session& ws, model_t& model, const std::string& k)
+   {
+      auto tx = ws.start_transaction(0);
+      CHECK(tx.remove(k) == (model.count(k) ? 0 : -1));
+      tx.commit();
+      model.erase(k);
+   }
 }  // namespace
 
 // gofractally/psitri#26: a moved-from savepoint stayed active, and its destructor
@@ -91,4 +139,50 @@ TEST_CASE("review: a transaction that was moved commits once", "[review]")
    again.upsert("c", "3");
    again.commit();
    CHECK(ws->get_root(0).count_keys() == 3);
+}
+
+// gofractally/psitri#28: a key stored with its full bytes in an external record
+// (its suffix was over 255 bytes when it arrived) kept only a 123-byte fragment
+// in the page. Once splits had tightened the page's common prefix, an update
+// replaced the external record by one without the key.
+TEST_CASE("review: updating a long key keeps the key", "[review]")
+{
+   temp_dir dir("long-key-update");
+   auto     db = engine::database::open(dir.path);
+   auto     ws = db->start_write_session();
+   model_t  model;
+
+   const std::string prefix(200, 'p');
+   const std::string first = prefix + 'm' + std::string(199, 'q');  // 400 bytes
+   put(*ws, model, first, "first-value");
+   for (int i = 0; i < 300; ++i)
+   {
+      std::string k = prefix;
+      k += char('a' + i / 26 % 26);
+      k += char('a' + i % 26);
+      k += char('0' + i / 676);
+      put(*ws, model, k, "0123456789");
+   }
+   check_against(*ws, model);
+   put(*ws, model, first, "second-value");
+   check_against(*ws, model);
+   // Every storage kind, updated to a small value, a value too large to stay in
+   // the page, and back.
+   const std::string big(600, 'B');
+   for (const auto& [k, v] : model_t(model))
+   {
+      put(*ws, model, k, big);
+      put(*ws, model, k, "s");
+   }
+   check_against(*ws, model);
+   for (int len : {130, 254, 255, 256, 257, 400, 1024})
+   {
+      std::string k = len < int(prefix.size())
+                          ? std::string(size_t(len), 'k')
+                          : prefix + std::string(size_t(len) - prefix.size(), char('A' + len % 26));
+      put(*ws, model, k, "v1");
+      put(*ws, model, k, big);
+      put(*ws, model, k, "v3");
+   }
+   check_against(*ws, model);
 }

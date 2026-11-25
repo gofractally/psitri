@@ -507,8 +507,15 @@ namespace sal
                                                uint64_t           root_version = 0) noexcept
       {
          assert(ro < _root_objects->size() && "invalid root object number");
-         auto result = _root_objects->at(*ro).exchange(desired, root_version,
-                                                       std::memory_order_release);
+         tree_id result;
+         {
+            // get() loads the root and then retains it, under the shared lock. Without
+            // the exclusive lock here the exchange can come between the two, the caller
+            // of this function releases the old root, and get() retains a freed object.
+            std::lock_guard<std::shared_mutex> rlock(_root_object_mutex[*ro]);
+            result = _root_objects->at(*ro).exchange(desired, root_version,
+                                                     std::memory_order_release);
+         }
          sync(st);
          _write_mutex[*ro].unlock();
          return result;

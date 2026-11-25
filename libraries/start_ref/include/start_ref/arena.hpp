@@ -225,6 +225,7 @@ namespace start_ref
 
       bool     cache_freed_(line_idx i, uint32_t n) noexcept;
       void     flush_fcache_() noexcept;
+      bool     unpark_() noexcept;  // flush_fcache_, reporting whether it held anything
       line_idx take_from_window_(uint32_t n) noexcept;
       void     flush_window_() noexcept;
       line_idx alloc_slow_(uint32_t n);
@@ -1040,6 +1041,13 @@ namespace start_ref
       if (_s)
       {
          _s->_txn_open = false;
+         // Whatever the transaction freed and kept to reuse, and whatever it
+         // reserved of a map word, goes back to the shared map now. A commit
+         // has already done this; an abort has not, and those lines would
+         // otherwise stay out of everyone's reach (this session's included,
+         // for any other size) until its next commit.
+         _s->flush_fcache_();
+         _s->flush_window_();
          if (_s->_segment != UINT32_MAX && !_s->_seg_idle)
          {
             // A plain store: while the session is in a transaction the
@@ -1143,6 +1151,17 @@ namespace start_ref
             _a->free_lines_now(i, n);
          _fcache[n].clear();
       }
+   }
+
+   template <class Geo>
+   inline bool session_t<Geo>::unpark_() noexcept
+   {
+      bool any = false;
+      for (uint32_t n = 1; n <= fcache_max_size; ++n)
+         any = any || !_fcache[n].empty();
+      if (any)
+         flush_fcache_();
+      return any;
    }
 
    template <class Geo>
@@ -1274,6 +1293,11 @@ namespace start_ref
       uint32_t   reclaims       = 0;
       const auto reclaim_helped = [&]() noexcept
       {
+         // Lines this session freed and kept by size are room too: before
+         // anything is called full they go back to the map, where a request
+         // for another size can find them.
+         if (s.unpark_())
+            return true;
          return reclaims++ < max_reclaim_rounds && a.try_reclaim();
       };
       auto claim = [&](uint32_t cur, bool prefer_grow, bool sweep) -> uint32_t

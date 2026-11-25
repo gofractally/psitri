@@ -2343,3 +2343,115 @@ TEST_CASE("Small Engine: a refused typed upsert gives the value's reference back
    CHECK(counted_value::releases.load() == stored + refused);
    CHECK(counted_value::retains.load() == 0);
 }
+
+// gofractally/psitri#35 item 6. A write session keeps the lines it frees
+// during a transaction in a private cache, by size, to reuse them without
+// going back to the shared free map. Up to a megabyte per size can sit there,
+// and it used to be handed back only by a commit or by destroying the session:
+// not by an abort, and not even to the session's own request for another size.
+// So a store could report full while that room existed.
+namespace
+{
+   // Leaves lines of one size parked in the session's cache: values created
+   // and removed inside one open transaction on `root`.
+   template <typename Tx>
+   void park_lines(Tx& tx, int count)
+   {
+      for (int i = 0; i < count; ++i)
+         tx.upsert("park/" + std::to_string(i), std::string(200, 'p'));  // two-line leaves
+      for (int i = 0; i < count; ++i)
+         REQUIRE(tx.remove("park/" + std::to_string(i)) == 0);
+   }
+   bool writes_fit(engine::write_session& ws, uint32_t root, const char* prefix)
+   {
+      try
+      {
+         auto tx = ws.start_transaction(root);
+         for (int j = 0; j < 400; ++j)
+            tx.upsert(std::string(prefix) + std::to_string(j), std::string(40, 'w'));  // one line
+         tx.commit();
+         return true;
+      }
+      catch (const engine::storage_full&)
+      {
+         return false;
+      }
+   }
+}  // namespace
+
+TEST_CASE("Small Engine: lines a session parked are room again after it aborts",
+          "[small][limit][parked]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 4));
+   auto parker = db->start_write_session();
+   auto other  = db->start_write_session();
+   // fill until a little over a megabyte is left above the reserve
+   const auto limit = db->usage();
+   for (uint64_t n = 0;; n += 500)
+   {
+      const auto u = db->usage();
+      if (u.used_bytes + u.reserve_bytes + (1300u << 10) >= u.limit_bytes)
+         break;
+      auto tx = parker->start_transaction(1);
+      for (uint64_t j = 0; j < 500; ++j)
+         tx.upsert(scattered_key("f", n + j), std::string(40, 'f'));
+      tx.commit();
+      REQUIRE(n < 2'000'000);
+   }
+   (void)limit;
+   auto wants = [&](const char* prefix) {  // about three quarters of a megabyte
+      try
+      {
+         auto tx = other->start_transaction(0);
+         for (int j = 0; j < 6000; ++j)
+            tx.upsert(std::string(prefix) + std::to_string(j), std::string(40, 'w'));
+         tx.commit();
+         return true;
+      }
+      catch (const engine::storage_full&)
+      {
+         return false;
+      }
+   };
+   {
+      auto held = parker->start_transaction(1);
+      park_lines(held, 4000);  // a megabyte, taken and let go inside the transaction
+      REQUIRE_FALSE(wants("during/"));
+      held.abort();
+   }
+   db->flush_releases();
+   // the transaction is gone and with it every line it took
+   REQUIRE(wants("after/"));
+}
+
+TEST_CASE("Small Engine: a session uses the lines it parked before reporting full",
+          "[small][limit][parked]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 4));
+   auto ws = db->start_write_session();
+   for (uint64_t n = 0;; n += 500)
+   {
+      db->flush_releases();  // count only what is really in use
+      const auto u = db->usage();
+      if (u.used_bytes + u.reserve_bytes + (1300u << 10) >= u.limit_bytes)
+         break;
+      auto tx = ws->start_transaction(0);
+      for (uint64_t j = 0; j < 500; ++j)
+         tx.upsert(scattered_key("f", n + j), std::string(40, 'f'));
+      tx.commit();
+      REQUIRE(n < 2'000'000);
+   }
+   auto tx = ws->start_transaction(0);
+   park_lines(tx, 4000);  // two-line runs, now in this session's cache
+   // the same transaction wants one-line leaves: three quarters of a megabyte
+   // of them fit in what it has just let go
+   REQUIRE_NOTHROW([&] {
+      for (int j = 0; j < 6000; ++j)
+         tx.upsert("own/" + std::to_string(j), std::string(40, 'o'));
+   }());
+   tx.commit();
+}

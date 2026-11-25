@@ -417,7 +417,7 @@ namespace sal
          if (mlock(segment_ptr, segment_size) != 0)
          {
             provider_state.failed_mlock_regions.fetch_add(1, std::memory_order_relaxed);
-            SAL_WARN("mlock failed for segment: ", seg, " error: ", strerror(errno));
+            SAL_WARN("mlock failed for segment {}: {}", seg, strerror(errno));
 
             // Clear both the bitmap and the meta bit using the helper
             update_segment_pinned_state(seg_num, false);
@@ -2182,7 +2182,7 @@ namespace sal
       auto seg = get_segment(seg_num);
       // Make the segment read-write accessible
       if (mprotect(seg, segment_size, PROT_READ | PROT_WRITE) != 0) [[unlikely]]
-         SAL_WARN("mprotect error(", errno, ") ", strerror(errno));
+         SAL_WARN("mprotect error({}) {}", errno, strerror(errno));
 
       // reset the first writable page to 0, so everyone knows it is safe
       seg->_first_writable_page = 0;
@@ -2525,7 +2525,7 @@ namespace sal
             if (munlock(sp, segment_size) != 0) [[unlikely]]
             {
                provider_state.failed_munlock_regions.fetch_add(1, std::memory_order_relaxed);
-               SAL_ERROR("munlock error(", errno, ") ", strerror(errno));
+               SAL_ERROR("munlock error({}) {}", errno, strerror(errno));
             }
             else
             {
@@ -2591,7 +2591,7 @@ namespace sal
       if (munlock(seg_ptr, segment_size) != 0) [[unlikely]]
       {
          provider_state.failed_munlock_regions.fetch_add(1, std::memory_order_relaxed);
-         SAL_ERROR("munlock error(", errno, ") ", strerror(errno));
+         SAL_ERROR("munlock error({}) {}", errno, strerror(errno));
       }
       else
       {
@@ -2608,7 +2608,7 @@ namespace sal
       // as they are allocated. This will waste some space, but will
       // improve disk cache performance.
       if (madvise(seg_ptr, segment_size, MADV_RANDOM) != 0) [[unlikely]]
-         SAL_ERROR("madvise error(", errno, ") ", strerror(errno));
+         SAL_ERROR("madvise error({}) {}", errno, strerror(errno));
    }
 
    void allocator::start_background_threads()

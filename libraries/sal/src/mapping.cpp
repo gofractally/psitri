@@ -82,7 +82,7 @@ namespace sal
       if (_size == 0)
       {
          _data = nullptr;
-         SAL_WARN("Opened empty file: {}", file.native());
+         SAL_INFO("Opened empty file: {}", file.native());
       }
       else
       {
@@ -91,7 +91,7 @@ namespace sal
          {
             _data = addr;
             try_pin(&_pinned, addr, _size);
-            SAL_WARN("Mapped file: {}, size={}, addr={:#x}", file.native(), _size,
+            SAL_INFO("Mapped file: {}, size={}, addr={:#x}", file.native(), _size,
                      reinterpret_cast<uintptr_t>(addr));
          }
          else
@@ -110,7 +110,7 @@ namespace sal
       {
          if (debug_memory)
          {
-            SAL_WARN("Unmapping memory: addr={:#x}, size={}", reinterpret_cast<uintptr_t>(p),
+            SAL_INFO("Unmapping memory: addr={:#x}, size={}", reinterpret_cast<uintptr_t>(p),
                      _size);
          }
          ::munmap(p, _size);
@@ -130,7 +130,7 @@ namespace sal
          return nullptr;
       }
 
-      SAL_WARN("Resizing mapping: current={}, new={}", _size, new_size);
+      SAL_INFO("Resizing mapping: current={}, new={}", _size, new_size);
 
       struct munmapper
       {
@@ -166,7 +166,7 @@ namespace sal
          {
             try_pin(&_pinned, end, new_size - _size);
             _size = new_size;
-            SAL_WARN("Extended existing mapping: addr={:#x}, new_size={}",
+            SAL_INFO("Extended existing mapping: addr={:#x}, new_size={}",
                      reinterpret_cast<uintptr_t>(_data.load()), _size);
             return nullptr;
          }
@@ -188,7 +188,7 @@ namespace sal
          _data        = addr;
          _size        = new_size;
          try_pin(&_pinned, addr, _size);
-         SAL_WARN("Remapped to new location: old_addr={:#x}, new_addr={:#x}, size={}",
+         SAL_INFO("Remapped to new location: old_addr={:#x}, new_addr={:#x}, size={}",
                   reinterpret_cast<uintptr_t>(result->addr), reinterpret_cast<uintptr_t>(addr),
                   _size);
          return std::shared_ptr<void>(std::move(result), result->addr);

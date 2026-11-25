@@ -482,8 +482,6 @@ namespace sal
       [[nodiscard]] tree_id start_transaction(root_object_number ro)
       {
          check_corruption();
-         SAL_WARN("{}", _root_objects);
-         SAL_WARN("start_transaction: {} size: {}", ro, _root_objects->size());
          assert(ro < _root_objects->size() && "invalid root object number");
          _write_mutex[*ro].lock();
          return get(ro);

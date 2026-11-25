@@ -129,39 +129,6 @@ namespace sal
          ses.release(adr);
    }
 
-   class recovery_version_index
-   {
-     public:
-      explicit recovery_version_index(uint64_t address_count) : _versions(address_count) {}
-
-      void record(const sync_root_info& info) noexcept
-      {
-         auto version_addr = ptr_address(info.version_address);
-         if (version_addr == null_ptr_address || info.root_version == 0)
-            return;
-
-         uint64_t index = *version_addr;
-         if (index >= _versions.size())
-            return;
-
-         _versions[index] = std::max(_versions[index], info.root_version);
-      }
-
-      uint64_t version_for(ptr_address addr) const noexcept
-      {
-         if (addr == null_ptr_address)
-            return 0;
-
-         uint64_t index = *addr;
-         if (index >= _versions.size())
-            return 0;
-         return _versions[index];
-      }
-
-     private:
-      std::vector<uint64_t> _versions;
-   };
-
    // MVCC removed: recovered_custom_cb_latest_version (used only by the old version-CB
    // reconstruction) is gone.
 
@@ -996,11 +963,6 @@ namespace sal
       return results;
    }
 
-   void allocator::reconstruct_custom_cbs_from_roots(const void* /*recovered_versions_ptr*/)
-   {
-      // MVCC removed: root slots carry no version CB, so there is nothing to reconstruct.
-   }
-
    void allocator::recover()
    {
       SAL_WARN("Recovering... rebuilding control blocks from segments!");
@@ -1036,7 +998,6 @@ namespace sal
       // Phase 3: Scan each segment, rebuilding object ID -> location mapping
       uint32_t                max_provider_seq = 0;
       recovery_location_index location_index(_ptr_alloc.current_max_address_count());
-      recovery_version_index  version_index(_ptr_alloc.current_max_address_count());
       for (auto seg_idx : age_index)
       {
          auto* seg = get_segment(segment_number(seg_idx));
@@ -1063,9 +1024,6 @@ namespace sal
 
             if (obj_ptr->type() == header_type::sync_head)
             {
-               auto* sync = reinterpret_cast<const sync_header*>(obj_ptr);
-               if (auto info = sync->get_root_info())
-                  version_index.record(*info);
                obj_ptr = obj_ptr->next();
                continue;
             }
@@ -1090,8 +1048,6 @@ namespace sal
 
       _ptr_alloc.set_next_alloc_sequence(location_index.next_sequence());
 
-      // Phase 3.5: Reconstruct custom CBs (version addresses) from root slots
-      reconstruct_custom_cbs_from_roots(&version_index);
 
       // Phase 4: Walk all root objects, recursively retain reachable nodes
       begin_recovery_walk();
@@ -1130,39 +1086,6 @@ namespace sal
       stop_background_threads();
 
       _ptr_alloc.reset_all_refs();
-
-      recovery_version_index version_index(_ptr_alloc.current_max_address_count());
-      auto                   num_segs = _block_alloc.num_blocks();
-      for (uint32_t seg_idx = 0; seg_idx < num_segs; ++seg_idx)
-      {
-         auto* seg = get_segment(segment_number(seg_idx));
-         if (seg->_provider_sequence == 0 && seg->get_alloc_pos() == 0)
-            continue;
-
-         auto* obj_ptr = reinterpret_cast<const alloc_header*>(seg->data);
-         auto* seg_end = reinterpret_cast<const alloc_header*>(
-             seg->data +
-             std::min<uint32_t>(segment_size - mapped_memory::segment_footer_size,
-                                seg->get_alloc_pos()));
-
-         while (obj_ptr < seg_end && obj_ptr->address() != null_ptr_address)
-         {
-            if (obj_ptr->size() == 0)
-               break;
-
-            if (obj_ptr->type() == header_type::sync_head)
-            {
-               auto* sync = reinterpret_cast<const sync_header*>(obj_ptr);
-               if (auto info = sync->get_root_info())
-                  version_index.record(*info);
-            }
-
-            obj_ptr = obj_ptr->next();
-         }
-      }
-
-      // Reconstruct custom CBs before walking roots
-      reconstruct_custom_cbs_from_roots(&version_index);
 
       begin_recovery_walk();
       recovery_visit_set visited(_ptr_alloc.current_max_address_count());
@@ -1323,7 +1246,6 @@ namespace sal
 
       uint32_t                max_provider_seq = 0;
       recovery_location_index location_index(_ptr_alloc.current_max_address_count());
-      recovery_version_index  version_index(_ptr_alloc.current_max_address_count());
       for (auto seg_idx : age_index)
       {
          auto* seg = get_segment(segment_number(seg_idx));
@@ -1336,7 +1258,6 @@ namespace sal
                 {
                    if (auto info = sh->get_root_info())
                    {
-                      version_index.record(*info);
                       SAL_WARN("  found root_info in sync header at pos {}: root[{}] = {} ts={}",
                                pos, info->root_index, info->root_address, *sh->timestamp());
                       recovered_roots.push_back({sh->timestamp(), info->root_index,
@@ -1386,7 +1307,6 @@ namespace sal
                auto  info    = scan_sh->get_root_info();
                if (info)
                {
-                  version_index.record(*info);
                   SAL_WARN("  found root_info in sync header at pos {}: root[{}] = {} ver_addr={} ver={} ts={}",
                            scan_pos, info->root_index, info->root_address,
                            info->version_address, info->root_version, *scan_sh->timestamp());
@@ -1535,8 +1455,6 @@ namespace sal
          }
       }
 
-      // Phase 5.5: Reconstruct custom CBs from root slots
-      reconstruct_custom_cbs_from_roots(&version_index);
 
       // Phase 6: Walk all valid roots, recursively retain reachable nodes
       begin_recovery_walk();
@@ -1702,24 +1620,6 @@ namespace sal
          }
       }
    }
-   bool allocator::compactor_release_objects(allocator_session& ses)
-   {
-      bool        more_work = false;
-      ptr_address read_ids[1024];
-      for (uint32_t snum = 0; snum < _mapped_state->_session_data.session_capacity(); ++snum)
-      {
-         auto& rcache = _mapped_state->_session_data.release_queue(allocator_session_number(snum));
-         // only process up to 1024 objects so that we can yield to
-         // other tasks the compactor is doing without too much delay
-         auto num_loaded = rcache.pop(read_ids, 1024);
-         for (uint32_t i = 0; i < num_loaded; ++i)
-         {
-            ses.final_release(read_ids[i]);
-         }
-      }
-      return more_work;
-   }
-
    /**
     * Dedicated release thread loop — processes deferred object releases from all
     * session release queues.  Uses fine-grained read locks so the compactor can

@@ -303,11 +303,6 @@ namespace sal
       [[nodiscard]] operation_scope record_operation(mapped_memory::session_operation op,
                                                      uint64_t count = 1) noexcept;
 
-      bool config_update_checksum_on_modify() const noexcept
-      {
-         // TODO: cache reference to runtime_config and return _update_checksum_on_modify;
-         return false;
-      }  //_update_checksum_on_modify; }
 
      private:
       friend class transaction;
@@ -423,26 +418,6 @@ namespace sal
       uint64_t _seg_alloc_ns      = 0;  ///< Cumulative nanoseconds in init_active_segment().
       // Reference to the session read lock from read_lock_queue
       mapped_memory::session_rlock& _session_rlock;
-
-      // Thread-ownership validation (enabled via SAL_THREAD_CHECKS or Debug builds).
-      // Returns true on success; on violation prints diagnostic and aborts.
-      // Usage: assert(check_thread_ownership()) — compiled out in Release
-      // unless SAL_THREAD_CHECKS is defined.
-#if !defined(NDEBUG) || defined(SAL_THREAD_CHECKS)
-      std::thread::id _owning_thread{std::this_thread::get_id()};
-
-      bool check_thread_ownership() const
-      {
-         // Thread identity is NOT the contract (Dan): sessions may move
-         // between threads as long as two threads are never ACTIVE on one
-         // simultaneously (strand-style serialization is legal). Overlap
-         // detection would need enter/exit pairing; identity checks here
-         // produced false violations, so the check is retired.
-         return true;
-      }
-#else
-      bool check_thread_ownership() const noexcept { return true; }
-#endif
 
       void prepare_alloc(uint32_t size, msec_timestamp vage);
 

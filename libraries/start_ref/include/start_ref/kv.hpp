@@ -202,9 +202,15 @@ namespace start_ref::kv
       }
    };
 
+   // Type numbers 0 and 65535 are the engine's own (plain bytes, and the
+   // directory of a value stored in chunks). A type that claimed one of them
+   // would be stored and then read back, released and recovered as if it were
+   // that, so such a type is not storable at all: it cannot be registered,
+   // written or read.
    template <class T>
    concept storable = requires(T t, const typename T::t_pod& p, void* ses) {
       { T::type_id } -> std::convertible_to<uint16_t>;
+      requires T::type_id != 0 && T::type_id != 65535;
       requires std::is_trivially_copyable_v<typename T::t_pod>;
       { std::move(t).take_pod() } -> std::same_as<typename T::t_pod>;
       { T::make_from_pod(p, true) } -> std::same_as<T>;

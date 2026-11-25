@@ -154,3 +154,23 @@ TEST_CASE("readers of a root and transactions committing it do not race", "[sal]
    CHECK(sig == 0);
    fs::remove_all(path);
 }
+
+#include <sal/segment_thread.hpp>
+
+// A background thread whose loop throws is gone for good: with the segment
+// provider gone, writers wait for a segment forever. That must not be a log
+// line and a hang; the process stops and says which thread and why.
+TEST_CASE("an exception out of a background thread stops the process", "[sal][fail_stop]")
+{
+   int sig = signal_from_child(
+       []
+       {
+          sal::mapped_memory::segment_thread_state state;
+          sal::segment_thread thread(&state, "test_provider",
+                                     [](sal::segment_thread&)
+                                     { throw std::runtime_error("no space left on device"); });
+          thread.start();
+          std::this_thread::sleep_for(std::chrono::seconds(5));
+       });
+   CHECK(sig == SIGABRT);
+}

@@ -42,6 +42,18 @@ namespace sal_art_ref
       static constexpr uint8_t vt_subtree    = 1;
       static constexpr uint8_t vt_extern     = 2;
       static constexpr uint8_t vt_extern_val = 3;
+      //   vt_typed   — a typed value (value_hooks.hpp): the value bytes are
+      //                [u16 LE typenum][token], written by the engine. Stored inline like
+      //                vt_bytes; its lifecycle fires the type's retain/release hooks. When the
+      //                record does not fit in the page it is external (vt_extern /
+      //                vt_extern_val) and the key_val_node carries vt_typed instead.
+      static constexpr uint8_t vt_typed = 4;
+
+      // The value bytes are stored in the record itself and sized by the caller.
+      static constexpr bool inline_payload(uint8_t vt) noexcept
+      {
+         return vt == vt_bytes || vt == vt_typed;
+      }
 
       // The value is stored in an external SAL object (record holds a 2-byte cbase code).
       static constexpr bool external_value(uint8_t vt) noexcept
@@ -59,6 +71,7 @@ namespace sal_art_ref
       std::span<const uint8_t> suffix() const noexcept { return {data, suffix_len}; }
       std::span<const uint8_t> value() const noexcept { return {data + suffix_len, value_len}; }
       bool                     is_subtree() const noexcept { return value_type == vt_subtree; }
+      bool                     is_typed() const noexcept { return value_type == vt_typed; }
       // The embedded subtree root (valid only when is_subtree()). Value bytes are a raw ptr_address.
       sal::ptr_address subtree_root() const noexcept
       {

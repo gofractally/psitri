@@ -2,14 +2,15 @@
 // heart's NATIVE psitri-shaped public API + the LOCKED adb typed-value layer.
 // The same database → write_session → transaction → cursor structure psitri
 // exposes; sal_art_ref::radix::database carries the base shape natively, and
-// this header adds the [u16 typenum][payload] value envelope, the registry,
-// three-outcome typed reads, and any_value on top — so the one templated
-// kv-compat body drives heart identically to the other engines.
+// this header adds the registry, three-outcome typed reads, and any_value on
+// top — so the one templated kv-compat body drives heart identically to the
+// other engines.
 //
-// Storage: every value heart stores is the envelope (typenum 0 = raw bytes).
-// The engine fires the user retain/release hooks from leaf_page's lifecycle
-// (value_hooks.hpp registry) keyed by the embedded typenum; this header only
-// builds the envelope on write and strips it on read.
+// Storage: plain bytes go to the engine untouched. A typed value is stored
+// through the engine's typed API (upsert_typed: a type number and a token,
+// kept under the engine's own value kind), and the engine fires the type's
+// retain/release hooks from its node lifecycle (value_hooks.hpp registry).
+// This header only converts between a storable type and its token.
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -36,14 +37,7 @@ namespace sal_art_ref::kv
       bool           checksum_on_commit      = false;
    };
 
-   struct invalid_type : std::runtime_error
-   {
-      invalid_type(uint16_t stored, uint16_t asked)
-          : std::runtime_error("sal_art_ref: value is type " + std::to_string(stored) +
-                               ", read as type " + std::to_string(asked))
-      {
-      }
-   };
+   using sal_art_ref::invalid_type;  // thrown by the engine's byte reads too
 
    template <class T>
    concept storable = requires(T t, const typename T::t_pod& p, void* ses) {
@@ -55,40 +49,52 @@ namespace sal_art_ref::kv
       T::t_pod::release(ses, p);
    };
 
-   inline uint16_t slot_type(value_view s) noexcept { return sal_art_ref::env_typenum(s); }
-   inline value_view slot_payload(value_view s) noexcept { return s.substr(2); }
-   inline value_view env_raw_(value_view v)  // [0][bytes], thread_local scratch
+   // What the engine hands back for a value of any kind: its type number (0 =
+   // plain bytes) and the bytes or the token.
+   struct slot
    {
-      thread_local std::string buf;
-      buf.resize(2 + v.size());
-      buf[0] = buf[1] = 0;
-      std::memcpy(buf.data() + 2, v.data(), v.size());
-      return {buf.data(), buf.size()};
+      uint16_t    type = kRawType;
+      std::string payload;
+   };
+   // Read through any native reader with get_any(key, fn(typenum, bytes)).
+   template <class Reader>
+   std::optional<slot> read_slot(Reader&& r, key_view k)
+   {
+      std::optional<slot> out;
+      r.get_any(k, [&](uint16_t t, value_view v) { out = slot{t, std::string(v)}; });
+      return out;
    }
    template <class S>
-   S slot_decode(value_view slot)
+   S slot_decode(const slot& s)
    {
-      const uint16_t t = slot_type(slot);
       if constexpr (storable<S>)
       {
-         if (t != S::type_id)
-            throw invalid_type{t, S::type_id};
+         if (s.type != S::type_id)
+            throw invalid_type{s.type, S::type_id};
          typename S::t_pod pod;
-         if (slot.size() - 2 != sizeof(pod))
-            throw invalid_type{t, S::type_id};
-         std::memcpy(&pod, slot.data() + 2, sizeof(pod));
+         if (s.payload.size() != sizeof(pod))
+            throw invalid_type{s.type, S::type_id};
+         std::memcpy(&pod, s.payload.data(), sizeof(pod));
          return S::make_from_pod(pod, true);  // a RETAINED handle out
       }
       else
       {
-         if (t != kRawType)
-            throw invalid_type{t, kRawType};
-         const value_view p = slot_payload(slot);
-         return S(p.data(), p.size());
+         if (s.type != kRawType)
+            throw invalid_type{s.type, kRawType};
+         return S(s.payload.data(), s.payload.size());
       }
    }
+   // Store a typed value: take_pod() CONSUMES v — custody moves into the database.
+   template <class Writer, class T>
+   void store_typed(Writer&& w, key_view k, T&& v)
+   {
+      using U                     = std::remove_cvref_t<T>;
+      const typename U::t_pod pod = std::move(v).take_pod();
+      w.upsert_typed(k, uint16_t(U::type_id),
+                     value_view(reinterpret_cast<const char*>(&pod), sizeof(pod)));
+   }
 
-   // any_value — heart backs it with an OWNED envelope copy (the leaf_page may
+   // any_value — heart backs it with an OWNED copy (the leaf_page may
    // be relocated by sal, so a raw slot pointer is unsafe past the read lock).
    // The interface matches every other engine; as<T> retains, bytes() on a
    // typed slot is invalid_type, raw_pod() is the expert/merger path.
@@ -96,42 +102,40 @@ namespace sal_art_ref::kv
    {
      public:
       any_value() = default;
-      uint16_t type() const noexcept { return _has ? slot_type(_env) : kRawType; }
+      uint16_t type() const noexcept { return _has ? _slot.type : kRawType; }
       template <class T>
       bool is() const noexcept
       {
-         return _has && slot_type(_env) == T::type_id;
+         return _has && _slot.type == T::type_id;
       }
       template <class T>
       T as() const
       {
          if (!is<T>())
             throw invalid_type{type(), T::type_id};
-         typename T::t_pod pod;
-         std::memcpy(&pod, _env.data() + 2, sizeof(pod));
-         return T::make_from_pod(pod, true);
+         return slot_decode<T>(_slot);
       }
       std::string_view bytes() const
       {
          if (type() != kRawType)
             throw invalid_type{type(), kRawType};
-         return {_env.data() + 2, _env.size() - 2};
+         return _slot.payload;
       }
       std::string_view raw_pod() const noexcept
       {
-         return _has ? std::string_view{_env.data() + 2, _env.size() - 2} : std::string_view{};
+         return _has ? std::string_view{_slot.payload} : std::string_view{};
       }
       explicit operator bool() const noexcept { return _has; }
 
      private:
       friend class transaction;
-      explicit any_value(std::string env) : _env(std::move(env)), _has(true) {}
-      std::string _env;
-      bool        _has = false;
+      explicit any_value(slot s) : _slot(std::move(s)), _has(true) {}
+      slot _slot;
+      bool _has = false;
    };
 
-   // Stripping cursor: delegates positioning to the native cursor; value reads
-   // peel the envelope (three-outcome). Used by the main CRUD battery.
+   // Typed cursor: delegates positioning to the native cursor; value reads are
+   // three-outcome. Used by the main CRUD battery.
    class cursor
    {
      public:
@@ -148,7 +152,8 @@ namespace sal_art_ref::kv
       template <class S = std::string>
       std::optional<S> value() const
       {
-         auto e = _c.template value<std::string>();
+         std::optional<slot> e;
+         _c.value_any([&](uint16_t t, value_view v) { e = slot{t, std::string(v)}; });
          if (!e)
             return std::nullopt;
          return slot_decode<S>(*e);
@@ -156,30 +161,19 @@ namespace sal_art_ref::kv
       template <class F>
       bool get_value(F&& f) const
       {
-         auto e = _c.template value<std::string>();
-         if (!e)
-            return false;
-         if (slot_type(*e) != kRawType)
-            throw invalid_type{slot_type(*e), kRawType};
-         f(slot_payload(*e));
-         return true;
+         return _c.get_value(std::forward<F>(f));  // a typed value throws invalid_type
       }
-      uint16_t value_type() const
-      {
-         auto e = _c.template value<std::string>();
-         return e ? slot_type(*e) : kRawType;
-      }
+      uint16_t value_type() const { return _c.value_typenum(); }
       template <class T>
       bool is_type() const
       {
-         auto e = _c.template value<std::string>();
-         return e && slot_type(*e) == T::type_id;
+         return _c.value_typenum() == T::type_id;
       }
 
       template <class S = std::string>
       std::optional<S> get(key_view k)
       {
-         auto e = _c.template get<std::string>(k);
+         auto e = read_slot(_c, k);
          if (!e)
             return std::nullopt;
          return slot_decode<S>(*e);
@@ -187,13 +181,7 @@ namespace sal_art_ref::kv
       template <class F>
       bool get(key_view k, F&& f)
       {
-         auto e = _c.template get<std::string>(k);
-         if (!e)
-            return false;
-         if (slot_type(*e) != kRawType)
-            throw invalid_type{slot_type(*e), kRawType};
-         f(slot_payload(*e));
-         return true;
+         return _c.get(k, std::forward<F>(f));  // a typed value throws invalid_type
       }
 
      private:
@@ -203,8 +191,8 @@ namespace sal_art_ref::kv
    // A tree IS a snapshot: an owned, frozen handle to a committed root (the
    // native owning tree holds a smart_ptr ref, so COW keeps the version alive
    // while this exists). It is the single owned-tree type — what get_root
-   // returns, what set_root exchanges, and what reads strip the envelope
-   // through. Default = empty.
+   // returns, what set_root exchanges, and what typed reads go through.
+   // Default = empty.
    class tree
    {
      public:
@@ -214,7 +202,7 @@ namespace sal_art_ref::kv
       template <class S = std::string>
       std::optional<S> get(key_view k) const
       {
-         auto e = _t.template get<std::string>(k);
+         auto e = read_slot(_t, k);
          if (!e)
             return std::nullopt;
          return slot_decode<S>(*e);
@@ -232,25 +220,19 @@ namespace sal_art_ref::kv
    {
      public:
       explicit root_handle(sal_art_ref::radix::radix_tree::tree_handle* h) : _h(h) {}
-      void insert(key_view k, value_view v) { _h->upsert(k, env_raw_(v)); }
-      void upsert(key_view k, value_view v) { _h->upsert(k, env_raw_(v)); }
+      void insert(key_view k, value_view v) { _h->upsert(k, v); }
+      void upsert(key_view k, value_view v) { _h->upsert(k, v); }
       template <class T>
          requires storable<std::remove_cvref_t<T>>
       void upsert(key_view k, T&& v)
       {
-         using U                     = std::remove_cvref_t<T>;
-         const typename U::t_pod pod = std::move(v).take_pod();
-         char                    buf[2 + sizeof(pod)];
-         const uint16_t          id = U::type_id;
-         std::memcpy(buf, &id, 2);
-         std::memcpy(buf + 2, &pod, sizeof(pod));
-         _h->upsert(k, value_view(buf, sizeof(buf)));
+         store_typed(*_h, k, std::forward<T>(v));
       }
       int remove(key_view k) { return _h->remove(k); }
       template <class T = std::string>
       std::optional<T> get(key_view k) const
       {
-         auto e = _h->template get<std::string>(k);
+         auto e = read_slot(*_h, k);
          if (!e)
             return std::nullopt;
          return slot_decode<T>(*e);
@@ -266,8 +248,8 @@ namespace sal_art_ref::kv
    {
      public:
       explicit transaction(sal_art_ref::radix::radix_tree::transaction&& t) : _tx(std::move(t)) {}
-      void insert(key_view k, value_view v) { _tx.upsert(k, env_raw_(v)); }
-      void upsert(key_view k, value_view v) { _tx.upsert(k, env_raw_(v)); }
+      void insert(key_view k, value_view v) { _tx.upsert(k, v); }
+      void upsert(key_view k, value_view v) { _tx.upsert(k, v); }
       // ── multi-root (adb): primary()/open_root() target additional roots ──
       root_handle primary() { return root_handle(&_tx.primary()); }
       root_handle open_root(uint32_t idx) { return root_handle(&_tx.open_root(idx)); }
@@ -276,13 +258,7 @@ namespace sal_art_ref::kv
          requires storable<std::remove_cvref_t<T>>
       void upsert(key_view k, T&& v)
       {
-         using U                     = std::remove_cvref_t<T>;
-         const typename U::t_pod pod = std::move(v).take_pod();  // custody -> db
-         char                    buf[2 + sizeof(pod)];
-         const uint16_t          id = U::type_id;
-         std::memcpy(buf, &id, 2);
-         std::memcpy(buf + 2, &pod, sizeof(pod));
-         _tx.upsert(k, value_view(buf, sizeof(buf)));
+         store_typed(_tx, k, std::forward<T>(v));  // custody -> db
       }
       int  remove(key_view k) { return _tx.remove(k); }
       void commit() { _tx.commit(); }
@@ -291,7 +267,7 @@ namespace sal_art_ref::kv
       template <class T = std::string>
       std::optional<T> get(key_view k)
       {
-         auto e = _tx.template get<std::string>(k);
+         auto e = read_slot(_tx, k);
          if (!e)
             return std::nullopt;
          return slot_decode<T>(*e);
@@ -299,17 +275,11 @@ namespace sal_art_ref::kv
       template <class F>
       bool get(key_view k, F&& fn)
       {
-         auto e = _tx.template get<std::string>(k);
-         if (!e)
-            return false;
-         if (slot_type(*e) != kRawType)
-            throw invalid_type{slot_type(*e), kRawType};
-         fn(slot_payload(*e));
-         return true;
+         return _tx.get(k, std::forward<F>(fn));  // a typed value throws invalid_type
       }
       any_value get_any(key_view k)
       {
-         auto e = _tx.template get<std::string>(k);
+         auto e = read_slot(_tx, k);
          if (!e)
             return {};
          return any_value{std::move(*e)};
@@ -340,8 +310,8 @@ namespace sal_art_ref::kv
       std::shared_ptr<sal_art_ref::radix::write_session> _ws;
    };
 
-   // Reader-thread handle (psitri-shaped): hands out envelope-stripping
-   // snapshot cursors. CREATE ON THE READER THREAD (one SAL session per
+   // Reader-thread handle (psitri-shaped): hands out typed snapshot
+   // cursors. CREATE ON THE READER THREAD (one SAL session per
    // thread). Reads run lock-free against the writer (native contract).
    class read_session
    {

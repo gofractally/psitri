@@ -5,6 +5,7 @@
 
 #include <sal_art_ref/inline_value.hpp>
 #include <sal_art_ref/radix_type_ids.hpp>
+#include <sal_art_ref/value_hooks.hpp>  // a typed external value releases its token here
 #include <sal_art_ref/versioned.hpp>
 #include <ucc/round.hpp>
 
@@ -36,7 +37,7 @@ namespace sal_art_ref
       uint32_t value_len;
       uint16_t key_len;
       uint16_t continuation_count;
-      uint8_t  value_type;  // vt_bytes | vt_subtree
+      uint8_t  value_type;  // vt_bytes | vt_subtree | vt_typed
       uint8_t  data[];      // key, chunk_entry[continuation_count], first payload
 
       static uint32_t alloc_size(std::span<const uint8_t> key,
@@ -60,7 +61,8 @@ namespace sal_art_ref
          assert(key.size() <= max_key_len);
          assert(entries.size() <= std::numeric_limits<uint16_t>::max());
          assert(entries.empty() ||
-                (vtype == inline_value::vt_bytes && entries.front().start == first.size() &&
+                (vtype == inline_value::vt_bytes /* never typed/subtree */ &&
+                 entries.front().start == first.size() &&
                  total_size > first.size()));
          value_len          = entries.empty() ? uint32_t(first.size()) : total_size;
          key_len            = uint16_t(key.size());
@@ -92,6 +94,7 @@ namespace sal_art_ref
          return first_bytes();
       }
       bool is_subtree() const noexcept { return value_type == inline_value::vt_subtree; }
+      bool is_typed() const noexcept { return value_type == inline_value::vt_typed; }
       sal::ptr_address subtree_root() const noexcept
       {
          assert(is_subtree() && !chunked());
@@ -105,6 +108,11 @@ namespace sal_art_ref
       {
          if (is_subtree())
             s->release(subtree_root());
+         else if (is_typed())  // the one physical copy of this typed value dies with the record
+         {
+            const auto v = value_bytes();
+            fire_typed_release({reinterpret_cast<const char*>(v.data()), v.size()});
+         }
          for (const auto& entry : chunks())
             if (entry.child != sal::null_ptr_address)
                s->release(entry.child);

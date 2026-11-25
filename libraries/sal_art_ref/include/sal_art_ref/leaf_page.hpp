@@ -36,6 +36,7 @@ namespace sal_art_ref
     * Every record keeps its SUFFIX in-page (compares never dereference). The record's
     * value payload is tagged by inline_value::value_type:
     *   vt_bytes   — value bytes inline (suffix+value <= max_inline_entry).
+    *   vt_typed   — a typed value inline: [u16 typenum][token], same size rule as vt_bytes.
     *   vt_subtree — 4-byte nested-tree root.
     *   vt_extern  — suffix+value > max_inline_entry: the value lives in an external
     *                SAL object; payload is a 2-byte code 0xFF00 | cbase<<4 | slot.
@@ -222,8 +223,8 @@ namespace sal_art_ref
 
       /// SAL destroy hook: a dying page releases its children (external value objects
       /// and nested subtree roots) — the cascade that frees what only this page owned.
-      /// Inline typed values (vt_bytes carrying a [typenum][payload] envelope) fire
-      /// the user release hook here — this is the page's physical-death point.
+      /// Inline typed values (vt_typed) fire the type's release hook here — this is
+      /// the page's physical-death point. Plain bytes (vt_bytes) are never inspected.
       template <typename Session>
       void destroy(const Session& s) const
       {
@@ -231,9 +232,22 @@ namespace sal_art_ref
          for (uint32_t i = 0; i < _nkeys; ++i)
          {
             const inline_value* iv = record(i);
-            if (iv->value_type == inline_value::vt_bytes)
-               fire_value_release({reinterpret_cast<const char*>(iv->value().data()),
+            if (iv->value_type == inline_value::vt_typed) [[unlikely]]
+               fire_typed_release({reinterpret_cast<const char*>(iv->value().data()),
                                    iv->value().size()});
+         }
+      }
+      /// Visit the stored bytes ([u16 typenum][token]) of every inline typed value: the
+      /// values a copy of this page duplicates.
+      template <typename F>
+      void for_each_inline_typed(F&& f) const
+      {
+         for (uint32_t i = 0; i < _nkeys; ++i)
+         {
+            const inline_value* iv = record(i);
+            if (iv->value_type == inline_value::vt_typed) [[unlikely]]
+               f(i, std::string_view{reinterpret_cast<const char*>(iv->value().data()),
+                                     iv->value().size()});
          }
       }
       // SAL reachability/refcount-rebuild hook — same external-value + subtree-root set destroy()
@@ -324,12 +338,13 @@ namespace sal_art_ref
       {
          return record(i)->value_type;
       }
-      /// vt_bytes payload (empty span for other types — deref the external instead).
+      /// Inline payload: the caller's bytes (vt_bytes) or a typed value's stored
+      /// [typenum][token] (vt_typed). Empty span for other types — deref the external instead.
       std::span<const uint8_t> value(uint32_t i) const noexcept
       {
          const inline_value* iv = record(i);
-         return iv->value_type == inline_value::vt_bytes ? iv->value()
-                                                         : std::span<const uint8_t>{};
+         return inline_value::inline_payload(iv->value_type) ? iv->value()
+                                                             : std::span<const uint8_t>{};
       }
       bool is_external(uint32_t i) const noexcept
       {
@@ -465,7 +480,7 @@ namespace sal_art_ref
             return can_apply_mode::none;  // diverges from cpfx => rebuilding clone
          if (ins.vtype != inline_value::vt_extern && n - _cpfx_len > max_suffix_len)
             return can_apply_mode::none;  // big items must arrive classified vt_extern
-         if (ins.vtype == inline_value::vt_bytes &&
+         if (inline_value::inline_payload(ins.vtype) &&
              int(n - _cpfx_len + ins.value.size()) > max_inline_entry)
             return can_apply_mode::none;  // engine should have externalized this entry
          if (inline_value::external_value(ins.vtype) && !can_add_address(ins.ext))
@@ -504,7 +519,7 @@ namespace sal_art_ref
       {
          assert(upd.index < _nkeys);
          const inline_value* iv = record(upd.index);
-         if (upd.vtype == inline_value::vt_bytes &&
+         if (inline_value::inline_payload(upd.vtype) &&
              int(iv->suffix_len + upd.value.size()) > max_inline_entry)
             return can_apply_mode::none;  // engine should have externalized this value
          if (inline_value::external_value(upd.vtype) && !can_add_address(upd.ext))
@@ -588,7 +603,8 @@ namespace sal_art_ref
       {
          const inline_value* iv   = record(upd.index);
          const uint32_t      npay = payload_bytes(upd.value.size(), upd.vtype);
-         if (upd.vtype == inline_value::vt_bytes && int(iv->suffix_len + npay) > max_inline_entry)
+         if (inline_value::inline_payload(upd.vtype) &&
+             int(iv->suffix_len + npay) > max_inline_entry)
             return false;
          if (inline_value::external_value(upd.vtype) && live_cbase_count() + 1 > max_cbases)
             return false;
@@ -1058,7 +1074,7 @@ namespace sal_art_ref
       }
       uint16_t alloc_record(const uint8_t* s, uint32_t sn, const insert_op& ins) noexcept
       {
-         assert(ins.vtype != inline_value::vt_bytes || int(sn + ins.value.size()) <=
+         assert(!inline_value::inline_payload(ins.vtype) || int(sn + ins.value.size()) <=
                     max_inline_entry);
          if (ins.vtype == inline_value::vt_extern && sn > ext_frag_cap)
             sn = ext_frag_cap;  // store the comparison fragment; the key_val_node has the rest

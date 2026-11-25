@@ -45,15 +45,30 @@ namespace sal_art_ref::radix
    {
       struct stored_value
       {
-         std::string_view bytes;
+         std::string_view bytes;  // plain bytes, or a typed value's token
          sal::ptr_address directory = sal::null_ptr_address;
+         uint16_t         typenum   = kRawType;  // nonzero: a typed value (value_hooks.hpp)
       };
+      /// A typed value's stored bytes ([u16 typenum][token]) as a stored_value.
+      inline stored_value from_typed(std::string_view stored) noexcept
+      {
+         return {typed_token(stored), sal::null_ptr_address, typed_typenum(stored)};
+      }
       inline stored_value from_external(const key_val_node& record, sal::ptr_address addr)
       {
          if (record.chunked())
             return {{}, addr};
          const auto v = record.value_bytes();
-         return {{reinterpret_cast<const char*>(v.data()), v.size()}, sal::null_ptr_address};
+         const std::string_view bytes{reinterpret_cast<const char*>(v.data()), v.size()};
+         if (record.is_typed()) [[unlikely]]
+            return from_typed(bytes);
+         return {bytes, sal::null_ptr_address};
+      }
+      /// A plain-bytes read found a typed value: never reinterpret it.
+      inline void require_bytes(const stored_value& v)
+      {
+         if (v.typenum != kRawType) [[unlikely]]
+            throw invalid_type{v.typenum, kRawType};
       }
       inline stored_value from_external(sal::allocator_session& ses, sal::ptr_address addr)
       {

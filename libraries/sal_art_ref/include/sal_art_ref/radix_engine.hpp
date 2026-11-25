@@ -334,6 +334,52 @@ namespace sal_art_ref::radix
          return _old_value_size;
       }
 
+      // ── typed values ────────────────────────────────────────────────────────────────────
+      // A typed value is a type number plus a small trivially copyable token (value_hooks.hpp).
+      // The engine writes [u16 typenum][token] under its own value kind (vt_typed); the type
+      // number is never part of a caller's bytes, and a plain-bytes value is never inspected
+      // for one. Storing CONSUMES one reference of the token's owner (no retain here); the
+      // type's hooks fire as the stored bytes are duplicated or die.
+      struct typed_stash
+      {
+         uint8_t buf[2 + max_typed_token_size];
+         bytes   stored;
+      };
+      void stage_typed(typed_stash& st, uint16_t typenum, value_view token)
+      {
+         if (typenum == kRawType || typenum == 0xFFFF)
+            throw std::invalid_argument(
+                "sal_art_ref: type numbers 0 (plain bytes) and 65535 are reserved");
+         if (token.size() > max_typed_token_size)
+            throw std::invalid_argument("sal_art_ref: typed value token exceeds " +
+                                        std::to_string(max_typed_token_size) + " bytes");
+         if (!_page_mode || _bucket_mode)
+            throw std::logic_error("sal_art_ref: typed values need the page model");
+         std::memcpy(st.buf, &typenum, 2);
+         if (!token.empty())
+            std::memcpy(st.buf + 2, token.data(), token.size());
+         st.stored = bytes{st.buf, 2 + token.size()};
+      }
+      [[nodiscard]] ptr_address typed_upsert_step(ptr_address root, key_view k, uint16_t typenum,
+                                                  value_view token)
+      {
+         typed_stash st;
+         stage_typed(st, typenum, token);
+         _ins_value_type = inline_value::vt_typed;
+         struct restore
+         {
+            uint8_t& v;
+            ~restore() { v = inline_value::vt_bytes; }
+         } r{_ins_value_type};
+         return upsert_step(root, as_bytes(k), st.stored);
+      }
+      int64_t upsert_typed(key_view key, uint16_t typenum, value_view token)
+      {
+         mutate_root(_root, [&](ptr_address pre)
+                     { return typed_upsert_step(pre, key, typenum, token); });
+         return _old_value_size;
+      }
+
       // ── first-class subtree values ──────────────────────────────────────────────────────
       // A subtree value: the value stored at `key` IS a nested tree (root `subtree`), not bytes.
       // Encoded as a vt_subtree terminal (value bytes = the 4-byte root); the terminal owns one
@@ -2312,6 +2358,13 @@ namespace sal_art_ref::radix
       // at `skip` (-1 = none). The successor's slot-swap release of the old page then balances:
       // each shared child nets one owner per owning page; the skipped child is freed when the
       // old page was unique, or stays owned by the snapshot's page when it was shared.
+      // A page that was just built as a copy of (part of) another holds a second physical copy
+      // of each inline typed value: one more owner for each, released when either page dies.
+      void retain_page_typed(ptr_address page)
+      {
+         _ses->get_ref<leaf_page>(page).obj()->for_each_inline_typed(
+             [](uint32_t, std::string_view stored) { fire_typed_retain(stored); });
+      }
       void retain_page_children(const leaf_page* pg, int skip)
       {
          for (uint32_t i = 0; i < pg->num_keys(); ++i)
@@ -2323,10 +2376,11 @@ namespace sal_art_ref::radix
                _ses->retain(pg->external_addr(i));
             else if (iv->is_subtree() && iv->subtree_root() != sal::null_ptr_address)
                _ses->retain(iv->subtree_root());
-            else if (iv->value_type == inline_value::vt_bytes)
-               // the clone duplicates these value bytes; the original/clone
-               // each die through leaf_page::destroy -> balanced release
-               fire_value_retain({reinterpret_cast<const char*>(iv->value().data()),
+            else if (iv->value_type == inline_value::vt_typed) [[unlikely]]
+               // the clone duplicates this typed value's bytes; the original/clone
+               // each die through leaf_page::destroy -> balanced release.
+               // Plain bytes (vt_bytes) are the caller's and are never inspected.
+               fire_typed_retain({reinterpret_cast<const char*>(iv->value().data()),
                                   iv->value().size()});
          }
       }
@@ -2370,8 +2424,9 @@ namespace sal_art_ref::radix
                                   .vtype = _ins_value_type,
                                   .ext   = sal::null_ptr_address,
                                   .res   = kvres(*_ses)};
-         const uint64_t pay0 = _ins_value_type == inline_value::vt_bytes ? uint64_t(val.size())
-                                                                         : 4u /*subtree root*/;
+         const uint64_t pay0 = inline_value::inline_payload(_ins_value_type)
+                                   ? uint64_t(val.size())
+                                   : 4u /*subtree root*/;
          const int idx = pg->find(kb.data(), uint32_t(kb.size()), ins.res);
          // ONCE EXTERNAL, STAYS EXTERNAL: an extern record's in-page fragment may be a
          // truncated prefix of the real key — inlining it on a shrinking update would lose
@@ -2401,6 +2456,25 @@ namespace sal_art_ref::radix
          sal::smart_ptr<sal::alloc_header> pending;
          if (ins.ext != sal::null_ptr_address)
             pending = sal::smart_ptr<sal::alloc_header>(_ses, ins.ext);
+         // An external record built for a typed value that no page adopts (the page was
+         // full: the caller splits and retries with a new record) must die without firing
+         // the type's release hook: the value was never stored, and the reference it would
+         // have carried is still the caller's until an upsert succeeds.
+         struct unadopted_typed
+         {
+            radix_tree*                        tree;
+            sal::smart_ptr<sal::alloc_header>& record;
+            bool                               typed;
+            ~unadopted_typed()
+            {
+               if (typed && record)
+                  tree->_ses->template get_ref<key_val_node>(record.address())
+                      .modify()
+                      .get()
+                      ->value_type = inline_value::vt_bytes;
+            }
+         } unadopted{this, pending,
+                     _ins_value_type == inline_value::vt_typed && ins.ext != sal::null_ptr_address};
          if (idx >= 0)  // UPDATE — capture the displaced record's identity first
          {
             const inline_value* old       = pg->record(uint32_t(idx));
@@ -2413,7 +2487,7 @@ namespace sal_art_ref::radix
             }
             else
             {
-               _old_value_size = old->value_len;
+               _old_value_size = old->is_typed() ? int64_t(old->value_len) - 2 : old->value_len;
                if (old->is_subtree())
                   old_child = old->subtree_root();
             }
@@ -2425,8 +2499,8 @@ namespace sal_art_ref::radix
                {
                   {  // the replaced inline value's bytes die in place
                      const inline_value* oiv = pg->record(uint32_t(idx));
-                     if (oiv->value_type == inline_value::vt_bytes)
-                        fire_value_release(
+                     if (oiv->value_type == inline_value::vt_typed) [[unlikely]]
+                        fire_typed_release(
                             {reinterpret_cast<const char*>(oiv->value().data()),
                              oiv->value().size()});
                   }
@@ -2515,8 +2589,8 @@ namespace sal_art_ref::radix
             return page;
          if (!shared)
          {
-            if (old->value_type == inline_value::vt_bytes)  // removed value's bytes die
-               fire_value_release({reinterpret_cast<const char*>(old->value().data()),
+            if (old->value_type == inline_value::vt_typed) [[unlikely]]  // a removed typed value dies
+               fire_typed_release({reinterpret_cast<const char*>(old->value().data()),
                                    old->value().size()});
             ref.modify().get()->apply(leaf_page::remove_op{uint16_t(idx)});
             if (old_child != sal::null_ptr_address)
@@ -3064,10 +3138,12 @@ namespace sal_art_ref::radix
          ptr_address      L  = _ses->alloc<leaf_page>(
              sal::alloc_hint{}, leaf_page::split_op{pg, 0, sp.index, kvres(*_ses), pg->divider()});
          _ses->get_ref<leaf_page>(L).obj()->for_each_child([&](ptr_address c) { _ses->retain(c); });
+         retain_page_typed(L);
          ptr_address R = _ses->alloc<leaf_page>(
              sal::alloc_hint{},
              leaf_page::split_op{pg, sp.index, uint16_t(pg->num_keys()), kvres(*_ses), sp.divider()});
          _ses->get_ref<leaf_page>(R).obj()->for_each_child([&](ptr_address c) { _ses->retain(c); });
+         retain_page_typed(R);
          ++_cc.page_splits;
          if (cur == P)  // the root IS the page → grow a radix above it
          {
@@ -3256,8 +3332,12 @@ namespace sal_art_ref::radix
             return true;
          }
          if (iv->is_subtree()) return false;
-         out = {{reinterpret_cast<const char*>(iv->data + iv->suffix_len), iv->value_len},
-                sal::null_ptr_address};
+         const std::string_view stored{reinterpret_cast<const char*>(iv->data + iv->suffix_len),
+                                       iv->value_len};
+         if (iv->is_typed()) [[unlikely]]
+            out = value_detail::from_typed(stored);
+         else
+            out = {stored, sal::null_ptr_address};
          return true;
       }
       bool page_find_in(sal::allocator_session& ses, ptr_address root, bytes kb, value_view& out)
@@ -3284,7 +3364,8 @@ namespace sal_art_ref::radix
 
       // In-order emission of one page (keys are SELF-CONTAINED: cpfx + suffix — the radix path
       // above is divider bytes, never key bytes). vt_subtree values emit their raw 4-byte root
-      // (legacy inline parity); vt_extern values dereference to the real bytes.
+      // (legacy inline parity); vt_extern values dereference to the real bytes; a typed value
+      // emits its token (the type number is not part of what a byte walk sees).
       template <class Cb>
       void emit_page(const leaf_page* pg, Cb& cb)
       {
@@ -3313,8 +3394,13 @@ namespace sal_art_ref::radix
                cb(key_view(reinterpret_cast<const char*>(kb2.buf), kb2.len), value.view());
             }
             else
+            {
+               const value_view stored(reinterpret_cast<const char*>(iv->data + iv->suffix_len),
+                                       iv->value_len);
+               // a typed value emits its token, as its external form does
                cb(key_view(reinterpret_cast<const char*>(kb2.buf), kb2.len),
-                  value_view(reinterpret_cast<const char*>(iv->data + iv->suffix_len), iv->value_len));
+                  iv->is_typed() ? typed_token(stored) : stored);
+            }
          }
       }
 
@@ -3817,12 +3903,14 @@ namespace sal_art_ref::radix
          {
             std::optional<sal::read_lock> pin(rlock());
             if (!_valid || _is_subtree) return value_ref{*pin, value_view{"", 0}};
+            require_bytes();
             return value_detail::read(ses(), current_value(), offset, length, pin);
          }
          template <class T = std::string>
          std::optional<T> value(uint64_t offset = 0, uint64_t length = adb::read_all) const
          {
             if (!_valid || _is_subtree) return std::nullopt;
+            require_bytes();
             std::optional<sal::read_lock> pin(rlock());
             const auto stored = current_value();
             if (stored.directory == sal::null_ptr_address)
@@ -3838,6 +3926,7 @@ namespace sal_art_ref::radix
          bool get_value(F&& fn, uint64_t offset = 0, uint64_t length = adb::read_all) const
          {
             if (!_valid || _is_subtree) return false;
+            require_bytes();
             std::optional<sal::read_lock> pin(rlock());
             const auto stored = current_value();
             if (stored.directory == sal::null_ptr_address)
@@ -3874,6 +3963,7 @@ namespace sal_art_ref::radix
             const bool ok = _t->_page_mode ? page_find_value(ses(), _root.address(), as_bytes(k), stored)
                                            : find_in(ses(), _root.address(), as_bytes(k), stored.bytes);
             if (!ok) return false;
+            value_detail::require_bytes(stored);
             if (stored.directory == sal::null_ptr_address)
             {
                fn(adb::detail::value_slice(stored.bytes, offset, length));
@@ -3883,6 +3973,47 @@ namespace sal_art_ref::radix
             fn(value.view());
             return true;
          }
+         // ── reads of a value of ANY kind ── fn(uint16_t typenum, value_view bytes): typenum 0
+         // with the plain bytes, or a typed value's type number with its token. A subtree
+         // value reads as not-found, as in get(). The view is valid only inside fn.
+         template <class F>
+            requires std::invocable<F, uint16_t, value_view>
+         bool get_any(key_view k, F&& fn)
+         {
+            if (_root.address() == sal::null_ptr_address) return false;
+            std::optional<sal::read_lock> pin(rlock());
+            value_detail::stored_value stored;
+            const bool ok = _t->_page_mode ? page_find_value(ses(), _root.address(), as_bytes(k), stored)
+                                           : find_in(ses(), _root.address(), as_bytes(k), stored.bytes);
+            if (!ok) return false;
+            if (stored.directory == sal::null_ptr_address)
+            {
+               fn(stored.typenum, stored.bytes);
+               return true;
+            }
+            auto value = value_detail::read(ses(), stored, 0, adb::read_all, pin);
+            fn(uint16_t(kRawType), value.view());
+            return true;
+         }
+         /// The current value, of any kind (see get_any).
+         template <class F>
+            requires std::invocable<F, uint16_t, value_view>
+         bool value_any(F&& fn) const
+         {
+            if (!_valid || _is_subtree) return false;
+            std::optional<sal::read_lock> pin(rlock());
+            const auto stored = current_value();
+            if (stored.directory == sal::null_ptr_address)
+            {
+               fn(stored.typenum, stored.bytes);
+               return true;
+            }
+            auto value = value_detail::read(ses(), stored, 0, adb::read_all, pin);
+            fn(uint16_t(kRawType), value.view());
+            return true;
+         }
+         /// Type number of the current value: 0 for plain bytes (and when not on a value).
+         uint16_t value_typenum() const noexcept { return _valid ? _typenum : kRawType; }
          template <class T = std::string, std::integral Offset = uint64_t>
          std::optional<T> get(key_view k, Offset offset = 0, uint64_t length = adb::read_all)
          {
@@ -3892,6 +4023,7 @@ namespace sal_art_ref::radix
             const bool ok = _t->_page_mode ? page_find_value(ses(), _root.address(), as_bytes(k), stored)
                                            : find_in(ses(), _root.address(), as_bytes(k), stored.bytes);
             if (!ok) return std::nullopt;
+            value_detail::require_bytes(stored);
             if (stored.directory == sal::null_ptr_address)
             {
                const auto part = adb::detail::value_slice(stored.bytes, uint64_t(offset), length);
@@ -3906,6 +4038,7 @@ namespace sal_art_ref::radix
          {
             (void)rl;
             if (!_valid || _is_subtree) return {};
+            require_bytes();
             const auto stored = current_value();
             if (stored.directory == sal::null_ptr_address) return stored.bytes;
             _compat_buffer = *value<std::string>();
@@ -3944,6 +4077,7 @@ namespace sal_art_ref::radix
             _valid          = false;
             _end            = 0;
             _is_subtree     = false;
+            _typenum        = kRawType;
             _stack_deferred = false;
          }
          void append(const uint8_t* p, size_t n) noexcept
@@ -3958,6 +4092,7 @@ namespace sal_art_ref::radix
             append(iv->data, iv->suffix_len);
             _value_page = sal::null_ptr_address;
             _value_size = iv->value_len;
+            _typenum    = kRawType;  // typed values exist only in the page model
             if (iv->is_subtree())
             {
                _is_subtree = true;
@@ -4000,21 +4135,33 @@ namespace sal_art_ref::radix
                const auto& record = *ses().get_ref<key_val_node>(pg->external_addr(uint32_t(i))).obj();
                _is_subtree = record.is_subtree();
                _subtree = _is_subtree ? record.subtree_root() : sal::null_ptr_address;
-               _value_size = record.value_size();
+               _typenum = record.is_typed() ? typed_typenum({reinterpret_cast<const char*>(
+                                                                 record.value_bytes().data()),
+                                                             record.value_bytes().size()})
+                                            : kRawType;
+               _value_size = record.value_size() - (_typenum != kRawType ? 2u : 0u);
                _val = {};  // resolve through the stable page/child IDs on every read
             }
             else
             {
                _is_subtree = iv->is_subtree();
                _subtree = _is_subtree ? iv->subtree_root() : sal::null_ptr_address;
-               _value_size = iv->value_len;
-               _val = _is_subtree ? value_view{} : value_view(
-                   reinterpret_cast<const char*>(iv->data + iv->suffix_len), iv->value_len);
+               const value_view stored(reinterpret_cast<const char*>(iv->data + iv->suffix_len),
+                                       iv->value_len);
+               _typenum    = iv->is_typed() ? typed_typenum(stored) : kRawType;
+               _value_size = iv->value_len - (_typenum != kRawType ? 2u : 0u);
+               _val = _is_subtree ? value_view{}
+                                  : (_typenum != kRawType ? typed_token(stored) : stored);
             }
+         }
+         void require_bytes() const
+         {
+            if (_typenum != kRawType) [[unlikely]]
+               throw invalid_type{_typenum, kRawType};
          }
          value_detail::stored_value current_value() const
          {
-            if (_value_page == sal::null_ptr_address) return {_val, sal::null_ptr_address};
+            if (_value_page == sal::null_ptr_address) return {_val, sal::null_ptr_address, _typenum};
             value_detail::stored_value result;
             page_value(ses(), as_page(_value_page), _value_index, result);
             return result;
@@ -4033,6 +4180,7 @@ namespace sal_art_ref::radix
             append(iv->data, iv->suffix_len);
             _value_page = sal::null_ptr_address;
             _value_size = iv->value_len;
+            _typenum    = kRawType;  // typed values exist only in the page model
             _is_subtree = iv->is_subtree();
             _subtree    = _is_subtree ? iv->subtree_root() : ptr_address{};
             _val        = _is_subtree ? value_view{}
@@ -4570,6 +4718,7 @@ namespace sal_art_ref::radix
          bool        _valid     = false;
          int8_t      _end       = 0;  // when !_valid: +1 = at/after end, -1 = at/before begin (rend)
          bool        _is_subtree = false;  // current terminal's value is a subtree (not bytes)
+         uint16_t    _typenum    = kRawType;  // nonzero: the current value is a typed value
          ptr_address _subtree{};           // that subtree's root (valid when _is_subtree)
          ptr_address _nextaddr{};
          uint32_t    _nextdepth = 0;
@@ -4649,6 +4798,15 @@ namespace sal_art_ref::radix
             cursor c(_t, _root);
             return c.get(k, std::forward<F>(f), offset, length);
          }
+         /// A value of any kind: f(uint16_t typenum, value_view) (see cursor::get_any).
+         template <class F>
+            requires std::invocable<F, uint16_t, value_view>
+         bool get_any(key_view k, F&& f) const
+         {
+            if (_root == sal::null_ptr_address) return false;
+            cursor c(_t, _root);
+            return c.get_any(k, std::forward<F>(f));
+         }
       };
       // psitri-compatible OWNING tree handle: what get_root/get_subtree/get_tree return and what
       // upsert_subtree accepts. Owns a ref on its root (RAII smart_ptr); copyable (retains) like
@@ -4706,6 +4864,15 @@ namespace sal_art_ref::radix
             if (!_root) return false;
             cursor c(_t, _root.address());
             return c.get(k, std::forward<F>(fn), offset, length);
+         }
+         /// A value of any kind: fn(uint16_t typenum, value_view) (see cursor::get_any).
+         template <class F>
+            requires std::invocable<F, uint16_t, value_view>
+         bool get_any(key_view k, F&& fn) const
+         {
+            if (!_root) return false;
+            cursor c(_t, _root.address());
+            return c.get_any(k, std::forward<F>(fn));
          }
       };
       // The last COMMITTED root, acquired from SAL's table (retain under the per-root shared lock).
@@ -4768,6 +4935,12 @@ namespace sal_art_ref::radix
             _t->_ins_value_type = inline_value::vt_bytes;
             _t->mutate_root(_working, [&](ptr_address pre)
                             { return _t->upsert_step(pre, as_bytes(k), as_bytes(v)); });
+         }
+         /// Store a typed value (see radix_tree::upsert_typed).
+         void upsert_typed(key_view k, uint16_t typenum, value_view token)
+         {
+            _t->mutate_root(_working, [&](ptr_address pre)
+                            { return _t->typed_upsert_step(pre, k, typenum, token); });
          }
          // THE exchange (adb multi_root): assign `t` as this handle's working root,
          // RETURN the displaced root as an owned tree. tree{} assigns empty; the
@@ -4841,6 +5014,9 @@ namespace sal_art_ref::radix
          template <class F>
             requires adb::detail::value_callback<F>
          bool get(key_view k, F&& f, uint64_t offset = 0, uint64_t length = adb::read_all) const { return handle().get(k, std::forward<F>(f), offset, length); }
+         template <class F>
+            requires std::invocable<F, uint16_t, value_view>
+         bool get_any(key_view k, F&& f) const { return handle().get_any(k, std::forward<F>(f)); }
       };
 
       // A transaction over one or more roots. Owns a primary tree_handle (the root at
@@ -4935,6 +5111,8 @@ namespace sal_art_ref::radix
 
          // ── primary-root mutations / reads (forward to the primary handle) ──
          void upsert(key_view k, value_view v) { PSITRI_DEBUG(oplog_kv('U', k, v);); _primary.upsert(k, v); }
+         /// Store a typed value in the primary root (see radix_tree::upsert_typed).
+         void upsert_typed(key_view k, uint16_t typenum, value_view token) { _primary.upsert_typed(k, typenum, token); }
          int  remove(key_view k) { PSITRI_DEBUG(oplog_k('R', k);); return _primary.remove(k); }
          uint64_t remove_range_counted(key_view lower, key_view upper)
          {
@@ -4956,6 +5134,9 @@ namespace sal_art_ref::radix
          template <class F>
             requires adb::detail::value_callback<F>
          bool get(key_view k, F&& f, uint64_t offset = 0, uint64_t length = adb::read_all) const { return _primary.get(k, std::forward<F>(f), offset, length); }
+         template <class F>
+            requires std::invocable<F, uint16_t, value_view>
+         bool get_any(key_view k, F&& f) const { return _primary.get_any(k, std::forward<F>(f)); }
 
          // ── additional roots (multi-root transaction) ──
          tree_handle& open_root(uint32_t idx)
@@ -5075,6 +5256,12 @@ namespace sal_art_ref::radix
             _t->mutate_root(_wt._root, [&](ptr_address pre)
                             { return _t->upsert_step(pre, as_bytes(k), as_bytes(v)); });
          }
+         /// Store a typed value (see radix_tree::upsert_typed).
+         void upsert_typed(key_view k, uint16_t typenum, value_view token)
+         {
+            _t->mutate_root(_wt._root, [&](ptr_address pre)
+                            { return _t->typed_upsert_step(pre, k, typenum, token); });
+         }
          void upsert_subtree(key_view k, tree sub)  // psitri parity: attach an owning tree (consumes)
          {
             ptr_address donated = sub._root.take();  // the terminal owns the attached root's ref
@@ -5105,6 +5292,9 @@ namespace sal_art_ref::radix
          template <class F>
             requires adb::detail::value_callback<F>
          bool get(key_view k, F&& fn, uint64_t offset = 0, uint64_t length = adb::read_all) const { return _wt.get(k, std::forward<F>(fn), offset, length); }
+         template <class F>
+            requires std::invocable<F, uint16_t, value_view>
+         bool get_any(key_view k, F&& f) const { return _wt.get_any(k, std::forward<F>(f)); }
          tree get_tree() { return std::move(_wt); }  // hand off the built (owning) tree
       };
 

@@ -1324,7 +1324,8 @@ namespace start_ref::kv
       // readers never touch refcounts or locks).
       void drain_retired_()  // caller holds _root_mx
       {
-         const bool tm = getenv("PART_DRAIN_TIME") != nullptr;
+         // read once: this runs at every commit
+         static const bool tm = getenv("PART_DRAIN_TIME") != nullptr;
          const auto t0 = tm ? std::chrono::steady_clock::now()
                             : std::chrono::steady_clock::time_point{};
          for (size_t i = 0; i < _retired.size();)

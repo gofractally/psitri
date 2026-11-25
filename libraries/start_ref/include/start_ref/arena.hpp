@@ -1438,8 +1438,13 @@ namespace start_ref
          s._cursor   = s._floor;
          s._fill_end = s._floor;  // not the high-water mark of segments left behind
          a._stats.range_switches.fetch_add(1, std::memory_order_relaxed);
+         // Below the ceiling every switch after the eighth grows a fresh
+         // segment, so this is not expected to be reachable; if it is, it is
+         // the same condition to a caller as any other failure to find room.
          if (!at_ceiling && attempts > 1024)
-            throw std::runtime_error("part: allocation livelock");
+            throw arena_full("start_ref: no room found for an allocation of " +
+                             std::to_string(n) + " units after " + std::to_string(attempts) +
+                             " segment switches in " + a._cfg.dir.generic_string());
       }
    }
 

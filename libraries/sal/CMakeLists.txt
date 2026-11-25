@@ -69,6 +69,7 @@ if(SAL_BUILD_TESTS)
         test/release_tests.cpp
         test/read_lock_queue_tests.cpp
         test/recovery_tests.cpp
+        test/fail_stop_tests.cpp
         test/read_cache_tests.cpp
         test/atomic_ptr_tests.cpp
     )

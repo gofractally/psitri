@@ -29,6 +29,23 @@ namespace sal
       }
    };
 
+   [[noreturn, gnu::cold, gnu::noinline]] inline void sal_retain_of_dead_abort(
+       const void* cb,
+       uint64_t    prior_word)
+   {
+      fprintf(stderr,
+              "sal: retain of control block %p whose reference count was zero (word 0x%llx): "
+              "a reference was taken to an object that had already been released\n",
+              cb, (unsigned long long)prior_word);
+      ::abort();
+   }
+
+   [[noreturn, gnu::cold, gnu::noinline]] inline void sal_double_free_abort(uint32_t address)
+   {
+      fprintf(stderr, "sal: address %u was freed twice\n", address);
+      ::abort();
+   }
+
    [[noreturn, gnu::cold, gnu::noinline]] inline void sal_release_underflow_abort(
        const void* cb,
        uint64_t    prior_word)
@@ -39,18 +56,6 @@ namespace sal
               cb, (unsigned long long)prior_word);
       ::abort();
    }
-
-#if PSITRI_DEEP_INVARIANTS
-   [[noreturn]] inline void sal_debug_resurrection_abort(const void* cb, uint64_t prior_word)
-   {
-      fprintf(stderr, "RESURRECTION-RETAIN: cb=%p prior_word=0x%llx (ref was 0)\n", cb,
-              (unsigned long long)prior_word);
-      void* frames[32];
-      int   n = ::backtrace(frames, 32);
-      ::backtrace_symbols_fd(frames, n, STDERR_FILENO);
-      ::abort();
-   }
-#endif
 
    /**
     * A control block for a shared pointer to a location in shared memory,
@@ -166,14 +171,12 @@ namespace sal
             _data.fetch_sub(1, std::memory_order_relaxed);
             throw reference_limit_error();
          }
-#if PSITRI_DEEP_INVARIANTS
-         // A retain on ref==0 resurrects a dead control (stale loc, bytes
-         // already freed) — the seed of compactor double-free corruption.
-         // Catch it AT the caller, with a backtrace.
-         if (prior.ref == 0)
-            sal_debug_resurrection_abort(this, prior.to_int());
-#endif
-         assert(prior.ref > 0);
+         // A retain at zero would bring a dead control block back: its location is stale
+         // and its bytes may already be reused, so whatever happens next corrupts
+         // something else. Nothing can be done for the caller; stop here, where the
+         // mistake is, and say so.
+         if (prior.ref == 0) [[unlikely]]
+            sal_retain_of_dead_abort(this, prior.to_int());
          return prior;
       };
 

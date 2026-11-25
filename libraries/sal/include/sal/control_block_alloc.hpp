@@ -637,12 +637,13 @@ namespace sal
          assert((*address / detail::ptrs_per_zone) <
                 _header_ptr->allocated_zones.load(std::memory_order_relaxed));
 
-         assert(not is_free(address));
-
-         auto prior = _free_list_base[*address / 64].fetch_add(1ull << (*address % 64),
-                                                               std::memory_order_release);
-         assert(not(prior & (1ull << (*address % 64))));
-         (void)prior;  // suppress unused variable warning in release builds
+         // fetch_or, not fetch_add: adding a bit that is already set carries into the
+         // neighbouring address's bit and frees or claims a slot that is not ours.
+         const uint64_t bit   = 1ull << (*address % 64);
+         const uint64_t prior =
+             _free_list_base[*address / 64].fetch_or(bit, std::memory_order_release);
+         if (prior & bit) [[unlikely]]
+            sal_double_free_abort(*address);
       }
       /**
        * used for allocating blocks of pages 16 MB at a time,

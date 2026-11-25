@@ -1066,8 +1066,17 @@ namespace start_ref
          uint32_t              flex_target = 0;
          std::vector<line_idx> exact[pool_exact_max + 1];  // guaranteed runs of exactly k lines
          uint32_t              quota[pool_exact_max + 1] = {};
-         std::vector<std::pair<line_idx, uint32_t>> big;   // guaranteed runs longer than that
+         // The long part: big_quota runs of 64 lines, for draws over
+         // pool_exact_max. A draw cuts the shortest piece that fits; what is
+         // left of the piece stays here (never in the flexible stock), and a
+         // freed run that touches a piece is joined to it, so a run that is
+         // drawn and comes back makes its 64 lines whole again.
+         std::vector<std::pair<line_idx, uint32_t>> big;
          uint32_t              big_quota = 0;
+         uint32_t              big_lines = 0;  // of big_quota * 64
+         // running totals, so that nothing is summed under the mutex
+         uint32_t              have       = 0;  // lines in all stocks
+         uint32_t              short_mask = 0;  // bit 1: flexible short; bit k: length k; bit 17: long part
       };
       // How the configured reserve is divided. A sixty-fourth of it to each
       // length from 2 to 16 (so 1/(64k) of the reserve's lines in runs of k),
@@ -1085,37 +1094,52 @@ namespace start_ref
             fixed += _pool.quota[k] * k;
             _pool.exact[k].reserve(_pool.quota[k]);
          }
-         _pool.big.reserve(_pool.big_quota);
+         _pool.big.reserve(size_t(_pool.big_quota) * max_alloc_lines);
          _pool.flex_target = total > fixed ? total - fixed : 0;
          // every list the flexible stock can ever need, so that it never
          // allocates (remainders of big runs can add a few lines beyond the target)
          for (uint32_t k = 1; k <= max_alloc_lines; ++k)
-            _pool.flex[k].reserve((_pool.flex_target + _pool.big_quota * max_alloc_lines) / k + 1);
+            _pool.flex[k].reserve(_pool.flex_target / k + 1);
       }
-      // After any change, under the mutex: what is owed, and the shortest
-      // freed run that could repay any of it.
-      void pool_account_() noexcept
+      // Bookkeeping, under the mutex. Every stock is at most its target, so
+      // what the reserve holds plus what it is owed is always its size.
+      static constexpr uint32_t pool_long_bit = pool_exact_max + 1;
+      void pool_mark_(uint32_t bit, bool is_short) noexcept
       {
-         uint32_t owed = 0, least = 0, have = _pool.flex_lines;
-         auto     note = [&](uint32_t lines, uint32_t run)
-         {
-            owed += lines;
-            if (lines && (!least || run < least))
-               least = run;
-         };
-         if (_pool.flex_lines < _pool.flex_target)
-            note(_pool.flex_target - _pool.flex_lines, 1);
+         if (is_short)
+            _pool.short_mask |= 1u << bit;
+         else
+            _pool.short_mask &= ~(1u << bit);
+      }
+      void pool_mark_flex_() noexcept { pool_mark_(1, _pool.flex_lines < _pool.flex_target); }
+      void pool_mark_exact_(uint32_t k) noexcept
+      {
+         pool_mark_(k, _pool.exact[k].size() < _pool.quota[k]);
+      }
+      void pool_mark_big_() noexcept
+      {
+         // only a run longer than the exact lengths can repay the long part
+         pool_mark_(pool_long_bit,
+                    _pool.big_lines + pool_exact_max < _pool.big_quota * max_alloc_lines);
+      }
+      // Publish the totals: lines held, lines owed, and the shortest freed
+      // run that could repay anything (0: nothing can be repaid).
+      void pool_publish_() noexcept
+      {
+#ifndef NDEBUG
+         uint32_t sum = _pool.flex_lines + _pool.big_lines, big = 0;
          for (uint32_t k = 2; k <= pool_exact_max; ++k)
-         {
-            have += uint32_t(_pool.exact[k].size()) * k;
-            note((_pool.quota[k] - uint32_t(_pool.exact[k].size())) * k, k);
-         }
+            sum += uint32_t(_pool.exact[k].size()) * k;
          for (const auto& [line, len] : _pool.big)
-            have += len;
-         note((_pool.big_quota - uint32_t(_pool.big.size())) * max_alloc_lines, pool_exact_max + 1);
-         _pool.owed.store(owed, std::memory_order_relaxed);
-         _pool.free_lines.store(have, std::memory_order_relaxed);
-         _pool.owed_min.store(least, std::memory_order_relaxed);
+            big += len;
+         assert(sum == _pool.have && big == _pool.big_lines);
+         assert(_pool.have <= _cfg.reserve_lines && _pool.flex_lines <= _pool.flex_target);
+#endif
+         _pool.free_lines.store(_pool.have, std::memory_order_relaxed);
+         _pool.owed.store(_cfg.reserve_lines - _pool.have, std::memory_order_relaxed);
+         _pool.owed_min.store(
+             _pool.short_mask ? uint32_t(std::countr_zero(_pool.short_mask)) : 0,
+             std::memory_order_relaxed);
       }
       // Collect the reserve from the free lines of segments [first, end).
       // Single-threaded: the constructor, the end of a rebuild, or growth
@@ -1194,18 +1218,14 @@ namespace start_ref
                share -= take;
             }
          }
-         for (uint32_t b = uint32_t(_pool.big.size()); b < _pool.big_quota; ++b)
+         for (uint32_t b = 0; b < _pool.big_quota; ++b)
          {
-            // the longest there is, if it is longer than the exact lengths
-            size_t best = found.size();
-            for (size_t k = 0; k < found.size(); ++k)
-               if (found[k].second > pool_exact_max &&
-                   (best == found.size() || found[k].second > found[best].second))
-                  best = k;
-            if (best == found.size())
+            // whole 64-line runs only: a shorter one would not be the long part
+            const line_idx at = cut(max_alloc_lines, true);
+            if (at == null_idx)
                break;
-            _pool.big.emplace_back(found[best].first, found[best].second);
-            found[best].second = 0;
+            _pool.big.emplace_back(at, max_alloc_lines);
+            _pool.big_lines += max_alloc_lines;
          }
          for (uint32_t k = pool_exact_max; k >= 2; --k)
             while (_pool.exact[k].size() < _pool.quota[k])
@@ -1215,13 +1235,31 @@ namespace start_ref
                   break;
                _pool.exact[k].push_back(at);
             }
-         for (const auto& [line, len] : found)
-            if (len)
+         // The rest is the flexible stock, up to its target. Anything beyond
+         // (the guaranteed runs could not all be cut from what was found)
+         // goes back to the free map: the reserve never holds more than it
+         // is owed room for.
+         for (auto& [line, len] : found)
+         {
+            const uint32_t keep = std::min(len, _pool.flex_target - _pool.flex_lines);
+            if (keep)
             {
-               _pool.flex[len].push_back(line);
-               _pool.flex_lines += len;
+               _pool.flex[keep].push_back(line);
+               _pool.flex_lines += keep;
             }
-         pool_account_();
+            if (len > keep)
+               freeset_((line + keep) / lines_per_segment)
+                   .free_run((line + keep) % lines_per_segment, len - keep);
+         }
+         _pool.have = _pool.flex_lines + _pool.big_lines;
+         for (uint32_t k = 2; k <= pool_exact_max; ++k)
+         {
+            _pool.have += uint32_t(_pool.exact[k].size()) * k;
+            pool_mark_exact_(k);
+         }
+         pool_mark_flex_();
+         pool_mark_big_();
+         pool_publish_();
          _pool.live.store(_cfg.reserve_lines != 0, std::memory_order_release);
       }
       // Clean close: nothing of the reserve stays on storage.
@@ -1260,6 +1298,9 @@ namespace start_ref
             _pool.exact[k].clear();
          _pool.big.clear();
          _pool.flex_lines = 0;
+         _pool.big_lines  = 0;
+         _pool.have       = 0;
+         _pool.short_mask = 0;
          _pool.owed.store(0, std::memory_order_relaxed);
          _pool.owed_min.store(0, std::memory_order_relaxed);
          _pool.free_lines.store(0, std::memory_order_relaxed);
@@ -1280,12 +1321,14 @@ namespace start_ref
                if (m > n)
                   _pool.flex[m - n].push_back(at + n);
                _pool.flex_lines -= n;
+               pool_mark_flex_();
             }
          // the guaranteed stock: only its own length
          if (at == null_idx && n >= 2 && n <= pool_exact_max && !_pool.exact[n].empty())
          {
             at = _pool.exact[n].back();
             _pool.exact[n].pop_back();
+            pool_mark_exact_(n);
          }
          if (at == null_idx && n > pool_exact_max)
          {
@@ -1296,25 +1339,29 @@ namespace start_ref
                   best = k;
             if (best != _pool.big.size())
             {
-               at                   = _pool.big[best].first;
-               const uint32_t spare = _pool.big[best].second - n;
-               _pool.big[best]      = _pool.big.back();
-               _pool.big.pop_back();
-               if (spare)  // what is left of it joins the flexible stock
+               at = _pool.big[best].first;
+               if (_pool.big[best].second > n)  // the rest of the piece stays in the long part
+                  _pool.big[best] = {at + n, _pool.big[best].second - n};
+               else
                {
-                  _pool.flex[spare].push_back(at + n);
-                  _pool.flex_lines += spare;
+                  _pool.big[best] = _pool.big.back();
+                  _pool.big.pop_back();
                }
+               _pool.big_lines -= n;
+               pool_mark_big_();
             }
          }
          if (at != null_idx)
-            pool_account_();
+         {
+            _pool.have -= n;
+            pool_publish_();
+         }
          return at;
       }
       // A run of n lines at i is being freed while the reserve is owed
       // something a run of this length can repay. Returns how many of its
-      // leading lines the reserve kept. Longest claims first: a run longer
-      // than the exact lengths restores a big run whole; then each exact
+      // leading lines the reserve kept. Longest claims first: the long part
+      // (only from a run longer than the exact lengths), then each exact
       // length it covers, longest first; what is left tops up the flexible
       // stock. A short run is never counted against a longer debt.
       uint32_t pool_take_(line_idx i, uint32_t n) noexcept
@@ -1323,27 +1370,64 @@ namespace start_ref
          if (!_pool.live.load(std::memory_order_relaxed))
             return 0;
          uint32_t kept = 0;
-         if (n > pool_exact_max && _pool.big.size() < _pool.big_quota)
+         if (n > pool_exact_max)
          {
-            _pool.big.emplace_back(i, n);
-            kept = n, n = 0;
+            const uint32_t room = _pool.big_quota * max_alloc_lines - _pool.big_lines;
+            const uint32_t k    = n <= room ? n : (room > pool_exact_max ? room : 0);
+            if (k)
+            {
+               pool_join_big_(i, k);
+               _pool.big_lines += k;
+               pool_mark_big_();
+               i += k, n -= k, kept += k;
+            }
          }
          for (uint32_t k = std::min(n, pool_exact_max); k >= 2 && n >= 2; --k)
-            while (k <= n && _pool.exact[k].size() < _pool.quota[k])
+            if (k <= n && _pool.exact[k].size() < _pool.quota[k])
             {
-               _pool.exact[k].push_back(i);
-               i += k, n -= k, kept += k;
+               do
+               {
+                  _pool.exact[k].push_back(i);
+                  i += k, n -= k, kept += k;
+               } while (k <= n && _pool.exact[k].size() < _pool.quota[k]);
+               pool_mark_exact_(k);
             }
          if (n && _pool.flex_lines < _pool.flex_target)
          {
             const uint32_t k = std::min(n, _pool.flex_target - _pool.flex_lines);
             _pool.flex[k].push_back(i);
             _pool.flex_lines += k;
+            pool_mark_flex_();
             kept += k;
          }
          if (kept)
-            pool_account_();
+         {
+            _pool.have += kept;
+            pool_publish_();
+         }
          return kept;
+      }
+      // Add the run [i, i + n) to the long part, joined to any piece it
+      // touches inside the same map word.
+      void pool_join_big_(line_idx i, uint32_t n) noexcept
+      {
+         for (bool joined = true; joined;)
+         {
+            joined = false;
+            for (size_t k = 0; k < _pool.big.size(); ++k)
+            {
+               const auto [line, len] = _pool.big[k];
+               if (line / 64 != i / 64 || (line + len != i && i + n != line))
+                  continue;
+               i = std::min(i, line);
+               n += len;
+               _pool.big[k] = _pool.big.back();
+               _pool.big.pop_back();
+               joined = true;
+               break;
+            }
+         }
+         _pool.big.emplace_back(i, n);
       }
       // Whether at least `need` units are free across the arena. Stops at
       // the first segments that add up, so it is cheap unless the arena is

@@ -796,3 +796,109 @@ TEST_CASE("a guaranteed run is repaid only by a run as long", "[arena][limit][re
    auto use = ses.use_reserve();
    REQUIRE(tx.alloc_lines(9) != null_idx);
 }
+
+namespace
+{
+   // what the reserve holds plus what it is owed is always its size
+   void require_reserve_adds_up(arena& a)
+   {
+      REQUIRE(a.reserve_free_lines() + a.reserve_owed_lines() == a.config().reserve_lines);
+   }
+}  // namespace
+
+// The long part of the reserve: a 64-line run for draws over 16 lines. What
+// a draw leaves of it stays in the long part, and a run that comes back is
+// joined to what it was cut from, so the 64 lines are whole again. Lines are
+// never lost: after every step, held plus owed is the reserve's size.
+TEST_CASE("the reserve's 64-line run is whole again when what was cut from it returns",
+          "[arena][limit][reserve]")
+{
+   arena_config c  = cfg(tmp_dir("longpart"));
+   c.max_segments  = 1;
+   c.reserve_lines = 2048;
+   arena a(c);
+   auto  ses   = a.start_session();
+   auto  taken = take_everything(ses, 1);
+   REQUIRE(a.reserve_big_quota() == 1);
+   require_reserve_adds_up(a);
+   auto     tx  = ses.start_transaction(0);
+   auto     use = ses.use_reserve();
+   // use up the flexible stock's long runs, so that long draws reach the long part
+   uint32_t flexible = 0;
+   while (a.reserve_runs_at_least(17) > 1)
+   {
+      tx.alloc_lines(64);
+      flexible += 64;
+   }
+   require_reserve_adds_up(a);
+   REQUIRE(a.reserve_longest_run() == 64);
+
+   const line_idx first = tx.alloc_lines(17);
+   REQUIRE(first != null_idx);
+   REQUIRE(a.reserve_longest_run() == 47);  // the rest of the run, still in the long part
+   REQUIRE(a.reserve_owed_lines() == flexible + 17);
+   require_reserve_adds_up(a);
+   a.release_run(first, 17);                // it comes back: joined, 64 again
+   REQUIRE(a.reserve_longest_run() == 64);
+   REQUIRE(a.reserve_owed_lines() == flexible);
+   require_reserve_adds_up(a);
+
+   const line_idx second = tx.alloc_lines(40);
+   REQUIRE(second == first);
+   REQUIRE(a.reserve_longest_run() == 24);
+   require_reserve_adds_up(a);
+   a.release_run(second, 40);
+   REQUIRE(a.reserve_longest_run() == 64);
+   REQUIRE(a.reserve_owed_lines() == flexible);
+   require_reserve_adds_up(a);
+
+   // draws of 64, 48 and 24 lines all still succeed, one after the other
+   for (uint32_t n : {64u, 48u, 24u})
+   {
+      const line_idx g = tx.alloc_lines(n);
+      REQUIRE(g != null_idx);
+      require_reserve_adds_up(a);
+      a.release_run(g, n);
+      require_reserve_adds_up(a);
+   }
+   REQUIRE(a.reserve_longest_run() == 64);
+
+   // Repaid from somewhere else instead (the usual case: the old version of
+   // the node, not the copy): the lines are all there, in two pieces.
+   const line_idx copy = tx.alloc_lines(20);
+   REQUIRE(copy != null_idx);
+   tx.commit();
+   tx.close();
+   // twenty adjacent ordinary lines, freed as one run
+   a.release_run(taken[640], 20);
+   REQUIRE(a.reserve_owed_lines() == flexible);
+   REQUIRE(a.reserve_longest_run() == 44);
+   require_reserve_adds_up(a);
+}
+
+// A draw the reserve cannot meet asks the reclaim hook once, not sixteen times.
+TEST_CASE("a reserve miss asks for queued releases once", "[arena][limit][reserve]")
+{
+   arena a(one_segment_with_reserve(tmp_dir("oncehook")));
+   auto  ses   = a.start_session();
+   auto  taken = take_everything(ses, 1);
+   static uint64_t calls;
+   calls = 0;
+   a.set_reclaim([](void*) noexcept { ++calls; return true; }, nullptr);
+   auto tx  = ses.start_transaction(0);
+   auto use = ses.use_reserve();
+   try  // every nine-line run the reserve can give, flexible or guaranteed
+   {
+      for (;;)
+         tx.alloc_lines(9);
+   }
+   catch (const arena_full&)
+   {
+   }
+   calls = 0;
+   REQUIRE_THROWS_AS(tx.alloc_lines(9), arena_full);
+   // once for the reserve, then the ordinary path's own bounded rounds
+   REQUIRE(calls >= 1);
+   REQUIRE(calls <= 1 + 16 + 1);
+   a.set_reclaim(nullptr, nullptr);
+}

@@ -245,3 +245,55 @@ TEST_CASE("an implicit router whose lines a newer version retains is not written
    }
    REQUIRE(a.used_bytes() == 0);  // nothing leaked, nothing freed twice
 }
+
+// A node of several lines that dies by its last reference going away is
+// freed as one run, not as its head and its tail apart. Seen here through the
+// reserve, which only takes back a run as long as the one it lent: an
+// eight-line key prefix dies, and the eight-line run the reserve was owed is
+// repaid by it.
+TEST_CASE("a dead node of several lines comes back as one run")
+{
+   arena_config c;
+   c.dir           = tmp_dir("onerun");
+   c.max_segments  = 1;
+   c.reserve_lines = 1024;
+   c.grow_batch    = 1;
+   arena a(c);
+   {
+      auto   ses = a.start_session();
+      auto   tx  = ses.start_transaction(0);
+      tree_t t{part_alloc<uint64_t>(&ses)};
+      const std::string prefix(900, 'p');  // 907 bytes of prefix node: eight lines
+      t.cow_insert(prefix + "a", uint64_t(1));
+      t.cow_insert(prefix + "b", uint64_t(2));
+      // everything else in the arena is taken, one line at a time
+      try
+      {
+         for (;;)
+            ses.alloc_lines(1);
+      }
+      catch (const arena_full&)
+      {
+      }
+      uint32_t before[max_alloc_lines + 1], after[max_alloc_lines + 1];
+      {
+         auto use = ses.use_reserve();
+         try  // every eight-line run the reserve has, flexible and guaranteed
+         {
+            for (;;)
+               ses.alloc_lines(8);
+         }
+         catch (const arena_full&)
+         {
+         }
+      }
+      a.reserve_histogram(before);
+      REQUIRE(before[8] == 0);
+      REQUIRE(a.reserve_quota(8) >= 1);
+      t.cow_release(t.root_handle());  // the tree dies: its prefix node with it
+      t.adopt_root(decltype(t.root_handle())::null());
+      a.reserve_histogram(after);
+      REQUIRE(after[8] == 1);  // repaid with the eight lines, as one run
+      tx.commit();
+   }
+}

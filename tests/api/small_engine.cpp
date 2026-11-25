@@ -3852,6 +3852,10 @@ namespace
       };
       auto room = [&] {
          db.flush_releases();
+         // what the reserve holds plus what it is owed is always its size
+         if (db.store().reserve_free_lines() + db.store().reserve_owed_lines() !=
+             db.store().config().reserve_lines)
+            out.error = "the reserve's lines do not add up";
          return uint64_t(db.store().reserve_free_lines());
       };
       fill("c");
@@ -4362,6 +4366,8 @@ namespace
          ws = db->start_write_session();
       }
       db->flush_releases();
+      REQUIRE(db->store().reserve_free_lines() + db->store().reserve_owed_lines() ==
+              db->store().config().reserve_lines);
       out.longest_after   = db->store().reserve_longest_run();
       out.long_runs_after = uint32_t(db->usage().reserve_long_runs);
       out.long_refused    = 0;
@@ -4616,4 +4622,172 @@ TEST_CASE("Small Engine: a store opened too full to collect its reserve fills it
    u  = db->usage();
    REQUIRE(u.reserve_owed_bytes == 0);
    REQUIRE(u.reserve_free_bytes == u.reserve_bytes);
+}
+
+// What a remove copies, and so the longest run it can need. It copies the
+// routers and key prefixes on the path to its key; it never copies a leaf,
+// its own or a neighbour's, so the size of the values does not come into it.
+// Here every removed key has a neighbour holding a value of several
+// kilobytes (24 to 63 lines), on a store at its ceiling: no remove draws a
+// run of more than 16 lines, each draws a handful of lines in all, and all of
+// it is repaid.
+TEST_CASE("Small Engine: a remove does not copy its neighbour's value, however large",
+          "[small][limit][reserve][reserve-big-values]")
+{
+   for (int value_bytes : {3000, 6000, 8000})
+   {
+      temporary_directory tmp;
+      auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                               small_config(psitri::sync_mode::none, 2));
+      auto ws = db->start_write_session();
+      auto key = [](int g, char last) {
+         char b[32];
+         std::snprintf(b, sizeof(b), "L%05d", g);
+         return std::string(b) + last;
+      };
+      const int pairs = 120;
+      {
+         for (int g = 0; g < pairs; g += 20)
+         {
+            auto tx = ws->start_transaction(0);
+            for (int k = g; k < g + 20; ++k)
+            {
+               tx.upsert(key(k, 'a'), std::string(20, 'v'));
+               tx.upsert(key(k, 'b'), std::string(size_t(value_bytes), 'B'));
+            }
+            tx.commit();
+         }
+      }
+      for (uint64_t n = 0;; ++n)
+      {
+         try
+         {
+            auto tx = ws->start_transaction(0);
+            tx.upsert(scattered_key("k", n), std::string(60, 's'));
+            tx.commit();
+         }
+         catch (const engine::storage_full&)
+         {
+            break;
+         }
+      }
+      db->flush_releases();
+      const uint64_t reserve = db->store().config().reserve_lines;
+      uint64_t       most = 0, longest = 0;
+      for (int g = 0; g < pairs; ++g)
+         for (char which : {'a', 'b'})
+         {
+            uint32_t before[65], during[65];
+            db->store().reserve_histogram(before);
+            auto tx = ws->start_transaction(0);
+            REQUIRE(tx.remove(key(g, which)) == 0);
+            db->store().reserve_histogram(during);
+            most = std::max<uint64_t>(most, db->store().reserve_owed_lines());
+            for (uint32_t k = 2; k <= 64; ++k)
+               if (during[k] < before[k])
+                  longest = std::max<uint64_t>(longest, k);
+            tx.commit();
+            db->flush_releases();
+            INFO("value " << value_bytes << " pair " << g << " key " << which);
+            REQUIRE(db->store().reserve_owed_lines() == 0);
+            REQUIRE(db->store().reserve_free_lines() == reserve);
+         }
+      std::printf("big values (%d bytes, %d lines): %d removes, at most %llu lines drawn by one, "
+                  "the longest run taken from stock %llu lines\n",
+                  value_bytes, (value_bytes + 8 + 127) / 128, pairs * 2, (unsigned long long)most,
+                  (unsigned long long)longest);
+      REQUIRE(most <= 16);
+      REQUIRE(longest <= 16);
+   }
+}
+
+// A remove that the reserve cannot serve waits, once and for a bounded time,
+// for releases that were already queued. Another writer that keeps the
+// release queue busy for ever must not be able to hold it longer than that.
+TEST_CASE("Small Engine: a writer that keeps queueing releases cannot hold up a remove",
+          "[small][limit][reserve][bounded-wait]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 4));
+   auto ws = db->start_write_session();
+   std::vector<std::string> keys;
+   for (uint64_t n = 0;; n += 100)
+   {
+      try
+      {
+         auto tx = ws->start_transaction(0);
+         for (uint64_t j = n; j < n + 100; ++j)
+            tx.upsert(scattered_key("k", j), std::string(60, 's'));
+         tx.commit();
+         for (uint64_t j = n; j < n + 100; ++j)
+            keys.push_back(scattered_key("k", j));
+      }
+      catch (const engine::storage_full&)
+      {
+         break;
+      }
+   }
+   // The other writer: root 1, transactions of a few hundred keys built in
+   // the reserve's shadow and aborted, over and over. Every abort hands
+   // subtrees to the releaser, so its queue is never empty for long.
+   std::atomic<bool>     stop{false};
+   std::atomic<uint64_t> aborts{0};
+   std::thread           busy([&] {
+      auto other = db->start_write_session();
+      while (!stop.load(std::memory_order_relaxed))
+      {
+         auto tx = other->start_transaction(1);
+         try
+         {
+            for (int j = 0; j < 3000; ++j)
+               tx.upsert(scattered_key("o", j), std::string(40, 'o'));
+         }
+         catch (const engine::storage_full&)
+         {
+         }
+         tx.abort();
+         aborts.fetch_add(1, std::memory_order_relaxed);
+      }
+   });
+   using clock = std::chrono::steady_clock;
+   std::vector<double> took;
+   uint64_t            refused = 0, removed = 0;
+   // transactions of many removes: they run the reserve down, so that draws
+   // miss and take the path that waits
+   for (int round = 0; round < 30 && removed + 2000 < keys.size(); ++round)
+   {
+      auto tx = ws->start_transaction(0);
+      try
+      {
+         for (int j = 0; j < 2000; ++j)
+         {
+            const auto t0 = clock::now();
+            const int  rc = tx.remove(keys[removed + size_t(j)]);
+            took.push_back(std::chrono::duration<double, std::milli>(clock::now() - t0).count());
+            if (rc != 0)
+               throw std::runtime_error("a committed key was missing");
+         }
+         tx.commit();
+         removed += 2000;
+      }
+      catch (const engine::storage_full&)
+      {
+         took.push_back(0);  // the refused call was timed just above
+         ++refused;
+         tx.abort();
+         removed += 2000;  // forget them; the next round takes other keys
+      }
+   }
+   stop = true;
+   busy.join();
+   std::sort(took.begin(), took.end());
+   std::printf("bounded wait: %zu removes beside a writer that aborted %llu transactions; %llu "
+               "transactions refused; slowest remove %.3f ms, 99.9th percentile %.3f ms\n",
+               took.size(), (unsigned long long)aborts.load(), (unsigned long long)refused,
+               took.back(), took[took.size() * 999 / 1000]);
+   REQUIRE(aborts.load() > 0);
+   // one bounded wait (half a millisecond) plus the drain of retired
+   // versions; generous for a loaded machine, far below an unbounded wait
+   REQUIRE(took.back() < 250.0);
 }

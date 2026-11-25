@@ -137,7 +137,9 @@ namespace start_ref::kv
       //   This is NOT what a remove can get: a remove needs runs of
       //   consecutive lines, and the next two say what runs there are.
       // reserve_longest_run_bytes: the longest single run it can hand out
-      //   now. A remove that has to copy a node longer than this is refused.
+      //   now. A remove that has to copy a longer node gets nothing from the
+      //   reserve for it: it is refused unless the session's own segment, or
+      //   failing that any segment of the store, has a free run that long.
       // reserve_long_runs: how many runs of nine lines (1,152 bytes) or more
       //   it can hand out now; nodes that long are routers of many branches,
       //   key prefixes over about a kilobyte, and leaves with long keys or

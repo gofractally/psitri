@@ -1514,7 +1514,7 @@ namespace sal
                roots_recovered, roots_from_file);
    }
 
-   allocator_session_number allocator::alloc_session_num() noexcept
+   allocator_session_number allocator::alloc_session_num()
    {
       return _mapped_state->_session_data.alloc_session_num();
    }

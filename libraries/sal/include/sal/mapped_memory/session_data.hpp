@@ -1,4 +1,6 @@
 #pragma once
+#include <stdexcept>
+
 #include <sal/config.hpp>
 #include <sal/control_block_alloc.hpp>
 #include <sal/debug.hpp>
@@ -11,6 +13,20 @@ namespace sal
 {
    using rcache_queue_type  = ucc::circular_buffer<ptr_address, 1024 * 256>;
    using release_queue_type = ucc::circular_buffer<ptr_address, 1024 * 32>;
+
+   /// Every session slot of the allocator is in use (64). Thrown by
+   /// allocator::create_session, and so by every engine call that makes a
+   /// session (start_read_session, start_write_session). Sessions are released
+   /// when their owner is destroyed; a caller can hold on to fewer of them and
+   /// try again.
+   struct session_limit_error : std::runtime_error
+   {
+      session_limit_error()
+          : std::runtime_error("sal: all 64 allocator sessions are in use; a session is "
+                               "released when the last reference to it is dropped")
+      {
+      }
+   };
 
    namespace mapped_memory
    {
@@ -29,8 +45,11 @@ namespace sal
          void push(segment_number segment_num)
          {
             // ARBTRIE_WARN("dirty_segment_queue::push: segment_num: ", segment_num);
+            // Reached from alloc(), which is noexcept: this limit is fail-stop.
             if (_used >= 4096)
-               throw std::runtime_error("dirty_segment_queue overflow");
+               throw std::runtime_error(
+                   "sal: one session finalized more than 4,096 segments (128 GiB) without a "
+                   "sync; a transaction this large must be committed in parts");
             _segments[_used++] = segment_num;
          }
          segment_number pop() noexcept
@@ -192,7 +211,7 @@ namespace sal
          do
          {
             if (fs_bits == 0)
-               throw std::runtime_error("max of 64 sessions can be in use");
+               throw session_limit_error();
 
             session_num = std::countr_zero(fs_bits);
             new_fs_bits = fs_bits & ~(1ULL << session_num);

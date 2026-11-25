@@ -4,6 +4,7 @@
 #include <atomic>
 #include <bit>
 #include <cstdint>
+#include <stdexcept>
 #include <sal/config.hpp>
 #include <sal/debug.hpp>
 #include <sal/location.hpp>
@@ -16,6 +17,18 @@
 
 namespace sal
 {
+   /// One object would have more than control_block::max_ref_count (262,080)
+   /// references. The count is left as it was. allocator_session::retain lets
+   /// it out to the caller; the smart pointers' copies are noexcept, so there
+   /// it stops the process with this message.
+   struct reference_limit_error : std::runtime_error
+   {
+      reference_limit_error()
+          : std::runtime_error("sal: an object cannot have more than 262,080 references")
+      {
+      }
+   };
+
    [[noreturn, gnu::cold, gnu::noinline]] inline void sal_release_underflow_abort(
        const void* cb,
        uint64_t    prior_word)
@@ -151,7 +164,7 @@ namespace sal
          if (prior.ref >= max_ref_count)
          {
             _data.fetch_sub(1, std::memory_order_relaxed);
-            throw std::runtime_error("reference count exceeded limits");
+            throw reference_limit_error();
          }
 #if PSITRI_DEEP_INVARIANTS
          // A retain on ref==0 resurrects a dead control (stale loc, bytes

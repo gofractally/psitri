@@ -8,12 +8,12 @@ if(PSITRI_FAIR_BANK)
 endif()
 
 # delta_art scale bench: start_ver (hot delta) -> sal_art_ref dwal (cold base).
-# The cold engine is sal_art_ref::radix::dwal_engine (heart_dwal_engine.hpp,
+# The cold engine is sal_art_ref::radix::engine (sal_art_ref/engine.hpp,
 # under sal_art_ref/test); it uses psitri's dwal::kv_engine concept.
 add_executable(delta_art-scale-bench delta_art_scale_bench.cpp)
 target_link_libraries(delta_art-scale-bench PRIVATE delta_art start_ver sal_art_ref psitri)
 target_include_directories(delta_art-scale-bench PRIVATE
-    ${PSITRI_SOURCE_DIR}/libraries/sal_art_ref/test)  # radix_engine + heart_dwal_engine
+    ${PSITRI_SOURCE_DIR}/libraries/sal_art_ref/test)  # test-side adapters (heart_kv.hpp)
 target_compile_definitions(delta_art-scale-bench PRIVATE XXH_INLINE_ALL)
 target_compile_options(delta_art-scale-bench PRIVATE -O3 -DNDEBUG)
 set_target_properties(delta_art-scale-bench PROPERTIES

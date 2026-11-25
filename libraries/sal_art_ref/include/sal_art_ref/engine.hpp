@@ -15,6 +15,5 @@ namespace sal_art_ref::radix
       using shared_tree   = sal_art_ref::radix::shared_tree;
       using config        = sal_art_ref::radix::runtime_config;
    };
-   using dwal_engine = engine;  // historical spelling
    static_assert(adb::openable_engine<engine, sal::open_mode>);
 }

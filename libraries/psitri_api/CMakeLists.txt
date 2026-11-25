@@ -27,8 +27,3 @@ add_library(psitri_api INTERFACE)
 add_library(psitri::api ALIAS psitri_api)
 target_link_libraries(psitri_api INTERFACE psitri_api_small psitri_api_big)
 
-# Compatibility targets for the initial API names.
-add_library(psitri::fixed ALIAS psitri_api_small)
-add_library(psitri::compact ALIAS psitri_api_big)
-add_library(psitri_api_fixed ALIAS psitri_api_small)
-add_library(psitri_api_compact ALIAS psitri_api_big)

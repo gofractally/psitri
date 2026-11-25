@@ -10,5 +10,4 @@ namespace psitri
    using default_engine = big_engine;
    static_assert(engine<big_engine>);
 
-   using compact_engine = big_engine;  // compatibility with the initial API spelling
 }

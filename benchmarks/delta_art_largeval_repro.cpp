@@ -8,7 +8,8 @@
 // drain ON, small hi_water (frequent rotations), large/vt_extern values, at scale, plus
 // concurrent reader scans that walk the cold base (route_to_page/max_page).
 #include <delta_art/tiered_kv.hpp>
-#include <heart_dwal_engine.hpp>
+#include <psitri/dwal/kv_engine.hpp>
+#include <sal_art_ref/engine.hpp>
 #include <start_ver/kv.hpp>
 
 #include <atomic>
@@ -22,7 +23,7 @@
 #include <thread>
 #include <vector>
 
-using TK = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::dwal_engine>;
+using TK = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::engine>;
 
 static std::string hashed_key(std::mt19937_64& rng, int nns)
 {

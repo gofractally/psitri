@@ -9,7 +9,8 @@
 //   env: DELTA_HI_WATER_MB, DELTA_ARENA_MB
 #include <delta_art/tiered_kv.hpp>
 
-#include <heart_dwal_engine.hpp>  // sal_art_ref::radix::dwal_engine (cold base)
+#include <psitri/dwal/kv_engine.hpp>
+#include <sal_art_ref/engine.hpp>
 #include <start_ver/kv.hpp>       // start_ver::kv::engine (hot delta)
 
 #include <atomic>
@@ -24,7 +25,7 @@
 #include <vector>
 
 using Clock = std::chrono::steady_clock;
-using TK    = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::dwal_engine>;
+using TK    = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::engine>;
 
 static std::string acct_key(uint64_t i)
 {

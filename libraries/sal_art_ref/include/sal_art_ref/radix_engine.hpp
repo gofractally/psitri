@@ -197,7 +197,7 @@ namespace sal_art_ref::radix
                           bool                         wipe      = true,
                           bool                         read_only = false,
                           sal::sync_type               sync      = sal::sync_type::none)
-          : radix_tree(dir, wipe, legacy_config(read_only, sync))
+          : radix_tree(dir, wipe, config_of(read_only, sync))
       {
       }
       /// `recovery` selects what to rebuild before the store is used. The default,
@@ -1209,7 +1209,7 @@ namespace sal_art_ref::radix
          }
       }
 
-      static runtime_config legacy_config(bool read_only, sal::sync_type sync)
+      static runtime_config config_of(bool read_only, sal::sync_type sync)
       {
          runtime_config cfg;
          cfg.read_only = read_only;
@@ -2816,38 +2816,10 @@ namespace sal_art_ref::radix
       smart_address make_divider_tail(bytes D, uint32_t depth, ptr_address page,
                                       sal::alloc_hint hint)
       {
-#ifdef HEART_NO_COLLAPSE  // A/B knob: build the OLD single-child setlist chain (default = collapse)
-         if (depth + 1 == D.size())
-            return smart_address::from_pointer(page);
-         // Every node here (term-only deepest AND branch-carrying up-links) must stay upgradeable,
-         // so chunk the divider tail at divider_prefix_cap. The deepest node may later acquire a
-         // branch when a sibling divider is inserted under it, so it is bound by the same cap.
-         constexpr int cap        = divider_prefix_cap;
-         constexpr int branch_cap = divider_prefix_cap;
-         const int     lo  = int(depth) + 1;
-         int           end = int(D.size());
-         int           start = end - cap > lo ? end - cap : lo;
-         ptr_address   node = make_node<setlist_u8>(D.subspan(size_t(start), size_t(end - start)),
-                                                    hint);
-         mut<setlist_u8>(node)->set_term_value(smart_address::from_pointer(page));
-         while (start > lo)
-         {
-            const int   bpos = start - 1;  // this link's branch byte
-            const int   s2   = bpos - branch_cap > lo ? bpos - branch_cap : lo;
-            ptr_address up = make_node<setlist_u8>(D.subspan(size_t(s2), size_t(bpos - s2)), hint);
-            [[maybe_unused]] bool okb =
-                mut<setlist_u8>(up)->set_branch(D[size_t(bpos)], smart_address::from_pointer(node));
-            assert(okb && "fresh single-entry setlist always fits");
-            node  = up;
-            start = s2;
-         }
-         return smart_address::from_pointer(node);
-#else
          (void)D;
          (void)depth;
          (void)hint;
          return smart_address::from_pointer(page);
-#endif
       }
 
       // Build a path-compression chain that consumes `seg` and ends by branching into `tail`
@@ -3577,12 +3549,12 @@ namespace sal_art_ref::radix
       {
          value_detail::stored_value value;
          if (!page_find_value(ses, root, kb, value)) return false;
-         out = legacy_value_view(ses, value);
+         out = direct_value_view(ses, value);
          return true;
       }
-      // The legacy direct API returns a naked view. A crossing value uses scratch
-      // valid until its next direct read; the public cursor API returns value_ref.
-      value_view legacy_value_view(sal::allocator_session& ses, value_detail::stored_value v)
+      // The direct API returns a naked view. A crossing value uses scratch valid until its
+      // next direct read; the public cursor API returns value_ref.
+      value_view direct_value_view(sal::allocator_session& ses, value_detail::stored_value v)
       {
          if (v.directory == sal::null_ptr_address) return v.bytes;
          std::optional<sal::read_lock> pin(ses.lock());
@@ -3592,7 +3564,7 @@ namespace sal_art_ref::radix
       }
       value_view external_bytes(ptr_address a)
       {
-         return legacy_value_view(*_ses, value_detail::from_external(*_ses, a));
+         return direct_value_view(*_ses, value_detail::from_external(*_ses, a));
       }
 
       // In-order emission of one page (keys are SELF-CONTAINED: cpfx + suffix — the radix path
@@ -4979,7 +4951,7 @@ namespace sal_art_ref::radix
       value_view legacy_cursor_value(const cursor& c)
       {
          auto pin = _ses->lock();
-         return legacy_value_view(*_ses, c.current_value());
+         return direct_value_view(*_ses, c.current_value());
       }
 
       // ── multi-root + transactions (psitri-shaped) ──────────────────────────────────────

@@ -7,7 +7,8 @@
 //
 //   oplog-replay <oplog.bin> <dir> [report_every_commits=200]
 #include <delta_art/tiered_kv.hpp>
-#include <heart_dwal_engine.hpp>
+#include <psitri/dwal/kv_engine.hpp>
+#include <sal_art_ref/engine.hpp>
 #include <start_ref/kv.hpp>
 #include <start_ver/kv.hpp>
 
@@ -21,7 +22,7 @@
 #include <vector>
 
 namespace fs = std::filesystem;
-using TK     = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::dwal_engine>;
+using TK     = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::engine>;
 
 static uint64_t fnv_(std::string_view v) noexcept  // matches the shim's oplog_fnv_
 {

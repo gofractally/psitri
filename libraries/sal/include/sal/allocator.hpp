@@ -16,7 +16,7 @@
 #include <sal/seg_alloc_dump.hpp>
 #include <sal/segment_thread.hpp>
 #include <sal/verify.hpp>
-#include <shared_mutex>
+#include <semaphore>
 #include "sal/config.hpp"
 
 namespace sal
@@ -474,7 +474,8 @@ namespace sal
                                 sync_type          st,
                                 uint64_t           root_version = 0) noexcept
       {
-         std::lock_guard<std::mutex> wlock(_write_mutex[*ro]);
+         // One writer per root at a time is the caller's contract (an engine's per-root
+         // writer lock, or transaction below): nothing here excludes a second one.
          // The exchange waits for no reader. A reader that had already announced the old
          // root is found by root_displaced, which keeps the old root alive for it.
          auto result = _root_objects->at(*ro).exchange(tid, root_version,
@@ -510,7 +511,6 @@ namespace sal
                     uint64_t           root_version,
                     OnCommit&&         on_commit) noexcept
       {
-         std::lock_guard<std::mutex> wlock(_write_mutex[*ro]);
          if (!_root_objects->at(*ro).compare_exchange(expect, desire, root_version,
                                                       std::memory_order_seq_cst))
             return false;
@@ -523,15 +523,18 @@ namespace sal
       }
 
       /**
-       * Grabs the write mutex for root object, which will ensure that no other
-       * threads will be working on a update to this root object until this transaction
-       * is committed or aborted.
+       * Takes the root's transaction gate, so that no other sal::transaction works on
+       * this root until this one is committed or aborted. The gate has no owner: a
+       * transaction may be finished by another thread than the one that started it (a
+       * session is not thread-safe, but it may move between threads when its use is
+       * serialized). It excludes other transactions only; set() and cas_root() take no
+       * lock and leave one-writer-per-root to their caller.
        */
       [[nodiscard]] tree_id start_transaction(root_object_number ro, allocator_session_number sn)
       {
          check_corruption();
          assert(ro < _root_objects->size() && "invalid root object number");
-         _write_mutex[*ro].lock();
+         _root_parked[*ro].transaction_free.acquire();
          return get(ro, sn);
       }
 
@@ -549,17 +552,17 @@ namespace sal
                                                        std::memory_order_seq_cst);
          root_displaced(ro, result);
          sync(st);
-         _write_mutex[*ro].unlock();
+         _root_parked[*ro].transaction_free.release();
          return result;
       }
 
       /**
-       * Aborts the transaction, and releases the write mutex.
+       * Aborts the transaction, and releases the root's transaction gate.
        */
       void transaction_abort(root_object_number ro) noexcept
       {
          assert(ro < _root_objects->size() && "invalid root object number");
-         _write_mutex[*ro].unlock();
+         _root_parked[*ro].transaction_free.release();
       }
       ///@}
 
@@ -764,10 +767,11 @@ namespace sal
       struct alignas(ucc::hardware_cacheline_size) root_parked
       {
          std::atomic<uint32_t> count{0};
+         /// One sal::transaction per root at a time; released by whichever thread
+         /// finishes the transaction.
+         std::binary_semaphore transaction_free{1};
       };
       std::array<root_parked, 1024> _root_parked;
-      /// mutexes used by transactions to ensure that only one writer per root object
-      std::array<std::mutex, 1024> _write_mutex;
 
       /// Corruption flag — set by compactor on checksum failure, checked by writers.
       /// Own cacheline to avoid false sharing (128 bytes for Apple M-series).

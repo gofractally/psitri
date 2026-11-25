@@ -12,6 +12,7 @@
 
 #include <sal/allocator_session_impl.hpp>
 #include <sal/smart_ptr_impl.hpp>
+#include <sal/transaction.hpp>
 
 namespace fs = std::filesystem;
 
@@ -193,6 +194,56 @@ TEST_CASE("readers acquire a root that commits keep replacing", "[sal][root][acq
       (void)writer->set_root(root, sal::smart_ptr<root_node>(), sal::sync_type::none);
       settle(alloc);
       CHECK(live_count(writer) == base);  // nothing kept for a reader is left behind
+   }
+   fs::remove_all(path);
+}
+
+// A transaction is finished by whichever thread the caller has it on at that moment; the
+// root's gate has no owner. It still lets one transaction at a time work on a root.
+TEST_CASE("a transaction started on one thread is committed on another, and the next one waits",
+          "[sal][root][transaction]")
+{
+   auto path = root_test_dir("sal_root_transaction_gate");
+   {
+      sal::allocator alloc(path, sal::runtime_config{}, false);
+      alloc.register_type_ops<root_node>();
+      alloc.start_background_threads();
+      const sal::root_object_number root(11);
+      auto                          first_ses  = alloc.create_session();
+      auto                          second_ses = alloc.create_session();
+      const auto                    base       = live_count(first_ses);
+
+      for (int round = 0; round < 50; ++round)
+      {
+         auto tx    = first_ses->start_transaction(root);  // this thread
+         tx->root() = sal::smart_ptr<sal::alloc_header>(
+             first_ses, first_ses->smart_alloc<root_node>(uint64_t(round)).take());
+
+         std::atomic<int> second_state{0};  // 1: asked for the root, 2: has it
+         std::thread      second(
+             [&]
+             {
+                second_state.store(1);
+                auto tx2 = second_ses->start_transaction(root);  // waits for the first
+                second_state.store(2);
+                tx2->abort();
+             });
+         while (second_state.load() == 0)
+            std::this_thread::yield();
+         std::this_thread::sleep_for(std::chrono::microseconds(200));
+         const int seen_while_open = second_state.load();
+
+         // Finish the first transaction on a third thread. The session is handed over,
+         // not shared: this thread does not touch it until the join.
+         std::thread finisher([&] { (void)tx->commit(sal::sync_type::none); });
+         finisher.join();
+         second.join();
+         REQUIRE(seen_while_open == 1);  // the second did not get in while the first was open
+         REQUIRE(second_state.load() == 2);
+      }
+      (void)first_ses->set_root(root, sal::smart_ptr<root_node>(), sal::sync_type::none);
+      settle(alloc);
+      CHECK(live_count(first_ses) == base);
    }
    fs::remove_all(path);
 }

@@ -140,9 +140,11 @@ encoding, record serializer, prefix index, or duplicate-value convention.
 Callbacks receive `std::string_view`, valid only during the callback. Keep them
 short; do not mutate the same database, save a view, or wait for a writer from a
 callback. `get_value` does not invoke its callback on a native subtree; use
-the Large Engine's subtree operations to read that entry. The Small Engine's typed-value extension
-may throw `invalid_type` if a typed value is read as bytes. The common API does
-not interpret application bytes as backend ownership handles.
+the Large Engine's subtree operations to read that entry. A typed value (below) read
+as bytes throws `invalid_type` in both engines. The common API does
+not interpret application bytes as backend ownership handles: a value's kind is
+the engine's own record of how it was stored, never something read out of the
+bytes a caller stored.
 
 The optional [range-read capability](range-reads.md), detected by
 `psitri::range_engine<E>`, is implemented by both engines. Use
@@ -197,3 +199,29 @@ Native subtrees, detached editors, and savepoints are Large Engine extensions.
 Registered typed values and typed test adapters are outside the common byte
 contract. Detect optional capabilities
 explicitly; never assume they follow from `psitri::engine<E>`.
+
+### Typed values in the Large Engine
+
+A typed value is a type number (1 to 65,534) and a token of at most 256 bytes,
+for a type that registered `retain` and `release` callbacks in
+`sal_art_ref::g_value_types` before any value of it is stored. It is written
+with `upsert_typed(key, type_number, token)` on a transaction, a tree handle or a
+detached write transaction, and read with `get_any(key, fn)` or a cursor's
+`value_any(fn)` / `value_typenum()`, where `fn(type_number, bytes)` receives the
+type number (zero for plain bytes) and the token or the bytes. Every byte read
+(`get`, `value`, `get_value`, `pinned_value`) of a typed value throws
+`sal_art_ref::invalid_type`.
+
+- The kind is stored by the engine beside the value. Plain bytes are stored as
+  given and never inspected, whatever they begin with.
+- Storing hands the engine one reference of the token's owner: `upsert_typed`
+  does not call `retain`. If it throws, nothing was stored and the reference is
+  still the caller's.
+- `retain` runs when the stored bytes are physically duplicated (a leaf page is
+  copied because a snapshot shares it, or split); `release` runs when a copy
+  dies (overwritten, removed, aborted, or its page or record destroyed). Either
+  may run on the engine's background threads: they must be thread-safe and must
+  not block or call back into the database.
+- Opening and recovering a database calls neither.
+- Typed values need the default page layout, and do not pass through the
+  kept-aside change stores of `psitri::transactions`: those carry bytes only.

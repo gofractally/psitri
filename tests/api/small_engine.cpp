@@ -1078,8 +1078,6 @@ TEST_CASE("Small Engine: a second open of a store that is already open is refuse
    auto rs  = db->start_read_session();
    auto cur = rs->create_cursor(0);
    REQUIRE(cur.get<std::string>("k") == std::optional<std::string>("v"));
-   db.reset();
-   rs.reset();
 }
 
 // If the tree cannot be walked after an unclean stop, open must fail, and

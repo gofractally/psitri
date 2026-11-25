@@ -314,14 +314,6 @@ namespace sal
        */
       void recover_from_power_loss();
 
-      /**
-       * 
-       * Forwards to the thread-local allocator_session::lock() method, it is faster
-       * and more efficient to keep a cached copy of your thread's session than to
-       * use this method.
-       */
-      [[nodiscard]] read_lock lock();
-
       void retain(ptr_address adr) noexcept { _ptr_alloc.get(adr).retain(); }
 
       /// posts to the thread-safe release queue (sessionless, any thread)
@@ -687,16 +679,11 @@ namespace sal
      private:
       inline bool config_validate_checksum_on_compact() const;
       inline bool config_update_checksum_on_compact() const;
-      inline bool config_update_checksum_on_modify() const;
 
       void mlock_pinned_segments();
       void recursive_retain_all(ptr_address addr, void* visited);
       // Implementation helper for reachable_size(); defined in allocator.cpp
       void recursive_sum_size(ptr_address addr, uint64_t& total, void* visited);
-      /// Reconstruct custom control blocks from root slots during recovery.
-      /// Custom CBs have no segment data and must be rebuilt from known positions.
-      void reconstruct_custom_cbs_from_roots(const void* recovered_versions = nullptr);
-      bool compactor_release_objects(allocator_session& ses);
 
       /**
        * Utilized by allocator_session 
@@ -960,11 +947,6 @@ namespace sal
    inline bool allocator::config_update_checksum_on_compact() const
    {
       return _mapped_state->_config.update_checksum_on_compact;
-   }
-
-   inline bool allocator::config_update_checksum_on_modify() const
-   {
-      return _mapped_state->_config.update_checksum_on_modify;
    }
 
    inline uint64_t allocator::total_pending_releases() const

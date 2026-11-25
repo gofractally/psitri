@@ -660,3 +660,73 @@ TEST_CASE("large values: many-key code-table churn drains the large arena")
    db->flush_releases();
    REQUIRE(db->large_used_grains() == 0);
 }
+
+// gofractally/psitri#34. Dropping the last reference to a version destroys its
+// tree, and used to descend one call level per level of that tree on the
+// caller's own stack. A tree is as deep as its longest key, so a caller with
+// a small stack (a service thread, a fibre) could overflow it by letting go of
+// a snapshot.
+TEST_CASE("kv: the last reference to a deep version is dropped on a small stack")
+{
+   namespace kv = start_ref::kv;
+   const std::size_t small_stack = 96 * 1024;
+   const int         depth       = 1024;  // 'a', 'aa', ...: one level per key
+   auto build = [&](kv::database& db, kv::write_session& ws) {
+      auto        tx = ws.start_transaction(0);
+      std::string k;
+      for (int i = 0; i < depth; ++i)
+      {
+         k.push_back('a');
+         tx.upsert(k, "v");
+      }
+      tx.commit();
+      (void)db;
+   };
+   auto clear = [&](kv::write_session& ws) {
+      auto        tx = ws.start_transaction(0);
+      std::string k;
+      for (int i = 0; i < depth; ++i)
+      {
+         k.push_back('a');
+         REQUIRE(tx.remove(k) == 0);
+      }
+      tx.commit();
+   };
+   for (bool background : {true, false})
+   {
+      INFO("background_release " << background);
+      auto dir = fs::temp_directory_path() / "part_kv_deep_release";
+      fs::remove_all(dir);
+      kv::runtime_config cfg;
+      cfg.background_release = background;
+      auto db = kv::database::create(dir, cfg);
+      auto ws = db->start_write_session();
+
+      // an owned snapshot, dropped by a small-stack thread
+      build(*db, *ws);
+      {
+         kv::tree snap = ws->get_root(0);
+         clear(*ws);  // the old version now lives through `snap` alone
+         db->flush_releases();
+         kv::sized_thread th(small_stack, [&] { kv::tree t = std::move(snap); });
+         th.join();
+      }
+      // a snapshot cursor, dropped by a small-stack thread
+      build(*db, *ws);
+      {
+         auto cur = std::make_unique<kv::cursor>(ws->get_root(0).snapshot_cursor());
+         clear(*ws);
+         db->flush_releases();
+         kv::sized_thread th(small_stack, [&] { cur.reset(); });
+         th.join();
+      }
+      // the writer's own commit retiring a deep version, on a small stack
+      build(*db, *ws);
+      {
+         kv::sized_thread th(small_stack, [&] { clear(*ws); });
+         th.join();
+      }
+      ws.reset();
+      require_drained(*db);
+   }
+}

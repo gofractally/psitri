@@ -6322,14 +6322,52 @@ namespace detail  // implementation types & node helpers — not part of the pub
                   alloc_.hkv_large_release(line_of(p), units, [&] { vh_node_dies_(p); });
                   return;
                }
-            alloc_.hkv_release(line_of(p),
-                               [&](uint32_t)
-                               {
-                                  vh_node_dies_(p);  // refcount-zero: bytes die
-                                  cow_destroy_dead_(p);
-                               });
+            // A node that dies releases its children, which may die and
+            // release theirs: one call level per level of the tree, and a
+            // tree is as deep as its longest key. The caller may be any
+            // thread with any stack (a handle or cursor being dropped), so
+            // the descent is cut off at rel_max_depth_: a subtree this call
+            // alone owns is parked and destroyed from the outermost frame.
+            if (rel_depth_ >= rel_max_depth_ && !is_leaf(p.tag()) &&
+                alloc_.hkv_ref(line_of(p)) == 1)
+            {
+               try
+               {
+                  rel_parked_.push_back(p);
+                  return;
+               }
+               catch (...)
+               {  // no memory for the list: descend after all
+               }
+            }
+            ++rel_depth_;
+            rel_one_(p);
+            if (--rel_depth_ == 0)
+               while (!rel_parked_.empty())
+               {
+                  const Ptr q = rel_parked_.back();
+                  rel_parked_.pop_back();
+                  ++rel_depth_;
+                  rel_one_(q);
+                  --rel_depth_;
+               }
          }
       }
+      void rel_one_(Ptr p) noexcept
+      {
+         alloc_.hkv_release(line_of(p),
+                            [&](uint32_t)
+                            {
+                               vh_node_dies_(p);  // refcount-zero: bytes die
+                               cow_destroy_dead_(p);
+                            });
+      }
+      // Call levels a release may descend before parking the rest. Each level
+      // is a few hundred bytes of stack in an optimized build, about a
+      // kilobyte in an unoptimized one.
+      static constexpr uint32_t rel_max_depth_ = 32;
+      uint32_t                  rel_depth_     = 0;
+      std::vector<Ptr>          rel_parked_;
 
       template <class V>
       bool cow_insert(key_param k, V&& v)

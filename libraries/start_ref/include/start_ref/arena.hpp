@@ -330,12 +330,15 @@ namespace start_ref
          _was_clean  = _hdr->clean.load(std::memory_order_relaxed) != 0;
          _derived_ok = _was_clean;
          _hdr->clean.store(0, std::memory_order_relaxed);
-         // The free map and reference counts are never synced, so after a
-         // power loss they are only trustworthy if the "open" mark got to
-         // storage before anything changed them. Only stores that asked for
-         // synchronization pay for that.
-         if (_cfg.sync_mode != sync_type::none && _cfg.sync_mode != sync_type::mprotect)
-            _meta->sync(_cfg.sync_mode);
+         // The free map and reference counts are not flushed by commits, so
+         // after a power loss they are only trustworthy if the "open" mark
+         // reached storage before anything changed them. Close always writes
+         // the "clean" mark through to storage, whatever the mode; so the
+         // "open" mark has to get there too in every mode, or a store that
+         // runs unsynchronized would come back from a power loss still marked
+         // clean and its stale maps would be trusted. One fsync of the small
+         // header per open; commits pay nothing for it.
+         _meta->sync(std::max(_cfg.sync_mode, sync_type::fsync));
 
          // Re-attach existing segments (maps existing file contents).
          const uint32_t nseg = _hdr->num_segments.load(std::memory_order_relaxed);

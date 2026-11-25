@@ -18,7 +18,7 @@ namespace sal_art_ref
       inline constexpr sal::header_type setlist_u8  = sal::header_type(base + 1);
       inline constexpr sal::header_type setlist_u16 = sal::header_type(base + 2);
       inline constexpr sal::header_type setlist_u32 = sal::header_type(base + 3);
-      inline constexpr sal::header_type bitset1     = sal::header_type(base + 4);
+      inline constexpr sal::header_type bitset1     = sal::header_type(base + 4);  // reserved: never produced
       inline constexpr sal::header_type bitset_r2   = sal::header_type(base + 5);
       inline constexpr sal::header_type bitset_r4   = sal::header_type(base + 6);
       inline constexpr sal::header_type full_radix  = sal::header_type(base + 7);
@@ -33,8 +33,8 @@ namespace sal_art_ref
       // targets / term_values point directly at pages.
       inline constexpr sal::header_type leaf_page = sal::header_type(base + 12);
       // Standalone (key,value) record (key_val_node.hpp): a page item whose suffix+value
-      // exceed the 128-byte in-page cap lives in its own allocation; the page keeps a
-      // comparison fragment + cbase code. NOT in radix_kind (never dispatched as a router).
+      // exceed the in-page cap lives in its own allocation; the page keeps the suffix (or a
+      // comparison fragment of it) + cbase code. NOT in radix_kind (never dispatched as a router).
       inline constexpr sal::header_type key_val = sal::header_type(base + 13);
       // Raw continuation payload; the directory and first payload live in key_val.
       inline constexpr sal::header_type value_chunk = sal::header_type(base + 14);

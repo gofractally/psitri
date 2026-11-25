@@ -548,7 +548,7 @@ namespace sal
    template <typename T>
    smart_ptr<T> allocator_session::get_root(root_object_number ro) noexcept
    {
-      auto tid = _sega.get(ro);
+      auto tid = _sega.get(ro, _session_num);
       return smart_ptr<T>(allocator_session_ptr(this, true), tid.root, false);
    }
 

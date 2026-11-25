@@ -29,6 +29,7 @@ namespace sal
    {
       SAL_INFO("allocator_session: constructor: {} {} ref: {}", this, ses_num, _ref_count);
       _block_base_ptr = a._block_alloc.get(offset_ptr(0));
+      a.root_slot_opened(ses_num);
    }
 
    allocator_session::~allocator_session()
@@ -54,6 +55,7 @@ namespace sal
          // A destructor cannot report it; the segments stay flagged active
          // (never compacted), which wastes space and loses nothing.
       }
+      _sega.root_slot_closed(_session_num);
       _sega.release_session_num(_session_num);
       _session_num = allocator_session_number(-1);
    }

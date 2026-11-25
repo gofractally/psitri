@@ -72,6 +72,8 @@ if(SAL_BUILD_TESTS)
         test/fail_stop_tests.cpp
         test/read_cache_tests.cpp
         test/atomic_ptr_tests.cpp
+        test/root_acquire_tests.cpp
+        test/root_acquire_bench.cpp
     )
     
     

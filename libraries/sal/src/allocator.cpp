@@ -427,7 +427,10 @@ namespace sal
    {
       stop_background_threads();
       if (!_read_only)
+      {
+         release_parked_roots_stopped();
          drain_releases_stopped();
+      }
       // The utility session releases its session slot through mapped state.
       // Destroy it before member teardown unmaps that state.
       _utility_ses = allocator_session_ptr(nullptr);
@@ -968,6 +971,7 @@ namespace sal
       SAL_WARN("Recovering... rebuilding control blocks from segments!");
 
       stop_background_threads();
+      forget_parked_roots();
 
       // Phase 1: Clear all control blocks
       _ptr_alloc.clear_all();
@@ -1084,6 +1088,7 @@ namespace sal
       SAL_WARN("Resetting reference counts...");
 
       stop_background_threads();
+      forget_parked_roots();
 
       _ptr_alloc.reset_all_refs();
 
@@ -1205,6 +1210,7 @@ namespace sal
       SAL_WARN("Power-loss recovery: validating segments and rebuilding state");
 
       stop_background_threads();
+      forget_parked_roots();
 
       // Phase 1: Clear all control blocks
       _ptr_alloc.clear_all();
@@ -1684,6 +1690,10 @@ namespace sal
       ptr_address read_ids[1024];
       while (thread.yield())
       {
+         // A root kept alive for a reader that was acquiring it when it was displaced: the
+         // root's next commit releases it, and so does this, for a root nobody commits again.
+         if (_parked_total.load(std::memory_order_relaxed) != 0) [[unlikely]]
+            release_parked_roots();
          apply_posted_releases(sesr);  // sessionless cross-thread releases (Dan's release queue)
          for (uint32_t snum = 0; snum < _mapped_state->_session_data.session_capacity(); ++snum)
          {
@@ -2774,6 +2784,76 @@ namespace sal
    {
       return const_cast<allocator*>(this)->create_session();
    }
+   void allocator::root_slot_opened(allocator_session_number sn) noexcept
+   {
+      assert(*sn < _root_slot.size());
+      // A number is given out again after its session ended; nothing may be left in the
+      // slot from before.
+      _root_slot[*sn].about_to_retain.store(0, std::memory_order_seq_cst);
+      // Raised before the session can announce anything: a commit that does not see the
+      // new end made its exchange before any announcement of this session, which
+      // therefore sees the new root when it looks again.
+      uint32_t end = _root_slot_end.load(std::memory_order_seq_cst);
+      while (end < *sn + 1 &&
+             !_root_slot_end.compare_exchange_weak(end, *sn + 1, std::memory_order_seq_cst))
+      {
+      }
+   }
+   void allocator::root_slot_closed(allocator_session_number sn) noexcept
+   {
+      if (*sn < _root_slot.size())
+         _root_slot[*sn].about_to_retain.store(0, std::memory_order_seq_cst);
+   }
+   void allocator::park_displaced_root(root_object_number ro, ptr_address root) noexcept
+   {
+      // The caller holds a reference to `root`, so this retain is an ordinary one.
+      retain(root);
+      std::lock_guard g(_parked_mx);
+      _parked.push_back({*ro, root});
+      _root_parked[*ro].count.fetch_add(1, std::memory_order_relaxed);
+      _parked_total.fetch_add(1, std::memory_order_relaxed);
+   }
+   void allocator::release_parked_roots() noexcept
+   {
+      std::lock_guard g(_parked_mx);
+      const uint32_t  end = _root_slot_end.load(std::memory_order_seq_cst);
+      for (size_t i = 0; i < _parked.size();)
+      {
+         if (root_announced(_parked[i].root, end))
+         {
+            ++i;  // a reader is still between its announcement and its retain
+            continue;
+         }
+         // Nothing names it, and nothing can name it again unless it is the root again,
+         // in which case the root table holds its own reference. Released like any
+         // sessionless release: by the release thread, under its read lock.
+         post_release(_parked[i].root);
+         _root_parked[_parked[i].root_index].count.fetch_sub(1, std::memory_order_relaxed);
+         _parked_total.fetch_sub(1, std::memory_order_relaxed);
+         _parked[i] = _parked.back();
+         _parked.pop_back();
+      }
+   }
+   void allocator::release_parked_roots_stopped() noexcept
+   {
+      std::lock_guard g(_parked_mx);
+      for (auto& p : _parked)
+      {
+         post_release(p.root);
+         _root_parked[p.root_index].count.fetch_sub(1, std::memory_order_relaxed);
+      }
+      _parked_total.store(0, std::memory_order_relaxed);
+      _parked.clear();
+   }
+   void allocator::forget_parked_roots() noexcept
+   {
+      std::lock_guard g(_parked_mx);
+      for (auto& p : _parked)
+         _root_parked[p.root_index].count.fetch_sub(1, std::memory_order_relaxed);
+      _parked_total.store(0, std::memory_order_relaxed);
+      _parked.clear();
+   }
+
    void allocator::post_release(ptr_address adr) noexcept
    {
       std::lock_guard g(_post_release_mx);

@@ -78,6 +78,14 @@ namespace sal
     *
     * ```
     */
+   namespace detail
+   {
+      /// For tests: called by a reader after it has announced a root and found it
+      /// unchanged, before it retains it. Null in production (one relaxed load per
+      /// acquisition of a root).
+      inline std::atomic<void (*)(ptr_address) noexcept> root_acquire_probe{nullptr};
+   }  // namespace detail
+
    class allocator
    {
      public:
@@ -412,15 +420,42 @@ namespace sal
       /**
        * Caller is responsible for releasing the returned tree_id's root.
        */
-      [[nodiscard]] tree_id get(root_object_number ro) noexcept
+      [[nodiscard]] tree_id get(root_object_number ro, allocator_session_number sn) noexcept
       {
          assert(ro < _root_objects->size() && "invalid root object number");
-         std::shared_lock<std::shared_mutex> lock(_root_object_mutex[*ro]);
-         auto tid = _root_objects->at(*ro).load(std::memory_order_acquire);
-         SAL_TRACE("get root object: {} adr: {}", ro, tid.root);
-         if (tid.root != null_ptr_address)
-            retain(tid.root);
-         return tid;
+         assert(*sn < _root_slot.size() && "invalid session number");
+         // No lock. The reader says which root it is about to retain in its session's own
+         // slot, then looks at the root again: if it is unchanged, a commit that displaces
+         // it from now on finds the slot (root_displaced) and keeps the object alive, so
+         // the retain below lands on a live object; if it changed, nothing was retained
+         // and the reader starts over. Both sides store before they load, in one total
+         // order (seq_cst), so at least one of them sees the other.
+         auto&    record = _root_objects->at(*ro);
+         auto&    slot   = _root_slot[*sn].about_to_retain;
+         uint64_t packed = record.tree.load(std::memory_order_seq_cst);
+         for (bool announced = false;;)
+         {
+            auto tid = tree_id::unpack(packed);
+            if (tid.root == null_ptr_address)
+            {
+               if (announced)
+                  slot.store(0, std::memory_order_release);
+               return tid;
+            }
+            slot.store(root_slot::announce(packed), std::memory_order_seq_cst);
+            announced            = true;
+            const uint64_t again = record.tree.load(std::memory_order_seq_cst);
+            if (again == packed)
+            {
+               if (auto probe = detail::root_acquire_probe.load(std::memory_order_relaxed))
+                   [[unlikely]]
+                  probe(tid.root);
+               retain(tid.root);
+               slot.store(0, std::memory_order_release);
+               return tid;
+            }
+            packed = again;
+         }
       }
 
       /// One more than the number of the last commit of `ro`. The caller is that root's one
@@ -440,18 +475,15 @@ namespace sal
                                 uint64_t           root_version = 0) noexcept
       {
          std::lock_guard<std::mutex> wlock(_write_mutex[*ro]);
-         tree_id                     result;
-         {
-            // Readers are kept out for the exchange only: get() loads the root and then
-            // retains it, and the exchange must not come between the two.
-            std::lock_guard<std::shared_mutex> rlock(_root_object_mutex[*ro]);
-            result = _root_objects->at(*ro).exchange(tid, root_version,
-                                                     std::memory_order_release);
-         }
-         // The flush needs nothing from the readers' lock. It needs this root's one writer
-         // (the caller) not to publish again before it returns, which the writer's own
-         // exclusion gives. A reader may therefore acquire the new root while its record
-         // is still being flushed; the caller does not get control back until it is.
+         // The exchange waits for no reader. A reader that had already announced the old
+         // root is found by root_displaced, which keeps the old root alive for it.
+         auto result = _root_objects->at(*ro).exchange(tid, root_version,
+                                                       std::memory_order_seq_cst);
+         root_displaced(ro, result);
+         // The flush needs this root's one writer (the caller) not to publish again before
+         // it returns, which the writer's own exclusion gives. A reader may acquire the new
+         // root while its record is still being flushed; the caller does not get control
+         // back until it is.
          sync(st);
          return result;
       }
@@ -479,13 +511,10 @@ namespace sal
                     OnCommit&&         on_commit) noexcept
       {
          std::lock_guard<std::mutex> wlock(_write_mutex[*ro]);
-         {
-            // As in set(): readers are kept out for the exchange only.
-            std::lock_guard<std::shared_mutex> rlock(_root_object_mutex[*ro]);
-            if (!_root_objects->at(*ro).compare_exchange(expect, desire, root_version,
-                                                         std::memory_order_release))
-               return false;
-         }
+         if (!_root_objects->at(*ro).compare_exchange(expect, desire, root_version,
+                                                      std::memory_order_seq_cst))
+            return false;
+         root_displaced(ro, expect);
          // on_commit is the caller's own sync of what it wrote; like the flush of the root
          // record it needs the writer's exclusion, not the readers'.
          on_commit();
@@ -498,12 +527,12 @@ namespace sal
        * threads will be working on a update to this root object until this transaction
        * is committed or aborted.
        */
-      [[nodiscard]] tree_id start_transaction(root_object_number ro)
+      [[nodiscard]] tree_id start_transaction(root_object_number ro, allocator_session_number sn)
       {
          check_corruption();
          assert(ro < _root_objects->size() && "invalid root object number");
          _write_mutex[*ro].lock();
-         return get(ro);
+         return get(ro, sn);
       }
 
       /**
@@ -516,15 +545,9 @@ namespace sal
                                                uint64_t           root_version = 0) noexcept
       {
          assert(ro < _root_objects->size() && "invalid root object number");
-         tree_id result;
-         {
-            // get() loads the root and then retains it, under the shared lock. Without
-            // the exclusive lock here the exchange can come between the two, the caller
-            // of this function releases the old root, and get() retains a freed object.
-            std::lock_guard<std::shared_mutex> rlock(_root_object_mutex[*ro]);
-            result = _root_objects->at(*ro).exchange(desired, root_version,
-                                                     std::memory_order_release);
-         }
+         auto result = _root_objects->at(*ro).exchange(desired, root_version,
+                                                       std::memory_order_seq_cst);
+         root_displaced(ro, result);
          sync(st);
          _write_mutex[*ro].unlock();
          return result;
@@ -680,8 +703,69 @@ namespace sal
      private:
       std::filesystem::path   _types_file;
       std::mutex                      _sync_mutex;
-      /// used by readers/writers to grab/update a root object
-      std::array<std::shared_mutex, 1024> _root_object_mutex;
+      // ── acquiring a root without a lock ──
+      // One slot per session number, each on its own cache line: the root a session is
+      // about to retain, or 0. Only that session writes it; a commit reads all of them.
+      struct alignas(ucc::hardware_cacheline_size) root_slot
+      {
+         std::atomic<uint64_t> about_to_retain{0};
+         /// Never 0, so a slot naming a root is distinct from an empty one.
+         static uint64_t announce(uint64_t packed_root) noexcept
+         {
+            return packed_root | (uint64_t(1) << 63);
+         }
+      };
+      std::array<root_slot, sal::max_threads> _root_slot;
+      /// One past the highest session number that ever had a session; slots at and
+      /// above it are empty, so a commit need not look at them.
+      std::atomic<uint32_t> _root_slot_end{0};
+      /// A session with this number starts or ends: its slot is empty.
+      void root_slot_opened(allocator_session_number sn) noexcept;
+      void root_slot_closed(allocator_session_number sn) noexcept;
+      bool root_announced(ptr_address root, uint32_t end) const noexcept
+      {
+         const uint64_t want = root_slot::announce(tree_id(root).pack());
+         for (uint32_t i = 0; i < end; ++i)
+            if (_root_slot[i].about_to_retain.load(std::memory_order_seq_cst) == want)
+               return true;
+         return false;
+      }
+      /// Called by a root's writer right after it took `old` out of the root table and
+      /// while it still holds the reference it took out. If a reader has announced `old`,
+      /// one more reference is taken and parked, so the reader's retain finds the object
+      /// alive whatever the writer does with its own reference; the parked one is released
+      /// once no slot names the object. Also releases what was parked for this root before.
+      void root_displaced(root_object_number ro, tree_id old) noexcept
+      {
+         if (old.root != null_ptr_address &&
+             root_announced(old.root, _root_slot_end.load(std::memory_order_seq_cst)))
+             [[unlikely]]
+            park_displaced_root(ro, old.root);
+         if (_root_parked[*ro].count.load(std::memory_order_relaxed) != 0) [[unlikely]]
+            release_parked_roots();
+      }
+      void park_displaced_root(root_object_number ro, ptr_address root) noexcept;
+      /// Releases every parked reference whose object no slot names. Any thread.
+      void release_parked_roots() noexcept;
+      /// Releases all of them: nothing can be acquiring a root (close).
+      void release_parked_roots_stopped() noexcept;
+      /// Forgets them without releasing: reference counts are about to be rebuilt from
+      /// the roots, which do not include a parked reference.
+      void forget_parked_roots() noexcept;
+      struct parked_root
+      {
+         uint32_t    root_index;
+         ptr_address root;
+      };
+      std::mutex               _parked_mx;  // taken only when a commit met a reader mid-acquire
+      std::vector<parked_root> _parked;
+      std::atomic<uint32_t>    _parked_total{0};
+      /// Per root, on a line only that root's writer writes in the common case.
+      struct alignas(ucc::hardware_cacheline_size) root_parked
+      {
+         std::atomic<uint32_t> count{0};
+      };
+      std::array<root_parked, 1024> _root_parked;
       /// mutexes used by transactions to ensure that only one writer per root object
       std::array<std::mutex, 1024> _write_mutex;
 

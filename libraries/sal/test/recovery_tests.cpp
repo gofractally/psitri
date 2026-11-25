@@ -211,3 +211,24 @@ TEST_CASE("a commit made after a recovery is newer than every commit the recover
    }
    fs::remove_all(path);
 }
+
+// A commit's stamp is wall-clock time; ages (what the compactor and the read
+// cache compare) are measured on the clock that counts from boot. Converting
+// one to the other must keep "how long ago", not the number.
+TEST_CASE("a commit stamp converts to the age clock by how long ago it was", "[sal][recovery][stamp]")
+{
+   const uint64_t now_age = *sal::get_current_time_msec();
+   const auto     just    = sal::next_commit_stamp();
+   const uint64_t fresh   = *sal::age_time_of_commit_stamp(just);
+   CHECK(fresh <= now_age + 50);
+   CHECK(fresh + 2000 >= now_age);
+
+   const uint64_t hour_ago = *sal::age_time_of_commit_stamp(
+       sal::usec_timestamp(*just - 3'600'000'000ull));
+   CHECK(fresh - hour_ago >= 3'599'000);
+   CHECK(fresh - hour_ago <= 3'601'000);
+
+   // A stamp from the future (a clock that was set back) is "now", not later than now.
+   CHECK(*sal::age_time_of_commit_stamp(sal::usec_timestamp(*just + 3'600'000'000ull)) <=
+         now_age + 50);
+}

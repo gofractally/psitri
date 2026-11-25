@@ -2220,8 +2220,8 @@ namespace sal
          if (thread && thread->get_stop_flag().load(std::memory_order_relaxed))
             return;
          if (foo->type() == header_type::sync_head)
-            src_vage =
-                msec_timestamp(*reinterpret_cast<const sync_header*>(foo)->timestamp() / 1000);
+            src_vage = age_time_of_commit_stamp(
+                reinterpret_cast<const sync_header*>(foo)->timestamp());
          else  // foo is a node_header
             try_copy_node(foo, src_vage);
          assert(foo != foo->next());

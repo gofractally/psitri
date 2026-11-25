@@ -182,9 +182,13 @@ TEST_CASE("a commit made after a recovery is newer than every commit the recover
           ses->alloc<recovery_test_node>(uint32_t(128), sal::alloc_hint{}, uint64_t(0xAAAA));
       (void)ses->set_root(sal::root_object_number(0),
                           sal::smart_ptr<recovery_test_node>(ses, adr), sal::sync_type::none);
-      // That commit's stamp, as a clock running far ahead of this one would have written it.
+      // That commit's stamp, as a clock running far ahead of this one would have written
+      // it: in its sync header, where a power loss that kept the header and lost the roots
+      // file's update would leave it.
       auto* header = sync_header_after(a.resolve(adr).first);
-      header->set_timestamp(sal::usec_timestamp(*header->timestamp() + 86'400'000'000ull * 365));
+      auto  info   = *header->get_root_info();
+      info.root_version += 86'400'000'000ull * 365;
+      header->set_user_data(info);
    }
    {
       sal::allocator a(path, recovery_test_config(), false);

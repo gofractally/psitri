@@ -345,6 +345,11 @@ namespace sal
       _mapped_state =
           reinterpret_cast<mapped_memory::allocator_state*>(_seg_alloc_state_file.data());
       _root_objects = reinterpret_cast<root_object_array*>(_root_object_file.data());
+      // No commit of this process may be stamped at or below one the roots file records,
+      // whatever the clock says now.
+      for (auto& record : *_root_objects)
+         commit_stamp_at_least(
+             usec_timestamp(record.version_for(record.load(std::memory_order_relaxed))));
       if (_session_op_stats_file.size() < sizeof(mapped_memory::session_operation_stats))
       {
          _session_op_stats_file.resize(
@@ -1447,22 +1452,33 @@ namespace sal
 
       _ptr_alloc.set_next_alloc_sequence(location_index.next_sequence());
 
-      // Phase 5: Rebuild roots from sync headers: for each root, the commit with the newest
-      // stamp wins. A sync header is flushed with the data of its commit, before the roots
-      // file is written, so where a header names a root it is the authority; the roots file
-      // decides only the roots no surviving header names.
+      // Phase 5: Rebuild roots. Each commit of a root carries a stamp, written both to the
+      // root's record in the roots file and into the sync headers of that commit. For each
+      // root the newest commit known wins: the roots file's, or a sync header's when the
+      // file's record is older (the commit's data was flushed and the file was not) or does
+      // not check out. The roots file cannot simply be overridden by headers: a header
+      // disappears when its segment is compacted and recycled, so the newest header that
+      // survives may belong to an older commit than the file records.
       std::sort(recovered_roots.begin(), recovered_roots.end(),
-                [](const auto& a, const auto& b) { return a.timestamp > b.timestamp; });
+                [](const auto& a, const auto& b) { return a.root_version > b.root_version; });
+      std::vector<uint64_t> file_stamp(_root_objects->size(), 0);
+      uint64_t              newest_stamp = recovered_roots.empty() ? 0 : recovered_roots.front().root_version;
+      for (uint32_t i = 0; i < _root_objects->size(); ++i)
+      {
+         auto& record  = _root_objects->at(i);
+         file_stamp[i] = record.version_for(record.load(std::memory_order_relaxed));
+         newest_stamp  = std::max(newest_stamp, file_stamp[i]);
+      }
       // Commits made from now on are newer than everything found, whatever the clock says.
-      if (!recovered_roots.empty())
-         commit_stamp_at_least(recovered_roots.front().timestamp);
+      commit_stamp_at_least(usec_timestamp(newest_stamp));
 
       // Track which roots we've already set (first occurrence = newest)
       std::vector<bool> root_set(_root_objects->size(), false);
       uint32_t          roots_recovered = 0;
       for (auto& entry : recovered_roots)
       {
-         if (entry.root_index < _root_objects->size() && !root_set[entry.root_index])
+         if (entry.root_index < _root_objects->size() && !root_set[entry.root_index] &&
+             entry.root_version > file_stamp[entry.root_index])
          {
             // Verify the ptr_address resolves to a real segment object. Offset
             // zero is a valid location, so do not treat loc().cacheline() as a
@@ -1472,7 +1488,7 @@ namespace sal
             if (ptr_address(entry.root_address) == null_ptr_address)
             {
                _root_objects->at(entry.root_index)
-                   .store(null_tree_id, 0, std::memory_order_relaxed);
+                   .store(null_tree_id, entry.root_version, std::memory_order_relaxed);
                root_set[entry.root_index] = true;
                continue;
             }
@@ -1485,8 +1501,10 @@ namespace sal
                    .store(recovered_tid, entry.root_version, std::memory_order_relaxed);
                root_set[entry.root_index] = true;
                ++roots_recovered;
-               SAL_WARN("recovered root[{}] = {} from sync header (ts={})",
-                        entry.root_index, entry.root_address, *entry.timestamp);
+               SAL_WARN("recovered root[{}] = {} from a sync header (commit stamp {}, roots file "
+                        "had {})",
+                        entry.root_index, entry.root_address, entry.root_version,
+                        file_stamp[entry.root_index]);
             }
          }
       }

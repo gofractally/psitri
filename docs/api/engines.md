@@ -87,8 +87,15 @@ large-value arena separately:
 It may be called from any thread. A write that needs a segment beyond the
 limit throws `psitri::small_engine::storage_full` (a `std::runtime_error`)
 from the write call. Abort the transaction: it rolls back completely, what was
-committed before is untouched, and the database stays usable. Freed space is
-reused in place; nothing is moved or compacted. Under the workload the engine
+committed before is untouched, and the same session can go on writing as soon
+as there is room (removing keys makes room). The limit is reported only when
+no segment has a free run of lines long enough for the allocation: before
+giving up, the writer waits for the background releaser to finish freeing
+versions that are already dead, and takes free lines from any segment. In the
+tests a store of 100-byte values filled to 100% of its limit before the first
+refusal. A node that needs many lines in a row (a value of several KiB) can be
+refused earlier on a fragmented store. Freed space is reused in place; nothing
+is moved or compacted. Under the workload the engine
 is meant for (rows rewritten in place plus an index entry moved to a new key
 per update, short reader snapshots throughout) `tests/api/small_engine.cpp`
 measured use and mapped size level from the first sample to the last: 31 MiB

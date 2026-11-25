@@ -32,21 +32,23 @@ the same time and do not wait for each other.
 A transaction holds its root's writer from `start_transaction` until it commits
 or aborts. A second transaction on the same root, from any session, waits and
 then starts from what the first published, so no commit is lost and nothing is
-retried. Starting a second transaction on a root from the thread that already
-has one open on it is a caller error. The Small Engine reports it:
-`start_transaction` throws `std::logic_error`, as it does for a second
-transaction on a session that already has one open, and `open_root` throws for
-a root at or below one the transaction already holds. Do not count on the
-Large Engine detecting it: there the call waits for itself and never returns. Additional roots opened with `open_root` wait for their
-writer when opened in ascending index order.
+retried. Starting a second transaction on a root while the first is still open
+therefore waits for the first, and if nothing else is going to finish the
+first, it waits forever: do not start one on a root your own code still holds
+through another session. What a Small Engine session can tell about its own
+misuse it reports: `start_transaction` on a session that already has a
+transaction open throws `std::logic_error`, and `open_root` throws for a root
+at or below one the transaction already holds. Additional roots opened with
+`open_root` wait for their writer when opened in ascending index order.
 
 A Small Engine session is not thread-safe, and it is not tied to the thread
-that created it: a write session or read session may be used from any thread
-as long as only one thread uses it at a time, which the caller arranges. A
-transaction holds its root's writer lock on behalf of the thread that started
-it, so commit or abort it on that thread; hand a session over between
-transactions. Builds with assertions enabled stop the process with a message
-when two threads are inside one write session at once.
+that created it: a write session, a read session, or a transaction in progress
+may be used from any thread as long as only one thread uses it at a time,
+which the caller arranges (a lock or a strand). A root's writer lock belongs
+to the transaction that holds it, not to a thread, so a transaction started on
+one thread may be committed or aborted on another. Nothing in the engine
+depends on which thread calls. Builds with assertions enabled stop the process
+with a message when two threads are inside one write session at once.
 
 A session keeps its database open: the store closes when the last handle to
 the database and the last session are gone. Trees, transactions and cursors
@@ -232,14 +234,16 @@ application's failure model and test recovery on the target storage stack.
 ### Small Engine: stopping without closing
 
 A Small Engine store records whether its last owner closed it.
-`database::closed_cleanly(dir)` reads that without opening the store, and
+`database::closed_cleanly(dir)` reads that without opening the store (a store
+that is open at that moment reads as not closed: ask before opening), and
 `db->recovered_on_open()` says whether this open found it not closed. When it
 was not, `open` rebuilds the free map and the reference counts from the
 published roots before it returns: these are derived files that are never
 synced and that, after a stop, still describe the dead writer's unfinished
 transaction. The rebuild reads every node once, so its cost follows the size
-of the live data. If the walk reaches storage outside the arena, `open` throws
-and leaves the files as they are; it does not come back empty.
+of the live data. If the walk reaches storage outside the arena, `open` throws;
+the data and root slots are unchanged and the store stays marked unclean, so
+every later open tries again. It does not come back empty.
 
 What `tests/api/small_engine.cpp` shows, and nothing beyond it: a writer
 running committed transactions was killed with `SIGKILL` at random moments
@@ -262,7 +266,10 @@ arenas to zero.
 A process kill leaves the operating system holding every page the process
 wrote, which is why all modes pass that test alike; the modes differ only in
 what has reached the device, and that has not been exercised by cutting power.
-Flush errors are not checked on the Small Engine's data pages. A transaction
+With any mode other than `none` and `mprotect`, a clean close flushes the free
+map and reference counts before it writes the clean mark, so the mark cannot
+reach storage ahead of them. Flush errors are not checked on the Small
+Engine's data pages. A transaction
 that commits several roots writes one root slot after another, so a stop
 between them leaves some roots new and others old.
 

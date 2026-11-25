@@ -91,7 +91,16 @@ Missing keys are ordinary results, not exceptions. Failed allocation, invalid
 open modes, or I/O may throw `std::exception` subclasses. The Small Engine
 throws `small_engine::storage_full` when a write would exceed `max_segments`
 (abort and carry on), `std::invalid_argument` for an oversized key or value,
-and `std::logic_error` for a transaction started where one is already open. Catch failures outside
+and `std::logic_error` for a second transaction on a session that has one open.
+A node can carry at most 254 references, of which transactions and write
+sessions may take it to 190. `commit()` throws `std::runtime_error` if a root
+it would publish is at that ceiling (only possible when the transaction was
+given a tree by `set_root` that some 190 snapshots also hold); nothing is
+published, the transaction stays open, and it can be aborted or committed
+again once references are released. Committing a root the transaction did not
+change takes no reference. Copying an owned snapshot, or taking a cursor from
+it, takes one and throws at 254; point reads through an owned snapshot
+(`snapshot.get`) take none. Catch failures outside
 the transaction scope so rollback runs during unwinding. A commit failure can
 have an uncertain persistence outcome; do not automatically replay a
 non-idempotent transaction or continue using that database instance.

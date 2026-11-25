@@ -371,6 +371,39 @@ TEMPLATE_TEST_CASE("Transactions: a range remove is the same half-open range in 
    }
 }
 
+// gofractally/psitri#30 (6): a transaction that keeps its changes aside accepted a
+// key over the limit and only failed when the changes reached the engine at commit,
+// taking every other change of the transaction with it.
+TEMPLATE_TEST_CASE("Transactions: a key over the limit is refused when it is written",
+                   "[api][transactions]",
+                   psitri::small_engine,
+                   psitri::big_engine)
+{
+   using E  = TestType;
+   using DB = psitri::database_for<E>;
+   temporary_directory temp;
+   auto                db = DB::open(temp.path / "db", psitri::open_mode::create_only, config<E>());
+   auto                writer = db->start_write_session();
+   const std::string   at_limit(psitri::max_key_size, 'k');
+   const std::string   over(psitri::max_key_size + 1, 'k');
+   {
+      psitri::delta_transaction<E> tx(*writer, 1);
+      tx.upsert("ok", "v");
+      tx.upsert(at_limit, "v");
+      REQUIRE_THROWS_AS(tx.upsert(over, "v"), std::invalid_argument);
+      REQUIRE(tx.remove(over) == -1);
+      tx.commit();  // what was accepted commits
+   }
+   REQUIRE(writer->get_root(1).template get<std::string>("ok").has_value());
+   REQUIRE(writer->get_root(1).template get<std::string>(at_limit).has_value());
+   {
+      psitri::transient_transaction tx(writer->get_root(1));
+      REQUIRE_THROWS_AS(tx.upsert(over, "v"), std::invalid_argument);
+      tx.upsert(at_limit, "w");
+      REQUIRE(tx.template get<std::string>(at_limit) == std::optional<std::string>("w"));
+   }
+}
+
 TEMPLATE_TEST_CASE("Transactions: a transient transaction reads its own changes and leaves the root alone",
                    "[api][transactions]",
                    psitri::small_engine,

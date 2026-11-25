@@ -5393,12 +5393,36 @@ namespace detail  // implementation types & node helpers — not part of the pub
          return np;
       }
 
+      // Whether writing to the node at p in place could be seen through
+      // another reference. For most nodes that is the count of the head
+      // line. An implicit router (node_full, c2/c4/c8) is the exception: its
+      // branch lines follow the head and carry counts of their own, and a
+      // copy of the router (which is explicit) retains those lines without
+      // touching the head. So an implicit router whose head has one
+      // reference can still have lines that a newer version reads, and it is
+      // shared if any of its lines is. The counts looked at are the bytes
+      // next to the head's own, one per line.
       bool cow_shared_(Ptr p) const noexcept
       {
          if constexpr (large_ok_)
             if (p.tag() == K::value_large)  // share count lives in the large arena
                return alloc_.hkv_large_ref(line_of(p)) >= 2;
-         return alloc_.hkv_ref(line_of(p)) >= 2;
+         const uint32_t head = line_of(p);
+         if (alloc_.hkv_ref(head) >= 2)
+            return true;
+         unsigned tail = 0;
+         switch (p.tag())
+         {
+            case K::node_full: tail = full_lines_v<Ptr>; break;
+            case K::c2:        tail = 2; break;
+            case K::c4:        tail = 4; break;
+            case K::c8:        tail = 8; break;
+            default:           return false;
+         }
+         for (unsigned k = 1; k <= tail; ++k)
+            if (alloc_.hkv_ref(head + k) >= 2)
+               return true;
+         return false;
       }
 
       // ── leaves under copy-on-write ────────────────────────────────────────

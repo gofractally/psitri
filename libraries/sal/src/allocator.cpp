@@ -1447,10 +1447,15 @@ namespace sal
 
       _ptr_alloc.set_next_alloc_sequence(location_index.next_sequence());
 
-      // Phase 5: Rebuild roots from sync headers (newest timestamp wins)
-      // Sort by timestamp descending so we encounter newest first
+      // Phase 5: Rebuild roots from sync headers: for each root, the commit with the newest
+      // stamp wins. A sync header is flushed with the data of its commit, before the roots
+      // file is written, so where a header names a root it is the authority; the roots file
+      // decides only the roots no surviving header names.
       std::sort(recovered_roots.begin(), recovered_roots.end(),
                 [](const auto& a, const auto& b) { return a.timestamp > b.timestamp; });
+      // Commits made from now on are newer than everything found, whatever the clock says.
+      if (!recovered_roots.empty())
+         commit_stamp_at_least(recovered_roots.front().timestamp);
 
       // Track which roots we've already set (first occurrence = newest)
       std::vector<bool> root_set(_root_objects->size(), false);
@@ -1462,6 +1467,15 @@ namespace sal
             // Verify the ptr_address resolves to a real segment object. Offset
             // zero is a valid location, so do not treat loc().cacheline() as a
             // boolean validity check.
+            // The newest commit of this root may have cleared it. That is its value: an
+            // older commit must not bring the root back.
+            if (ptr_address(entry.root_address) == null_ptr_address)
+            {
+               _root_objects->at(entry.root_index)
+                   .store(null_tree_id, 0, std::memory_order_relaxed);
+               root_set[entry.root_index] = true;
+               continue;
+            }
             auto resolved = resolve(ptr_address(entry.root_address));
             if (resolved.first)
             {
@@ -1477,9 +1491,8 @@ namespace sal
          }
       }
 
-      // Validate roots from the roots file — these were synced to disk by
-      // allocator::sync() during commit, so they are the primary source.
-      // Sync headers are a secondary source for when the roots file is corrupt.
+      // Roots that no surviving sync header names keep what the roots file says, if that
+      // still names an object the segment scan found.
       uint32_t roots_from_file = 0;
       for (uint32_t i = 0; i < _root_objects->size(); ++i)
       {

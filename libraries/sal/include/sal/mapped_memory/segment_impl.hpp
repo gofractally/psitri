@@ -50,7 +50,7 @@ namespace sal
                SAL_TRACK_LOCK();
                char* alloc_ptr = data + alloc_pos;
                auto* ahead     = new (alloc_ptr) sync_header(marker_size);
-               ahead->set_timestamp(sal::get_current_time_usec());
+               ahead->set_timestamp(sal::next_commit_stamp());
                ahead->set_prev_aheader_pos(_last_aheader_pos);
                memcpy(ahead->user_data(), user_data.data(), user_data.size());
                ahead->set_user_data_size(user_data.size());
@@ -93,7 +93,7 @@ namespace sal
             SAL_TRACK_LOCK();
             char* alloc_ptr = data + alloc_pos;
             auto* ahead     = new (alloc_ptr) sync_header(terminal_size);
-            ahead->set_timestamp(sal::get_current_time_usec());
+            ahead->set_timestamp(sal::next_commit_stamp());
             ahead->set_prev_aheader_pos(_last_aheader_pos);
             memcpy(ahead->user_data(), user_data.data(), user_data.size());
             ahead->set_user_data_size(user_data.size());
@@ -149,7 +149,7 @@ namespace sal
          auto asize = new_alloc_pos - alloc_pos;
 
          auto ahead = new (alloc_ptr) sync_header(asize);
-         ahead->set_timestamp(sal::get_current_time_usec());
+         ahead->set_timestamp(sal::next_commit_stamp());
          ahead->set_prev_aheader_pos(_last_aheader_pos);
          memcpy(ahead->user_data(), user_data.data(), user_data.size());
          ahead->set_user_data_size(user_data.size());

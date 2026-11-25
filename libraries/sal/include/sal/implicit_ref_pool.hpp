@@ -4,8 +4,8 @@
 // Each slot is a 1-byte atomic refcount that IS its own lifetime: alloc sets it to 1, a node
 // clone retain()s it (++), a node destroy release()s it (--), and the releaser that drives it to
 // 0 frees the slot (and is told `was_last` so it can release that range's actual branch
-// pointers). No "deferral"/settle special case, no fork-on-overflow except the genuine 255-version
-// ceiling — correct and async-safe by construction (clone's +1 and destroy's -1 are a conserved
+// pointers). No "deferral"/settle special case. The one-byte count has a ceiling of 255 sharers:
+// try_retain refuses the 256th and the caller forks (takes a counter of its own) — correct and async-safe by construction (clone's +1 and destroy's -1 are a conserved
 // pair regardless of when the destructor runs). The "pointee" is implicit: the slot counts the
 // branch ptr_addresses of a node's range, which live in the node array, not in the slot.
 //
@@ -58,11 +58,23 @@ namespace sal
       }
 
       /// Clone shares the slot: one more version references this range's branch-set.
-      void retain(ptr_address adr)
+      /// Returns false, and changes nothing, when the count is already at its one-byte
+      /// ceiling: the caller must then give its version a counter of its own for the
+      /// range (and retain the range's branches itself). Never wraps. More than one
+      /// thread may share a slot at once (writers continuing from versions of one tree),
+      /// so the ceiling is tested and the count raised in one atomic step.
+      [[nodiscard]] bool try_retain(ptr_address adr)
       {
-         [[maybe_unused]] auto prev = _a.get(adr).fetch_add(1, std::memory_order_relaxed);
-         assert(prev >= 1 && "retain of a dead (0) slot");
-         assert(prev < implicit_ref_max && "ref overflow — fork before 255 versions");
+         auto& count = _a.get(adr);
+         auto  prev  = count.load(std::memory_order_relaxed);
+         do
+         {
+            assert(prev >= 1 && "retain of a dead (0) slot");
+            if (prev == implicit_ref_max)
+               return false;
+         } while (not count.compare_exchange_weak(prev, uint8_t(prev + 1),
+                                                  std::memory_order_relaxed));
+         return true;
       }
 
       /// Destroy releases the slot. Returns true iff this was the LAST reference — the slot is

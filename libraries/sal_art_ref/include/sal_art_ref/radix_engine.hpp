@@ -1265,6 +1265,23 @@ namespace sal_art_ref::radix
          return false;
       }
 
+      // Give up this version's share of range r's counter. The version that takes a counter
+      // to zero is the last owner of that range's branch set and releases the branches, exactly
+      // as large_radix::destroy does. A caller that has just counted more than one sharer can
+      // still be the last by the time it leaves: the others may be versions the release thread
+      // is destroying at that moment.
+      template <class N>
+      void rr_leave(const N* n, int r)
+      {
+         if constexpr (is_big<N>)
+         {
+            if (_ses->rr_release(n->rc_ctr(r)))
+               n->for_each_entry([&](uint8_t byte, smart_address sa) {
+                  if (sa.is_pointer() && range_of(byte) == r) _ses->release(sa.as_pointer());
+               });
+         }
+      }
+
       // Rare: a counter alloc found the node's region full. Fully privatize — retain ALL pointer
       // children (O(F)), drop this version's hold on all 8 old counters, birth fresh ones in a new
       // region. Every range becomes private (count 1).
@@ -1275,7 +1292,7 @@ namespace sal_art_ref::radix
          {
             n->for_each_entry([&](uint8_t, smart_address sa)
                               { if (sa.is_pointer()) _ses->retain(sa.as_pointer()); });
-            for (int r = 0; r < range_count; ++r) (void)_ses->rr_release(n->rc_ctr(r));
+            for (int r = 0; r < range_count; ++r) rr_leave<N>(n, r);
             rr_birth<N>(n);
          }
       }
@@ -1298,7 +1315,7 @@ namespace sal_art_ref::radix
             n->for_each_entry([&](uint8_t byte, smart_address sa) {
                if (sa.is_pointer() && range_of(byte) == r) _ses->retain(sa.as_pointer());
             });
-            (void)_ses->rr_release(n->rc_ctr(r));  // leave old shared set (count was >1, not last)
+            rr_leave<N>(n, r);  // leave the old shared set (its branches are held above)
             n->rc_set_off(r, sal::offset_of(*a));
          }
       }
@@ -1317,7 +1334,29 @@ namespace sal_art_ref::radix
          {
             if (nn->rc_has_ctrs())  // share the 8 per-range counters (blit copied region+offsets)
             {
-               for (int r = 0; r < range_count; ++r) _ses->rr_retain(nn->rc_ctr(r));
+               // A counter is one byte: it can stand for 255 versions of a range's branch
+               // set. When this clone would be one more (many versions kept alive at once,
+               // or dropped faster than the release thread finishes them), it does not
+               // share: it owns its branches the way a newly built node does, with a
+               // reference of its own on every child and fresh counters. The versions it
+               // was cloned from are untouched.
+               int r = 0;
+               while (r < range_count && _ses->rr_try_retain(nn->rc_ctr(r)))
+                  ++r;
+               if (r < range_count) [[unlikely]]
+               {
+                  // Own every branch first, then give back the shares already taken on
+                  // the earlier ranges. `src` holds each of those counters for as long
+                  // as this runs, so a share given back is not the last; if one ever is,
+                  // this thread has become that range set's last owner and releases its
+                  // branches as a destroy would (rr_leave), which the references just
+                  // taken keep alive.
+                  nn->for_each_entry([&](uint8_t, smart_address sa)
+                                     { if (sa.is_pointer()) _ses->retain(sa.as_pointer()); });
+                  for (int j = 0; j < r; ++j)
+                     rr_leave<N>(nn, j);
+                  rr_birth<N>(nn);
+               }
                smart_address tv = nn->term_value();
                if (tv.is_pointer()) _ses->retain(tv.as_pointer());  // term held directly
             }

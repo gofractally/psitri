@@ -258,7 +258,7 @@ namespace sal
       // there). See doc/micro_refcount.md.
       ptr_address                rr_alloc_fresh();
       std::optional<ptr_address> rr_alloc_in_region(const implicit_ref_hint& h);
-      void                       rr_retain(ptr_address a);
+      [[nodiscard]] bool         rr_try_retain(ptr_address a);
       [[nodiscard]] bool         rr_release(ptr_address a);
       uint8_t                    rr_count(ptr_address a);
 

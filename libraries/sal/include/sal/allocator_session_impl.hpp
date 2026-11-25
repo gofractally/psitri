@@ -368,7 +368,7 @@ namespace sal
    {
       return _sega.iref().alloc_in_region(h);
    }
-   inline void    allocator_session::rr_retain(ptr_address a) { _sega.iref().retain(a); }
+   inline bool    allocator_session::rr_try_retain(ptr_address a) { return _sega.iref().try_retain(a); }
    inline bool    allocator_session::rr_release(ptr_address a) { return _sega.iref().release(a); }
    inline uint8_t allocator_session::rr_count(ptr_address a) { return _sega.iref().count(a); }
    // Inline-destroy node budget per top-level release before the cascade spills to the background

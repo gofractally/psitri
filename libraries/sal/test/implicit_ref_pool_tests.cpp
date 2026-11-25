@@ -34,8 +34,8 @@ TEST_CASE("implicit_ref lifetime: alloc=1, retain, release, last-frees", "[sal][
 
    auto a = p.alloc_fresh();
    REQUIRE(p.count(a) == 1);
-   p.retain(a);
-   p.retain(a);
+   REQUIRE(p.try_retain(a));
+   REQUIRE(p.try_retain(a));
    REQUIRE(p.count(a) == 3);          // 1 + 2 clones share this range
    REQUIRE_FALSE(p.release(a));       // 3 -> 2, not last
    REQUIRE_FALSE(p.release(a));       // 2 -> 1, not last
@@ -69,7 +69,7 @@ TEST_CASE("implicit_ref conservation: random retain/release churn", "[sal][impli
          uint32_t a = live[rng() % live.size()];
          if (rng() & 1)  // retain
          {
-            if (model[a] < 250) { p.retain(sal::ptr_address(a)); ++model[a]; }
+            if (model[a] < 250) { REQUIRE(p.try_retain(sal::ptr_address(a))); ++model[a]; }
          }
          else  // release
          {
@@ -103,7 +103,7 @@ TEST_CASE("implicit_ref concurrent retain/release is conservative", "[sal][impli
       auto a   = p.alloc_fresh();        // count = 1
       slots[i] = *a;
       for (int t = 1; t < threads; ++t)  // bring to `threads` so each thread releases once
-         p.retain(sal::ptr_address(slots[i]));
+         REQUIRE(p.try_retain(sal::ptr_address(slots[i])));
       REQUIRE(p.count(sal::ptr_address(slots[i])) == threads);
    }
 
@@ -124,6 +124,47 @@ TEST_CASE("implicit_ref concurrent retain/release is conservative", "[sal][impli
    fs::remove_all(dir);
 }
 
+// A count is one byte. The 256th sharer is refused instead of wrapping the count to
+// zero, which would free the slot (and the range's branches) under 255 live sharers.
+TEST_CASE("implicit_ref ceiling: the 256th sharer is refused and nothing wraps", "[sal][implicit_ref]")
+{
+   auto                   dir = fresh("iref_ceiling");
+   sal::implicit_ref_pool p(dir);
+
+   auto a = p.alloc_fresh();  // count = 1
+   for (int i = 1; i < sal::implicit_ref_max; ++i)
+      REQUIRE(p.try_retain(a));
+   REQUIRE(p.count(a) == sal::implicit_ref_max);
+   REQUIRE_FALSE(p.try_retain(a));
+   REQUIRE(p.count(a) == sal::implicit_ref_max);
+
+   // Many threads at the ceiling together: exactly as many succeed as there is room for.
+   auto b = p.alloc_fresh();
+   for (int i = 1; i < 200; ++i)
+      REQUIRE(p.try_retain(b));
+   std::atomic<int>         taken{0};
+   std::vector<std::thread> ts;
+   for (int t = 0; t < 8; ++t)
+      ts.emplace_back([&] {
+         for (int i = 0; i < 40; ++i)
+            if (p.try_retain(b))
+               taken.fetch_add(1, std::memory_order_relaxed);
+      });
+   for (auto& th : ts) th.join();
+   REQUIRE(taken.load() == sal::implicit_ref_max - 200);
+   REQUIRE(p.count(b) == sal::implicit_ref_max);
+
+   // Every share is given back once; only the last one frees the slot.
+   for (auto slot : {a, b})
+   {
+      for (int i = 1; i < sal::implicit_ref_max; ++i)
+         REQUIRE_FALSE(p.release(slot));
+      REQUIRE(p.release(slot));
+   }
+   REQUIRE(p.used() == 0);
+   fs::remove_all(dir);
+}
+
 TEST_CASE("implicit_ref recovery: counts re-tallied from replayed handles", "[sal][implicit_ref]")
 {
    auto                  dir = fresh("iref_recover");
@@ -137,7 +178,7 @@ TEST_CASE("implicit_ref recovery: counts re-tallied from replayed handles", "[sa
    {
       auto    a   = p.alloc_fresh();   // 1
       int     extra = int(rng() % 5);  // 0..4 more versions share it
-      for (int k = 0; k < extra; ++k) p.retain(sal::ptr_address(a));
+      for (int k = 0; k < extra; ++k) REQUIRE(p.try_retain(sal::ptr_address(a)));
       truth[*a] = 1 + extra;
    }
    REQUIRE(p.used() == truth.size());

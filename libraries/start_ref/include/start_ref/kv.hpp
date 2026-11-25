@@ -805,6 +805,12 @@ namespace start_ref::kv
    // on its root (under node-COW that ref keeps the version readable across
    // later commits). The single owned-tree type: get_root returns it, set_root
    // exchanges it, snapshot_cursor reads it. Copyable; default = empty.
+   //
+   // LIFETIME: a tree points at its database and gives its reference back to
+   // it when destroyed, so every tree (and every cursor, read session and
+   // write session) must be gone before the database is. Nothing keeps the
+   // database alive for them. A build with assertions on counts the trees
+   // that hold a root and aborts in ~database if one is left.
    class tree
    {
      public:
@@ -853,7 +859,7 @@ namespace start_ref::kv
       friend class write_session;
       friend class transaction;
       friend class tree_handle;
-      tree(database* db, root_ptr held, size_t count) : _db(db), _root(held), _count(count) {}
+      tree(database* db, root_ptr held, size_t count);  // out-of-line (counts the handle)
       void      release_();  // cow_release the held ref (out-of-line)
       database* _db    = nullptr;
       root_ptr  _root  = root_ptr::null();
@@ -1043,6 +1049,8 @@ namespace start_ref::kv
 
       ~database()
       {
+         assert(_live_trees.load(std::memory_order_relaxed) == 0 &&
+                "a tree (owned snapshot) outlived its database");
          // clean shutdown (SPEC §19): ring drained, releaser stopped and
          // JOINED before any member teardown; the rest runs foreground/exact
          flush_releases();
@@ -1455,6 +1463,11 @@ namespace start_ref::kv
       // One entry per type number, a megabyte in all: made when the first type
       // is registered, so a store that keeps only bytes never has it. The
       // releaser reads it from its own thread, hence the published pointer.
+      // Trees that hold a root (see the lifetime note on class tree). Kept in
+      // every build so the class has one layout; only assertions read it.
+      std::atomic<int64_t> _live_trees{0};
+      void tree_born_() noexcept { _live_trees.fetch_add(1, std::memory_order_relaxed); }
+      void tree_gone_() noexcept { _live_trees.fetch_sub(1, std::memory_order_relaxed); }
       std::unique_ptr<type_entry[]>  _types_owner;
       std::atomic<type_entry*>       _types{nullptr};
       template <class T>
@@ -1608,6 +1621,7 @@ namespace start_ref::kv
       engine_t v{part_alloc<bval>(&_db->_arena)};
       v.allocator_mut().vhooks = &_db->_vh;
       v.cow_release(_root);  // drop THIS handle's ref (cascades only at zero)
+      _db->tree_gone_();
       _root = root_ptr::null();
       _db   = nullptr;
    }
@@ -1615,7 +1629,16 @@ namespace start_ref::kv
    inline tree::tree(const tree& o) : _db(o._db), _root(o._root), _count(o._count)
    {
       if (_db && !_root.is_null())
+      {
          _db->retain_root_(_root);
+         _db->tree_born_();
+      }
+   }
+   inline tree::tree(database* db, root_ptr held, size_t count)
+       : _db(db), _root(held), _count(count)
+   {
+      if (_db && !_root.is_null())
+         _db->tree_born_();
    }
    template <class S>
    inline std::optional<S> tree::get(key_view k, uint64_t offset, uint64_t length) const

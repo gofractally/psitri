@@ -132,6 +132,21 @@ namespace sal
                                                                 std::memory_order_relaxed));
       return usec_timestamp(next);
    }
+   /// A commit stamp expressed on the clock that ages are measured on
+   /// (get_current_time_msec: time since boot): the moment that lies as far in the past
+   /// as the commit does. The compactor gives the objects it moves the age of the commit
+   /// that wrote them, and must not compare a wall-clock stamp with that clock directly.
+   inline msec_timestamp age_time_of_commit_stamp(usec_timestamp stamp) noexcept
+   {
+      const uint64_t wall_ms = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            std::chrono::system_clock::now().time_since_epoch())
+                                            .count());
+      const uint64_t stamp_ms = *stamp / 1000;
+      const uint64_t age_ms   = wall_ms > stamp_ms ? wall_ms - stamp_ms : 0;
+      const uint64_t now_ms   = *get_current_time_msec();
+      return msec_timestamp(now_ms > age_ms ? now_ms - age_ms : 0);
+   }
+
    /// Recovery: no later commit may be stamped at or below `stamp`.
    inline void commit_stamp_at_least(usec_timestamp stamp) noexcept
    {

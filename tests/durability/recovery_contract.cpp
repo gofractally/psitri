@@ -11,12 +11,14 @@
 #include <sal/mapped_memory/segment.hpp>
 
 #include <fcntl.h>
+#include <sys/file.h>
 #include <signal.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -331,11 +333,33 @@ namespace
       ::close(in[0]);
       return std::unique_ptr<Child>(new Child{pid, out[0], in[1]});
    }
+   // A killed process is reaped before the kernel has necessarily finished closing its
+   // files (the last release of a dying task's files can run just after its parent's
+   // wait returns), and the store's files are locked without waiting. So after killing a
+   // writer, wait until its lock on the store is really gone before opening it.
+   void waitForStoreLock(const fs::path& path)
+   {
+      const auto file = path / "ptrs" / "header.bin";
+      for (int attempt = 0; attempt < 5000; ++attempt)
+      {
+         const int fd = ::open(file.c_str(), O_RDONLY);
+         require(fd >= 0, "cannot open " + file.string());
+         const bool unlocked = ::flock(fd, LOCK_EX | LOCK_NB) == 0;
+         if (unlocked)
+            ::flock(fd, LOCK_UN);
+         ::close(fd);
+         if (unlocked)
+            return;
+         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      throw std::runtime_error("the killed writer's lock on the store was never released");
+   }
    void crashWriter(const fs::path& path, unsigned first, unsigned last)
    {
       auto child = spawnWriter(path, first, last, false);
       child->expect("READY");
       child->kill();
+      waitForStoreLock(path);
    }
    void create(const fs::path& path, unsigned generation)
    {
@@ -473,6 +497,7 @@ namespace
       child->resume();
       child->expect("READY");
       child->kill();
+      waitForStoreLock(path);
       for (const char* name : volatileFiles)
       {
          fs::remove_all(path / name);

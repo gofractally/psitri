@@ -18,6 +18,12 @@ if(Catch2_FOUND)
     set_target_properties(api-conformance-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME api-conformance-tests COMMAND api-conformance-tests)
 
+    # A second root written key by key by its own thread (gofractally/psibase#2268).
+    add_executable(root-writer-stress-tests api/root_writer_stress.cpp)
+    target_link_libraries(root-writer-stress-tests PRIVATE psitri::api Catch2::Catch2WithMain)
+    set_target_properties(root-writer-stress-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME root-writer-stress-tests COMMAND root-writer-stress-tests)
+
     # The same writer and reader cases on the engines layered over others.
     if(TARGET psitri)
         add_executable(layered-conformance-tests api/layered.cpp)

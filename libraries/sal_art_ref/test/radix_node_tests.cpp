@@ -12,8 +12,6 @@
 #include <sal_art_ref/inline_value.hpp>
 #include <sal_art_ref/leaf_node.hpp>
 #include <sal_art_ref/radix_node.hpp>
-#include <sal_art_ref/version_history.hpp>
-#include <sal_art_ref/version_node.hpp>
 #include <sal_art_ref/versioned.hpp>
 
 using sal_art_ref::smart_address;
@@ -78,25 +76,18 @@ TEST_CASE("node family: sizes and dispatch tiers", "[radix_node]")
 {
    using namespace sal_art_ref;
    // total cachelines: 1 / 3 / 5 / 9 = 128 / 384 / 640 / 1152
-   CHECK(sizeof(suffix_value_node) == 128);
-   CHECK(sizeof(prefix_next_node) == 128);
-   CHECK(sizeof(setlist_tiny_node) == 128);
    CHECK(sizeof(setlist_node<uint8_t>) == 128);
    CHECK(sizeof(setlist_node<uint32_t>) == 128);
-   CHECK(sizeof(bitset1_node) == 128);
    CHECK(sizeof(bitset_r2_node) == 384);
    CHECK(sizeof(bitset_r4_node) == 640);
    CHECK(sizeof(full_radix_node) == 1152);
 
-   CHECK(setlist_tiny_node::tier == dispatch_shape::r1);
-   CHECK(bitset1_node::tier == dispatch_shape::r1);
    CHECK(bitset_r2_node::tier == dispatch_shape::r2);
    CHECK(bitset_r4_node::tier == dispatch_shape::r4);
    CHECK(full_radix_node::tier == dispatch_shape::r8);
 
    // the bitset family carries per-range refcounts (range_ctrs); sparse nodes do not. Every big
-   // tier now has RANGE_COUNT (8) per-range counters — refcount_block_count is the is_big marker.
-   CHECK(bitset1_node::refcount_block_count == sal_art_ref::range_count);
+   // tier has range_count per-range counters — refcount_block_count is the is_big marker.
    CHECK(bitset_r2_node::refcount_block_count == sal_art_ref::range_count);
    CHECK(bitset_r4_node::refcount_block_count == sal_art_ref::range_count);
    CHECK(full_radix_node::refcount_block_count == sal_art_ref::range_count);

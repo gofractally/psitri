@@ -196,3 +196,100 @@ TEST_CASE("a segment's pinned flag survives concurrent state changes", "[sal][se
    cycler.join();
    CHECK(lost == 0);
 }
+
+#include <filesystem>
+
+#include <sal/allocator_impl.hpp>
+#include <sal/allocator_session_impl.hpp>
+#include <sal/smart_ptr_impl.hpp>
+
+namespace
+{
+   struct first_recycle_node : sal::alloc_header
+   {
+      static constexpr sal::header_type type_id = sal::header_type::start_user_type;
+      uint64_t                          magic;
+      first_recycle_node(uint32_t size, sal::ptr_address_seq seq, uint64_t m) noexcept
+          : sal::alloc_header(size, type_id, seq), magic(m)
+      {
+      }
+   };
+}  // namespace
+
+// gofractally/psitri#16, end to end. On a NEW database: a session takes its
+// read lock and reads an object; the compactor then empties that object's
+// segment, the first segment this database ever recycles. Until the session
+// drops its lock the bytes it is reading must stay what they were, however
+// much is allocated meanwhile: the segment may not be handed out again.
+//
+// Before the read-lock fix the lock taken before the first recycle counted
+// for nothing, the provider gave the segment away at once, and the reader's
+// object was overwritten (on Linux, zeroed by the hole punch). A writer that
+// copied a page from such a segment built its new tree from those bytes:
+// inserts lost for good.
+TEST_CASE("a session reading across the first recycled segment of a new database keeps its bytes",
+          "[sal][read_lock_queue][first_recycle]")
+{
+   namespace fs    = std::filesystem;
+   const auto path = fs::temp_directory_path() / "sal_first_recycle_test";
+   fs::remove_all(path);
+   fs::create_directories(path);
+   {
+      sal::runtime_config cfg;
+      cfg.max_pinned_cache_size_mb             = 0;
+      cfg.compact_pinned_unused_threshold_mb   = 1;
+      cfg.compact_unpinned_unused_threshold_mb = 1;
+      cfg.enable_read_cache                    = false;
+      sal::allocator a(path, cfg, false);
+      a.register_type_ops<first_recycle_node>();
+      a.start_background_threads();
+
+      const uint32_t MiB    = 1 << 20;
+      auto           writer = a.create_session();
+      auto           reader = a.create_session();
+
+      // One small object and enough filler to take its segment and the next.
+      sal::ptr_address watched =
+          writer->alloc<first_recycle_node>(uint32_t(128), sal::alloc_hint{}, uint64_t(0xAAAA));
+      std::vector<sal::ptr_address> filler;
+      for (int i = 0; i < 70; ++i)
+         filler.push_back(
+             writer->alloc<first_recycle_node>(MiB, sal::alloc_hint{}, uint64_t(0x1111)));
+      writer->sync(sal::sync_type::none);
+
+      // The reader starts reading: lock, then find the object.
+      auto                      lock = reader->lock();
+      const first_recycle_node* seen =
+          static_cast<const first_recycle_node*>(a.resolve(watched).first);
+      REQUIRE(seen->magic == 0xAAAA);
+
+      // The rest of the segment dies; the compactor moves the watched object out and the
+      // segment becomes the first one this database recycles.
+      for (auto adr : filler)
+         writer->release(adr);
+      bool moved = false;
+      for (int i = 0; i < 6000 && !moved; ++i)
+      {
+         moved = a.resolve(watched).first != seen;
+         if (!moved)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+      REQUIRE(moved);
+
+      // Give the provider time to take the segment if it (wrongly) may, then allocate far
+      // more than a segment: a segment handed out again is written over.
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      std::vector<sal::ptr_address> more;
+      for (int i = 0; i < 300; ++i)
+         more.push_back(
+             writer->alloc<first_recycle_node>(MiB, sal::alloc_hint{}, uint64_t(0x2222)));
+
+      CHECK(seen->magic == 0xAAAA);
+      CHECK(*seen->address() == *watched);
+
+      for (auto adr : more)
+         writer->release(adr);
+      writer->release(watched);
+   }
+   fs::remove_all(path);
+}

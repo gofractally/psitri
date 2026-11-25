@@ -97,9 +97,9 @@ namespace
       return cfg;
    }
 
-   uint64_t root_magic(sal::allocator& a, sal::allocator_session& ses)
+   uint64_t root_magic(sal::allocator& a, sal::allocator_session& ses, uint32_t index = 0)
    {
-      auto root = ses.get_root<recovery_test_node>(sal::root_object_number(0));
+      auto root = ses.get_root<recovery_test_node>(sal::root_object_number(index));
       if (!root)
          return 0;
       auto resolved = a.resolve(root.address());
@@ -283,5 +283,52 @@ TEST_CASE("recovery keeps what the closing sync header of a segment covers",
       auto ses = a.create_session();
       CHECK(root_magic(a, *ses) == 0xEEEE);
    }
+   fs::remove_all(path);
+}
+
+// The roots file was once told apart from an older layout by its size, and a
+// file written on a machine with smaller pages is smaller than this machine's
+// page-rounded size: it was read as the older layout and every root came out
+// wrong. There is one layout; a file that holds the whole table is that table.
+TEST_CASE("a roots file that ends before this machine's page boundary keeps its roots",
+          "[sal][recovery][roots_file]")
+{
+   const auto path = fs::temp_directory_path() / "sal_roots_file_page_size_test";
+   fs::remove_all(path);
+   fs::create_directories(path);
+   {
+      sal::allocator a(path, recovery_test_config(), false);
+      a.register_type_ops<recovery_test_node>();
+      a.start_background_threads();
+      auto ses = a.create_session();
+      auto adr =
+          ses->alloc<recovery_test_node>(uint32_t(128), sal::alloc_hint{}, uint64_t(0xCCCC));
+      (void)ses->set_root(sal::root_object_number(5),
+                          sal::smart_ptr<recovery_test_node>(ses, adr), sal::sync_type::none);
+   }
+   // What a machine with 4 KiB pages would have written.
+   // 1,024 root records of 24 bytes: 24,576 bytes, a whole number of 4 KiB pages.
+   const std::uintmax_t table_4k = 1024 * 24;
+   REQUIRE(fs::file_size(path / "roots") >= table_4k);
+   fs::resize_file(path / "roots", table_4k);
+   {
+      sal::allocator a(path, recovery_test_config(), false);
+      a.register_type_ops<recovery_test_node>();
+      auto ses = a.create_session();
+      CHECK(root_magic(a, *ses, 5) == 0xCCCC);
+   }
+   fs::remove_all(path);
+}
+
+TEST_CASE("a roots file too small to hold the root table is refused", "[sal][recovery][roots_file]")
+{
+   const auto path = fs::temp_directory_path() / "sal_roots_file_too_small_test";
+   fs::remove_all(path);
+   fs::create_directories(path);
+   {
+      sal::allocator a(path, recovery_test_config(), false);
+   }
+   fs::resize_file(path / "roots", 8192);
+   CHECK_THROWS_AS(sal::allocator(path, recovery_test_config(), false), std::runtime_error);
    fs::remove_all(path);
 }

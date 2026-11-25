@@ -972,3 +972,70 @@ TEST_CASE("Small Engine: read-only open is refused with a clear error", "[small]
    auto cur = rs->create_cursor(0);
    REQUIRE(cur.get<std::string>("k") == std::optional<std::string>("v"));
 }
+
+// A root line's reference count has a ceiling: ordinary references stop at
+// 190 and owned snapshots may take it to 254. A reference that cannot be
+// taken must be an error where it is asked for, never a count that is later
+// given back without having been taken.
+TEST_CASE("Small Engine: many owned snapshots of one version do not unbalance its count",
+          "[small][refs]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 16));
+   auto ws = db->start_write_session();
+   {
+      auto tx = ws->start_transaction(0);
+      for (int i = 0; i < 500; ++i)
+         tx.upsert("key" + std::to_string(i), std::string(40, 'v'));
+      tx.commit();
+   }
+   {
+      std::vector<psitri::snapshot_for<engine>> held;
+      for (int i = 0; i < 200; ++i)
+         held.push_back(ws->get_root(0));
+      // More sessions and aborted transactions than the count has room for.
+      for (int i = 0; i < 40; ++i)
+      {
+         try
+         {
+            auto extra = db->start_write_session();
+            auto tx    = extra->start_transaction(0);
+            tx.upsert("scratch", "x");
+            tx.abort();
+         }
+         catch (const std::runtime_error&)
+         {
+            // refusing is fine; miscounting is not
+         }
+      }
+      for (auto& snapshot : held)
+         REQUIRE(snapshot.get<std::string>("key7") == std::optional<std::string>(std::string(40, 'v')));
+   }
+   // Every snapshot is gone; the committed tree must still be whole.
+   for (int round = 0; round < 3; ++round)
+   {
+      auto tx = ws->start_transaction(0);
+      for (int i = 0; i < 500; ++i)
+         REQUIRE(tx.get<std::string>("key" + std::to_string(i)) ==
+                 std::optional<std::string>(std::string(40, 'v')));
+      tx.upsert("more" + std::to_string(round), std::string(300, 'm'));
+      tx.commit();
+   }
+   {
+      auto     rs  = db->start_read_session();
+      auto     cur = rs->create_cursor(0);
+      uint64_t n   = 0;
+      for (cur.seek_begin(); !cur.is_end(); cur.next())
+         ++n;
+      REQUIRE(n == 503);
+   }  // a live cursor would keep the version it reads
+   {
+      auto tx = ws->start_transaction(0);
+      tx.remove_range_counted(std::string_view(), std::string_view("\xff\xff", 2));
+      tx.commit();
+   }
+   ws.reset();
+   db->flush_releases();
+   REQUIRE(db->usage().used_bytes <= 64 * 128);
+}

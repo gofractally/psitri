@@ -107,6 +107,14 @@ namespace start_ref::kv
    class transaction;
    class tree_handle;
 
+   [[gnu::cold, noreturn]] inline void throw_root_references()
+   {
+      throw std::runtime_error(
+          "start_ref::kv: too many references to one version of a root: write sessions and "
+          "transactions can hold it up to 190 references, owned snapshots up to 254; release "
+          "some snapshots");
+   }
+
    // What database::usage() reports. All figures are bytes of arena storage,
    // which is file-backed mapped memory: `mapped` is what the store can have
    // resident and what its data files occupy.
@@ -1400,7 +1408,11 @@ namespace start_ref::kv
       const root_ptr r = db->_live_root[0];
       if (!r.is_null())
       {
-         _t.cow_retain(r);
+         // A refused reference must not be adopted: the session would later
+         // give back a count it never took, and the version would be freed
+         // while its other holders still read it.
+         if (!_t.cow_retain(r))
+            throw_root_references();
          _t.adopt_root(r, 0);
       }
    }
@@ -1615,8 +1627,14 @@ namespace start_ref::kv
          const root_ptr diverged = t.root_handle();
          if (diverged.raw() != it->start_root.raw())
          {
-            t.cow_retain(it->start_root);  // the working re-takes the start ref
-            t.adopt_root(it->start_root, it->start_count);
+            // The working re-takes the start ref. If the version is at its
+            // reference ceiling it cannot; then it holds nothing, and the next
+            // transaction adopts the committed root afresh (or reports the
+            // ceiling where an error can be reported).
+            if (t.cow_retain(it->start_root))
+               t.adopt_root(it->start_root, it->start_count);
+            else
+               t.adopt_root(root_ptr::null(), 0);
             t.cow_release(diverged);  // drop the working's diverged ref
          }
          it->lock.unlock();  // reverse order
@@ -1643,7 +1661,7 @@ namespace start_ref::kv
          const root_ptr nr  = t.root_handle();
          const root_ptr old = db->_live_root[r.index];
          if (!nr.is_null() && !t.cow_retain(nr))
-            throw std::runtime_error("start_ref::kv: root retain refused");
+            throw_root_references();
          db->_live_root[r.index] = nr;
          db->_live_raw[r.index].store(encode_root(nr), std::memory_order_seq_cst);
          db->_arena.set_root(r.index, encode_root(nr));
@@ -1694,7 +1712,7 @@ namespace start_ref::kv
       if (live.raw() != old.raw())
       {
          if (!live.is_null() && !t.cow_retain(live))
-            throw std::runtime_error("start_ref::kv: root retain refused");
+            throw_root_references();
          t.adopt_root(live, 0);
          t.cow_release(old);
       }
@@ -1714,7 +1732,11 @@ namespace start_ref::kv
          const root_ptr r = _db->_live_root[i];
          if (!r.is_null())
          {
-            _aux[i]->cow_retain(r);  // the working takes its ref
+            if (!_aux[i]->cow_retain(r))  // the working takes its ref
+            {
+               _aux[i].reset();
+               throw_root_references();
+            }
             _aux[i]->adopt_root(r, 0);
          }
       }

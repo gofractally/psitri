@@ -561,8 +561,12 @@ namespace sal
        root_object_number       ro,
        tree_id                  tid) noexcept
    {
-      // MVCC removed: no version CB / version number — a version-free sync record.
-      return sync_root_info{*ro, *tid.root, *null_ptr_address, 0};
+      // root_version is the commit's stamp. The same stamp goes into the root's record in
+      // the roots file and into every sync header this commit writes, so power-loss
+      // recovery can tell which of the two saw the newer commit of a root. (A header is
+      // gone once its segment is compacted and recycled, so the newest header that
+      // survives may be older than the roots file.)
+      return sync_root_info{*ro, *tid.root, *null_ptr_address, *next_commit_stamp()};
    }
 
    template <typename T>

@@ -110,12 +110,14 @@ namespace sal
       inline std::atomic<uint64_t> last_commit_stamp{0};
    }
 
-   /// The stamp a commit's sync header carries. Power-loss recovery orders the commits it
-   /// finds by it, so it must keep increasing across a restart of the machine, which a
-   /// steady clock (time since boot) does not. It is wall-clock microseconds, never less
-   /// than one more than the last stamp given out in this process; recovery raises that
-   /// floor above every stamp it finds on disk (commit_stamp_at_least). What is left: a
-   /// wall clock set backwards across a restart in which no recovery ran.
+   /// The stamp of a commit of a root. It is written to the root's record in the roots
+   /// file and into the sync headers of the commit; power-loss recovery takes, for each
+   /// root, the commit with the newest stamp. So it must keep increasing across a restart
+   /// of the machine, which a steady clock (time since boot) does not. It is wall-clock
+   /// microseconds, never less than one more than the last stamp given out in this
+   /// process; opening a store and recovering one raise that floor above every stamp
+   /// found in it (commit_stamp_at_least), so a clock set backwards does not reorder
+   /// commits either.
    inline usec_timestamp next_commit_stamp() noexcept
    {
       const uint64_t wall = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(

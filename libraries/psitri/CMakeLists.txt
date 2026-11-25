@@ -1,3 +1,8 @@
+# DEPRECATED: the original engine (psitri::database). It is kept building
+# because psitrimdbx, its own tests and some benchmarks still link it, but it
+# is no longer part of the cross-engine conformance suite and gets no new
+# concept features (gofractally/psitri#2). New code uses the Large Engine
+# (sal_art_ref, psitri::big_engine) or the Small Engine (start_ref).
 add_library( psitri
              src/database.cpp
              src/node/leaf.cpp

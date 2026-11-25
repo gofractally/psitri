@@ -19,10 +19,9 @@
 #include <adb/testing/kv_conformance.hpp>  // shared bounds conformance (one check, all engines)
 #include <start_ref/kv.hpp>        // part's native psitri-shaped API (start_ref::kv::database)
 
-#include <psitri/cursor.hpp>
-#include <psitri/database.hpp>
-#include <psitri/transaction.hpp>
-#include <psitri/write_session_impl.hpp>
+// The original engine (libraries/psitri, psitri::database) is deprecated and
+// no longer runs here: it does not implement the concept's typed values and
+// multi-root features and will not be given them (gofractally/psitri#2).
 
 #include <start_ver/kv.hpp>  // the 4th engine: vpart must pass standalone (Dan)
 #include <gcart/kv.hpp>      // the 5th engine: gcart (sal_hybrid GC-ART)
@@ -31,7 +30,6 @@
 // fails HERE, by name, before a single test runs.
 static_assert(adb::kv_database<sal_art_ref::kv::database>);
 static_assert(adb::kv_database<start_ref::kv::database>);
-static_assert(adb::kv_database<psitri::database>);
 static_assert(adb::kv_database<start_ver::kv::database>);
 static_assert(adb::kv_database<gcart::kv::database>);  // gcart: cursor + get_root enforced here
 // gcart's snapshot cursor is fully mergeable (delta_art tier-capable).
@@ -931,8 +929,6 @@ int main()
    auto want = [&](const char* n) { return !only || std::string(only) == n; };
    bool h = !want("sal_art_ref") ||
             guarded("sal_art_ref", [&] { return run<sal_art_ref::kv::database>("sal_art_ref", tmp("kvcompat_sal_art_ref")); });
-   bool p = !want("psitri") ||
-            guarded("psitri", [&] { return run<psitri::database>("psitri", tmp("kvcompat_psitri")); });
    bool a = !want("start_ref") ||
             guarded("start_ref", [&] { return run<start_ref::kv::database>("start_ref", tmp("kvcompat_start_ref")); });
    bool v = !want("start_ver") ||
@@ -946,13 +942,11 @@ int main()
    std::printf("\n== recovery (clean close + reopen) ==\n");
    bool rc = true;
    rc &= guarded("rec:sal_art_ref", [&] { return recover<sal_art_ref::kv::database>("sal_art_ref", tmp("kvrec_sar")); });
-   rc &= guarded("rec:psitri",      [&] { return recover<psitri::database>("psitri", tmp("kvrec_psitri")); });
    rc &= guarded("rec:start_ref",   [&] { return recover<start_ref::kv::database>("start_ref", tmp("kvrec_sref")); });
    rc &= guarded("rec:start_ver",   [&] { return recover<start_ver::kv::database>("start_ver", tmp("kvrec_sver")); });
    rc &= guarded("rec:gcart",       [&] { return recover<gcart::kv::database>("gcart", tmp("kvrec_gcart")); });
 
-   std::printf("RESULT: sal_art_ref %s, psitri %s, start_ref %s, start_ver %s, recovery %s\n",
-               h ? "PASS" : "FAIL", p ? "PASS" : "FAIL", a ? "PASS" : "FAIL", v ? "PASS" : "FAIL",
-               rc ? "PASS" : "FAIL");
-   return (h && p && a && v && rc) ? 0 : 1;
+   std::printf("RESULT: sal_art_ref %s, start_ref %s, start_ver %s, recovery %s\n",
+               h ? "PASS" : "FAIL", a ? "PASS" : "FAIL", v ? "PASS" : "FAIL", rc ? "PASS" : "FAIL");
+   return (h && a && v && rc) ? 0 : 1;
 }

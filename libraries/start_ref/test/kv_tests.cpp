@@ -730,3 +730,30 @@ TEST_CASE("kv: the last reference to a deep version is dropped on a small stack"
       require_drained(*db);
    }
 }
+
+// gofractally/psitri#35 item 4. A typed value may not use a type number the
+// engine keeps for itself: upsert needs no registration, so the check has to
+// be in what makes a type storable.
+namespace
+{
+   template <uint16_t Id>
+   struct numbered_value
+   {
+      static constexpr uint16_t type_id = Id;
+      struct t_pod
+      {
+         uint64_t n;
+         static void retain(void*, const t_pod&) {}
+         static void release(void*, const t_pod&) {}
+      };
+      uint64_t n = 0;
+      t_pod    take_pod() && { return {n}; }
+      static numbered_value make_from_pod(const t_pod& p, bool) { return {p.n}; }
+   };
+   static_assert(start_ref::kv::storable<numbered_value<1>>);
+   static_assert(start_ref::kv::storable<numbered_value<65534>>);
+   static_assert(!start_ref::kv::storable<numbered_value<0>>,
+                 "type number 0 is plain bytes");
+   static_assert(!start_ref::kv::storable<numbered_value<65535>>,
+                 "type number 65535 is the directory of a chunked value");
+}  // namespace

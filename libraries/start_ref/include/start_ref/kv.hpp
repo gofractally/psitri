@@ -1300,12 +1300,26 @@ namespace start_ref::kv
                drained = db->_retired.size() != before;
             }
          }
-         const bool queued = db->_rel_tail.load(std::memory_order_acquire) !=
-                             db->_rel_head.load(std::memory_order_acquire);
-         if (queued || drained)
-            db->flush_releases();
+         // Wait for the releaser to get through what was queued when we came
+         // in, and no longer: other writers can keep adding to the queue for
+         // ever, and this runs inside a writer's transaction. Bounded in time
+         // as well (reclaim_max_wait), in case the releaser is slow or is not
+         // being scheduled.
+         const uint32_t upto   = db->_rel_head.load(std::memory_order_acquire);
+         const bool     queued = db->_rel_tail.load(std::memory_order_acquire) != upto;
+         if (queued)
+         {
+            const auto until = std::chrono::steady_clock::now() + reclaim_max_wait;
+            while (int32_t(db->_rel_tail.load(std::memory_order_acquire) - upto) < 0 &&
+                   std::chrono::steady_clock::now() < until)
+               std::this_thread::yield();
+         }
          return queued || drained;
       }
+      // The longest one call of the reclaim hook waits for the releaser. A
+      // remove that the reserve cannot serve calls it once; an ordinary
+      // allocation at most 16 times before it reports the store full.
+      static constexpr std::chrono::microseconds reclaim_max_wait{500};
       static bool defer_cb_(void* ctx, uint64_t raw) noexcept
       {
          return static_cast<database*>(ctx)->rel_push_(raw);

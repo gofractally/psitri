@@ -4,14 +4,16 @@
 // calls. See heart/test/heart_kv.hpp for the canonical shape this mirrors and
 // programs/kv_compat_test.cpp for the conformance driver.
 //
-// Engine: the verbatim-hkv tree on the part arena (part/hkv/tree.hpp +
-// part_alloc), with the part COW extension supplying snapshot semantics:
-// commit retains the new root for the database's live-root slot and releases
-// the old one; snapshot cursors pin the live root (the 191..254 refcount band)
-// and everything reachable under the pin is immutable by the COW discipline
-// (SPEC §7), so cursor traversal needs no further refcounting. Values are POD
-// inline byte strings (<= 126 B): COW clones are memcpys and every value byte
-// lives in the arena.
+// Engine: the hkv tree on the start_ref arena (hkv/tree.hpp + part_alloc),
+// with the copy-on-write extension supplying snapshot semantics: commit
+// retains the new root for the database's live-root slot and releases the old
+// one. A reader's cursor protects the root it reads by publishing it in a
+// reader slot (it takes no reference); an owned snapshot (get_root) holds a
+// reference. Everything reachable from a protected root is immutable by the
+// copy-on-write discipline (SPEC §7), so traversal needs no further counting.
+// A value is a two-byte type tag written by the engine followed by the
+// caller's bytes, stored in the leaf: in the line arena up to 64 lines, in
+// the large-value arena up to 2 MiB, and in chunks beyond that.
 #pragma once
 #include <system_error>
 #include <pthread.h>
@@ -364,9 +366,10 @@ namespace start_ref::kv
    }
 
    // any_value — pointer to the value SLOT in the tree, no copy; inside a
-   // write transaction the transaction itself is the pin (invalidated by a
-   // later write to the same key). as<T>() retains; bytes() on a typed slot
-   // is invalid_type; raw_pod() is the expert/merger identity path.
+   // write transaction the transaction itself is the pin. It is invalidated
+   // by the transaction's next write of ANY key: a write elsewhere can split,
+   // rebuild or free the leaf this points into. as<T>() retains; bytes() on a
+   // typed slot is invalid_type; raw_pod() is the expert/merger identity path.
    class any_value
    {
      public:

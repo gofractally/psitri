@@ -17,9 +17,11 @@
 // qualify a segment, an every-other-line 50%-free segment must never be
 // claimed), else the file grows.
 //
-// Refcounts are per LINE (not per node): u8, writers clone at 190, reader pins
-// own 191..254, and the increment that would store 255 throws ref_overflow —
-// counts can never overflow and nothing is ever pinned-stuck (SPEC §9).
+// Refcounts are per LINE (not per node): u8. A writer's retain is refused at
+// 190 and the writer clones the line instead; owned snapshots and recovery
+// may count up to 254, and the increment that would store 255 throws
+// ref_overflow, so a count can never wrap (SPEC §9). Readers do not count at
+// all: each publishes the root it reads in one of 64 reader slots.
 //
 // Grain-parameterized (large-value second arena): arena_t<Geo> derives all its
 // size constants from Geo. line_geometry (128 B grain) reproduces today's exact

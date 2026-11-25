@@ -1,16 +1,20 @@
 // kv_tree<T> — the headerless adaptive radix map of design4.md.
 //
-// Tiers implemented in this v1:
-//   leaf<T>      value_ptr  — suffix (rest of key) + value, one alloc (lazy expansion)
-//   prefix_node  prefix_node— long shared prefix + one next pointer (path compression)
-//   setlist      setlist_u8 — sparse byte router, 1 cacheline, up to 16 branches (R1)
-//   node_full    node_full  — dense direct-index router, full_lines_v lines, skip-CL0 (SFULL)
+// Tiers:
+//   leaf<T>      value_ptr / value_large — suffix (rest of key) + value, one alloc
+//   prefix_node  prefix_node — long shared prefix + one next pointer (path compression)
+//   setlist      setlist_u8  — sparse byte router, 1 cacheline, up to 16 branches
+//   cnode<N>     c2 / c4 / c8 — segmented routers between the setlist and the full node
+//   node_full    node_full   — dense direct-index router, full_lines_v lines, skip-CL0
+//   node_fullx / node_cx     — the explicit forms a shared full / segmented router is
+//                              cloned into, which share the original's lines
 //
-// Routing is off the pointer tag: setlist/prefix read the node (R1); node_full
+// Routing is off the pointer tag: setlist/prefix read the node; node_full
 // computes the segment line from the key byte, PREFETCHES it, then reads the slot
-// (skip-CL0). Growth: a full setlist widens to node_full. Mutation is in place
-// (no COW). The narrow bitset tiers (r32/64/128, c2/c4/c8) and wide setlists are
-// the documented next step; the dispatch and growth scaffolding already fits them.
+// (skip-CL0). Growth climbs setlist -> c2 -> c4 -> c8 -> node_full. With an
+// allocator that has reference-count hooks the tree is copy-on-write: a node
+// shared with another version is cloned before it is changed (see "part COW
+// extension" below); with a plain allocator mutation is in place.
 #pragma once
 #include <bit>
 #include <map>
@@ -696,11 +700,10 @@ namespace detail  // implementation types & node helpers — not part of the pub
       struct no_base_t
       {
       };
-      // value_large grain (16 KB) vs line grain (128 B): the index field is
+      // value_large grain (32 KiB) vs line grain (128 B): the index field is
       // identical; only the multiplier (and base) differ. (raw & ~0xF) is the
       // index << 4, so the deref shift is log2(grain) - 4 (128 B -> 3, the line
-      // path; 16 KB -> 10). One predictable, almost-always-false tag compare; the
-      // small path is byte-identical to before.
+      // path; 32 KiB -> 11). One predictable, almost-always-false tag compare.
       static constexpr unsigned large_deref_shift_ =
           large_ok_ ? unsigned(std::countr_zero(start_ref::large_grain_bytes)) - 4u : 0u;
       static_assert(!large_ok_ || (start_ref::large_grain_bytes &
@@ -3137,8 +3140,9 @@ namespace detail  // implementation types & node helpers — not part of the pub
       // term-less router collapses into its child (edge byte + inline prefix absorbed, a
       // prefix node allocated only when the child can't take them for free), and a sparse
       // dense node (full/cN, <= 12 branches) de-widens back to a setlist. Allocating
-      // collapses are best-effort: on bad_alloc the tree simply stays unshrunk. Ancestors
-      // beyond the deepest 64 levels are left unshrunk (the window covers any practical key).
+      // collapses are best-effort: on bad_alloc the tree simply stays unshrunk. The whole
+      // path is recorded (64 levels inline, the rest on the heap), so every ancestor is
+      // considered however deep the key.
       // NOTE: not noexcept — removing a non-POD value from a bucket rebuilds it (allocates),
       // and a custom key_codec may allocate. Nothrow in practice for POD values / radix mode.
       bool remove(key_param k)

@@ -116,8 +116,16 @@ A full store is never stuck:
 - **Raise the limit.** Close the store and open it with a larger
   `max_segments`; the same files are used and nothing is rewritten.
   Lowering it is accepted only down to the number of segments the store
-  already has (`usage().mapped_bytes`); below that, `open` throws
-  `std::runtime_error` naming both sizes, before mapping or changing anything.
+  already has (`usage().mapped_bytes`, and for the large-value arena
+  `usage().large_mapped_bytes` against `min(max_segments, 512)` of its 2 GiB
+  segments); below that, `open` throws `std::runtime_error` naming both
+  sizes. Both arenas are checked before either is opened, so a refused open
+  has not mapped, locked or written anything. The size that counts is the
+  larger of the recorded segment count and what the data file holds: the
+  file is what gets mapped. After a stop in the middle of growing, the file
+  can be a few segments longer than the count; such a store is refused for a
+  limit between the two until it has been opened once with a limit that
+  covers the file, which trims it.
 
 Overwriting a value is an ordinary write and is refused like an insert. Freed
 space is reused in place; nothing is moved or compacted. Under the workload

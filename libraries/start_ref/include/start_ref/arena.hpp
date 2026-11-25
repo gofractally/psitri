@@ -456,16 +456,25 @@ namespace start_ref
                 " MiB); open it with max_segments of at least " + std::to_string(existing));
       }
       // How many segments the arena in `dir` occupies, read without mapping
-      // or changing anything; 0 when there is none. The larger of the
-      // recorded count and what the data file holds, since a stop during
-      // growth can leave the two apart.
+      // or changing anything; 0 when there is none. The largest of the
+      // recorded count and what each of the three mapped files holds: a stop
+      // during growth, or during the trimming that follows one, can leave
+      // any of them longer than the count, and every one of them is mapped
+      // whole.
       static uint64_t existing_segments_(const std::filesystem::path& dir)
       {
          uint64_t        segments = 0;
          std::error_code ec;
-         const auto      bytes = std::filesystem::file_size(dir / "data.part", ec);
-         if (!ec)
-            segments = (uint64_t(bytes) + segment_bytes - 1) / segment_bytes;
+         const std::pair<const char*, uint64_t> files[] = {
+             {"data.part", segment_bytes},
+             {"free.part", std::bit_ceil(sizeof(seg_freeset))},
+             {"refs.part", lines_per_segment}};
+         for (const auto& [name, block] : files)
+         {
+            const auto bytes = std::filesystem::file_size(dir / name, ec);
+            if (!ec)
+               segments = std::max<uint64_t>(segments, (uint64_t(bytes) + block - 1) / block);
+         }
          if (std::FILE* f = std::fopen((dir / "meta.part").c_str(), "rb"))
          {
             alignas(meta_hdr) unsigned char raw[sizeof(meta_hdr)];

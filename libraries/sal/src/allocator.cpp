@@ -2402,10 +2402,11 @@ namespace sal
       auto& provider_state = _mapped_state->_segment_provider;
 
       // Process all available recycled segments
+      segment_number segs[256];
       while (auto available = _mapped_state->_read_lock_queue.available_to_pop())
       {
-         segment_number segs[available];
-         int popped = _mapped_state->_read_lock_queue.pop_recycled_segments(segs, available);
+         int popped = _mapped_state->_read_lock_queue.pop_recycled_segments(
+             segs, int(std::min<uint32_t>(available, std::size(segs))));
          // Set the recycled segment in the free_segments bitset and punch
          // holes to release disk space and commit charge immediately.
          for (int i = 0; i < popped; ++i)

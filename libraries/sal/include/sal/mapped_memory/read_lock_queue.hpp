@@ -43,7 +43,11 @@ namespace sal
          }
 
         private:
-         ucc::padded_atomic<uint64_t> _lock_ptr{uint64_t(-1)};
+         // High half: the queue's end position as last broadcast, 0 for a queue nothing has
+         // been pushed to. Low half: unlocked. (The high half must NOT start at all ones:
+         // lock() copies it into the low half, and all ones there means "unlocked", so a
+         // lock taken before the first push would have locked nothing.)
+         ucc::padded_atomic<uint64_t> _lock_ptr{uint64_t(uint32_t(-1))};
       };
 
       /**
@@ -104,6 +108,9 @@ namespace sal
          {
             for (auto& lock : _session_locks)
                lock.unlock();
+            // Whatever the mapped state held, every session must copy the queue's real end
+            // position when it next locks.
+            broadcast_end_ptr(uint32_t(recycled_segments.get_push_pos()));
          }
 
          /// Recovery: forget segments queued for recycling. Their state is
@@ -200,10 +207,15 @@ namespace sal
             if (min_read_pos == uint32_t(-1))
                break;
          }
-         // this works even when it wraps around because the maximum difference
-         // between the two positions is max_segment_count which is less than
-         // 2^31
-         return min_read_pos - uint32_t(recycled_segments.get_read_pos());
+         // A session can hold a position BEHIND the pop position. lock() copies the end
+         // position it was last told and then stores it, in two steps; between them the
+         // compactor can push and the provider pop, and the stored position is then one the
+         // queue has already passed. That session needs nothing from the popped segments (it
+         // locked after they were emptied), but its position must not be subtracted as if it
+         // were ahead: unsigned, the difference is about 2^32. Until it unlocks, nothing more
+         // is handed out.
+         const int32_t available = int32_t(min_read_pos - pop_pos);
+         return available > 0 ? uint32_t(available) : 0;
          static_assert(max_segment_count < (1ull << 31));
       }
 

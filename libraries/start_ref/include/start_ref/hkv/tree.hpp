@@ -52,13 +52,11 @@ namespace start_ref::hkv
 {
    // Compile-time structural policy — a flag set, combinable with operator|:
    //   kv_tree<T>                              plain adaptive-radix
-   //   kv_tree<T, mode::buckets>               last-mile buckets from the root
-   //   kv_tree<T, mode::adaptive | mode::dense_tiers>
+   //   kv_tree<T, mode::dense_tiers>
+   // (Bits 0 and 1 selected bucket layouts that have been removed.)
    enum class mode : unsigned
    {
       none        = 0,
-      buckets     = 1u << 0,  // terminals are last-mile buckets (collapse sparse/deep tails)
-      adaptive    = 1u << 1,  // radix that collapses deep-narrow leaf-splits to buckets
       dense_tiers = 1u << 2,  // allow the segmented-bitset cnode routers (setlist→cN→full)
       wide_stems  = 1u << 3,  // sparse routers consume 2 bytes/hop (setlist_u16); re-stride if dense
    };
@@ -2215,7 +2213,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
 
      public:
       // Remove `key` if present; returns true iff it was found and removed. The structure
-      // SHRINKS on the way out: empty routers/buckets are freed (cascading up), a router
+      // SHRINKS on the way out: empty routers are freed (cascading up), a router
       // whose only payload is its term collapses to the term handle, a single-branch
       // term-less router collapses into its child (edge byte + inline prefix absorbed, a
       // prefix node allocated only when the child can't take them for free), and a sparse
@@ -2223,8 +2221,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
       // collapses are best-effort: on bad_alloc the tree simply stays unshrunk. The whole
       // path is recorded (64 levels inline, the rest on the heap), so every ancestor is
       // considered however deep the key.
-      // NOTE: not noexcept — removing a non-POD value from a bucket rebuilds it (allocates),
-      // and a custom key_codec may allocate. Nothrow in practice for POD values / radix mode.
+      // NOTE: not noexcept — a custom key_codec may allocate, and the recorded path
+      // spills to the heap past 64 levels.
       bool remove(key_param k)
       {
          scratch_t        ks_;
@@ -2438,7 +2436,7 @@ namespace detail  // implementation types & node helpers — not part of the pub
             case K::c4:           ++d.c4; break;
             case K::c8:           ++d.c8; break;
             case K::node_full:    ++d.full; break;
-            case K::bucket:       return 0;  // census doesn't descend buckets
+            case K::bucket:       return 0;  // reserved tag: never produced
             case K::null:         return 0;  // exhaustive (no default)
          }
          const router_hdr* rh = static_cast<const router_hdr*>(deref_(cur));
@@ -4188,7 +4186,8 @@ namespace detail  // implementation types & node helpers — not part of the pub
       Ptr    root_handle() const noexcept { return root_; }
       size_t size_hint() const noexcept { return count_; }
 
-      // TEMP shape audit: single-child routers + node histogram + avg leaf depth.
+      // Shape audit for the library's tests: single-child routers, a node histogram
+      // and the average leaf depth.
       struct shape_stats
       {
          size_t total = 0, routers = 0, setlist = 0, setlist1 = 0, router1 = 0, prefix = 0,

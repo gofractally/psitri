@@ -334,10 +334,14 @@ namespace start_ref
             // A store that asked for synchronization must not carry a clean
             // mark on storage ahead of them: after a power loss the next open
             // would trust maps that never arrived.
+            // The mark below is always synced, whatever the mode, so the
+            // maps are always written out first, and synchronously: an
+            // asynchronous request could still let the mark arrive first.
             if (_derived_ok && _free && _refs)
             {
-               _free->sync(_cfg.sync_mode);
-               _refs->sync(_cfg.sync_mode);
+               const sync_type st = std::max(_cfg.sync_mode, sync_type::msync_sync);
+               _free->sync(st);
+               _refs->sync(st);
             }
             _hdr->clean.store(_derived_ok ? 1 : 0, std::memory_order_relaxed);
             _meta->sync(sync_type::full);

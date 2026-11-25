@@ -1,0 +1,34 @@
+Tree at f195607 (old) and with cow_shared_ looking at an implicit router's lines (new), interleaved, load average 17-22.
+bench: 2,000,000 one-upsert transactions on one key, five repetitions (tx/s); churn: no reader, 100k rows, 3M updates; segments: 100,000 one-upsert transactions over 20,000 keys.
+old: bench 5725342 5779825 5688931 5502474 5621282  churn 630091 updates/s segments 1518918 tx/s
+new: bench 5765760 5668980 5651858 5726241 5550889  churn 629359 updates/s segments 1377183 tx/s
+old: bench 5613507 5544786 5551920 5586059 5364235  churn 633136 updates/s segments 1516458 tx/s
+new: bench 5769114 5674506 5344624 5682958 5753019  churn 635032 updates/s segments 1399397 tx/s
+old: bench 5488491 5667974 5746035 5658574 5703492  churn 631110 updates/s segments 1518076 tx/s
+new: bench 5777636 5798790 5709141 5735655 5647735  churn 638069 updates/s segments 1427310 tx/s
+old: bench 5695424 5715527 5619740 5353176 5885072  churn 633691 updates/s segments 1477612 tx/s
+new: bench 5508702 5646373 5717271 5866085 5824733  churn 638403 updates/s segments 1512826 tx/s
+old: bench 5677417 5667549 5678771 5582174 5662728  churn 633608 updates/s segments 1426005 tx/s
+new: bench 5858406 5717620 5753076 5644660 5809371  churn 620536 updates/s segments 1473190 tx/s
+
+segments workload, ten more pairs (tx/s):
+old 1486069
+new 1434885
+old 1474536
+new 1449331
+old 1450412
+new 1491912
+old 1488976
+new 1466250
+old 1443421
+new 1448911
+old 1474467
+new 1463302
+old 1443417
+new 1438889
+old 1436686
+new 1453248
+old 1463929
+new 1358800
+old 1353027
+new 1344052

@@ -184,3 +184,64 @@ TEST_CASE("cow on an unshared tree degenerates to in-place (no clones)")
       free_total += a.freeset_of(s).free_lines();
    REQUIRE(free_total == uint64_t(a.num_segments()) * lines_per_segment);
 }
+
+// gofractally/psitri#31, at the tree itself. A wide router is "implicit": its
+// branch lines follow its head. When a later version copies it, the copy is
+// "explicit" and retains those very lines, so the original's head count no
+// longer says whether its lines are shared. A working tree handed the
+// original with one reference to its head must still not write into them.
+TEST_CASE("an implicit router whose lines a newer version retains is not written in place")
+{
+   arena_config c;
+   c.dir = tmp_dir("implicit");
+   arena a(c);
+   {
+      auto   ses = a.start_session();
+      auto   tx  = ses.start_transaction(0);
+      tree_t live{part_alloc<uint64_t>(&ses)};
+      auto key = [](int first, int n) {
+         std::string k;
+         k.push_back(char(first));
+         return k + "key" + std::to_string(n);
+      };
+      for (int n = 0; n < 3; ++n)
+         for (int i = 0; i <= 255; ++i)
+            live.cow_insert(key((i * 97) % 256, n), uint64_t(1000 + n));
+      const auto v1 = live.root_handle();
+      REQUIRE(v1.tag() == hkv::detail::K::node_full);  // an implicit 256-way router
+      REQUIRE(live.cow_retain(v1));                    // a snapshot of version 1
+
+      // version 2: the root is copied; the copy shares version 1's lines
+      live.cow_insert(key(5, 0), uint64_t(2000));
+      REQUIRE(live.root_handle().raw() != v1.raw());
+      REQUIRE(a.ref(uint32_t(v1.raw() >> 4)) == 1);  // only the snapshot holds version 1's head
+
+      // a second working tree takes over the snapshot's reference and writes
+      tree_t old{part_alloc<uint64_t>(&ses)};
+      old.adopt_root(v1, 0);
+      old.cow_insert(key(150, 1), uint64_t(9999));  // overwrite an existing value
+      old.cow_insert(key(150, 7), uint64_t(7777));  // and add a key under the same branch
+      uint64_t out = 0;
+      REQUIRE(old.find(std::string_view(key(150, 1)), out));
+      REQUIRE(out == 9999);
+
+      // version 2 has seen none of it
+      REQUIRE(live.find(std::string_view(key(150, 1)), out));
+      REQUIRE(out == 1001);
+      REQUIRE_FALSE(live.find(std::string_view(key(150, 7)), out));
+      REQUIRE(live.find(std::string_view(key(5, 0)), out));
+      REQUIRE(out == 2000);
+      // and removing through the old version leaves version 2 whole as well
+      REQUIRE(old.cow_remove(key(151, 1)));
+      REQUIRE(live.find(std::string_view(key(151, 1)), out));
+      REQUIRE(out == 1001);
+
+      for (tree_t* t : {&old, &live})
+      {
+         t->cow_release(t->root_handle());
+         t->adopt_root(decltype(v1)::null());
+      }
+      tx.commit();
+   }
+   REQUIRE(a.used_bytes() == 0);  // nothing leaked, nothing freed twice
+}

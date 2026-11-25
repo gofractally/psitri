@@ -1081,3 +1081,64 @@ TEST_CASE("Small Engine: a second open of a store that is already open is refuse
    db.reset();
    rs.reset();
 }
+
+// If the tree cannot be walked after an unclean stop, open must fail, and
+// keep failing: a failed recovery must not leave the store marked clean, or
+// the next open would trust a half-rebuilt free map and hand out live lines.
+TEST_CASE("Small Engine: a store that cannot be recovered is refused every time",
+          "[small][kill][damage]")
+{
+   temporary_directory tmp;
+   const auto          cfg = small_config(psitri::sync_mode::none, 16);
+   const model         m{1000, 20};
+   const auto          killed = run_and_kill(tmp.path, cfg, m, 20000);
+   REQUIRE(WIFSIGNALED(killed.status));
+   REQUIRE_FALSE(database::closed_cleanly(tmp.path));
+
+   // Point root slot 0 far outside the arena, as a torn or lost write could.
+   const auto    meta        = tmp.path / "meta.part";
+   const long    root_offset = 32;  // start_ref::arena_t::meta_hdr::roots[0]
+   std::uint64_t original    = 0;
+   {
+      std::FILE* f = std::fopen(meta.c_str(), "r+b");
+      REQUIRE(f);
+      REQUIRE(std::fseek(f, root_offset, SEEK_SET) == 0);
+      REQUIRE(std::fread(&original, 8, 1, f) == 1);
+      REQUIRE(original != 0);
+      const std::uint64_t damaged =
+          (original & 0xF) | (std::uint64_t(0x0FFFFFF0) << 4) | (std::uint64_t(1) << 40);
+      REQUIRE(std::fseek(f, root_offset, SEEK_SET) == 0);
+      REQUIRE(std::fwrite(&damaged, 8, 1, f) == 1);
+      std::fclose(f);
+   }
+   for (int attempt = 0; attempt < 3; ++attempt)
+   {
+      try
+      {
+         database::open(tmp.path, psitri::open_mode::open_existing, cfg);
+         FAIL("a store with a root outside the arena was opened");
+      }
+      catch (const std::runtime_error& e)
+      {
+         INFO(e.what());
+         REQUIRE(std::string(e.what()).find("not closed cleanly") != std::string::npos);
+      }
+      REQUIRE_FALSE(database::closed_cleanly(tmp.path));
+   }
+   // With the root slot restored the same files recover completely.
+   {
+      std::FILE* f = std::fopen(meta.c_str(), "r+b");
+      REQUIRE(f);
+      REQUIRE(std::fseek(f, root_offset, SEEK_SET) == 0);
+      REQUIRE(std::fwrite(&original, 8, 1, f) == 1);
+      std::fclose(f);
+   }
+   {
+      auto db = database::open(tmp.path, psitri::open_mode::open_existing, cfg);
+      REQUIRE(db->recovered_on_open());
+      auto rs  = db->start_read_session();
+      auto cur = rs->create_cursor(0);
+      REQUIRE(m.verify(cur) >= killed.acknowledged);
+   }
+   REQUIRE(usage_after_emptying(tmp.path, cfg).used_bytes <= 64 * 128);
+}

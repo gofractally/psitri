@@ -289,7 +289,8 @@ namespace start_ref
                   _hdr->seg_bytes != segment_bytes || _hdr->page_bytes != disk_page_bytes)
             throw std::runtime_error("part: meta geometry mismatch");
 
-         _was_clean = _hdr->clean.load(std::memory_order_relaxed) != 0;
+         _was_clean  = _hdr->clean.load(std::memory_order_relaxed) != 0;
+         _derived_ok = _was_clean;
          _hdr->clean.store(0, std::memory_order_relaxed);
          // The free map and reference counts are never synced, so after a
          // power loss they are only trustworthy if the "open" mark got to
@@ -318,10 +319,13 @@ namespace start_ref
 
       ~arena_t()
       {
-         // Clean shutdown: derived state on disk is now trustworthy.
+         // Clean shutdown: derived state on disk is trustworthy, provided it
+         // was when this arena opened or has been rebuilt since. An arena
+         // that was found unclean and not rebuilt (recovery failed, or the
+         // owner gave up part-way through opening) stays marked unclean.
          if (_hdr)
          {
-            _hdr->clean.store(1, std::memory_order_relaxed);
+            _hdr->clean.store(_derived_ok ? 1 : 0, std::memory_order_relaxed);
             _meta->sync(sync_type::full);
          }
       }
@@ -521,6 +525,7 @@ namespace start_ref
       // ── recovery (SPEC §10) — single-threaded by contract ─────────────────
       void rebuild_begin()
       {
+         _derived_ok = false;  // until rebuild_end: a rebuild that stops half-way is not clean
          const uint32_t nseg = num_segments();
          for (uint32_t s = 0; s < nseg; ++s)
             freeset_(s).init(true);
@@ -595,6 +600,7 @@ namespace start_ref
             for (auto& d : _segs[s].dirty)
                d.store(0, std::memory_order_relaxed);
          }
+         _derived_ok = true;
       }
 
       uint32_t num_segments() const noexcept
@@ -851,6 +857,7 @@ namespace start_ref
       std::atomic<uint64_t> _reader_roots[max_read_sessions] = {};
       arena_stats                           _stats;
       bool                                  _was_clean = false;
+      bool                                  _derived_ok = false;  // free map + counts may be marked clean at close
       void*                                 _companion = nullptr;  // -> large_arena (type-erased)
    };
 

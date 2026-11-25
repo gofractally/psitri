@@ -53,15 +53,15 @@ change to how nodes own their lines has to be made in both.
 
 - Power loss and operating-system crash are untested for every sync mode. The
   rebuild makes the derived files irrelevant to that case, but nothing checks
-  that the data pages a root points to reached storage.
-- `msync` results on data pages are ignored (`arena::sync_segment_`).
+  that the data pages a root points to reached storage (#11).
+- `msync` results on data pages are ignored (`arena::sync_segment_`) (#11).
 - `sync_mode::mprotect` protects nothing here, and
-  `write_protect_on_commit` / `checksum_on_commit` are ignored.
+  `write_protect_on_commit` / `checksum_on_commit` are ignored (#12).
 - There is no checksum on nodes or root slots; a damaged image is detected
-  only when the recovery walk leaves the arena.
-- The recovery walk does not cover the compiled-out page layout.
+  only when the recovery walk leaves the arena (#11).
+- The recovery walk does not cover the compiled-out page layout (#14).
 - Typed values registered with `register_value_types` hold references the
-  arena does not know; recovery does not replay their retain hooks.
+  arena does not know; recovery does not replay their retain hooks (#14).
 - `database::sync()` is a no-op; durability follows the configured mode at
   commit.
 - Read-only open is not implemented. (A store that is open is locked: a
@@ -70,4 +70,4 @@ change to how nodes own their lines has to be made in both.
 - Reverse cursor steps are a series of forward probes (cost follows key
   length); there is no backward link.
 - The large-value arena has no ceiling of its own below
-  `min(max_segments, 512)` segments of 2 GiB.
+  `min(max_segments, 512)` segments of 2 GiB (#13).

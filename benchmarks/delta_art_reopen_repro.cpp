@@ -3,7 +3,8 @@
 // hits on startup (open schema -> close -> open sync -> write) that the steady-
 // state bank bench never exercises. Run under ThreadSanitizer.
 #include <delta_art/tiered_kv.hpp>
-#include <heart_dwal_engine.hpp>  // sal_art_ref::radix::dwal_engine (cold base)
+#include <psitri/dwal/kv_engine.hpp>
+#include <sal_art_ref/engine.hpp>
 #include <start_ver/kv.hpp>       // start_ver::kv::engine (hot delta)
 
 #include <cstdint>
@@ -13,7 +14,7 @@
 #include <filesystem>
 #include <string>
 
-using TK = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::dwal_engine>;
+using TK = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::engine>;
 
 static void write_some(TK::database& db, uint64_t base, uint64_t n)
 {

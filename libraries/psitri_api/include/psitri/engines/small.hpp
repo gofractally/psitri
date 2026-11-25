@@ -9,5 +9,4 @@ namespace psitri
    using small_engine = start_ref::kv::engine;
    static_assert(engine<small_engine>);
 
-   using fixed_engine = small_engine;  // compatibility with the initial API spelling
 }

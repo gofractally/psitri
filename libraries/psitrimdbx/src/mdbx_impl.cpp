@@ -90,7 +90,7 @@
 #include <psitri/dwal/byte_engine.hpp>
 #endif
 #if PSITRIMDBX_BACKEND_DWAL || PSITRIMDBX_BACKEND_DELTA_ART || PSITRIMDBX_BACKEND_SAL_ART_REF
-#include <sal_art_ref/engine.hpp>  // sal_art_ref::radix::dwal_engine (cold base / direct)
+#include <sal_art_ref/engine.hpp>  // sal_art_ref::radix::engine (cold base / direct)
 #endif
 #if PSITRIMDBX_USES_PSITRI
 #include <psitri/database_impl.hpp>     // basic_database<LockPolicy> full def
@@ -222,10 +222,10 @@ using TK         = delta_art::tiered_kv<start_ver::kv::engine,
 #elif PSITRIMDBX_BACKEND_DWAL
 using TK = psitri::dwal::byte_engine<sal_art_ref::radix::engine>;
 #elif PSITRIMDBX_BACKEND_SAL_ART_REF
-using TK         = sal_art_ref::radix::dwal_engine;  // sal_art_ref DIRECT — no tiering / no merger
+using TK         = sal_art_ref::radix::engine;  // sal_art_ref DIRECT — no tiering / no merger
 #else
 using TK         = delta_art::tiered_kv<start_ver::kv::engine,
-                                        sal_art_ref::radix::dwal_engine>;
+                                        sal_art_ref::radix::engine>;
 #endif
 using be_db      = TK::database;
 using be_ws      = TK::write_session;

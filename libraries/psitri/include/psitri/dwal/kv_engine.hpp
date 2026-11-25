@@ -11,7 +11,7 @@
 //
 // An Engine is a TRAITS BUNDLE (not the database itself): five member types
 // whose instances interact per the requires-clauses below. `psitri_engine`
-// adapts psitri; heart's adapter lives with heart (heart_dwal_engine.hpp) so
+// adapts psitri; heart's adapter lives with heart (sal_art_ref/engine.hpp) so
 // the psitri library never depends on heart.
 //
 // Optional capabilities are feature-detected at the call sites with

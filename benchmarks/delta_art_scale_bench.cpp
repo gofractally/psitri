@@ -12,7 +12,8 @@
 // the hot band while heart absorbs the long tail — THE pipeline thesis.
 #include <delta_art/tiered_kv.hpp>
 
-#include <heart_dwal_engine.hpp>
+#include <psitri/dwal/kv_engine.hpp>
+#include <sal_art_ref/engine.hpp>
 #include <start_ver/kv.hpp>
 
 #include <chrono>
@@ -23,7 +24,7 @@
 #include <sys/resource.h>
 
 using Clock = std::chrono::steady_clock;
-using TK    = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::dwal_engine>;
+using TK    = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::engine>;
 
 static uint64_t splitmix64(uint64_t x)
 {

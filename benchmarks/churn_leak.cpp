@@ -9,7 +9,8 @@
 //   churn-leak <engine> [N=1000000] [rounds=40] [dir=/tmp/churn]
 //   engine = sal_art_ref | delta_art
 #include <delta_art/tiered_kv.hpp>
-#include <heart_dwal_engine.hpp>
+#include <psitri/dwal/kv_engine.hpp>
+#include <sal_art_ref/engine.hpp>
 #include <heart_kv.hpp>
 #include <start_ref/kv.hpp>
 #include <start_ver/kv.hpp>
@@ -23,7 +24,7 @@
 #include <thread>
 
 namespace fs = std::filesystem;
-using TK     = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::dwal_engine>;
+using TK     = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::engine>;
 
 static uint64_t splitmix64(uint64_t x)
 {

@@ -29,6 +29,7 @@
 // shadow the file-scope globals so the class bodies are byte-identical.
 #pragma once
 #include <sys/mman.h>
+#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <cassert>
@@ -80,6 +81,12 @@ namespace start_ref
       uint32_t              grow_batch      = 4;     // segments per file growth
       uint32_t              msync_gap_pages = 1;     // merge dirty runs across <= G clean pages
       sync_type             sync_mode       = sync_type::none;
+      // Units kept back from ordinary allocations once the arena can no
+      // longer grow, for the allocations of operations that free more than
+      // they take (a remove copies the path to its key before the old path
+      // is freed). UINT32_MAX: a sixty-fourth of the arena, at least 1,024
+      // and at most 8,192 units. 0: no reserve.
+      uint32_t              reserve_lines   = UINT32_MAX;
    };
 
    struct arena_stats
@@ -168,6 +175,22 @@ namespace start_ref
       arena_t<Geo>& store() noexcept { return *_a; }
       bool          in_transaction() const noexcept { return _txn_open; }
 
+      // While one of these is alive, this session's allocations may come out
+      // of the arena's reserve. For operations that end up freeing more than
+      // they allocate (removes), so that a full store can always shrink.
+      class reserve_use
+      {
+        public:
+         explicit reserve_use(session_t* s) noexcept : _s(s) { ++_s->_reserve_ok; }
+         reserve_use(const reserve_use&)            = delete;
+         reserve_use& operator=(const reserve_use&) = delete;
+         ~reserve_use() { --_s->_reserve_ok; }
+
+        private:
+         session_t* _s;
+      };
+      [[nodiscard]] reserve_use use_reserve() noexcept { return reserve_use(this); }
+
      private:
       friend class arena_t<Geo>;
       friend class transaction_t<Geo>;
@@ -180,6 +203,8 @@ namespace start_ref
       line_idx              _fill_end     = 0;           // one past the highest alloc this txn
       uint64_t              _alloc_bytes  = 0;           // batched into arena stats at commit
       bool                  _txn_open     = false;
+      bool                  _seg_idle     = false;  // _segment was marked SEG_IDLE at txn end
+      uint32_t              _reserve_ok   = 0;      // live reserve_use guards
       std::vector<uint32_t> _touched;  // segments dirtied by the open txn
 
       // Word window: the slow path reserves the remainder of the l0 word it
@@ -194,6 +219,7 @@ namespace start_ref
       // txn floor — their pages are dirty anyway, so recycling them is free and
       // skips the freeset round trip entirely. Flushed at commit: holes behind
       // the next floor must wait for segment recycle (two-state page model).
+      static constexpr uint32_t max_reclaim_rounds = 16;  // per allocation, before giving up
       static constexpr uint32_t fcache_max_size = 16;  // run length, in lines
       std::vector<line_idx>     _fcache[fcache_max_size + 1];
 
@@ -250,10 +276,16 @@ namespace start_ref
       static constexpr uint64_t meta_magic   = 0x7061727461726e61ull;  // "partarna"
       static constexpr uint32_t meta_version = 1;
       static constexpr uint32_t max_roots    = 16;
-      static constexpr uint8_t  SEG_UNOWNED = 0, SEG_OWNED = 1;
+      // OWNED: a session is allocating in it. IDLE: a session holds it but
+      // is between transactions; it keeps the segment for its next one
+      // unless, at the ceiling, another session needs it first.
+      static constexpr uint8_t  SEG_UNOWNED = 0, SEG_OWNED = 1, SEG_IDLE = 2;
 
       explicit arena_t(arena_config cfg) : _cfg(std::move(cfg))
       {
+         if (_cfg.reserve_lines == UINT32_MAX)
+            _cfg.reserve_lines = uint32_t(std::clamp<uint64_t>(
+                uint64_t(_cfg.max_segments) * lines_per_segment / 64, 1024, 8192));
          if (uint64_t(_cfg.max_segments) * lines_per_segment > sentinel_base)
             throw std::runtime_error("part: max_segments crosses the sentinel index band");
          namespace fs = std::filesystem;
@@ -642,6 +674,7 @@ namespace start_ref
       // Segments are never returned to the OS: this is the high-water mark.
       uint64_t mapped_bytes() const noexcept { return uint64_t(num_segments()) * segment_bytes; }
       uint64_t limit_bytes() const noexcept { return uint64_t(_cfg.max_segments) * segment_bytes; }
+      uint64_t reserve_bytes() const noexcept { return uint64_t(_cfg.reserve_lines) * line_bytes; }
       seg_freeset& freeset_of(uint32_t s) noexcept { return freeset_(s); }
       const arena_stats& stats() const noexcept { return _stats; }
       const void* refs_base_dbg() const noexcept { return _ref_base; }
@@ -658,6 +691,11 @@ namespace start_ref
          return _defer_fn && _defer_fn(_defer_ctx, raw);
       }
       const arena_config& config() const noexcept { return _cfg; }
+      // debug/tests: a segment's claim state
+      uint8_t segment_state(uint32_t s) const noexcept
+      {
+         return _segs[s].state.load(std::memory_order_relaxed);
+      }
 
       // Last-chance hook before an allocation reports arena_full: the owner
       // may know of storage that is about to be freed (the kv layer's
@@ -806,15 +844,33 @@ namespace start_ref
          for (uint32_t k = 0; k < nseg; ++k)
          {
             const uint32_t s = (start + k) % nseg;
-            if (_segs[s].state.load(std::memory_order_relaxed) == SEG_UNOWNED &&
-                freeset_(s).free_lines() >= n)
+            if (freeset_(s).free_lines() < n)
+               continue;
+            // An idle session's segment may be taken: its owner notices at
+            // its next transaction and claims afresh. (Its owner may also be
+            // starting a transaction this instant, hence the exchange.)
+            uint8_t state = _segs[s].state.load(std::memory_order_relaxed);
+            if (state != SEG_OWNED &&
+                _segs[s].state.compare_exchange_strong(state, SEG_OWNED,
+                                                       std::memory_order_acq_rel))
             {
-               _segs[s].state.store(SEG_OWNED, std::memory_order_relaxed);
                _stats.segments_reused.fetch_add(1, std::memory_order_relaxed);
                return s;
             }
          }
          throw_full_();
+      }
+      // Whether at least `need` units are free across the arena. Stops at
+      // the first segments that add up, so it is cheap unless the arena is
+      // nearly full.
+      bool free_at_least_(uint64_t need) noexcept
+      {
+         const uint32_t nseg = num_segments();
+         uint64_t       sum  = 0;
+         for (uint32_t s = 0; s < nseg; ++s)
+            if ((sum += freeset_(s).free_lines()) >= need)
+               return true;
+         return false;
       }
       [[gnu::cold, noreturn]] void throw_full_() const
       {
@@ -944,7 +1000,13 @@ namespace start_ref
       flush_window_();
       flush_stats_();
       if (_segment != UINT32_MAX)
-         _a->release_claim_(_segment);
+      {
+         // Give the segment back only if it is still ours: an idle one may
+         // have been taken at the ceiling.
+         uint8_t expected = _seg_idle ? arena_t<Geo>::SEG_IDLE : arena_t<Geo>::SEG_OWNED;
+         _a->_segs[_segment].state.compare_exchange_strong(expected, arena_t<Geo>::SEG_UNOWNED,
+                                                           std::memory_order_acq_rel);
+      }
    }
 
    template <class Geo>
@@ -952,6 +1014,16 @@ namespace start_ref
    {
       assert(!_txn_open && "one open transaction per session");
       _txn_open = true;
+      if (_seg_idle)
+      {
+         // Take the segment back from idle; if another session needed it
+         // meanwhile, claim afresh at the first allocation.
+         _seg_idle        = false;
+         uint8_t expected = arena_t<Geo>::SEG_IDLE;
+         if (!_a->_segs[_segment].state.compare_exchange_strong(
+                 expected, arena_t<Geo>::SEG_OWNED, std::memory_order_acq_rel))
+            _segment = UINT32_MAX;
+      }
       // floor = the disk page the txn starts writing on (SPEC §7)
       _floor = (_fill_end / lines_per_page) * lines_per_page;
       return transaction_t<Geo>(this);
@@ -966,7 +1038,17 @@ namespace start_ref
    inline void transaction_t<Geo>::close() noexcept
    {
       if (_s)
+      {
          _s->_txn_open = false;
+         if (_s->_segment != UINT32_MAX && !_s->_seg_idle)
+         {
+            // A plain store: while the session is in a transaction the
+            // segment is OWNED by it and nobody else may change that.
+            _s->_a->_segs[_s->_segment].state.store(arena_t<Geo>::SEG_IDLE,
+                                                    std::memory_order_release);
+            _s->_seg_idle = true;
+         }
+      }
       _s = nullptr;
    }
    template <class Geo>
@@ -1186,6 +1268,14 @@ namespace start_ref
       // Claiming can end in arena_full. Before letting that out, give the
       // owner's reclaim hook one chance per round to finish frees that are
       // already queued; only if it had nothing to do is the arena full.
+      // The hook reporting work does not mean this allocation can now be
+      // met (another writer may keep the releaser busy for ever while n
+      // lines in a row exist nowhere), so the number of rounds is bounded.
+      uint32_t   reclaims       = 0;
+      const auto reclaim_helped = [&]() noexcept
+      {
+         return reclaims++ < max_reclaim_rounds && a.try_reclaim();
+      };
       auto claim = [&](uint32_t cur, bool prefer_grow, bool sweep) -> uint32_t
       {
          for (;;)
@@ -1196,11 +1286,19 @@ namespace start_ref
             }
             catch (const arena_full&)
             {
-               if (!a.try_reclaim())
+               if (!reclaim_helped())
                   throw;
             }
          }
       };
+      // Once the arena cannot grow, ordinary allocations leave the reserve
+      // alone. (The few lines a session already holds privately are outside
+      // this accounting; the reserve is far larger than those.)
+      if (a._cfg.reserve_lines && !s._reserve_ok &&
+          a.num_segments() >= a._cfg.max_segments)
+         while (!a.free_at_least_(uint64_t(a._cfg.reserve_lines) + n))
+            if (!reclaim_helped())
+               a.throw_full_();
       uint32_t swept = 0;  // segments tried in sweep mode since the last reclaim
       for (int attempts = 0;; ++attempts)
       {
@@ -1278,7 +1376,7 @@ namespace start_ref
          const bool sweep      = at_ceiling && attempts >= 8;
          if (sweep && ++swept > a.num_segments())
          {
-            if (!a.try_reclaim())
+            if (!reclaim_helped())
                a.throw_full_();
             swept = 0;
          }

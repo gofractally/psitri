@@ -124,6 +124,7 @@ namespace start_ref::kv
       uint64_t used_bytes   = 0;  // claimed 128-byte lines (live + retained + awaiting release)
       uint64_t mapped_bytes = 0;  // segments created so far; never shrinks (high-water mark)
       uint64_t limit_bytes  = 0;  // max_segments x 8 MiB: allocation beyond this throws
+      uint64_t reserve_bytes = 0; // of the limit, kept for removes once the store cannot grow
       // The companion arena that holds values too large for a 64-line run.
       uint64_t large_used_bytes   = 0;
       uint64_t large_mapped_bytes = 0;
@@ -1039,6 +1040,7 @@ namespace start_ref::kv
          u.used_bytes         = _arena.used_bytes();
          u.mapped_bytes       = _arena.mapped_bytes();
          u.limit_bytes        = _arena.limit_bytes();
+         u.reserve_bytes      = _arena.reserve_bytes();
          u.large_used_bytes   = _large.used_bytes();
          u.large_mapped_bytes = _large.mapped_bytes();
          u.large_limit_bytes  = _large.limit_bytes();
@@ -1296,6 +1298,7 @@ namespace start_ref::kv
       {
          start_ref::arena_config c = make_cfg_(std::move(dir), cfg);
          c.dir /= "large";
+         c.reserve_lines = 0;  // removes allocate nothing here
          c.max_segments = std::min<uint32_t>(c.max_segments, 512);
          return c;
       }
@@ -1587,6 +1590,9 @@ namespace start_ref::kv
    inline int transaction::remove(key_view k)
    {
       write_session::use_scope use(_ws);
+      // A remove copies the path to its key and frees the old one at commit:
+      // it may use the reserve, so that a full store can always be shrunk.
+      const auto reserve = _ws->_ses.use_reserve();
       if constexpr (engine_t::cb_create)
          return _ws->tree_for(_roots[0].index).pg_remove(k) ? 0 : -1;
       else
@@ -1727,11 +1733,34 @@ namespace start_ref::kv
          }
          throw_root_references();
       }
-      _done = true;
+      // Room for the versions this commit retires, so that nothing between
+      // the first root's publication and the last can throw. Other commits
+      // can use it up before the lock below is taken; then it is topped up
+      // there, still before anything is published.
+      const auto give_back = [&]() noexcept
+      {
+         for (size_t i = 0; i < count; ++i)
+         {
+            engine_t&      t  = _ws->tree_for(_roots[i].index);
+            const root_ptr nr = t.root_handle();
+            if (!nr.is_null() && nr.raw() != db->_live_root[_roots[i].index].raw())
+               t.cow_release(nr);
+         }
+      };
       _large_tx.commit(); // continuation/head data must precede root publication
       _tx.commit();  // data msync + floor advance (layer 1)
       {
          std::lock_guard g(db->_root_mx);
+         try
+         {
+            db->_retired.reserve(db->_retired.size() + count);
+         }
+         catch (...)
+         {
+            give_back();  // nothing published: still open, as for a refusal
+            throw;
+         }
+         _done = true;
          for (auto& r : _roots)
          {
             const root_ptr nr  = _ws->tree_for(r.index).root_handle();
@@ -1828,6 +1857,7 @@ namespace start_ref::kv
    inline int tree_handle::remove(key_view k)
    {
       write_session::use_scope use(_tx->_ws);
+      const auto reserve = _tx->_ws->_ses.use_reserve();
       return _tx->tree_(_ri).cow_remove(k) ? 0 : -1;
    }
    template <class S>

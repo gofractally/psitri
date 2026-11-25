@@ -293,3 +293,67 @@ TEST_CASE("a session reading across the first recycled segment of a new database
    }
    fs::remove_all(path);
 }
+
+// A live object the compactor cannot move (here: it fails its checksum) stays
+// in its segment. The segment must then not be recycled: handing it out again
+// writes over the only copy of that object.
+TEST_CASE("a segment holding an object the compactor could not move is not recycled",
+          "[sal][compactor][corruption]")
+{
+   namespace fs    = std::filesystem;
+   const auto path = fs::temp_directory_path() / "sal_compactor_left_behind_test";
+   fs::remove_all(path);
+   fs::create_directories(path);
+   {
+      sal::runtime_config cfg;
+      cfg.max_pinned_cache_size_mb             = 0;
+      cfg.compact_pinned_unused_threshold_mb   = 1;
+      cfg.compact_unpinned_unused_threshold_mb = 1;
+      cfg.enable_read_cache                    = false;
+      cfg.validate_checksum_on_compact         = true;
+      sal::allocator a(path, cfg, false);
+      a.register_type_ops<first_recycle_node>();
+      a.start_background_threads();
+
+      const uint32_t   MiB = 1 << 20;
+      auto             ses = a.create_session();
+      sal::ptr_address watched =
+          ses->alloc<first_recycle_node>(uint32_t(128), sal::alloc_hint{}, uint64_t(0xAAAA));
+      std::vector<sal::ptr_address> filler;
+      for (int i = 0; i < 70; ++i)
+         filler.push_back(ses->alloc<first_recycle_node>(MiB, sal::alloc_hint{}, uint64_t(0x1111)));
+
+      // Give the object a checksum, then damage it.
+      auto* object = const_cast<first_recycle_node*>(
+          static_cast<const first_recycle_node*>(a.resolve(watched).first));
+      object->update_checksum();
+      REQUIRE(object->verify_checksum());
+      object->magic = 0xDEAD;
+      REQUIRE_FALSE(object->verify_checksum());
+      ses->sync(sal::sync_type::none);
+
+      for (auto adr : filler)
+         ses->release(adr);
+      bool detected = false;
+      for (int i = 0; i < 6000 && !detected; ++i)
+      {
+         detected = a.corruption_detected();
+         if (!detected)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+      REQUIRE(detected);
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      std::vector<sal::ptr_address> more;
+      for (int i = 0; i < 300; ++i)
+         more.push_back(ses->alloc<first_recycle_node>(MiB, sal::alloc_hint{}, uint64_t(0x2222)));
+
+      CHECK(a.resolve(watched).first == object);
+      CHECK(object->magic == 0xDEAD);
+      CHECK(*object->address() == *watched);
+
+      for (auto adr : more)
+         ses->release(adr);
+   }
+   fs::remove_all(path);
+}

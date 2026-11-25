@@ -59,35 +59,41 @@ namespace sal
          /// cleared by the provider thread when the segment is prepared for reuse.
          std::atomic<uint32_t> flags;
 
+         /// Moves the segment to a state of its life cycle and keeps `pinned`, which
+         /// another thread sets and clears (set_pinned) on its own schedule: a load
+         /// followed by a store here would undo a change of it made in between.
+         void enter(uint32_t state) noexcept
+         {
+            uint32_t cur = flags.load(std::memory_order_relaxed);
+            while (!flags.compare_exchange_weak(cur, (cur & pinned) | state,
+                                                std::memory_order_relaxed))
+            {
+            }
+         }
+
         public:
          void added_to_provider_queue()
          {
             assert(not(flags.load(std::memory_order_relaxed) & read_only));
-            uint32_t new_flags = (flags.load(std::memory_order_relaxed) & pinned) | queued;
-            flags.store(new_flags, std::memory_order_relaxed);
+            enter(queued);
          }
          void added_to_read_lock_queue()
          {
             assert(flags.load(std::memory_order_relaxed) & read_only);
-            // don't change pinned or read_only flags
-            uint32_t new_flags =
-                ((flags.load(std::memory_order_relaxed) & pinned) | read_only) | pending;
-            flags.store(new_flags, std::memory_order_relaxed);
+            enter(read_only | pending);
          }
          void added_to_free_list()
          {
             assert(not(flags.load(std::memory_order_relaxed) & (active | queued)));
             assert(flags.load(std::memory_order_relaxed) & read_only);
-            uint32_t new_flags = (flags.load(std::memory_order_relaxed) & pinned) | free;
-            flags.store(new_flags, std::memory_order_relaxed);
+            enter(free);
          }
          /// transition to active from queued
          void allocated_by_session()
          {
             assert(not(flags.load(std::memory_order_relaxed) & read_only));
             assert(flags.load(std::memory_order_relaxed) & queued);
-            uint32_t new_flags = (flags.load(std::memory_order_relaxed) & pinned) | active;
-            flags.store(new_flags, std::memory_order_relaxed);
+            enter(active);
             _freed_space_LOCKED.store(0, std::memory_order_relaxed);
          }
 
@@ -134,8 +140,7 @@ namespace sal
          void prepare_for_compaction(uint64_t vage_value)
          {
             vage.store(vage_value, std::memory_order_relaxed);
-            flags.store((flags.load(std::memory_order_relaxed) & pinned) | read_only,
-                        std::memory_order_relaxed);
+            enter(read_only);
          }
          /// Recovery: a segment holding live objects becomes read only and
          /// compactable, with its reclaimable space recounted from scratch.

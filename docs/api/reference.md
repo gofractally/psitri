@@ -179,7 +179,11 @@ persisted data.
 
 `adb::multi_root_transaction` adds `primary()` and `open_root(index)` editors,
 with `upsert`, `remove`, `get`, and `set_root(tree)`. The latter assigns a tree
-and returns the displaced owned tree. Open distinct additional roots in
+and returns the displaced owned tree. On the Small Engine the assigned
+tree stays referenced by the transaction until it commits or aborts, and
+writes after `set_root` copy what they change; an old snapshot can be assigned
+and edited without affecting any other version. `set_root` throws
+`std::runtime_error` if the tree's version is at its reference ceiling. Open distinct additional roots in
 ascending order. Keep all trees in the same database. Publication across root
 slots is **not promised atomic**; neither publication order nor savepoints
 spanning roots is a common guarantee. For atomic revision manifests, put

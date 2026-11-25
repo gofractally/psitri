@@ -1200,9 +1200,24 @@ TEST_CASE("Small Engine: commit is all-or-nothing when a root reference is refus
       for (int i = 0; i < 195; ++i)
          held.push_back(ws->get_root(2));
       {
+         // Past the ceiling the tree cannot even be assigned: set_root takes
+         // a writer reference of its own. Nothing changes.
          auto tx = ws->start_transaction(0);
          tx.upsert("a", "half");
-         tx.open_root(1).set_root(ws->get_root(2));
+         REQUIRE_THROWS_AS(tx.open_root(1).set_root(ws->get_root(2)), std::runtime_error);
+         REQUIRE(tx.open_root(2).get<std::string>("c") == std::optional<std::string>("0"));
+         tx.abort();
+      }
+      REQUIRE(read(0, "a") == std::optional<std::string>("1"));
+      REQUIRE(read(1, "b") == std::optional<std::string>("0"));
+      // One short of it: 186 snapshots, the slot's reference, this session's
+      // working reference and the tree being assigned make 189; set_root's
+      // own reference is the 190th and commit's is refused.
+      held.resize(186);
+      {
+         auto tx = ws->start_transaction(0);
+         tx.upsert("a", "half");
+         REQUIRE_NOTHROW(tx.open_root(1).set_root(ws->get_root(2)));
          REQUIRE_THROWS_AS(tx.commit(), std::runtime_error);
          REQUIRE(read(0, "a") == std::optional<std::string>("1"));
          REQUIRE(read(1, "b") == std::optional<std::string>("0"));
@@ -2209,4 +2224,154 @@ TEST_CASE("Small Engine: a session keeps its segment across transactions after r
    // transactions; not once per transaction
    REQUIRE(more_switches < 200);
    REQUIRE(more_claims < 200);
+}
+
+// set_root() with a snapshot that nobody else holds. The snapshot's version
+// can share storage with the live tree in a way its own root's reference
+// count does not show: a wide router that a later version copied has its
+// tail lines retained by the copy. A transaction working on such a tree
+// must treat it as shared; it used to write into those lines in place, so
+// readers of the committed root saw uncommitted data, and an aborted insert
+// stayed.
+TEST_CASE("Small Engine: set_root of an old snapshot does not write through to the live tree",
+          "[small][set-root]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 64));
+   auto ws = db->start_write_session();
+   auto key = [](int first, int n) {
+      std::string k;
+      k.push_back(char(first));
+      return k + "key" + std::to_string(n);
+   };
+   auto live = [&](const std::string& k) {
+      auto rs  = db->start_read_session();
+      auto cur = rs->create_cursor(0);
+      return cur.get<std::string>(k);
+   };
+   {
+      // version 1: every first byte, three keys each: a 256-way root router
+      auto tx = ws->start_transaction(0);
+      for (int n = 0; n < 3; ++n)
+         for (int i = 0; i <= 255; ++i)
+            tx.upsert(key((i * 97) % 256, n), "v1");
+      tx.commit();
+   }
+   auto snapshot = ws->get_root(0);
+   {
+      // version 2 copies the root router and shares version 1's lines
+      auto tx = ws->start_transaction(0);
+      tx.upsert(key(5, 0), "v2");
+      tx.commit();
+   }
+   {
+      // one more commit: now only `snapshot` refers to version 1's root
+      auto tx = ws->start_transaction(0);
+      tx.upsert(key(6, 0), "v3");
+      tx.commit();
+   }
+   db->flush_releases();
+   REQUIRE(live(key(150, 1)) == std::optional<std::string>("v1"));
+
+   // a held cursor on the committed root, as a concurrent reader would have
+   auto reader = db->start_read_session();
+   auto held   = reader->create_cursor(0);
+   {
+      auto tx = ws->start_transaction(0);
+      tx.primary().set_root(std::move(snapshot));
+      tx.upsert(key(150, 1), "XX");       // same size as the committed value
+      tx.upsert(key(150, 7), "new-key");
+      REQUIRE(tx.get<std::string>(key(150, 1)) == std::optional<std::string>("XX"));
+      // nothing of this is committed: readers must not see it
+      REQUIRE(held.get<std::string>(key(150, 1)) == std::optional<std::string>("v1"));
+      REQUIRE_FALSE(held.get<std::string>(key(150, 7)));
+      REQUIRE(live(key(150, 1)) == std::optional<std::string>("v1"));
+      REQUIRE_FALSE(live(key(150, 7)));
+      tx.abort();
+   }
+   db->flush_releases();
+   REQUIRE(live(key(150, 1)) == std::optional<std::string>("v1"));
+   REQUIRE_FALSE(live(key(150, 7)));
+   REQUIRE(live(key(5, 0)) == std::optional<std::string>("v2"));
+   REQUIRE(live(key(6, 0)) == std::optional<std::string>("v3"));
+
+   // and committed this time, from another old snapshot nobody else holds
+   {
+      auto tx = ws->start_transaction(0);
+      tx.upsert("later", "v4");
+      tx.commit();
+   }
+   auto old_version = ws->get_root(0);  // has "later"; about to be the only holder
+   {
+      auto tx = ws->start_transaction(0);
+      tx.upsert(key(8, 0), "v5");
+      tx.commit();
+      auto tx2 = ws->start_transaction(0);
+      tx2.upsert(key(9, 0), "v6");
+      tx2.commit();
+   }
+   db->flush_releases();
+   auto before = ws->get_root(0);
+   {
+      auto tx = ws->start_transaction(0);
+      tx.primary().set_root(std::move(old_version));
+      tx.upsert(key(150, 1), "YY");
+      REQUIRE(tx.remove(key(7, 2)) == 0);
+      REQUIRE(held.get<std::string>(key(150, 1)) == std::optional<std::string>("v1"));
+      REQUIRE(before.get<std::string>(key(7, 2)) == std::optional<std::string>("v1"));
+      tx.commit();
+   }
+   REQUIRE(live(key(150, 1)) == std::optional<std::string>("YY"));
+   REQUIRE_FALSE(live(key(7, 2)));
+   REQUIRE_FALSE(live(key(9, 0)).value_or("") == "v6");  // root 0 is the old version again
+   // what was live before, and the reader's cursor, are what they were
+   REQUIRE(before.get<std::string>(key(150, 1)) == std::optional<std::string>("v1"));
+   REQUIRE(before.get<std::string>(key(7, 2)) == std::optional<std::string>("v1"));
+   REQUIRE(before.get<std::string>(key(9, 0)) == std::optional<std::string>("v6"));
+   REQUIRE(held.get<std::string>(key(150, 1)) == std::optional<std::string>("v1"));
+   REQUIRE(held.get<std::string>(key(6, 0)) == std::optional<std::string>("v3"));
+}
+
+// The reference a transaction keeps for a tree given to set_root is given
+// back when the transaction ends, whichever way it ends.
+TEST_CASE("Small Engine: trees given to set_root are released with the transaction",
+          "[small][set-root]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 64));
+   {
+      auto ws = db->start_write_session();
+      for (int round = 0; round < 40; ++round)
+      {
+         {
+            auto tx = ws->start_transaction(0);
+            for (int j = 0; j < 300; ++j)
+               tx.upsert(scattered_key("k", round * 300 + j), std::string(50, char('a' + round % 26)));
+            tx.commit();
+         }
+         auto old = ws->get_root(0);
+         {
+            auto tx = ws->start_transaction(0);
+            tx.upsert(scattered_key("k", round), "changed");
+            tx.commit();
+         }
+         auto tx = ws->start_transaction(0);
+         auto r1 = tx.open_root(1);
+         r1.set_root(std::move(old));           // root 1 := the older version of root 0
+         r1.upsert("only-in-1", std::to_string(round));
+         auto displaced = tx.primary().set_root(ws->get_root(0));  // a no-op assignment
+         if (round % 3 == 0)
+            tx.abort();
+         else
+            tx.commit();
+      }
+      auto tx = ws->start_transaction(0);
+      tx.primary().set_root({});
+      tx.open_root(1).set_root({});
+      tx.commit();
+   }
+   db->flush_releases();
+   REQUIRE(db->usage().used_bytes <= 64 * 128);
 }

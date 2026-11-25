@@ -29,7 +29,9 @@ target_compile_definitions(psitri PUBLIC XXH_INLINE_ALL)
 
 target_link_libraries( psitri PUBLIC sal ucc art psitri_api_transactions)
 
-option(PSITRI_BUILD_TESTS "Build the psitri test suite" ${BUILD_TESTS})
+# The deprecated engine's own suite (about six minutes) is not part of the
+# default test run. -DPSITRI_BUILD_TESTS=ON builds and registers it.
+option(PSITRI_BUILD_TESTS "Build the deprecated original engine's test suite" OFF)
 if(PSITRI_BUILD_TESTS)
     enable_testing()
     find_package(Catch2 3 QUIET)

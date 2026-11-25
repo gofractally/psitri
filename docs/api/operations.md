@@ -33,8 +33,20 @@ A transaction holds its root's writer from `start_transaction` until it commits
 or aborts. A second transaction on the same root, from any session, waits and
 then starts from what the first published, so no commit is lost and nothing is
 retried. Starting a second transaction on a root from the thread that already
-has one open on it therefore never returns. Additional roots opened with
-`open_root` wait for their writer when opened in ascending index order.
+has one open on it is a caller error. The Small Engine reports it:
+`start_transaction` throws `std::logic_error`, as it does for a second
+transaction on a session that already has one open, and `open_root` throws for
+a root at or below one the transaction already holds. Do not count on the
+Large Engine detecting it: there the call waits for itself and never returns. Additional roots opened with `open_root` wait for their
+writer when opened in ascending index order.
+
+A Small Engine session is not thread-safe, and it is not tied to the thread
+that created it: a write session or read session may be used from any thread
+as long as only one thread uses it at a time, which the caller arranges. A
+transaction holds its root's writer lock on behalf of the thread that started
+it, so commit or abort it on that thread; hand a session over between
+transactions. Builds with assertions enabled stop the process with a message
+when two threads are inside one write session at once.
 
 A session keeps its database open: the store closes when the last handle to
 the database and the last session are gone. Trees, transactions and cursors
@@ -115,7 +127,11 @@ for short scopes; it is outside the common API.
 Do not mix multiple writable opens of the same directory or assume a shared
 multi-process writer protocol. Read-only opens in the Large Engine use a shared advisory
 lock and refuse while an exclusive writer owns the database. The Small Engine rejects
-read-only opens. Open only a matching engine and compatible disk format.
+read-only opens: `open` with `open_mode::read_only` throws `std::runtime_error`
+saying the engine does not support it, before creating or touching any file.
+While a Small Engine store is open its files are locked exclusively, so a second
+open of the same directory, from the same or another process, throws. Open only a
+matching engine and compatible disk format.
 
 ## Configuration
 
@@ -124,8 +140,9 @@ Choose `Engine::config`, not another engine's config type. Set it before open.
 
 | Profile / field | Meaning |
 |---|---|
-| Small Engine: `max_segments` | Ordinary arena reservation in 8 MiB segments; default 4,096 = 32 GiB. Companion large arena reserves up to `min(max_segments, 512)` segments of 2 GiB. |
+| Small Engine: `max_segments` | Ordinary arena ceiling in 8 MiB segments; default 4,096 = 32 GiB. Writes that need more throw `storage_full`; see [bounding and watching storage](engines.md#bounding-and-watching-storage). Companion large arena reserves up to `min(max_segments, 512)` segments of 2 GiB. |
 | Small Engine: `background_release` | Use the release thread (default true), or reclaim inline |
+| Small Engine: `write_protect_on_commit`, `checksum_on_commit` | Accepted for source compatibility and ignored |
 | Large Engine: `max_pinned_cache_size_mb` | Budget for pinned SAL segments; not a total RSS cap |
 | Large Engine: `enable_read_cache` | Enable read-driven hot object promotion; profile default false |
 | Large Engine: `read_cache_window_sec` | Access-decay interval used for hot object promotion |
@@ -211,8 +228,43 @@ unchanged read-only reopen without an additional power cut or corruption.
 Comprehensive power-loss, arbitrary process-kill, disk-full, storage-corruption,
 and sustained beyond-RAM validation is incomplete. Select the library against your
 application's failure model and test recovery on the target storage stack.
-The Small Engine exposes low-level rebuild machinery, but its database factory does not
-perform a complete root walk/rebuild.
+
+### Small Engine: stopping without closing
+
+A Small Engine store records whether its last owner closed it.
+`database::closed_cleanly(dir)` reads that without opening the store, and
+`db->recovered_on_open()` says whether this open found it not closed. When it
+was not, `open` rebuilds the free map and the reference counts from the
+published roots before it returns: these are derived files that are never
+synced and that, after a stop, still describe the dead writer's unfinished
+transaction. The rebuild reads every node once, so its cost follows the size
+of the live data. If the walk reaches storage outside the arena, `open` throws
+and leaves the files as they are; it does not come back empty.
+
+What `tests/api/small_engine.cpp` shows, and nothing beyond it: a writer
+running committed transactions was killed with `SIGKILL` at random moments
+2,202 times, repeatedly on the same store. After every kill the store reported
+that it had not been closed, reopened, held every transaction whose `commit()`
+had returned and at most the one that was in flight, matched its model in a
+full forward scan with exact row and index counts, and kept its storage use
+where it had settled; after the last kill, removing every key drained the
+arenas to zero.
+
+| `sync_mode` | After the process is killed (operating system keeps running) | After power loss or an operating-system crash |
+|---|---|---|
+| `none` | Every committed transaction present (tested) | Not tested. Nothing is flushed by commit: expect to lose recent transactions, and the root slot can reach storage before the nodes it points to, which open may or may not be able to detect |
+| `mprotect` | Not tested. The Small Engine applies no page protection; it flushes data pages as `msync_sync` does but not the root slot | Not tested |
+| `msync_async` | Every committed transaction present (tested) | Not tested. Flushes are only requested, so the same exposure as `none` applies |
+| `msync_sync` | Every committed transaction present (tested) | Not tested. Commit waits for `msync(MS_SYNC)` of the data pages, then of the root slot |
+| `fsync` | Every committed transaction present (tested) | Not tested. As `msync_sync`, plus `fsync` of the data and root files before commit returns |
+| `full` | Every committed transaction present (tested) | Not tested. As `fsync`, with the platform's device flush (`F_FULLFSYNC` on macOS) |
+
+A process kill leaves the operating system holding every page the process
+wrote, which is why all modes pass that test alike; the modes differ only in
+what has reached the device, and that has not been exercised by cutting power.
+Flush errors are not checked on the Small Engine's data pages. A transaction
+that commits several roots writes one root slot after another, so a stop
+between them leaves some roots new and others old.
 
 Use `create_only` for new databases and `open_existing` for expected existing
 ones so missing data is not mistaken for a fresh successful open. Keep external

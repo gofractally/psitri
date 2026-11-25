@@ -38,7 +38,8 @@ engine registry. Returned session handles are `std::shared_ptr`s, but they do
 
 `create_only` rejects an existing engine database; `open_existing` rejects a
 missing database; `create_or_open` does either. All preserve existing content.
-`read_only` is available in the Large Engine and explicitly rejected by the Small Engine. Never
+`read_only` is available in the Large Engine; the Small Engine rejects it with a
+`std::runtime_error` that says it is unsupported, without touching the directory. Never
 open another engine's files as a conversion mechanism. Existence checks use
 engine marker files and do not provide a universal format detector or an atomic
 multi-process create protocol.
@@ -87,7 +88,10 @@ Use it when the work is expected to commit and a transient or delta transaction
 when it may well be thrown away. `tests/api/transactions.cpp` drives all three
 against a reference map.
 Missing keys are ordinary results, not exceptions. Failed allocation, invalid
-open modes, or I/O may throw `std::exception` subclasses. Catch failures outside
+open modes, or I/O may throw `std::exception` subclasses. The Small Engine
+throws `small_engine::storage_full` when a write would exceed `max_segments`
+(abort and carry on), `std::invalid_argument` for an oversized key or value,
+and `std::logic_error` for a transaction started where one is already open. Catch failures outside
 the transaction scope so rollback runs during unwinding. A commit failure can
 have an uncertain persistence outcome; do not automatically replay a
 non-idempotent transaction or continue using that database instance.
@@ -148,8 +152,10 @@ The common key envelope is at most **1,024 bytes**, with roots **0..7**.
 Both maintained profiles support a **4 GiB − 1 byte** logical value limit,
 exposed as `Engine::max_value_size`, with allocation tests through **512 MiB**.
 Practical database and memory limits may be lower. Oversized values throw
-`std::invalid_argument` before input bytes are read or the tree changes. The Large Engine
-also checks its 1,024-byte key limit before mutation. The Small Engine uses fixed-address
+`std::invalid_argument` before input bytes are read or the tree changes. Both engines
+check the 1,024-byte key limit before mutation and throw `std::invalid_argument`
+for a longer key (`psitri::small_engine::max_key_size` names the limit); reading
+or removing such a key is an ordinary miss. The Small Engine uses fixed-address
 chunks of at most 2 MiB; the Large Engine uses segment-aware chunks of almost 32 MiB.
 See [large-value storage](chunked-values.md) for layouts and ownership.
 
@@ -167,6 +173,16 @@ ascending order. Keep all trees in the same database. Publication across root
 slots is **not promised atomic**; neither publication order nor savepoints
 spanning roots is a common guarantee. For atomic revision manifests, put
 related subtrees beneath a single Large Engine root.
+
+On the Small Engine, concretely: the roots of one transaction are published
+one after another, in ascending index order. Each root on its own always
+shows a committed state. A reader that takes cursors on two roots from a read
+session can get the first root as of this commit and the second as of the
+previous one, and whole commits can fall between any two cursors. Two owned
+snapshots from `get_root` are never torn that way within one commit, but
+other commits can still land between the two calls. After an unclean stop the
+root slots can likewise be a mix of the last commit and the one before. Data
+that must change together belongs under one root, distinguished by key prefix.
 
 Native subtrees, detached editors, and savepoints are Large Engine extensions.
 Registered typed values and typed test adapters are outside the common byte

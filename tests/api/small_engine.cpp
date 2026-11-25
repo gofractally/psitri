@@ -1039,3 +1039,45 @@ TEST_CASE("Small Engine: many owned snapshots of one version do not unbalance it
    db->flush_releases();
    REQUIRE(db->usage().used_bytes <= 64 * 128);
 }
+
+// One owner at a time: the store's files are locked while it is open.
+TEST_CASE("Small Engine: a second open of a store that is already open is refused",
+          "[small][open]")
+{
+   temporary_directory tmp;
+   const auto          cfg = small_config(psitri::sync_mode::none, 16);
+   auto db = database::open(tmp.path, psitri::open_mode::create_only, cfg);
+   {
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("k", "v");
+      tx.commit();
+   }
+   REQUIRE_THROWS_AS(database::open(tmp.path, psitri::open_mode::open_existing, cfg),
+                     std::runtime_error);
+   std::fflush(nullptr);
+   const pid_t pid = ::fork();
+   REQUIRE(pid >= 0);
+   if (pid == 0)
+   {
+      try
+      {
+         auto other = database::open(tmp.path, psitri::open_mode::open_existing, cfg);
+         ::_exit(1);  // a second owner got in
+      }
+      catch (const std::exception&)
+      {
+         ::_exit(0);
+      }
+   }
+   int status = 0;
+   ::waitpid(pid, &status, 0);
+   REQUIRE(WIFEXITED(status));
+   REQUIRE(WEXITSTATUS(status) == 0);
+   // The refused opens changed nothing for the owner.
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+   REQUIRE(cur.get<std::string>("k") == std::optional<std::string>("v"));
+   db.reset();
+   rs.reset();
+}

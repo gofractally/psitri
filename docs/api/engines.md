@@ -36,7 +36,11 @@ identify their storage model, not a limit on the size of an individual value.
 | Root slots | 16 | 1,024 |
 | Native subtree ownership | No | Yes |
 | Primary-root savepoints | No | Native `sub_transaction()`; scope below |
-| Read-only open | Rejected | Supported with separate-process locking restrictions |
+| Read-only open | Rejected with an error that says so | Supported with separate-process locking restrictions |
+| Key limit | 1,024 bytes, enforced on every write | 1,024 bytes, enforced on every write |
+| Reader slots | 64 (see below) | No such table |
+| Unclean stop | Reported; free map and reference counts rebuilt from the roots at open | Reported; recovery at open |
+| Storage ceiling | `max_segments`; exceeding it throws `storage_full` | `max_database_size` |
 | Ordinary arena | Default 32 GiB; addressable ceiling just under 512 GiB | Default storage ceiling 32 TiB, subject to platform limits |
 | Logical value limit | 4 GiB − 1 byte | 4 GiB − 1 byte |
 | Tested allocated value size | Through 512 MiB | Through 512 MiB |
@@ -65,6 +69,46 @@ multiple owned chunks.
 For resident-data performance, budget for live data, snapshots, metadata,
 fragmentation, and the release backlog within available RAM. A large address
 reservation does not make the Small Engine a substitute for the Large Engine's relocation and compaction.
+
+### Bounding and watching storage
+
+`max_segments` is the ceiling: the ordinary arena never maps more than
+`max_segments` × 8 MiB, and its data files never grow past that. Segments are
+mapped as they are first needed and are never returned, so the mapped size is a
+high-water mark. `db->usage()` reports, for the ordinary arena and the
+large-value arena separately:
+
+| Field | Meaning |
+|---|---|
+| `used_bytes` | Allocated 128-byte lines: live nodes, nodes kept by snapshots, nodes waiting for the releaser |
+| `mapped_bytes` | Segments created so far: file size and the most that can be resident |
+| `limit_bytes` | `max_segments` × segment size |
+
+It may be called from any thread. A write that needs a segment beyond the
+limit throws `psitri::small_engine::storage_full` (a `std::runtime_error`)
+from the write call. Abort the transaction: it rolls back completely, what was
+committed before is untouched, and the database stays usable. Freed space is
+reused in place; nothing is moved or compacted. Under the workload the engine
+is meant for (rows rewritten in place plus an index entry moved to a new key
+per update, short reader snapshots throughout) `tests/api/small_engine.cpp`
+measured use and mapped size level from the first sample to the last: 31 MiB
+used and 96 MiB mapped for 100,000 rows over 10 million updates, 316 MiB used
+and 928 MiB mapped for 1 million rows over 6 million updates. Plan for mapped
+size of about three times live size, more if snapshots are held for long.
+
+Values above about 8 KiB live in the large-value arena, which is bounded only
+by its own reservation of `min(max_segments, 512)` segments of 2 GiB. A
+deployment that needs a tight memory bound should keep values small or
+account for that arena separately.
+
+### Reader slots
+
+There are 64 reader slots. Each read session holds one for its lifetime, and
+each cursor a read session has open beyond its first holds one more while it
+lives. When none is free, `start_read_session()` or `create_cursor()` throws
+`std::runtime_error` naming the limit; nothing else is affected, and a slot is
+reusable as soon as its holder is destroyed. A live cursor keeps the version
+it reads, and everything that version shares with nothing newer, allocated.
 
 ## Large Engine: keep the working set close
 

@@ -208,11 +208,6 @@ namespace start_ref
       bool                  _txn_open     = false;
       bool                  _seg_idle     = false;  // _segment was marked SEG_IDLE at txn end
       uint32_t              _reserve_ok   = 0;      // live reserve_use guards
-      // Runs this transaction drew from the reserve. One of them freed again
-      // before the transaction ends goes straight back (see release_run): it
-      // must not sit in the hot-hole cache, where an ordinary allocation of
-      // this session would pick it up.
-      std::vector<line_idx> _drawn;
       std::vector<uint32_t> _touched;  // segments dirtied by the open txn
 
       // Word window: the slow path reserves the remainder of the l0 word it
@@ -242,6 +237,13 @@ namespace start_ref
       line_idx try_segment_(uint32_t n) noexcept;
       line_idx alloc_reserved_(uint32_t n);
       void     flush_stats_() noexcept;
+
+      // Runs this transaction drew from the reserve. One of them freed again
+      // before the transaction ends goes straight back (see release_run): it
+      // must not sit in the hot-hole cache, where an ordinary allocation of
+      // this session would pick it up. Last, and never touched outside a
+      // remove at the ceiling: the members above keep their cache lines.
+      std::vector<line_idx> _drawn;
    };
 
    // First-class txn (harness-shaped): alloc_lines + commit/abort. The tree
@@ -302,9 +304,7 @@ namespace start_ref
             throw std::runtime_error("part: max_segments crosses the sentinel index band");
          _cfg.reserve_lines =
              std::min<uint32_t>((_cfg.reserve_lines + 63) / 64 * 64, lines_per_segment / 2);
-         // every list the reserve can ever need, so that it never allocates
-         for (uint32_t k = 1; k <= max_alloc_lines; ++k)
-            _pool.stock[k].reserve(_cfg.reserve_lines / k + 1);
+         pool_plan_();
          namespace fs = std::filesystem;
          fs::create_directories(_cfg.dir);
          // An existing arena larger than the requested ceiling cannot be
@@ -620,8 +620,11 @@ namespace start_ref
       void free_lines_now(line_idx i, uint32_t n) noexcept
       {
          _stats.bytes_freed.fetch_add(uint64_t(n) * line_bytes, std::memory_order_relaxed);
-         if (_pool.need.load(std::memory_order_relaxed)) [[unlikely]]
-         {  // the reserve is owed lines: it is repaid before the free map sees any
+         // 0: the reserve is owed nothing. Otherwise the shortest run that
+         // could repay something: shorter frees pass without touching it.
+         if (const uint32_t least = _pool.owed_min.load(std::memory_order_relaxed);
+             least && n >= least) [[unlikely]]
+         {  // the reserve is repaid before the free map sees anything
             const uint32_t taken = pool_take_(i, n);
             i += taken;
             n -= taken;
@@ -782,20 +785,52 @@ namespace start_ref
          return _pool.free_lines.load(std::memory_order_relaxed);
       }
       // Lines the reserve is waiting to get back: lent to removes whose old
-      // versions have not been freed yet, or never found at open.
+      // versions have not been freed yet (or cannot repay: see pool_take_),
+      // or never found at open.
       uint64_t reserve_owed_lines() const noexcept
       {
-         return _pool.need.load(std::memory_order_relaxed);
+         return _pool.owed.load(std::memory_order_relaxed);
+      }
+      // How many runs of each length the reserve can hand out right now:
+      // out[k] for k lines, flexible and guaranteed stock together.
+      void reserve_histogram(uint32_t out[max_alloc_lines + 1]) const noexcept
+      {
+         std::lock_guard g(_pool.mx);
+         for (uint32_t k = 0; k <= max_alloc_lines; ++k)
+            out[k] = k ? uint32_t(_pool.flex[k].size()) : 0;
+         for (uint32_t k = 1; k <= pool_exact_max; ++k)
+            out[k] += uint32_t(_pool.exact[k].size());
+         for (const auto& [line, len] : _pool.big)
+            ++out[len];
       }
       // The longest run the reserve can hand out right now, in lines.
       uint32_t reserve_longest_run() const noexcept
       {
-         std::lock_guard g(_pool.mx);
+         uint32_t h[max_alloc_lines + 1];
+         reserve_histogram(h);
          for (uint32_t k = max_alloc_lines; k >= 1; --k)
-            if (!_pool.stock[k].empty())
+            if (h[k])
                return k;
          return 0;
       }
+      // Runs of `least` lines or more that it can hand out right now.
+      uint32_t reserve_runs_at_least(uint32_t least) const noexcept
+      {
+         uint32_t h[max_alloc_lines + 1];
+         reserve_histogram(h);
+         uint32_t n = 0;
+         for (uint32_t k = std::max<uint32_t>(least, 1); k <= max_alloc_lines; ++k)
+            n += h[k];
+         return n;
+      }
+      // The guaranteed stock: how many runs of exactly k lines (2 to
+      // pool_exact_max) are kept for draws of that length alone, and how
+      // many runs longer than that (kept whole, up to 64 lines).
+      uint32_t reserve_quota(uint32_t k) const noexcept
+      {
+         return k >= 2 && k <= pool_exact_max ? _pool.quota[k] : 0;
+      }
+      uint32_t reserve_big_quota() const noexcept { return _pool.big_quota; }
       // Segments are never returned to the OS: this is the high-water mark.
       uint64_t mapped_bytes() const noexcept { return uint64_t(num_segments()) * segment_bytes; }
       uint64_t limit_bytes() const noexcept { return uint64_t(_cfg.max_segments) * segment_bytes; }
@@ -988,41 +1023,112 @@ namespace start_ref
          throw_full_();
       }
       // ── the reserve ────────────────────────────────────────────────────────
-      // A pool of free runs, each inside one map word like any allocation,
-      // held out of ordinary allocation (taken in the free map) once the
-      // arena is at its ceiling. A session inside use_reserve() draws from it
-      // when its own segment has no room: no segment claim, no waiting.
+      // Free runs, each inside one map word like any allocation, held out of
+      // ordinary allocation (taken in the free map) once the arena is at its
+      // ceiling. A session inside use_reserve() draws from it when its own
+      // segment has no room: no segment claim, no waiting.
       //
-      // What is drawn is OWED. Every run that is freed anywhere in the arena
-      // is offered to the reserve first while anything is owed, and a debt is
-      // repaid with a run of the same length whenever a freed run is long
-      // enough: the old versions of the nodes a remove copied are exactly
-      // such runs. Lines a remove wrote on are ordinary data from then on,
-      // wherever they are, so nothing about the reserve depends on which
-      // nodes stay cold; and nothing about it is remembered across an open:
-      // at a clean close the pool goes back to the free map, a rebuild
-      // discards it, and each open collects it again from what is free
-      // (longest runs first), recording any shortfall as owed.
+      // It has two parts, because what a remove needs is a RUN and a count
+      // of lines says nothing about runs.
+      //
+      //  * Guaranteed stock. For every length from 2 to pool_exact_max lines
+      //    a fixed number of runs of exactly that length (quota[k]), and
+      //    big_quota runs of up to 64 lines for anything longer. A run here
+      //    is only ever handed to a draw of its own length (or, the big
+      //    ones, to a draw longer than pool_exact_max), and its place is
+      //    only ever refilled by a freed run at least that long. So no number
+      //    of shorter draws can take away the reserve's ability to serve a
+      //    longer one.
+      //  * Flexible stock: the rest of the reserve. Any draw may split a run
+      //    of it; it is refilled line for line with whatever is freed. Short
+      //    draws turn it into short runs over time, which is what it is for.
+      //
+      // A draw uses the flexible stock while that has a run long enough and
+      // the guaranteed stock otherwise. What is drawn is OWED: while
+      // anything is owed, every run freed anywhere in the arena that is long
+      // enough to repay something is offered here before the free map. The
+      // old versions of the nodes a remove copied are exactly such runs.
+      // Lines a remove wrote on are ordinary data from then on, wherever
+      // they are, so nothing depends on which nodes stay cold; and nothing
+      // is remembered across an open: at a clean close the reserve goes back
+      // to the free map, a rebuild discards it, and each open collects it
+      // again from what is free, recording what it could not find as owed.
+      static constexpr uint32_t pool_exact_max = 16;  // routers reach 14 lines, key prefixes 9
       struct alignas(128) reserve_pool  // its counters are written often: keep them to themselves
       {
-         std::atomic<uint32_t> need{0};        // lines owed: the only thing a free looks at
+         std::atomic<uint32_t> owed_min{0};    // shortest run that repays something; 0: nothing owed
+         std::atomic<uint32_t> owed{0};        // lines owed
          std::atomic<uint32_t> free_lines{0};  // lines in stock
          std::atomic<bool>     live{false};
          mutable std::mutex    mx;             // held for one list operation, never across a wait
-         std::vector<line_idx> stock[max_alloc_lines + 1];  // free runs, by exact length
-         uint32_t              debt[max_alloc_lines + 1] = {};  // runs owed, by length
-         uint32_t              short_lines = 0;  // owed with no record of lengths (found short at open)
+         std::vector<line_idx> flex[max_alloc_lines + 1];  // flexible runs, by exact length
+         uint32_t              flex_lines  = 0;
+         uint32_t              flex_target = 0;
+         std::vector<line_idx> exact[pool_exact_max + 1];  // guaranteed runs of exactly k lines
+         uint32_t              quota[pool_exact_max + 1] = {};
+         std::vector<std::pair<line_idx, uint32_t>> big;   // guaranteed runs longer than that
+         uint32_t              big_quota = 0;
       };
+      // How the configured reserve is divided. A sixty-fourth of it to each
+      // length from 2 to 16 (so 1/(64k) of the reserve's lines in runs of k),
+      // one 64-line run per 2,048 lines for longer draws, the rest flexible:
+      // a little over three quarters.
+      void pool_plan_()
+      {
+         const uint32_t total = _cfg.reserve_lines;
+         uint32_t       fixed = 0;
+         _pool.big_quota      = total ? std::max<uint32_t>(1, total / 2048) : 0;
+         fixed += _pool.big_quota * max_alloc_lines;
+         for (uint32_t k = 2; k <= pool_exact_max; ++k)
+         {
+            _pool.quota[k] = total ? std::max<uint32_t>(1, total / (64 * k)) : 0;
+            fixed += _pool.quota[k] * k;
+            _pool.exact[k].reserve(_pool.quota[k]);
+         }
+         _pool.big.reserve(_pool.big_quota);
+         _pool.flex_target = total > fixed ? total - fixed : 0;
+         // every list the flexible stock can ever need, so that it never
+         // allocates (remainders of big runs can add a few lines beyond the target)
+         for (uint32_t k = 1; k <= max_alloc_lines; ++k)
+            _pool.flex[k].reserve((_pool.flex_target + _pool.big_quota * max_alloc_lines) / k + 1);
+      }
+      // After any change, under the mutex: what is owed, and the shortest
+      // freed run that could repay any of it.
+      void pool_account_() noexcept
+      {
+         uint32_t owed = 0, least = 0, have = _pool.flex_lines;
+         auto     note = [&](uint32_t lines, uint32_t run)
+         {
+            owed += lines;
+            if (lines && (!least || run < least))
+               least = run;
+         };
+         if (_pool.flex_lines < _pool.flex_target)
+            note(_pool.flex_target - _pool.flex_lines, 1);
+         for (uint32_t k = 2; k <= pool_exact_max; ++k)
+         {
+            have += uint32_t(_pool.exact[k].size()) * k;
+            note((_pool.quota[k] - uint32_t(_pool.exact[k].size())) * k, k);
+         }
+         for (const auto& [line, len] : _pool.big)
+            have += len;
+         note((_pool.big_quota - uint32_t(_pool.big.size())) * max_alloc_lines, pool_exact_max + 1);
+         _pool.owed.store(owed, std::memory_order_relaxed);
+         _pool.free_lines.store(have, std::memory_order_relaxed);
+         _pool.owed_min.store(least, std::memory_order_relaxed);
+      }
       // Collect the reserve from the free lines of segments [first, end).
       // Single-threaded: the constructor, the end of a rebuild, or growth
-      // creating the last segments before anyone can see them.
-      void pool_establish_(uint32_t first, uint32_t end) noexcept
+      // creating the last segments before anyone can see them. The longest
+      // free runs are found first (at most seven passes over the map words,
+      // one load per word and pass, ending as soon as enough is found: one
+      // pass when whole free words are available, as on a store that is not
+      // nearly full) and the guaranteed stock is cut from the longest.
+      void pool_establish_(uint32_t first, uint32_t end)
       {
          std::lock_guard g(_pool.mx);
-         uint32_t        want = _cfg.reserve_lines;
-         for (uint32_t k = 1; k <= max_alloc_lines; ++k)
-            want -= std::min<uint32_t>(want, uint32_t(_pool.stock[k].size()) * k);
-         // longest runs first: whole words, then halves, and so on down
+         std::vector<std::pair<line_idx, uint32_t>> found;  // longest first
+         uint32_t                                   want = _cfg.reserve_lines;
          for (uint32_t least = max_alloc_lines; least >= 1 && want; least /= 2)
             for (uint32_t s = end; s-- > first && want;)
             {
@@ -1042,7 +1148,7 @@ namespace start_ref
                      const uint32_t take = std::min(run, want);
                      const uint64_t mask = (take >= 64 ? ~0ull : ((1ull << take) - 1)) << pos;
                      fs.l0[w].fetch_and(~mask, std::memory_order_relaxed);
-                     _pool.stock[take].push_back(line_idx(s) * lines_per_segment + w * 64 + pos);
+                     found.emplace_back(line_idx(s) * lines_per_segment + w * 64 + pos, take);
                      want -= take;
                      touched = true;
                   }
@@ -1050,12 +1156,72 @@ namespace start_ref
                if (touched)
                   fs.rebuild_from_l0();
             }
-         _pool.short_lines = want;
-         uint32_t owed = want;
-         for (uint32_t k = 1; k <= max_alloc_lines; ++k)
-            owed += _pool.debt[k] * k;
-         _pool.need.store(owed, std::memory_order_relaxed);
-         _pool.free_lines.store(_cfg.reserve_lines - want, std::memory_order_relaxed);
+         // Cut the guaranteed stock out of what was found, longest lengths
+         // first, each from the shortest found run that is long enough; what
+         // is left over is the flexible stock.
+         std::stable_sort(found.begin(), found.end(),
+                          [](const auto& a, const auto& b) { return a.second > b.second; });
+         auto cut = [&](uint32_t len, bool whole) -> line_idx
+         {
+            for (size_t k = found.size(); k-- > 0;)
+               if (found[k].second >= len)
+               {
+                  const line_idx at = found[k].first;
+                  if (whole)
+                     found[k].second = 0;
+                  else
+                     found[k].first += len, found[k].second -= len;
+                  return at;
+               }
+            return null_idx;
+         };
+         // Found short (a store too full to fill its reserve): the flexible
+         // stock, which every remove needs for its single lines, gets its
+         // share of what there is first, from the shortest runs; otherwise
+         // the guaranteed stock would take everything and no remove could
+         // start.
+         if (const uint32_t got = _cfg.reserve_lines - want; want && got)
+         {
+            uint32_t share = uint32_t(uint64_t(got) * _pool.flex_target / _cfg.reserve_lines);
+            for (size_t k = found.size(); k-- > 0 && share;)
+            {
+               const uint32_t take = std::min(found[k].second, share);
+               if (!take)
+                  continue;
+               _pool.flex[take].push_back(found[k].first);
+               _pool.flex_lines += take;
+               found[k].first += take, found[k].second -= take;
+               share -= take;
+            }
+         }
+         for (uint32_t b = uint32_t(_pool.big.size()); b < _pool.big_quota; ++b)
+         {
+            // the longest there is, if it is longer than the exact lengths
+            size_t best = found.size();
+            for (size_t k = 0; k < found.size(); ++k)
+               if (found[k].second > pool_exact_max &&
+                   (best == found.size() || found[k].second > found[best].second))
+                  best = k;
+            if (best == found.size())
+               break;
+            _pool.big.emplace_back(found[best].first, found[best].second);
+            found[best].second = 0;
+         }
+         for (uint32_t k = pool_exact_max; k >= 2; --k)
+            while (_pool.exact[k].size() < _pool.quota[k])
+            {
+               const line_idx at = cut(k, false);
+               if (at == null_idx)
+                  break;
+               _pool.exact[k].push_back(at);
+            }
+         for (const auto& [line, len] : found)
+            if (len)
+            {
+               _pool.flex[len].push_back(line);
+               _pool.flex_lines += len;
+            }
+         pool_account_();
          _pool.live.store(_cfg.reserve_lines != 0, std::memory_order_release);
       }
       // Clean close: nothing of the reserve stays on storage.
@@ -1064,95 +1230,119 @@ namespace start_ref
          std::lock_guard g(_pool.mx);
          if (!_pool.live.exchange(false, std::memory_order_acq_rel))
             return;
-         _pool.need.store(0, std::memory_order_relaxed);
-         for (uint32_t k = 1; k <= max_alloc_lines; ++k)
+         auto give = [&](line_idx i, uint32_t n)
          {
-            for (line_idx i : _pool.stock[k])
-               freeset_(i / lines_per_segment).free_run(i % lines_per_segment, k);
-            _pool.stock[k].clear();
-            _pool.debt[k] = 0;
-         }
-         _pool.short_lines = 0;
-         _pool.free_lines.store(0, std::memory_order_relaxed);
+            freeset_(i / lines_per_segment).free_run(i % lines_per_segment, n);
+         };
+         for (uint32_t k = 1; k <= max_alloc_lines; ++k)
+            for (line_idx i : _pool.flex[k])
+               give(i, k);
+         for (uint32_t k = 2; k <= pool_exact_max; ++k)
+            for (line_idx i : _pool.exact[k])
+               give(i, k);
+         for (const auto& [line, len] : _pool.big)
+            give(line, len);
+         pool_clear_();
       }
-      // A rebuild re-derives the free map from the tree: the pool's lines are
-      // simply free again there.
+      // A rebuild re-derives the free map from the tree: the reserve's lines
+      // are simply free again there.
       void pool_forget_() noexcept
       {
          std::lock_guard g(_pool.mx);
          _pool.live.store(false, std::memory_order_relaxed);
-         _pool.need.store(0, std::memory_order_relaxed);
-         _pool.free_lines.store(0, std::memory_order_relaxed);
-         for (uint32_t k = 1; k <= max_alloc_lines; ++k)
-         {
-            _pool.stock[k].clear();
-            _pool.debt[k] = 0;
-         }
-         _pool.short_lines = 0;
+         pool_clear_();
       }
-      // n consecutive lines from the reserve, or null_idx. The shortest run
-      // that fits is used; what is left of it stays in stock.
+      void pool_clear_() noexcept
+      {
+         for (uint32_t k = 1; k <= max_alloc_lines; ++k)
+            _pool.flex[k].clear();
+         for (uint32_t k = 2; k <= pool_exact_max; ++k)
+            _pool.exact[k].clear();
+         _pool.big.clear();
+         _pool.flex_lines = 0;
+         _pool.owed.store(0, std::memory_order_relaxed);
+         _pool.owed_min.store(0, std::memory_order_relaxed);
+         _pool.free_lines.store(0, std::memory_order_relaxed);
+      }
+      // n consecutive lines from the reserve, or null_idx.
       line_idx pool_draw_(uint32_t n) noexcept
       {
          if (!_pool.live.load(std::memory_order_acquire))
             return null_idx;
          std::lock_guard g(_pool.mx);
-         for (uint32_t m = n; m <= max_alloc_lines; ++m)
+         line_idx        at = null_idx;
+         // the flexible stock, the shortest run that fits
+         for (uint32_t m = n; m <= max_alloc_lines && at == null_idx; ++m)
+            if (!_pool.flex[m].empty())
+            {
+               at = _pool.flex[m].back();
+               _pool.flex[m].pop_back();
+               if (m > n)
+                  _pool.flex[m - n].push_back(at + n);
+               _pool.flex_lines -= n;
+            }
+         // the guaranteed stock: only its own length
+         if (at == null_idx && n >= 2 && n <= pool_exact_max && !_pool.exact[n].empty())
          {
-            if (_pool.stock[m].empty())
-               continue;
-            const line_idx i = _pool.stock[m].back();
-            _pool.stock[m].pop_back();
-            if (m > n)
-               _pool.stock[m - n].push_back(i + n);
-            ++_pool.debt[n];
-            _pool.free_lines.fetch_sub(n, std::memory_order_relaxed);
-            _pool.need.fetch_add(n, std::memory_order_relaxed);
-            return i;
+            at = _pool.exact[n].back();
+            _pool.exact[n].pop_back();
          }
-         return null_idx;
+         if (at == null_idx && n > pool_exact_max)
+         {
+            size_t best = _pool.big.size();
+            for (size_t k = 0; k < _pool.big.size(); ++k)
+               if (_pool.big[k].second >= n &&
+                   (best == _pool.big.size() || _pool.big[k].second < _pool.big[best].second))
+                  best = k;
+            if (best != _pool.big.size())
+            {
+               at                   = _pool.big[best].first;
+               const uint32_t spare = _pool.big[best].second - n;
+               _pool.big[best]      = _pool.big.back();
+               _pool.big.pop_back();
+               if (spare)  // what is left of it joins the flexible stock
+               {
+                  _pool.flex[spare].push_back(at + n);
+                  _pool.flex_lines += spare;
+               }
+            }
+         }
+         if (at != null_idx)
+            pool_account_();
+         return at;
       }
       // A run of n lines at i is being freed while the reserve is owed
-      // something. Returns how many of its leading lines the reserve kept.
+      // something a run of this length can repay. Returns how many of its
+      // leading lines the reserve kept. Longest claims first: a run longer
+      // than the exact lengths restores a big run whole; then each exact
+      // length it covers, longest first; what is left tops up the flexible
+      // stock. A short run is never counted against a longer debt.
       uint32_t pool_take_(line_idx i, uint32_t n) noexcept
       {
          std::lock_guard g(_pool.mx);
          if (!_pool.live.load(std::memory_order_relaxed))
             return 0;
          uint32_t kept = 0;
-         auto     keep = [&](uint32_t k)
+         if (n > pool_exact_max && _pool.big.size() < _pool.big_quota)
          {
-            _pool.stock[k].push_back(i);
-            i += k, n -= k, kept += k;
-         };
-         // debts of the same length or shorter, longest first
-         for (uint32_t k = std::min(n, max_alloc_lines); k >= 1 && n; --k)
-            while (k <= n && _pool.debt[k])
-            {
-               --_pool.debt[k];
-               keep(k);
-            }
-         // lines missing since the open
-         if (n && _pool.short_lines)
-         {
-            const uint32_t k = std::min(n, _pool.short_lines);
-            _pool.short_lines -= k;
-            keep(k);
+            _pool.big.emplace_back(i, n);
+            kept = n, n = 0;
          }
-         // shorter than everything still owed: it counts against the
-         // shortest debt, so that the reserve's line count comes back even
-         // when a run of the owed length does not
-         if (n)
-            for (uint32_t k = n + 1; k <= max_alloc_lines; ++k)
-               if (_pool.debt[k])
-               {
-                  --_pool.debt[k];
-                  ++_pool.debt[k - n];
-                  keep(n);
-                  break;
-               }
-         _pool.free_lines.fetch_add(kept, std::memory_order_relaxed);
-         _pool.need.fetch_sub(kept, std::memory_order_relaxed);
+         for (uint32_t k = std::min(n, pool_exact_max); k >= 2 && n >= 2; --k)
+            while (k <= n && _pool.exact[k].size() < _pool.quota[k])
+            {
+               _pool.exact[k].push_back(i);
+               i += k, n -= k, kept += k;
+            }
+         if (n && _pool.flex_lines < _pool.flex_target)
+         {
+            const uint32_t k = std::min(n, _pool.flex_target - _pool.flex_lines);
+            _pool.flex[k].push_back(i);
+            _pool.flex_lines += k;
+            kept += k;
+         }
+         if (kept)
+            pool_account_();
          return kept;
       }
       // Whether at least `need` units are free across the arena. Stops at
@@ -1345,7 +1535,8 @@ namespace start_ref
          // for any other size) until its next commit.
          _s->flush_fcache_();
          _s->flush_window_();
-         _s->_drawn.clear();
+         if (!_s->_drawn.empty()) [[unlikely]]
+            _s->_drawn.clear();
          if (_s->_segment != UINT32_MAX && !_s->_seg_idle)
          {
             // A plain store: while the session is in a transaction the
@@ -1675,7 +1866,19 @@ namespace start_ref
             return g;
       if (_drawn.size() == _drawn.capacity())  // before anything is drawn: this can throw
          _drawn.reserve(std::max<size_t>(64, _drawn.capacity() * 2));
-      const line_idx g = _a->pool_draw_(n);
+      line_idx g = _a->pool_draw_(n);
+      // The reserve has no run of this length just now. What earlier removes
+      // drew is repaid as their old versions are released, and that may
+      // simply not have happened yet (retired versions wait for the next
+      // commit, dead subtrees for the releaser): have it happen, and look
+      // again. This waits for the releaser to finish what is already queued,
+      // never for another writer.
+      for (uint32_t round = 0; g == null_idx && round < max_reclaim_rounds; ++round)
+      {
+         if (!_a->try_reclaim())
+            break;
+         g = _a->pool_draw_(n);
+      }
       if (g != null_idx)
       {
          _drawn.push_back(g);

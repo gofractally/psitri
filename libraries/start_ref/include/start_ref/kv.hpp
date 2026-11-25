@@ -55,6 +55,11 @@ namespace start_ref::kv
       // is never registered — every release runs synchronously on its caller
       // (identical semantics, for deployments that cannot tolerate a thread).
       bool           background_release      = true;
+      // Size of the reserve that lets a store at its ceiling remove keys (see
+      // usage_info and docs/api/engines.md). 0: a sixty-fourth of the store,
+      // between 128 KiB and 1 MiB. Raise it for a store whose transactions
+      // remove many keys each at the ceiling; at most 4 MiB.
+      uint64_t       reserve_bytes           = 0;
    };
 
    // Inline POD value: len-prefixed bytes, trivially copyable (COW memcpy).
@@ -127,13 +132,25 @@ namespace start_ref::kv
       uint64_t mapped_bytes = 0;  // segments created so far; never shrinks (high-water mark)
       uint64_t limit_bytes  = 0;  // max_segments x 8 MiB: allocation beyond this throws
       uint64_t reserve_bytes = 0; // of the limit, kept for removes once the store cannot grow
-      // Of the reserve: what a remove can draw right now, and what it is
-      // still waiting to get back (lent to removes whose old versions are not
-      // freed yet, or not found free when the store was opened). The two add
-      // up to reserve_bytes once the store is at its ceiling; watch
-      // reserve_free_bytes to act before removes run out of room.
-      uint64_t reserve_free_bytes = 0;
-      uint64_t reserve_owed_bytes = 0;
+      // Of the reserve (zero until the store is at its ceiling):
+      // reserve_free_bytes: lines it holds now, whatever their arrangement.
+      //   This is NOT what a remove can get: a remove needs runs of
+      //   consecutive lines, and the next two say what runs there are.
+      // reserve_longest_run_bytes: the longest single run it can hand out
+      //   now. A remove that has to copy a node longer than this is refused.
+      // reserve_long_runs: how many runs of nine lines (1,152 bytes) or more
+      //   it can hand out now; nodes that long are routers of many branches,
+      //   key prefixes over about a kilobyte, and leaves with long keys or
+      //   values.
+      // reserve_owed_bytes: lines it is waiting to get back. They return
+      //   when the versions that removes replaced are released, which a
+      //   reader still on such a version holds up for as long as it stays
+      //   there, and only as runs at least as long as the ones lent; also
+      //   lines not found free when the store was opened.
+      uint64_t reserve_free_bytes        = 0;
+      uint64_t reserve_owed_bytes        = 0;
+      uint64_t reserve_longest_run_bytes = 0;
+      uint32_t reserve_long_runs         = 0;
       // The companion arena that holds values too large for a 64-line run.
       uint64_t large_used_bytes   = 0;
       uint64_t large_mapped_bytes = 0;
@@ -1092,6 +1109,9 @@ namespace start_ref::kv
          u.reserve_bytes      = _arena.reserve_bytes();
          u.reserve_free_bytes = _arena.reserve_free_bytes();
          u.reserve_owed_bytes = _arena.reserve_owed_bytes();
+         u.reserve_longest_run_bytes =
+             uint64_t(_arena.reserve_longest_run()) * start_ref::line_bytes;
+         u.reserve_long_runs = _arena.reserve_runs_at_least(9);
          u.large_used_bytes   = _large.used_bytes();
          u.large_mapped_bytes = _large.mapped_bytes();
          u.large_limit_bytes  = _large.limit_bytes();
@@ -1365,6 +1385,10 @@ namespace start_ref::kv
          // grow without bound. 1/8 keeps the can-this-segment-serve-allocs
          // guarantee while reclaiming aggressively.
          c.reuse_threshold = 0.125;
+         if (cfg.reserve_bytes)
+            c.reserve_lines = uint32_t(std::min<uint64_t>(
+                (cfg.reserve_bytes + start_ref::line_bytes - 1) / start_ref::line_bytes,
+                start_ref::lines_per_segment / 2));
          return c;
       }
       // The large-value second arena lives in a `large/` subdirectory (its own

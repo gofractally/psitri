@@ -1,0 +1,44 @@
+One-upsert workload below the ceiling: e3532c4 (old), 0472866 (new) and the two-part reserve with the session's drawn list moved to the end (cur). Load average 26-100 throughout.
+
+Arena-level microbenchmark (start, allocate one line, commit, close, free the previous line; single thread; ns per transaction; 20 interleaved runs of 3M, best of 9 repetitions each):
+mb-old: min 56.15  2nd 59.69  median 71.12 ns
+mb-new: min 59.10  2nd 59.30  median 74.17 ns
+mb-cur: min 57.89  2nd 58.23  median 72.99 ns
+
+small-engine-tests [.bench] (400,000 one-upsert transactions x 5, best repetition per run, 20 interleaved runs; tx/s):
+se-old: best 5911337  median 4686788  worst 4412243  (n=20)
+se-new: best 5827262  median 4668552  worst 4388842  (n=20)
+se-cur: best 5403294  median 4642535  worst 4050067  (n=20)
+
+churn without a reader, 100k rows, 3M updates:
+se-old churn 583581 updates/s
+se-cur churn 586802 updates/s
+se-old churn 613752 updates/s
+se-cur churn 595484 updates/s
+se-old churn 529906 updates/s
+se-cur churn 539706 updates/s
+se-old churn 549780 updates/s
+se-cur churn 469804 updates/s
+se-old churn 548628 updates/s
+se-cur churn 607781 updates/s
+
+Single-change variants of 0472866 in the microbenchmark (12 interleaved runs):
+mb-old: min 70.85  2nd 71.87  median 73.10 ns
+mb-new: min 74.04  2nd 74.29  median 74.72 ns
+mb-V1 (no alignas on the pool): min 73.69  2nd 73.91  median 74.74 ns
+mb-V2 (no _drawn test in release, no _drawn.clear() at close): min 69.15  2nd 69.35  median 69.64 ns
+mb-V3 (no owed test on the free path): min 70.20  2nd 70.44  median 71.54 ns
+mb-V4 (alloc_slow_ calls the ordinary path directly): min 73.08  2nd 74.34  median 76.12 ns
+mb-V5 (finish_alloc_ without the in_segment flag): min 72.84  2nd 74.22  median 74.92 ns
+mb-V2V3: min 69.97  2nd 70.04  median 71.72 ns
+
+Free path with the reserve in different states (same transaction per thread, own session each; total transactions/s, best of 4 runs of 5 repetitions):
+state 0 = below the ceiling; 1 = at the ceiling, nothing owed; 2 = at the ceiling, guaranteed 9-line and 64-line runs owed (owed_min = 9)
+"lock on every free" = the 0472866 behaviour (any debt makes every free take the reserve's mutex)
+threads 1 state 0: 13409170   lock on every free 13366408
+threads 1 state 1: 16790128   lock on every free 17463889
+threads 1 state 2: 17620887   lock on every free 15782417
+threads 3 state 0: 13749475   lock on every free 13497815
+threads 3 state 1: 17357194   lock on every free 17465344
+threads 3 state 2: 18022297   lock on every free 19158143
+(three threads did not scale on this machine at the time: load average about 30)

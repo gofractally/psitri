@@ -4223,3 +4223,397 @@ TEST_CASE("Small Engine: map files longer than the segment count are counted aga
    auto cur = rs->create_cursor(0);
    REQUIRE(m.verify(cur) == 150);
 }
+
+// ── long runs (gofractally/psitri#39, third review) ────────────────────────
+// A store at its ceiling holds, among small keys, 60 pairs of keys behind a
+// 900-byte common prefix. Removing one of a pair copies nodes of many lines
+// (the prefix alone is eight). The reserve must be able to hand out such runs
+// however many short draws came before: after one transaction that removes
+// `batch` small keys (committed, or refused and aborted), or after the same
+// removes one per transaction while a reader holds the version before them.
+namespace
+{
+   std::string long_prefix_key(int i, char last)
+   {
+      uint64_t h = (uint64_t(i) + 1) * 0x9E3779B97F4A7C15ull;
+      h ^= h >> 29;
+      h *= 0xBF58476D1CE4E5B9ull;
+      h ^= h >> 32;
+      std::string k = "Q";
+      k.append(reinterpret_cast<const char*>(&h), 4);
+      k.append(900, 'p');
+      k.push_back(last);
+      return k;
+   }
+   struct long_run_result
+   {
+      uint64_t control_ok = 0, long_ok = 0, long_refused = 0, small_ok = 0, small_refused = 0;
+      uint64_t batch_done = 0;
+      bool     batch_refused = false;
+      uint32_t longest_before = 0, longest_after = 0, long_runs_after = 0;
+   };
+   long_run_result long_runs_after_short_draws(bool under_reader, uint64_t batch, bool reopen,
+                                               psitri::sync_mode sync = psitri::sync_mode::none)
+   {
+      long_run_result     out;
+      temporary_directory tmp;
+      const auto          cfg = small_config(sync, 2);
+      auto                db  = database::open(tmp.path, psitri::open_mode::create_only, cfg);
+      auto                ws  = db->start_write_session();
+      {
+         auto tx = ws->start_transaction(0);
+         for (int i = 0; i < 60; ++i)
+         {
+            tx.upsert(long_prefix_key(i, 'a'), std::string(20, 'W'));
+            tx.upsert(long_prefix_key(i, 'b'), std::string(20, 'S'));
+         }
+         tx.commit();
+      }
+      std::vector<std::string> keys;
+      uint64_t                 next = 0;
+      std::mt19937_64          rng(99);
+      auto refill = [&] {
+         for (int tiny = 0; tiny < 2; ++tiny)
+            for (;;)
+            {
+               try
+               {
+                  auto tx = ws->start_transaction(0);
+                  tx.upsert(scattered_key("k", next),
+                            tiny ? std::string(1, 't') : std::string(20 + rng() % 170, 'v'));
+                  tx.commit();
+               }
+               catch (const engine::storage_full&)
+               {
+                  break;
+               }
+               keys.push_back(scattered_key("k", next));
+               ++next;
+            }
+      };
+      auto remove_long = [&](int from, int to) {
+         uint64_t ok = 0;
+         for (int i = from; i < to; ++i)
+         {
+            try
+            {
+               auto tx = ws->start_transaction(0);
+               if (tx.remove(long_prefix_key(i, 'a')) != 0)
+                  throw std::runtime_error("a long-prefix key was missing");
+               tx.commit();
+               ++ok;
+            }
+            catch (const engine::storage_full&)
+            {
+               ++out.long_refused;
+            }
+         }
+         return ok;
+      };
+      refill();
+      out.control_ok = remove_long(0, 5);
+      refill();
+      db->flush_releases();
+      out.longest_before = db->store().reserve_longest_run();
+      std::shuffle(keys.begin(), keys.end(), rng);
+      if (under_reader)
+      {
+         auto rs  = db->start_read_session();
+         auto cur = rs->create_cursor(0);
+         for (; out.batch_done < batch; ++out.batch_done)
+         {
+            try
+            {
+               auto tx = ws->start_transaction(0);
+               tx.remove(keys.back());
+               tx.commit();
+               keys.pop_back();
+            }
+            catch (const engine::storage_full&)
+            {
+               out.batch_refused = true;
+               break;
+            }
+         }
+      }
+      else
+      {
+         auto tx = ws->start_transaction(0);
+         try
+         {
+            for (; out.batch_done < batch; ++out.batch_done)
+               tx.remove(keys[keys.size() - 1 - out.batch_done]);
+            tx.commit();
+            keys.resize(keys.size() - out.batch_done);
+         }
+         catch (const engine::storage_full&)
+         {
+            out.batch_refused = true;
+            tx.abort();
+         }
+      }
+      db->flush_releases();
+      refill();
+      if (reopen)
+      {
+         ws.reset();
+         db.reset();
+         db = database::open(tmp.path, psitri::open_mode::open_existing, cfg);
+         ws = db->start_write_session();
+      }
+      db->flush_releases();
+      out.longest_after   = db->store().reserve_longest_run();
+      out.long_runs_after = uint32_t(db->usage().reserve_long_runs);
+      out.long_refused    = 0;
+      out.long_ok         = remove_long(5, 45);
+      for (int j = 0; j < 200 && !keys.empty(); ++j)
+      {
+         try
+         {
+            auto tx = ws->start_transaction(0);
+            tx.remove(keys.back());
+            tx.commit();
+            ++out.small_ok;
+         }
+         catch (const engine::storage_full&)
+         {
+            ++out.small_refused;
+         }
+         keys.pop_back();
+      }
+      return out;
+   }
+   void report(const char* what, const long_run_result& r)
+   {
+      std::printf("%s: the batch did %llu removes%s; reserve longest run %u lines before, %u after "
+                  "(%u runs of nine or more); long-prefix removes afterwards %llu of 40, refused "
+                  "%llu; small removes %llu, refused %llu\n",
+                  what, (unsigned long long)r.batch_done, r.batch_refused ? " and was refused" : "",
+                  r.longest_before, r.longest_after, r.long_runs_after,
+                  (unsigned long long)r.long_ok, (unsigned long long)r.long_refused,
+                  (unsigned long long)r.small_ok, (unsigned long long)r.small_refused);
+      std::fflush(stdout);
+   }
+   void require_long_runs_kept(const long_run_result& r)
+   {
+      REQUIRE(r.control_ok == 5);
+      REQUIRE(r.long_refused == 0);
+      REQUIRE(r.long_ok == 40);
+      REQUIRE(r.small_refused == 0);
+      REQUIRE(r.longest_after >= 16);
+   }
+}  // namespace
+
+TEST_CASE("Small Engine: long removes still work after one large batch of short ones",
+          "[small][limit][reserve][reserve-long]")
+{
+   for (bool reopen : {false, true})
+      for (uint64_t batch : {uint64_t(1040), uint64_t(1500)})
+      {
+         const auto r = long_runs_after_short_draws(false, batch, reopen);
+         report(reopen ? "long runs, one batch, reopened" : "long runs, one batch", r);
+         require_long_runs_kept(r);
+      }
+}
+
+TEST_CASE("Small Engine: long removes still work after many short ones under a reader",
+          "[small][limit][reserve][reserve-long]")
+{
+   for (bool reopen : {false, true})
+   {
+      const auto r = long_runs_after_short_draws(true, 1500, reopen);
+      report(reopen ? "long runs, under a reader, reopened" : "long runs, under a reader", r);
+      require_long_runs_kept(r);
+   }
+}
+
+// A transaction too large for the reserve is refused and rolled back. What
+// it drew before that must not have cost the reserve its long runs either.
+TEST_CASE("Small Engine: a refused and aborted batch does not cost the reserve its long runs",
+          "[small][limit][reserve][reserve-long]")
+{
+   const auto r = long_runs_after_short_draws(false, 20000, false);
+   report("long runs, batch refused and aborted", r);
+   REQUIRE(r.batch_refused);
+   require_long_runs_kept(r);
+}
+
+// The same with a sync mode that flushes at every commit.
+TEST_CASE("Small Engine: the reserve behaves the same with commits that sync",
+          "[small][limit][reserve][reserve-sync]")
+{
+   const auto r = long_runs_after_short_draws(false, 1500, true, psitri::sync_mode::msync_sync);
+   report("long runs, one batch, msync_sync, reopened", r);
+   require_long_runs_kept(r);
+   temporary_directory tmp;
+   const auto          cfg = small_config(psitri::sync_mode::fsync, 2);
+   reserve_run         run;
+   for (uint64_t epoch = 0; run.rounds < 600 && run.error.empty(); ++epoch)
+   {
+      auto db = database::open(tmp.path, psitri::open_mode::create_or_open, cfg);
+      reserve_rounds(*db, run, 200, epoch + 1, false, false);
+   }
+   report("reserve, fsync, clean reopens", run);
+   INFO(run.error);
+   REQUIRE(run.error.empty());
+   REQUIRE(run.refused_removes == 0);
+   REQUIRE(run.least_room >= run.start_room);
+}
+
+// Removes whose paths are made of long nodes, in the shapes that could be
+// expected to leave the reserve short of long runs: two long key prefixes one
+// after the other with a key branching off between them (shape 0), a long
+// prefix above a leaf with a long key suffix (shape 1), and a long prefix
+// above leaves with values of several lines (shape 2). Each remove draws runs
+// of three to seven lines. After every one of them, once its old version is
+// released, nothing is owed: every run drawn has been repaid with a run as
+// long, and the guaranteed stock of every length is complete. 450 groups of
+// three keys, every key removed in a transaction of its own.
+TEST_CASE("Small Engine: removes through long nodes are repaid run for run",
+          "[small][limit][reserve][reserve-long-nodes]")
+{
+   for (int shape = 0; shape < 3; ++shape)
+   {
+      temporary_directory tmp;
+      auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                               small_config(psitri::sync_mode::none, 2));
+      auto ws = db->start_write_session();
+      const int groups = 150;
+      auto key = [&](int g, int which) {
+         char head[16];
+         std::snprintf(head, sizeof(head), "G%05d", g);
+         const std::string p = head + std::string(444, 'p');
+         if (which == 3)
+            return p + "b";
+         if (shape == 0)
+            return p + "a" + std::string(450, 'q') + char('0' + which);
+         if (shape == 1)
+            return p + (which == 1 ? "a" : "c") + std::string(450, 'q');
+         return p + "a" + char('0' + which);
+      };
+      {
+         auto tx = ws->start_transaction(0);
+         for (int g = 0; g < groups; ++g)
+            for (int which : {1, 2, 3})
+               tx.upsert(key(g, which), std::string(shape == 2 ? 700 : 20, 'v'));
+         tx.commit();
+      }
+      for (uint64_t n = 0;; ++n)
+      {
+         try
+         {
+            auto tx = ws->start_transaction(0);
+            tx.upsert(scattered_key("k", n), std::string(60, 's'));
+            tx.commit();
+         }
+         catch (const engine::storage_full&)
+         {
+            break;
+         }
+      }
+      db->flush_releases();
+      REQUIRE(db->usage().reserve_owed_bytes == 0);
+      uint64_t most_drawn = 0, longest_drawn = 0;
+      for (int g = 0; g < groups; ++g)
+         for (int which : {3, 1, 2})
+         {
+            uint32_t before[65], during[65];
+            db->store().reserve_histogram(before);
+            auto tx = ws->start_transaction(0);
+            REQUIRE(tx.remove(key(g, which)) == 0);
+            db->store().reserve_histogram(during);
+            most_drawn = std::max<uint64_t>(most_drawn, db->store().reserve_owed_lines());
+            for (uint32_t k = 2; k <= 64; ++k)
+               if (during[k] < before[k])
+                  longest_drawn = std::max<uint64_t>(longest_drawn, k);
+            tx.commit();
+            db->flush_releases();
+            INFO("shape " << shape << " group " << g << " key " << which);
+            REQUIRE(db->usage().reserve_owed_bytes == 0);
+         }
+      uint32_t hist[65];
+      db->store().reserve_histogram(hist);
+      for (uint32_t k = 2; k <= 16; ++k)
+         REQUIRE(hist[k] >= db->store().reserve_quota(k));
+      std::printf("long nodes, shape %d: %d removes, at most %llu lines drawn by one, runs of up "
+                  "to %llu lines taken from stock; nothing owed after any of them; longest run "
+                  "now %u\n",
+                  shape, groups * 3, (unsigned long long)most_drawn,
+                  (unsigned long long)longest_drawn, db->store().reserve_longest_run());
+   }
+}
+
+// A store opened with more reserve than it has free lines comes up short.
+// It says so through usage(), ordinary writes are refused, removes work, and
+// the lines they free go to the reserve until it is whole; only then is there
+// room for writes again.
+TEST_CASE("Small Engine: a store opened too full to collect its reserve fills it from frees",
+          "[small][limit][reserve][reserve-short-open]")
+{
+   temporary_directory tmp;
+   auto                cfg = small_config(psitri::sync_mode::none, 2);
+   std::vector<std::string> keys;
+   {
+      auto db = database::open(tmp.path, psitri::open_mode::create_only, cfg);
+      auto ws = db->start_write_session();
+      keys    = fill_to_the_brim(*db, *ws);
+      REQUIRE(db->usage().reserve_bytes == 2048 * 128);
+   }
+   cfg.reserve_bytes = 1u << 20;  // 8,192 lines, of which about 2,048 are free
+   auto db = database::open(tmp.path, psitri::open_mode::open_existing, cfg);
+   auto ws = db->start_write_session();
+   auto u  = db->usage();
+   std::printf("short open: reserve %llu lines wanted, %llu found, %llu owed; longest run %llu "
+               "lines, %u runs of nine or more\n",
+               (unsigned long long)u.reserve_bytes / 128, (unsigned long long)u.reserve_free_bytes / 128,
+               (unsigned long long)u.reserve_owed_bytes / 128,
+               (unsigned long long)u.reserve_longest_run_bytes / 128, unsigned(u.reserve_long_runs));
+   REQUIRE(u.reserve_bytes == 8192 * 128);
+   REQUIRE(u.reserve_free_bytes < u.reserve_bytes / 2);
+   REQUIRE(u.reserve_free_bytes + u.reserve_owed_bytes >= u.reserve_bytes);
+   REQUIRE(u.reserve_longest_run_bytes >= 16 * 128);  // the long runs were collected first
+   {
+      auto tx = ws->start_transaction(0);
+      REQUIRE_THROWS_AS([&] {
+         for (int j = 0; j < 200; ++j)
+            tx.upsert("more/" + std::to_string(j), std::string(100, 'x'));
+      }(), engine::storage_full);
+   }
+   // removes work, and what they free is the reserve's first: the flexible
+   // stock is filled from the single lines, the guaranteed runs from frees
+   // that are long enough
+   size_t         removed = 0;
+   uint64_t       owed    = u.reserve_owed_bytes;
+   const uint64_t free0   = u.reserve_free_bytes;
+   while (removed < keys.size() * 6 / 10)
+   {
+      auto tx = ws->start_transaction(0);
+      for (int j = 0; j < 50 && removed < keys.size(); ++j, ++removed)
+         REQUIRE(tx.remove(keys[removed]) == 0);
+      tx.commit();
+      db->flush_releases();
+      const uint64_t now = db->usage().reserve_owed_bytes;
+      REQUIRE(now <= owed);
+      owed = now;
+   }
+   u = db->usage();
+   std::printf("short open: after %zu removes the reserve holds %llu lines, %llu still owed (runs "
+               "of lengths nothing freed was long enough for)\n",
+               removed, (unsigned long long)u.reserve_free_bytes / 128,
+               (unsigned long long)u.reserve_owed_bytes / 128);
+   REQUIRE(u.reserve_free_bytes >= free0 + 4000 * 128);
+   // the flexible stock is full: freed lines are ordinary room again
+   {
+      auto tx = ws->start_transaction(0);
+      for (int j = 0; j < 100; ++j)
+         tx.upsert("more/" + std::to_string(j), std::string(100, 'x'));
+      tx.commit();
+   }
+   // and with room in the store, the next open collects all of it
+   ws.reset();
+   db.reset();
+   db = database::open(tmp.path, psitri::open_mode::open_existing, cfg);
+   u  = db->usage();
+   REQUIRE(u.reserve_owed_bytes == 0);
+   REQUIRE(u.reserve_free_bytes == u.reserve_bytes);
+}

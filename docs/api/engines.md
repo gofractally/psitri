@@ -115,6 +115,9 @@ A full store is never stuck:
   allocates nothing and frees the whole tree.
 - **Raise the limit.** Close the store and open it with a larger
   `max_segments`; the same files are used and nothing is rewritten.
+  Lowering it is accepted only down to the number of segments the store
+  already has (`usage().mapped_bytes`); below that, `open` throws
+  `std::runtime_error` naming both sizes, before mapping or changing anything.
 
 Overwriting a value is an ordinary write and is refused like an insert. Freed
 space is reused in place; nothing is moved or compacted. Under the workload

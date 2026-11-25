@@ -2073,3 +2073,84 @@ TEST_CASE("Small Engine: two writers feed the release queue at once",
    // every line is accounted for: nothing lost in the queue, nothing freed twice
    REQUIRE(db->usage().used_bytes <= 64 * 128);
 }
+
+namespace
+{
+   std::string file_bytes(const std::filesystem::path& p)
+   {
+      std::string out;
+      if (std::FILE* f = std::fopen(p.c_str(), "rb"))
+      {
+         char   buf[1 << 16];
+         size_t n;
+         while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+            out.append(buf, n);
+         std::fclose(f);
+      }
+      return out;
+   }
+}  // namespace
+
+// Lowering max_segments below what a store already occupies cannot be
+// honoured (nothing is ever moved). The open must be refused before any of
+// the store is mapped, with the two sizes in the message, and must leave
+// every file exactly as it was.
+TEST_CASE("Small Engine: reopening with a limit below the store's size is refused untouched",
+          "[small][open][limit][shrink]")
+{
+   temporary_directory tmp;
+   const model         m{20000, 100};
+   uint64_t            mapped = 0;
+   {
+      auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                               small_config(psitri::sync_mode::none, 16));
+      auto ws = db->start_write_session();
+      for (uint64_t seq = 1; seq <= 400; ++seq)
+      {
+         auto tx = ws->start_transaction(0);
+         m.apply(tx, seq);
+         tx.commit();
+      }
+      mapped = db->usage().mapped_bytes;
+      REQUIRE(mapped > 2ull * 8 * 1024 * 1024);
+   }
+   const char* files[] = {"meta.part", "free.part", "refs.part", "large/meta.part"};
+   std::vector<std::string> before;
+   for (auto f : files)
+      before.push_back(file_bytes(tmp.path / f));
+   const auto data_size = std::filesystem::file_size(tmp.path / "data.part");
+
+   for (int attempt = 0; attempt < 2; ++attempt)
+   {
+      std::string what;
+      try
+      {
+         database::open(tmp.path, psitri::open_mode::open_existing,
+                        small_config(psitri::sync_mode::none, 2));
+         FAIL("a store of more than two segments was opened with max_segments = 2");
+      }
+      catch (const std::runtime_error& e)
+      {
+         what = e.what();
+      }
+      INFO(what);
+      REQUIRE(what.find("max_segments") != std::string::npos);
+      REQUIRE(what.find(std::to_string(mapped / (8 * 1024 * 1024)) + " segments") !=
+              std::string::npos);
+      REQUIRE(what.find("2 segments") != std::string::npos);
+      REQUIRE(database::closed_cleanly(tmp.path));
+      for (size_t i = 0; i < std::size(files); ++i)
+         REQUIRE(file_bytes(tmp.path / files[i]) == before[i]);
+      REQUIRE(std::filesystem::file_size(tmp.path / "data.part") == data_size);
+   }
+   // exactly at the store's size is allowed; so is the original limit
+   for (uint32_t limit : {uint32_t(mapped / (8 * 1024 * 1024)), 16u})
+   {
+      auto db = database::open(tmp.path, psitri::open_mode::open_existing,
+                               small_config(psitri::sync_mode::none, limit));
+      REQUIRE_FALSE(db->recovered_on_open());
+      auto rs  = db->start_read_session();
+      auto cur = rs->create_cursor(0);
+      REQUIRE(m.verify(cur) == 400);
+   }
+}

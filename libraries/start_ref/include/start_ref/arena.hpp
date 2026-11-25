@@ -358,6 +358,13 @@ namespace start_ref
 
          // Re-attach existing segments (maps existing file contents).
          const uint32_t nseg = _hdr->num_segments.load(std::memory_order_relaxed);
+         // Growth extends the three files and records the new count last. A
+         // stop in between leaves files longer than the count: blocks nothing
+         // ever pointed into. They are cut off, so the files and the count
+         // agree again and the next growth starts where the count says.
+         for (sal::block_allocator* file : {_data.get(), _free.get(), _refs.get()})
+            if (file->num_blocks() > nseg)
+               file->truncate(nseg);
          if (nseg)
          {
             _data->reserve(nseg);

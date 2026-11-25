@@ -2757,3 +2757,57 @@ TEST_CASE("Small Engine: a session uses the lines it parked before reporting ful
    }());
    tx.commit();
 }
+
+// gofractally/psitri#35 item 1. Growing the store extends three files and only
+// then records the new segment count. A process killed in between leaves the
+// files longer than the count says. The next open must treat the unrecorded
+// tail as never having existed: otherwise the first growth near the limit
+// asks the files for a block past their maximum and fails with an error that
+// is not storage_full, and the store never notices that it is at its ceiling.
+TEST_CASE("Small Engine: files left longer than the segment count by a stop during growth",
+          "[small][limit][growth]")
+{
+   namespace fs = std::filesystem;
+   temporary_directory tmp;
+   const auto          cfg = small_config(psitri::sync_mode::none, 8);
+   uintmax_t           data_block = 0;
+   {
+      auto db = database::open(tmp.path, psitri::open_mode::create_only, cfg);
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      for (int j = 0; j < 100; ++j)
+         tx.upsert("seed/" + std::to_string(j), std::string(40, 's'));
+      tx.commit();
+      ws.reset();
+      db->flush_releases();
+      data_block = db->usage().mapped_bytes;  // what exists so far
+   }
+   // what a kill inside growth leaves behind: each file extended to the
+   // maximum, the recorded count unchanged
+   const uintmax_t data_size = fs::file_size(tmp.path / "data.part");
+   REQUIRE(data_block > 0);
+   REQUIRE(data_size == data_block);
+   const uintmax_t segments = data_size / (8u << 20);
+   REQUIRE(segments >= 1);
+   REQUIRE(segments < 8);
+   for (const char* name : {"data.part", "free.part", "refs.part"})
+   {
+      const auto path = tmp.path / name;
+      fs::resize_file(path, fs::file_size(path) / segments * 8);
+   }
+   auto db = database::open(tmp.path, psitri::open_mode::open_existing, cfg);
+   REQUIRE(db->usage().mapped_bytes == data_size);  // the tail is not part of the store
+   auto ws = db->start_write_session();
+   std::vector<std::string> keys;
+   REQUIRE_NOTHROW(keys = fill_to_the_brim(*db, *ws));  // ends in storage_full, nothing else
+   const auto full = db->usage();
+   REQUIRE(full.mapped_bytes == full.limit_bytes);
+   REQUIRE(full.used_bytes + full.reserve_bytes + (64u << 10) >= full.limit_bytes);
+   // at the ceiling the reserve works: every key can be removed again
+   for (const auto& key : keys)
+   {
+      auto tx = ws->start_transaction(0);
+      REQUIRE(tx.remove(key) == 0);
+      tx.commit();
+   }
+}

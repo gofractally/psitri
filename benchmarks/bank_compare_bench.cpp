@@ -13,7 +13,8 @@
 #include <delta_art/tiered_kv.hpp>
 #include <psitri/dwal/kv_engine.hpp>  // psitri::dwal::kv_engine concept (cold-base contract)
 
-#include <heart_dwal_engine.hpp>  // sal_art_ref::radix::dwal_engine (cold base)
+#include <psitri/dwal/kv_engine.hpp>
+#include <sal_art_ref/engine.hpp>
 #include <heart_kv.hpp>           // sal_art_ref::kv (standalone)
 #include <start_ver/kv.hpp>       // start_ver::kv (hot, standalone)
 #include <start_ref/kv.hpp>       // start_ref::kv (hot, standalone)
@@ -32,8 +33,8 @@
 #include <vector>
 
 using Clock = std::chrono::steady_clock;
-using TK    = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::dwal_engine>;
-using TKR   = delta_art::tiered_kv<start_ref::kv::engine, sal_art_ref::radix::dwal_engine>;
+using TK    = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::engine>;
+using TKR   = delta_art::tiered_kv<start_ref::kv::engine, sal_art_ref::radix::engine>;
 // start_ver hot delta over a gcart COLD base (the tiered config under test).
 using TKG   = delta_art::tiered_kv<start_ver::kv::engine, gcart::kv::engine>;
 static_assert(psitri::dwal::kv_engine<gcart::kv::engine>,

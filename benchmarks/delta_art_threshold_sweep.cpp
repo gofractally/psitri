@@ -11,7 +11,8 @@
 //                             [dir=/tmp/da_sweep]  (SWEEP_MB="32 64 128" env)
 #include <delta_art/tiered_kv.hpp>
 
-#include <heart_dwal_engine.hpp>
+#include <psitri/dwal/kv_engine.hpp>
+#include <sal_art_ref/engine.hpp>
 #include <start_ver/kv.hpp>
 
 #include <chrono>
@@ -24,7 +25,7 @@
 #include <vector>
 
 using Clock = std::chrono::steady_clock;
-using TK    = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::dwal_engine>;
+using TK    = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::engine>;
 
 namespace
 {

@@ -13,7 +13,8 @@
 // synced" (arena.hpp), so a crash needs a refcount REBUILD from the committed
 // roots — a different recovery path than start_ver's stamp-in-root-table.
 #include <delta_art/tiered_kv.hpp>
-#include <heart_dwal_engine.hpp>
+#include <psitri/dwal/kv_engine.hpp>
+#include <sal_art_ref/engine.hpp>
 #include <heart_kv.hpp>
 #include <start_ver/kv.hpp>
 
@@ -26,7 +27,7 @@
 #include <sys/resource.h>
 
 using Clock = std::chrono::steady_clock;
-using TK    = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::dwal_engine>;
+using TK    = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::engine>;
 
 namespace
 {

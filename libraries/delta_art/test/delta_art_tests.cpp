@@ -7,7 +7,8 @@
 #include <adb/testing/kv_conformance.hpp>  // shared bounds conformance (one check, all engines)
 #include <delta_art/tiered_kv.hpp>
 
-#include <heart_dwal_engine.hpp>  // sal_art_ref::radix::dwal_engine (concept-checked)
+#include <psitri/dwal/kv_engine.hpp>
+#include <sal_art_ref/engine.hpp>
 #include <start_ver/kv.hpp>
 
 #include <filesystem>
@@ -17,8 +18,8 @@
 
 namespace fs = std::filesystem;
 
-using TK = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::dwal_engine>;
-using TE = delta_art::engine<start_ver::kv::engine, sal_art_ref::radix::dwal_engine>;
+using TK = delta_art::tiered_kv<start_ver::kv::engine, sal_art_ref::radix::engine>;
+using TE = delta_art::engine<start_ver::kv::engine, sal_art_ref::radix::engine>;
 static_assert(psitri::dwal::kv_engine<TE>,
               "the COMPOSITION must satisfy the engine concept, cursors included (Dan)");
 

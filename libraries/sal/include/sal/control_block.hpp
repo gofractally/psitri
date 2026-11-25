@@ -218,6 +218,40 @@ namespace sal
       }
 
       /**
+       * Drops one reference unless it is the last one. Returns true if it dropped it.
+       *
+       * A caller that gets false holds the ONLY reference: no other thread can hold or
+       * acquire one, so the count stays at 1 until the caller itself changes it. That lets
+       * the caller prepare (take its read lock, or hand the reference to another thread)
+       * BEFORE the count reaches zero. The compactor treats a zero count as "already freed"
+       * and leaves such an object behind when it empties a segment, so an object must never
+       * be at zero while its bytes can still be recycled under the thread about to destroy it.
+       */
+      bool release_if_shared() noexcept
+      {
+         uint64_t           expected = _data.load(std::memory_order_relaxed);
+         control_block_data prior;
+         do
+         {
+            prior.from_int(expected);
+            if (prior.ref == 0) [[unlikely]]
+               sal_release_underflow_abort(this, prior.to_int());
+            if (prior.ref == 1)
+               return false;
+         } while (!_data.compare_exchange_weak(expected, prior_minus_one(prior),
+                                               std::memory_order_relaxed));
+         return true;
+      }
+
+     private:
+      static uint64_t prior_minus_one(control_block_data prior) noexcept
+      {
+         prior.set_ref(prior.ref - 1);
+         return prior.to_int();
+      }
+
+     public:
+      /**
        * @return the state of the control_block_data before decrementing the reference count
        */
       control_block_data release() noexcept

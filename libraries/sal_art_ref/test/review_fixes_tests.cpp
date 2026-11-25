@@ -285,3 +285,53 @@ TEST_CASE("review: a key outside a page's long common prefix gets in", "[review]
       put(*ws, model, k, "small");
    check_against(*ws, model);
 }
+
+// gofractally/psitri#29: a cursor kept its descent path in 256 frames and wrote
+// past them. The routing index is as deep as its dividers nest, and keys that
+// are each a prefix of the next (a, aa, aaa, ...) nest once per byte, up to the
+// key limit.
+TEST_CASE("review: a cursor walks a tree nested as deep as the longest key", "[review]")
+{
+   temp_dir dir("deep-cursor");
+   auto     db = engine::database::open(dir.path);
+   auto     ws = db->start_write_session();
+   model_t  model;
+
+   // Groups a^n b ?? for every n the key limit allows: 60 keys per group so each
+   // group's page splits and leaves a divider at its depth.
+   constexpr int deepest = 1024 - 3;
+   for (int n = 1; n <= deepest; ++n)
+   {
+      auto tx = ws->start_transaction(0);
+      for (int j = 0; j < 60; ++j)
+      {
+         std::string k(size_t(n), 'a');
+         k += 'b';
+         k += char('A' + j / 10);
+         k += char('0' + j % 10);
+         tx.upsert(k, "v");
+         model[k] = "v";
+      }
+      tx.commit();
+   }
+   REQUIRE(model.rbegin()->first.size() <= 1024);
+   check_against(*ws, model);
+
+   auto tree = ws->get_root(0);
+   auto c    = tree.snapshot_cursor();
+   for (int n : {1, 200, 255, 256, 257, 280, 400, 1000, deepest})
+   {
+      std::string k(size_t(n), 'a');
+      k += "bA0";
+      INFO("depth " << n);
+      REQUIRE(c.lower_bound(k));
+      REQUIRE(std::string(c.key()) == k);
+      auto it = model.find(k);
+      REQUIRE(c.next());
+      REQUIRE(std::string(c.key()) == std::next(it)->first);
+      REQUIRE(c.prev());
+      REQUIRE(c.prev() == (it != model.begin()));
+      if (it != model.begin())
+         REQUIRE(std::string(c.key()) == std::prev(it)->first);
+   }
+}

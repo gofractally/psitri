@@ -4264,8 +4264,10 @@ namespace sal_art_ref::radix
             _typenum        = kRawType;
             _stack_deferred = false;
          }
-         void append(const uint8_t* p, size_t n) noexcept
+         void append(const uint8_t* p, size_t n)
          {
+            if (_klen + n > sizeof(_kbuf)) [[unlikely]]
+               throw std::logic_error("sal_art_ref cursor: a path is longer than the key limit");
             std::memcpy(_kbuf + _klen, p, n);
             _klen += uint32_t(n);
          }
@@ -4431,7 +4433,7 @@ namespace sal_art_ref::radix
             {
                if (const leaf_page* pg = as_page(addr))  // leftmost path ends in a page
                {
-                  frame& f = _fr[_depth];
+                  frame& f = next_frame();
                   f.addr   = addr;
                   f.klen1  = uint16_t(_klen);
                   f.pos    = 0;
@@ -4448,7 +4450,7 @@ namespace sal_art_ref::radix
                }
                if (const bucket_node* bn = as_bucket(addr))  // leftmost path ends in a bucket
                {
-                  frame& f = _fr[_depth];
+                  frame& f = next_frame();
                   f.addr   = addr;
                   f.klen1  = uint16_t(_klen);
                   f.pos    = 0;
@@ -4460,7 +4462,7 @@ namespace sal_art_ref::radix
                }
                const uint32_t k0 = _klen;  // key length before this node's prefix (local; not stored)
                const int      r  = _t->dispatch(ses(), addr, [&](auto ad) -> int {
-                  frame& f = _fr[_depth];
+                  frame& f = next_frame();
                   f.addr   = addr;
                   bytes pfx = ad.prefix();
                   append(pfx.data(), pfx.size());
@@ -4556,7 +4558,7 @@ namespace sal_art_ref::radix
             {
                if (const leaf_page* pg = as_page(addr))  // rightmost path ends in a page
                {
-                  frame& f = _fr[_depth];
+                  frame& f = next_frame();
                   f.addr   = addr;
                   f.klen1  = uint16_t(_klen);
                   ++_depth;
@@ -4574,7 +4576,7 @@ namespace sal_art_ref::radix
                }
                if (const bucket_node* bn = as_bucket(addr))  // rightmost path ends in a bucket
                {
-                  frame& f = _fr[_depth];
+                  frame& f = next_frame();
                   f.addr   = addr;
                   f.klen1  = uint16_t(_klen);
                   ++_depth;
@@ -4587,7 +4589,7 @@ namespace sal_art_ref::radix
                }
                const uint32_t k0 = _klen;
                const int      r  = _t->dispatch(ses(), addr, [&](auto ad) -> int {
-                  frame& f = _fr[_depth];
+                  frame& f = next_frame();
                   f.addr   = addr;
                   bytes pfx = ad.prefix();
                   append(pfx.data(), pfx.size());
@@ -4773,7 +4775,7 @@ namespace sal_art_ref::radix
             {
                if (const leaf_page* pg = as_page(addr))
                {
-                  frame& f = _fr[_depth];
+                  frame& f = next_frame();
                   f.addr   = addr;
                   f.klen1  = uint16_t(_klen);
                   ++_depth;
@@ -4781,7 +4783,7 @@ namespace sal_art_ref::radix
                   return;
                }
                _t->dispatch(ses(), addr, [&](auto ad) {
-                  frame& f = _fr[_depth];
+                  frame& f = next_frame();
                   f.addr   = addr;
                   bytes pfx = ad.prefix();
                   append(pfx.data(), pfx.size());
@@ -4838,7 +4840,7 @@ namespace sal_art_ref::radix
             {
                if (const bucket_node* bn = as_bucket(addr))  // path ends in a bucket leaf
                {
-                  frame& f = _fr[_depth];
+                  frame& f = next_frame();
                   f.addr   = addr;
                   f.klen1  = uint16_t(_klen);
                   ++_depth;
@@ -4851,7 +4853,7 @@ namespace sal_art_ref::radix
                   return;
                }
                const int r = _t->dispatch(ses(), addr, [&](auto ad) -> int {
-                  frame& f = _fr[_depth];
+                  frame& f = next_frame();
                   f.addr   = addr;
                   bytes pfx = ad.prefix();
                   append(pfx.data(), pfx.size());
@@ -4890,7 +4892,18 @@ namespace sal_art_ref::radix
 
          radix_tree*                     _t;
          cursor_root _root;  // pins the snapshot version (RAII refcount) unless borrowed
-         frame                           _fr[256];  // descent path (bounded by key depth; no heap)
+         // The descent path. Every router node on a path consumes at least one byte of a
+         // divider, and a divider is at most a maximum-length key, so a path has at most
+         // max_key_len router frames, one more for a node entered through its terminal, and
+         // one for the page. next_frame() enforces the bound instead of trusting it.
+         static constexpr int max_frames = int(key_val_node::max_key_len) + 2;
+         frame                           _fr[max_frames];
+         frame& next_frame()
+         {
+            if (_depth >= max_frames) [[unlikely]]
+               throw std::logic_error("sal_art_ref cursor: the tree is deeper than the key limit allows");
+            return _fr[_depth];
+         }
          uint8_t                         _kbuf[1024];
          uint32_t    _klen      = 0;
          value_view  _val;

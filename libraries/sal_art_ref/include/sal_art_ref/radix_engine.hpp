@@ -5067,7 +5067,18 @@ namespace sal_art_ref::radix
          }
 
         public:
-         transaction(transaction&&) noexcept            = default;
+         // The moved-from transaction is closed: it holds no lock and no working root.
+         transaction(transaction&& o) noexcept
+             : _t(o._t),
+               _primary_idx(o._primary_idx),
+               _open(o._open),
+               _writer(std::move(o._writer)),
+               _primary(std::move(o._primary)),
+               _extra(std::move(o._extra)),
+               _extra_writers(std::move(o._extra_writers))
+         {
+            o._open = false;
+         }
          transaction(const transaction&)                = delete;
          transaction& operator=(const transaction&)     = delete;
          ~transaction() { if (_open) abort(); }
@@ -5206,7 +5217,13 @@ namespace sal_art_ref::radix
          }
 
         public:
-         frame(frame&&) noexcept        = default;
+         // The moved-from frame is no longer the savepoint: left active, its destructor
+         // would "abort" and put its now-empty saved root in place of the working one.
+         frame(frame&& o) noexcept
+             : _tx(o._tx), _sp(std::move(o._sp)), _nchild(o._nchild), _active(o._active)
+         {
+            o._active = false;
+         }
          frame(const frame&)            = delete;
          frame& operator=(const frame&) = delete;
          ~frame() { if (_active) abort(); }

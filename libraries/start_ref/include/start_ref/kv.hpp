@@ -415,20 +415,10 @@ namespace start_ref::kv
    class cursor
    {
      public:
-      cursor(cursor&& o) noexcept
-          : _a(o._a),
-            _hp(o._hp),
-            _root(o._root),
-            _view(std::move(o._view)),
-            _it(_view.end()),
-            _own_slot(std::move(o._own_slot)),
-            _session_slot_busy(o._session_slot_busy),
-            _borrowed(o._borrowed)
-      {
-         o._a  = nullptr;  // moved-from cursor owns no pin; position resets
-         o._hp = nullptr;
-         o._session_slot_busy = nullptr;
-      }
+      // A moved cursor stays where it was. Its iterator points into its own
+      // view of the tree, so the position travels as the key it stood on and
+      // is found again in the new view.
+      cursor(cursor&& o) noexcept : cursor(std::move(o), o.where_()) {}
       cursor(const cursor&) = delete;
       ~cursor()
       {
@@ -642,6 +632,46 @@ namespace start_ref::kv
       {
          _view.allocator_mut().vhooks = vh;  // write-side cursors can release
          _view.adopt_root(_root);
+      }
+      // Where a cursor stands, in a form that survives its view being moved.
+      struct position
+      {
+         bool     on_key = false;
+         bool     rend   = false;
+         uint16_t size   = 0;
+         char     key[max_key_size];
+      };
+      position where_() const
+      {
+         position p;
+         p.rend = _rend;
+         if (_a && !_rend && _it != _view.end())
+         {
+            const key_view k = (*_it).first;
+            p.on_key         = true;
+            p.size           = uint16_t(k.size());
+            std::memcpy(p.key, k.data(), k.size());
+         }
+         return p;
+      }
+      cursor(cursor&& o, const position& at) noexcept
+          : _own_slot(std::move(o._own_slot)),
+            _session_slot_busy(o._session_slot_busy),
+            _a(o._a),
+            _hp(o._hp),
+            _root(o._root),
+            _view(std::move(o._view)),
+            _it(_view.end()),
+            _rend(at.rend),
+            _borrowed(o._borrowed)
+      {
+         o._a  = nullptr;  // the moved-from cursor owns no pin
+         o._hp = nullptr;
+         o._session_slot_busy = nullptr;
+         o._it   = o._view.end();
+         o._rend = false;
+         if (at.on_key)
+            _it = _view.lower_bound(key_view(at.key, at.size));
       }
 
       // A reader's cursor protects its snapshot through one reader slot. The
@@ -1419,14 +1449,25 @@ namespace start_ref::kv
          void (*retain)(void*, const char*, size_t)  = nullptr;
          void (*release)(void*, const char*, size_t) = nullptr;
       };
-      std::vector<type_entry> _types = std::vector<type_entry>(65536);
+      // One entry per type number, a megabyte in all: made when the first type
+      // is registered, so a store that keeps only bytes never has it. The
+      // releaser reads it from its own thread, hence the published pointer.
+      std::unique_ptr<type_entry[]>  _types_owner;
+      std::atomic<type_entry*>       _types{nullptr};
       template <class T>
       void reg_type_()
       {
          static_assert(storable<T>);
          static_assert(T::type_id != kRawType && T::type_id != large_value_detail::chunked_type,
                        "type IDs 0 and 65535 are reserved for byte values");
-         _types[T::type_id] = {&vh_retain_t_<T>, &vh_release_t_<T>};
+         type_entry* types = _types.load(std::memory_order_acquire);
+         if (!types)
+         {
+            _types_owner = std::make_unique<type_entry[]>(65536);
+            types        = _types_owner.get();
+         }
+         types[T::type_id] = {&vh_retain_t_<T>, &vh_release_t_<T>};
+         _types.store(types, std::memory_order_release);
       }
       template <class T>
       static void vh_retain_t_(void* db, const char* p, size_t n)
@@ -1458,7 +1499,10 @@ namespace start_ref::kv
             large_value_detail::release_head(_large, {b, n});
             return;
          }
-         const auto& e = _types[t];
+         const type_entry* types = _types.load(std::memory_order_acquire);
+         if (!types)
+            return;  // no type was ever registered
+         const auto& e = types[t];
          if (auto f = retain ? e.retain : e.release)
             f(this, b + 2, n - 2);
       }

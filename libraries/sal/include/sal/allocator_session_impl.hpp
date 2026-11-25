@@ -393,6 +393,17 @@ namespace sal
    inline std::atomic<uint64_t> g_sal_consumer_queue1{0};      // &queue(1) the bg loop reads
 #endif
 
+   namespace detail
+   {
+      /// For tests: called on the last-reference path of allocator_session::release at the
+      /// point where the object is committed to being destroyed but must still be counted:
+      /// just before its reference is handed to the release queue (deferred == true), or
+      /// just before the count is dropped under the read lock (deferred == false). Null in
+      /// production; one relaxed load per last-reference release.
+      using release_probe_fn = void (*)(const control_block& cb, bool deferred) noexcept;
+      inline std::atomic<release_probe_fn> release_last_reference_probe{nullptr};
+   }  // namespace detail
+
    inline void allocator_session::release(ptr_address adr) noexcept
    {
       assert(check_thread_ownership());
@@ -425,6 +436,9 @@ namespace sal
       // drops it under its own read lock.
       if (_defer_destroy || _destroy_budget == 0)
       {
+         if (auto probe = detail::release_last_reference_probe.load(std::memory_order_relaxed))
+             [[unlikely]]
+            probe(cb, true);
          if (_release_queue.try_push(adr)) [[likely]]
          {
 #ifdef SAL_RELEASE_DEBUG_COUNTERS
@@ -455,6 +469,9 @@ namespace sal
       // otherwise), so the bytes cannot be recycled from now on. Drop the last reference: the
       // word returned carries the object's CURRENT location, wherever the compactor moved it
       // while it was still referenced; at zero it is not moved again.
+      if (auto probe = detail::release_last_reference_probe.load(std::memory_order_relaxed))
+          [[unlikely]]
+         probe(cb, false);
       auto prev = cb.release();
 
       // Destroy `adr` via the fast templated per-tier destroy (NOT the std::function vtable

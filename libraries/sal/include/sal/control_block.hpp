@@ -196,28 +196,6 @@ namespace sal
       }
 
       /**
-       * Reclaim exclusive ownership of a just-resurrected control for inline destroy:
-       * (ref=1, loc=L) -> (ref=0, loc=L) under CAS, so a concurrent compactor cas_move
-       * (the only legal writer of an unreachable ref-1 object) cannot be lost — the
-       * object may have relocated since the caller's last read. Returns the
-       * pre-transition word: destroy at its loc().
-       */
-      control_block_data take_for_destroy() noexcept
-      {
-         uint64_t           expect = _data.load(std::memory_order_acquire);
-         control_block_data prior, next;
-         do
-         {
-            prior.from_int(expect);
-            assert(prior.ref == 1);
-            next = prior;
-            next.set_ref(0);
-         } while (
-             not _data.compare_exchange_weak(expect, next.to_int(), std::memory_order_acq_rel));
-         return prior;
-      }
-
-      /**
        * Drops one reference unless it is the last one. Returns true if it dropped it.
        *
        * A caller that gets false holds the ONLY reference: no other thread can hold or

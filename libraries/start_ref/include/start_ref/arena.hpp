@@ -361,8 +361,6 @@ namespace start_ref
              const_cast<void*>(_refs->mapped_base()));
          for (uint32_t s = 0; s < nseg; ++s)
             _segs[s].state.store(SEG_UNOWNED, std::memory_order_relaxed);
-         if (getenv("PART_PRINT_REFBASE"))
-            fprintf(stderr, "REFBASE %p DATABASE %p\n", (void*)_ref_base, (void*)_base);
       }
 
       ~arena_t()
@@ -435,10 +433,6 @@ namespace start_ref
       {
          auto& r   = _ref_base[i];
          auto  cur = r.load(std::memory_order_relaxed);
-         if (long(i) == trace_line_())
-            fprintf(stderr, "TRACE line %u retain from=%u ra0=%p ra1=%p ra2=%p\n", i, cur,
-                    __builtin_return_address(0), __builtin_return_address(1),
-                    __builtin_return_address(2));
          while (cur < writer_clone_at)
             if (r.compare_exchange_weak(cur, uint8_t(cur + 1), std::memory_order_relaxed))
                return true;
@@ -460,8 +454,6 @@ namespace start_ref
       {
          auto& r   = _ref_base[i];
          auto  cur = r.load(std::memory_order_relaxed);
-         if (long(i) == trace_line_())
-            fprintf(stderr, "TRACE line %u pin from=%u\n", i, cur);
          do
          {
             if (cur >= ref_ceiling)
@@ -471,21 +463,10 @@ namespace start_ref
       // Exact decrement; on 1->0 runs destroy(i) while the line is still valid,
       // then frees the line immediately (crash safety is the COW contract's
       // job — SPEC §7). Returns true when the line died.
-      // PART_TRACE_LINE=<n>: stderr trace of one line's count lifecycle (debug)
-      static long trace_line_()
-      {
-         static long v = [] {
-            const char* e = getenv("PART_TRACE_LINE");
-            return e ? atol(e) : -1;
-         }();
-         return v;
-      }
       template <typename Destroy>
       bool release(line_idx i, Destroy&& destroy) noexcept(noexcept(destroy(i)))
       {
          const uint8_t prior = _ref_base[i].fetch_sub(1, std::memory_order_acq_rel);
-         if (long(i) == trace_line_())
-            fprintf(stderr, "TRACE line %u release prior=%u\n", i, prior);
          assert(prior >= 1 && "release of a dead line");
          if (prior != 1)
             return false;
@@ -508,8 +489,6 @@ namespace start_ref
          for (uint32_t k = 0; k < n; ++k)
          {
             const uint8_t prior = _ref_base[i + k].fetch_sub(1, std::memory_order_acq_rel);
-            if (long(i + k) == trace_line_())
-               fprintf(stderr, "TRACE line %u release_run prior=%u\n", i + k, prior);
             assert(prior >= 1 && "release of a dead line");
             if (prior == 1)
             {
@@ -1100,9 +1079,6 @@ namespace start_ref
    inline void session_t<Geo>::finish_alloc_(line_idx g, uint32_t n) noexcept
    {
       arena_t<Geo>& a = *_a;
-      if (arena_t<Geo>::trace_line_() >= 0 && uint32_t(arena_t<Geo>::trace_line_()) >= g &&
-          uint32_t(arena_t<Geo>::trace_line_()) < g + n)
-         fprintf(stderr, "TRACE line %ld alloc (run %u+%u)\n", arena_t<Geo>::trace_line_(), g, n);
       for (uint32_t k = 0; k < n; ++k)
          a._ref_base[g + k].store(1, std::memory_order_relaxed);
       if (a._cfg.sync_mode != sync_type::none)
@@ -1129,8 +1105,6 @@ namespace start_ref
       {
          for (uint32_t k = 0; k < n; ++k)
          {
-            if (long(i + k) == arena_t<Geo>::trace_line_())
-               fprintf(stderr, "TRACE line %u ses_release_run(1->0)\n", i + k);
             _a->_ref_base[i + k].store(0, std::memory_order_release);
             destroy(i + k);
          }

@@ -31,6 +31,8 @@ if(START_REF_BUILD_TESTS)
         )
         target_link_libraries(start_ref-tests PRIVATE start_ref Catch2::Catch2WithMain)
         target_compile_options(start_ref-tests PRIVATE -O1 -g -UNDEBUG -Wall -Werror=switch)
+        # the freeset tests count descent steps through a probe an ordinary build omits
+        target_compile_definitions(start_ref-tests PRIVATE START_REF_PROBES)
         set_target_properties(start_ref-tests PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
         add_test(NAME start_ref-tests COMMAND start_ref-tests)

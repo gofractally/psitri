@@ -2470,8 +2470,11 @@ namespace sal
       }
 
       provider_prepare_segment(seg_num, true /* pin it*/);
-      provider_state.ready_pinned_segments.push(seg_num);
+      // Mark it queued BEFORE it can be popped: once it is in the queue a
+      // session may take it at once and mark it active, and a later store of
+      // `queued` here would overwrite that.
       _mapped_state->_segment_data.added_to_provider_queue(seg_num);
+      provider_state.ready_pinned_segments.push(seg_num);
    }
    void allocator::provider_populate_unpinned_segments()
    {

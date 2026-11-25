@@ -439,10 +439,19 @@ namespace sal
                                 sync_type          st,
                                 uint64_t           root_version = 0) noexcept
       {
-         std::lock_guard<std::mutex>        wlock(_write_mutex[*ro]);
-         std::lock_guard<std::shared_mutex> rlock(_root_object_mutex[*ro]);
-         auto result = _root_objects->at(*ro).exchange(tid, root_version,
-                                                       std::memory_order_release);
+         std::lock_guard<std::mutex> wlock(_write_mutex[*ro]);
+         tree_id                     result;
+         {
+            // Readers are kept out for the exchange only: get() loads the root and then
+            // retains it, and the exchange must not come between the two.
+            std::lock_guard<std::shared_mutex> rlock(_root_object_mutex[*ro]);
+            result = _root_objects->at(*ro).exchange(tid, root_version,
+                                                     std::memory_order_release);
+         }
+         // The flush needs nothing from the readers' lock. It needs this root's one writer
+         // (the caller) not to publish again before it returns, which the writer's own
+         // exclusion gives. A reader may therefore acquire the new root while its record
+         // is still being flushed; the caller does not get control back until it is.
          sync(st);
          return result;
       }
@@ -469,16 +478,19 @@ namespace sal
                     uint64_t           root_version,
                     OnCommit&&         on_commit) noexcept
       {
-         std::lock_guard<std::mutex>        wlock(_write_mutex[*ro]);
-         std::lock_guard<std::shared_mutex> rlock(_root_object_mutex[*ro]);
-         if (_root_objects->at(*ro).compare_exchange(expect, desire, root_version,
-                                                     std::memory_order_release))
+         std::lock_guard<std::mutex> wlock(_write_mutex[*ro]);
          {
-            on_commit();
-            sync(st);
-            return true;
+            // As in set(): readers are kept out for the exchange only.
+            std::lock_guard<std::shared_mutex> rlock(_root_object_mutex[*ro]);
+            if (!_root_objects->at(*ro).compare_exchange(expect, desire, root_version,
+                                                         std::memory_order_release))
+               return false;
          }
-         return false;
+         // on_commit is the caller's own sync of what it wrote; like the flush of the root
+         // record it needs the writer's exclusion, not the readers'.
+         on_commit();
+         sync(st);
+         return true;
       }
 
       /**

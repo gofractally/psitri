@@ -301,6 +301,76 @@ namespace
    }
 }  // namespace
 
+// gofractally/psitri#30 (5): remove_range_counted(lower, "") removed nothing in the
+// engines' own transactions (the range [lower, "") is empty) and everything from
+// `lower` on in the transactions that keep their changes aside.
+TEMPLATE_TEST_CASE("Transactions: a range remove is the same half-open range in every transaction",
+                   "[api][transactions]",
+                   psitri::small_engine,
+                   psitri::big_engine)
+{
+   using E  = TestType;
+   using DB = psitri::database_for<E>;
+   temporary_directory temp;
+   auto                db = DB::open(temp.path / "db", psitri::open_mode::create_only, config<E>());
+   auto                writer = db->start_write_session();
+   model               letters;
+   {
+      auto tx = writer->start_transaction(1);
+      for (char c = 'a'; c <= 'z'; ++c)
+      {
+         tx.upsert(std::string(1, c), "v");
+         letters[std::string(1, c)] = "v";
+      }
+      tx.commit();
+   }
+   auto check = [&](auto& tx)
+   {
+      auto expected = letters;
+      // nothing is below the empty key, so [lower, "") is empty
+      REQUIRE(tx.remove_range_counted("m", "") == 0);
+      REQUIRE(tx.remove_range_counted("", "") == 0);
+      // an inverted or empty range
+      REQUIRE(tx.remove_range_counted("x", "x") == 0);
+      REQUIRE(tx.remove_range_counted("y", "b") == 0);
+      require_same_scan(tx.snapshot_cursor(), expected);
+      // the empty lower bound is the beginning
+      REQUIRE(tx.remove_range_counted("", "d") == 3);
+      expected.erase(expected.begin(), expected.lower_bound("d"));
+      REQUIRE(tx.remove_range_counted("p", "s") == 3);
+      expected.erase(expected.lower_bound("p"), expected.lower_bound("s"));
+      // to the end: an upper bound above every key
+      REQUIRE(tx.remove_range_counted("w", "\xff") == 4);
+      expected.erase(expected.lower_bound("w"), expected.end());
+      require_same_scan(tx.snapshot_cursor(), expected);
+   };
+   SECTION("the engine's own transaction")
+   {
+      auto tx = writer->start_transaction(1);
+      check(tx);
+      tx.abort();
+   }
+   SECTION("a transient transaction")
+   {
+      psitri::transient_transaction tx(writer->get_root(1));
+      check(tx);
+   }
+   SECTION("a delta transaction")
+   {
+      psitri::delta_transaction<E> tx(*writer, 1);
+      check(tx);
+      tx.abort();
+   }
+   SECTION("a delta transaction inside a savepoint")
+   {
+      psitri::delta_transaction<E> tx(*writer, 1);
+      auto                         point = tx.save();
+      check(tx);
+      tx.rollback(point);
+      tx.abort();
+   }
+}
+
 TEMPLATE_TEST_CASE("Transactions: a transient transaction reads its own changes and leaves the root alone",
                    "[api][transactions]",
                    psitri::small_engine,

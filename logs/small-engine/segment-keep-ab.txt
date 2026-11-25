@@ -1,0 +1,26 @@
+Engine at 64715de (old) and with the fill-position fix (new), interleaved, machine load average 55-80.
+small-engine-tests [segments]: 20,000 keys, one-upsert transactions; the 100,000 transactions after the session's first segment reuse.
+old: 51974 segment switches, 51974 claims, 910061 tx/s
+new: 5 segment switches, 5 claims, 1025844 tx/s
+old: 51974 segment switches, 51974 claims, 855410 tx/s
+new: 5 segment switches, 5 claims, 913630 tx/s
+old: 51974 segment switches, 51974 claims, 826656 tx/s
+new: 5 segment switches, 5 claims, 950792 tx/s
+old: 51974 segment switches, 51974 claims, 877991 tx/s
+new: 5 segment switches, 5 claims, 905603 tx/s
+old: 51974 segment switches, 51974 claims, 924894 tx/s
+new: 5 segment switches, 5 claims, 979042 tx/s
+old: 51974 segment switches, 51974 claims, 841937 tx/s
+new: 5 segment switches, 5 claims, 1013051 tx/s
+
+small-engine-tests [.bench]: five repetitions of 2,000,000 one-upsert transactions on one key (tx/s).
+old: 2842222 2049726 1752832 1773201 2074320 
+new: 4037811 3492544 3425075 3543356 3558049 
+old: 2807010 1780746 1870505 1578008 2130814 
+new: 2729426 3565575 3255931 3490717 3547804 
+old: 3511490 3016370 2659918 2926797 3072321 
+new: 4326715 3885246 3562762 3660672 3641344 
+old: 3072063 2795625 2191234 1821727 2897598 
+new: 2024672 1279804 1341132 1542064 1634632 
+old: 1379876 1283633 1115189 1293493 1354113 
+new: 1985661 2070643 3090161 2474467 2523701 

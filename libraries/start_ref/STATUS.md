@@ -87,8 +87,6 @@ change to how nodes own their lines has to be made in both.
   up the remove reserve before it commits.
 - At the ceiling a session takes free lines from any segment, which gives up
   the placement policy's low write amplification for as long as it lasts.
-- `session_t::_fill_end` is not reset when a session moves to a lower-numbered
-  segment, so each transaction start there forces one more segment switch.
 - Reverse cursor steps are a series of forward probes (cost follows key
   length); there is no backward link.
 - The large-value arena has no ceiling of its own below

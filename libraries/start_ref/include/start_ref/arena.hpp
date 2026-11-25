@@ -200,7 +200,7 @@ namespace start_ref
       uint32_t              _segment      = UINT32_MAX;  // current claim
       line_idx              _floor        = 0;           // first-fit scan start (global line)
       line_idx              _cursor       = 0;           // next-scan hint (global line)
-      line_idx              _fill_end     = 0;           // one past the highest alloc this txn
+      line_idx              _fill_end     = 0;           // one past the highest alloc in _segment
       uint64_t              _alloc_bytes  = 0;           // batched into arena stats at commit
       bool                  _txn_open     = false;
       bool                  _seg_idle     = false;  // _segment was marked SEG_IDLE at txn end
@@ -1142,9 +1142,16 @@ namespace start_ref
          if (_touched.empty() || _touched.back() != seg)
             _touched.push_back(seg);
       }
-      if (g + n > _fill_end)
-         _fill_end = g + n;
-      _cursor = g + n;
+      // The fill position and scan hint describe the session's CURRENT
+      // segment. A run recycled from the hot-hole cache can lie in a segment
+      // the session has since left; it must not move them there, or the next
+      // transaction's floor lands outside the segment and forces a switch.
+      if (g / lines_per_segment == _segment)
+      {
+         if (g + n > _fill_end)
+            _fill_end = g + n;
+         _cursor = g + n;
+      }
       _alloc_bytes += uint64_t(n) * line_bytes;
    }
 
@@ -1353,8 +1360,9 @@ namespace start_ref
             const line_idx base = line_idx(s._segment) * lines_per_segment;
             // A segment claimed afresh is written from its start: the floor
             // only ever applied to the segment it was set in.
-            s._floor  = base;
-            s._cursor = base;
+            s._floor    = base;
+            s._cursor   = base;
+            s._fill_end = base;  // the fill position restarts with the segment
          }
          const line_idx seg_base = line_idx(s._segment) * lines_per_segment;
          seg_freeset&   fs       = a.freeset_(s._segment);
@@ -1426,8 +1434,9 @@ namespace start_ref
             swept = 0;
          }
          s._segment = claim(prev, /*prefer_grow=*/attempts >= 8, sweep);
-         s._floor   = line_idx(s._segment) * lines_per_segment;
-         s._cursor  = s._floor;
+         s._floor    = line_idx(s._segment) * lines_per_segment;
+         s._cursor   = s._floor;
+         s._fill_end = s._floor;  // not the high-water mark of segments left behind
          a._stats.range_switches.fetch_add(1, std::memory_order_relaxed);
          if (!at_ceiling && attempts > 1024)
             throw std::runtime_error("part: allocation livelock");

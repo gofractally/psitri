@@ -6,6 +6,7 @@
 #include <atomic>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -29,21 +30,32 @@ namespace
       return std::to_string(generation) + ":" + std::string(40 + i % 7, char('a' + generation % 26));
    }
    // Every key present, all from one generation: a snapshot is never a mix.
-   unsigned check(engine::cursor c)
+   // No test macro in here: it runs on reader threads, and the framework's
+   // assertions are for one thread at a time. nullopt = the snapshot was wrong.
+   std::optional<unsigned> scan(engine::cursor c)
    {
       unsigned generation = 0, seen = 0;
       for (bool ok = c.lower_bound(std::string_view{}); ok; ok = c.next(), ++seen)
       {
          auto v = c.value<std::string>();
-         REQUIRE(v);
+         if (!v)
+            return std::nullopt;
          const unsigned g = unsigned(std::stoul(*v));
          if (seen == 0)
             generation = g;
-         REQUIRE(c.key() == key(seen));
-         REQUIRE(*v == value(generation, seen));
+         if (c.key() != key(seen) || *v != value(generation, seen))
+            return std::nullopt;
       }
-      REQUIRE(seen == key_count);
+      if (seen != key_count)
+         return std::nullopt;
       return generation;
+   }
+   // The same, asserted: for the test's own thread only.
+   unsigned check(engine::cursor c)
+   {
+      auto generation = scan(std::move(c));
+      REQUIRE(generation);
+      return *generation;
    }
 }  // namespace
 
@@ -68,6 +80,7 @@ TEST_CASE("shared_tree: readers on shared snapshots run beside the writer", "[sh
       engine::shared_tree latest = build(1, {});
       std::atomic<bool>   done{false};
       std::atomic<unsigned> reads{0};
+      std::atomic<unsigned> wrong{0};
 
       std::vector<std::thread> readers;
       for (unsigned r = 0; r < 4; ++r)
@@ -84,10 +97,12 @@ TEST_CASE("shared_tree: readers on shared snapshots run beside the writer", "[sh
                       mine = latest;
                    }
                    // Half the readers borrow: no reference taken on the shared root.
-                   const unsigned generation = check(reads.load() % 2 ? session->borrow_cursor(mine)
-                                                                      : session->create_cursor(mine));
-                   REQUIRE(generation >= last);  // never goes back in time
-                   last = generation;
+                   const auto generation = scan(reads.load() % 2 ? session->borrow_cursor(mine)
+                                                                 : session->create_cursor(mine));
+                   if (!generation || *generation < last)  // never goes back in time
+                      ++wrong;
+                   else
+                      last = *generation;
                    ++reads;
                    // `mine` is dropped here, on the reader thread.
                 }
@@ -116,14 +131,17 @@ TEST_CASE("shared_tree: readers on shared snapshots run beside the writer", "[sh
       done = true;
       for (auto& t : readers)
          t.join();
+      CHECK(wrong.load() == 0);
 
       // A reader's view of the published root can leave its thread.
       auto reader    = db->start_read_session();
       auto published = reader->get_root(0);
+      std::optional<unsigned> elsewhere;
       std::thread([&] {
          auto session = db->start_read_session();
-         REQUIRE(check(session->create_cursor(published)) == 300);
+         elsewhere    = scan(session->create_cursor(published));
       }).join();
+      REQUIRE(elsewhere == 300u);
       published.reset();
 
       // Only the published root keeps anything alive once the shared handles are gone.

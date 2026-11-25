@@ -1870,15 +1870,11 @@ namespace start_ref
       // The reserve has no run of this length just now. What earlier removes
       // drew is repaid as their old versions are released, and that may
       // simply not have happened yet (retired versions wait for the next
-      // commit, dead subtrees for the releaser): have it happen, and look
-      // again. This waits for the releaser to finish what is already queued,
+      // commit, dead subtrees for the releaser): have it happen, once, and
+      // look again. The hook's wait is bounded and is for the releaser,
       // never for another writer.
-      for (uint32_t round = 0; g == null_idx && round < max_reclaim_rounds; ++round)
-      {
-         if (!_a->try_reclaim())
-            break;
+      if (g == null_idx && _a->try_reclaim())
          g = _a->pool_draw_(n);
-      }
       if (g != null_idx)
       {
          _drawn.push_back(g);

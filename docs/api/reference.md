@@ -64,7 +64,7 @@ an attached snapshot on which to create a cursor. A tree returned by
 | transaction destructor | Aborts unfinished work |
 
 | `tx.snapshot_cursor()` | A cursor on the root as this transaction has changed it so far; a snapshot, like any cursor |
-| `tx.remove_range_counted(low, high)` | Removes every key in `[low, high)`, including uncommitted ones; returns how many. An empty `low` is the beginning; an empty `high` leaves the range empty (pass a key above every key to remove to the end). The same in the engines' transactions and in those that keep their changes aside |
+| `tx.remove_range_counted(low, high)` | Removes every key in `[low, high)`, including uncommitted ones; returns how many. An empty `low` is the beginning; an empty `high` leaves the range empty (pass `psitri::above_every_key`, which is longer than any key can be, to remove to the end). The same in the engines' transactions and in those that keep their changes aside |
 
 Call commit or abort at most once and then destroy the transaction. Do not
 retain mutable root handles beyond their transaction. Only one transaction may

@@ -283,6 +283,28 @@ namespace sal_art_ref::radix
       /// The engine the database opened. References that may outlive a write session, such
       /// as shared trees, refer to it and not to the session's writer context.
       radix_tree* store() noexcept { return _store; }
+      // Roots held by this writer context's own open transactions. A second claim on
+      // one of them by the same context would wait for a lock the context itself holds,
+      // which never ends, so it is refused instead. The record belongs to the context (a
+      // write session), not to a thread: a session may move between threads.
+      void claim_root(uint32_t idx)
+      {
+         for (uint32_t held : _held_roots)
+            if (held == idx)
+               throw std::logic_error("root " + std::to_string(idx) +
+                                      " is already held by an open transaction of this write session");
+         _held_roots.push_back(idx);
+      }
+      void unclaim_root(uint32_t idx) noexcept
+      {
+         for (auto& held : _held_roots)
+            if (held == idx)
+            {
+               held = _held_roots.back();
+               _held_roots.pop_back();
+               return;
+            }
+      }
       /// The writer lock of root `idx`.
       std::mutex& root_writer(uint32_t idx)
       {
@@ -5273,6 +5295,35 @@ namespace sal_art_ref::radix
          // Held from here until commit or abort, so a second writer on the root waits and
          // starts from what this one published. Declared before _primary: the root is read
          // only once the lock is held.
+         // Roots this transaction claimed on its writer context (see radix_tree::claim_root),
+         // declared before the locks so a refused claim takes no lock.
+         struct claims
+         {
+            radix_tree*           t = nullptr;
+            std::vector<uint32_t> roots;
+            claims(radix_tree* tree, uint32_t idx) : t(tree) { add(idx); }
+            claims(claims&& o) noexcept : t(o.t), roots(std::move(o.roots)) { o.roots.clear(); }
+            claims(const claims&)            = delete;
+            claims& operator=(const claims&) = delete;
+            ~claims() { drop(); }
+            void add(uint32_t idx)
+            {
+               roots.reserve(roots.size() + 1);  // so recording a granted claim cannot throw
+               t->claim_root(idx);
+               roots.push_back(idx);
+            }
+            void undo_last() noexcept  // the claim just added got no lock
+            {
+               t->unclaim_root(roots.back());
+               roots.pop_back();
+            }
+            void drop() noexcept
+            {
+               for (uint32_t idx : roots)
+                  t->unclaim_root(idx);
+               roots.clear();
+            }
+         } _claims;
          std::unique_lock<std::mutex> _writer;
          tree_handle _primary;                                              // the root at _primary_idx
          std::vector<std::pair<uint32_t, std::unique_ptr<tree_handle>>> _extra;  // open_root(idx)
@@ -5281,6 +5332,7 @@ namespace sal_art_ref::radix
              : _t(t),
                _primary_idx(idx),
                _open(true),
+               _claims(t, idx),
                _writer(t->root_writer(idx)),
                _primary(t, t->_ses->get_root<sal::alloc_header>(sal::root_object_number(idx)))
          {
@@ -5290,6 +5342,7 @@ namespace sal_art_ref::radix
             _extra_writers.clear();
             if (_writer.owns_lock())
                _writer.unlock();
+            _claims.drop();
          }
          // COMMIT a flushed working root: hand it to SAL's root table — set_root TAKES the
          // working ref, writes the commit sync-header (sealing filled segments so the compactor
@@ -5309,6 +5362,7 @@ namespace sal_art_ref::radix
              : _t(o._t),
                _primary_idx(o._primary_idx),
                _open(o._open),
+               _claims(std::move(o._claims)),
                _writer(std::move(o._writer)),
                _primary(std::move(o._primary)),
                _extra(std::move(o._extra)),
@@ -5398,15 +5452,25 @@ namespace sal_art_ref::radix
             uint32_t highest = _primary_idx;
             for (auto& [i, h] : _extra)
                highest = std::max(highest, i);
-            if (idx > highest)
-               _extra_writers.emplace_back(_t->root_writer(idx));
-            else
+            _claims.add(idx);  // refused if another transaction of this session holds it
+            try
             {
-               std::unique_lock<std::mutex> writer(_t->root_writer(idx), std::try_to_lock);
-               if (!writer.owns_lock())
-                  throw std::runtime_error(
-                      "root is being written; open roots in ascending order to wait for it");
-               _extra_writers.push_back(std::move(writer));
+               _extra_writers.reserve(_extra_writers.size() + 1);
+               if (idx > highest)
+                  _extra_writers.emplace_back(_t->root_writer(idx));
+               else
+               {
+                  std::unique_lock<std::mutex> writer(_t->root_writer(idx), std::try_to_lock);
+                  if (!writer.owns_lock())
+                     throw std::runtime_error(
+                         "root is being written; open roots in ascending order to wait for it");
+                  _extra_writers.push_back(std::move(writer));
+               }
+            }
+            catch (...)
+            {
+               _claims.undo_last();
+               throw;
             }
             _extra.emplace_back(idx, std::unique_ptr<tree_handle>(new tree_handle(
                                          _t, _t->_ses->get_root<sal::alloc_header>(
@@ -5584,6 +5648,13 @@ namespace sal_art_ref::radix
       // definition and never touch the table.
       void set_root(uint32_t idx, tree t, sal::sync_type st = sal::sync_type::none)
       {
+         claim_root(idx);  // refused while an open transaction of this session holds the root
+         struct unclaim
+         {
+            radix_tree* t;
+            uint32_t    idx;
+            ~unclaim() { t->unclaim_root(idx); }
+         } done{this, idx};
          std::lock_guard<std::mutex> writer(root_writer(idx));
          auto old =
              _ses->set_root<sal::alloc_header>(sal::root_object_number(idx), std::move(t._root), st);
@@ -7530,6 +7601,7 @@ namespace sal_art_ref::radix
          std::array<std::mutex, 1024> mutex;
       };
       std::shared_ptr<root_writers>   _root_writers;
+      std::vector<uint32_t>           _held_roots;  // see claim_root
       sal::allocator_session_ptr      _ses;
       sal::sync_type                  _sync = sal::sync_type::none;  // commit durability (adb config)
       // The DIRECT-API working root — an OWNING smart_ptr (psitri tree_context's discipline);

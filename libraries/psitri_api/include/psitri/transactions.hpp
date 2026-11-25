@@ -39,6 +39,20 @@
 
 namespace psitri
 {
+   /// The longest key every engine takes (docs/api/reference.md). A transaction that keeps
+   /// its changes aside refuses a longer key when it is written, not when the changes
+   /// reach the engine.
+   inline constexpr std::size_t max_key_size = 1024;
+
+   namespace detail
+   {
+      inline void check_key_size(std::string_view key)
+      {
+         if (key.size() > max_key_size) [[unlikely]]
+            throw std::invalid_argument("key exceeds the 1,024-byte limit");
+      }
+   }  // namespace detail
+
    namespace detail
    {
       // One changed key: a new value (stored after this header) or a removal.
@@ -615,7 +629,11 @@ namespace psitri
       transient_transaction& operator=(transient_transaction&&) noexcept = delete;
       ~transient_transaction() { detail::give_delta_store(std::move(_store)); }
 
-      void upsert(std::string_view key, std::string_view value) { _store->put(key, value); }
+      void upsert(std::string_view key, std::string_view value)
+      {
+         detail::check_key_size(key);
+         _store->put(key, value);
+      }
       /// 0 if the key was there, -1 if not.
       int remove(std::string_view key)
       {
@@ -700,7 +718,11 @@ namespace psitri
             abort();
       }
 
-      void upsert(std::string_view key, std::string_view value) { _store->put(key, value); }
+      void upsert(std::string_view key, std::string_view value)
+      {
+         detail::check_key_size(key);
+         _store->put(key, value);
+      }
       /// 0 if the key was there, -1 if not.
       int remove(std::string_view key)
       {

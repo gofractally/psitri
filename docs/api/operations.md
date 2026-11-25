@@ -266,9 +266,9 @@ arenas to zero.
 A process kill leaves the operating system holding every page the process
 wrote, which is why all modes pass that test alike; the modes differ only in
 what has reached the device, and that has not been exercised by cutting power.
-With any mode other than `none` and `mprotect`, a clean close flushes the free
-map and reference counts before it writes the clean mark, so the mark cannot
-reach storage ahead of them. Flush errors are not checked on the Small
+In every mode a clean close writes the free map and reference counts out
+synchronously before it writes the clean mark, so the mark is not handed to
+storage ahead of them. Flush errors are not checked on the Small
 Engine's data pages. A transaction
 that commits several roots writes one root slot after another, so a stop
 between them leaves some roots new and others old.

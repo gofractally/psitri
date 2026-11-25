@@ -84,24 +84,48 @@ large-value arena separately:
 | `mapped_bytes` | Segments created so far: file size and the most that can be resident |
 | `limit_bytes` | `max_segments` × segment size |
 
-It may be called from any thread. A write that needs a segment beyond the
+| `reserve_bytes` | Part of the limit kept for removes once the store cannot grow |
+
+It may be called from any thread. A write that would take the store past its
 limit throws `psitri::small_engine::storage_full` (a `std::runtime_error`)
-from the write call. Abort the transaction: it rolls back completely, what was
-committed before is untouched, and the same session can go on writing as soon
-as there is room (removing keys makes room). The limit is reported only when
-no segment has a free run of lines long enough for the allocation: before
-giving up, the writer waits for the background releaser to finish freeing
-versions that are already dead, and takes free lines from any segment. In the
-tests a store of 100-byte values filled to 100% of its limit before the first
-refusal. A node that needs many lines in a row (a value of several KiB) can be
-refused earlier on a fragmented store. Freed space is reused in place; nothing
-is moved or compacted. Under the workload the engine
-is meant for (rows rewritten in place plus an index entry moved to a new key
-per update, short reader snapshots throughout) `tests/api/small_engine.cpp`
-measured use and mapped size level from the first sample to the last: 31 MiB
-used and 96 MiB mapped for 100,000 rows over 10 million updates, 316 MiB used
-and 928 MiB mapped for 1 million rows over 6 million updates. Plan for mapped
-size of about three times live size, more if snapshots are held for long.
+from the write call. Abort the transaction: it rolls back completely and what
+was committed before is untouched.
+
+What "full" means: once every segment exists, ordinary writes are refused when
+the free space left is no more than the reserve (a sixty-fourth of the store,
+between 128 KiB and 1 MiB; 512 KiB of a 32 MiB store), or when no segment has
+a free run of lines long enough for the allocation. Before refusing, the
+writer releases versions that no reader holds any more, waits for the
+background releaser to finish what is queued, and looks for free lines in
+every segment, including segments held by sessions that are between
+transactions. In the tests a store of 100-byte values took 174,000 keys and
+was 98% used when it first refused. A node that needs many lines in a row (a
+value of several KiB) can be refused earlier on a fragmented store, and each
+writer that is in a transaction at the same moment needs a segment of its own.
+
+A full store is never stuck:
+
+- **Remove keys.** `remove` and `remove_range_counted` may allocate from the
+  reserve, because a remove has to copy the path to its key before the old
+  path is freed. `tests/api/small_engine.cpp` fills a store one upsert per
+  transaction until it refuses and then removes every key, one transaction
+  each, down to empty. A single transaction that removes very many keys can
+  outrun the reserve; commit in batches.
+- **Drop the root.** `tx.primary().set_root({})` followed by `commit()`
+  allocates nothing and frees the whole tree.
+- **Raise the limit.** Close the store and open it with a larger
+  `max_segments`; the same files are used and nothing is rewritten.
+
+Overwriting a value is an ordinary write and is refused like an insert. Freed
+space is reused in place; nothing is moved or compacted. Under the workload
+the engine is meant for (rows rewritten in place plus an index entry moved to
+a new key per update, short reader snapshots throughout)
+`tests/api/small_engine.cpp` measured use and mapped size level from the first
+sample to the last: 31 MiB used and 96 MiB mapped for 100,000 rows over 10
+million updates, 316 MiB used and 928 MiB mapped for 1 million rows over 6
+million updates. Plan for mapped size of about three times live size, more if
+snapshots are held for long, and set `max_segments` with that in mind: a limit
+close to the live size leaves a store that is always near full.
 
 Values above about 8 KiB live in the large-value arena, which is bounded only
 by its own reservation of `min(max_segments, 512)` segments of 2 GiB. A

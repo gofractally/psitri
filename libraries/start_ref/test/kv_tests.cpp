@@ -757,3 +757,48 @@ namespace
    static_assert(!start_ref::kv::storable<numbered_value<65535>>,
                  "type number 65535 is the directory of a chunked value");
 }  // namespace
+
+// A cursor that is moved keeps its place (it used to come back at the end).
+TEST_CASE("kv: a moved cursor stays on the key it stood on")
+{
+   namespace kv = start_ref::kv;
+   auto dir = fs::temp_directory_path() / "part_kv_cursor_move";
+   fs::remove_all(dir);
+   auto db = kv::database::create(dir);
+   auto ws = db->start_write_session();
+   {
+      auto tx = ws->start_transaction(0);
+      for (int i = 0; i < 100; ++i)
+         tx.upsert("k/" + std::to_string(1000 + i), "v" + std::to_string(i));
+      tx.commit();
+   }
+   auto rs = db->start_read_session();
+   {
+      auto cur = rs->create_cursor(0);
+      REQUIRE(cur.lower_bound("k/1040"));
+      kv::cursor moved(std::move(cur));
+      REQUIRE_FALSE(moved.is_end());
+      REQUIRE(moved.key() == "k/1040");
+      REQUIRE(*moved.value<std::string>() == "v40");
+      REQUIRE(moved.next());
+      REQUIRE(moved.key() == "k/1041");
+   }
+   {  // a cursor at the end, and one moved while holding the session's slot, too
+      auto cur = rs->create_cursor(0);
+      REQUIRE_FALSE(cur.lower_bound("z"));
+      kv::cursor moved(std::move(cur));
+      REQUIRE(moved.is_end());
+      REQUIRE(moved.seek_begin());
+      REQUIRE(moved.key() == "k/1000");
+   }
+   {  // a snapshot cursor returned by value from a function, as the API does
+      auto make = [&] {
+         auto c = ws->get_root(0).snapshot_cursor();
+         c.lower_bound("k/1099");
+         return c;
+      };
+      kv::cursor last = make();
+      REQUIRE(last.key() == "k/1099");
+      REQUIRE_FALSE(last.next());
+   }
+}

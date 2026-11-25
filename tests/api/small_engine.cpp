@@ -2690,9 +2690,9 @@ TEST_CASE("Small Engine: lines a session parked are room again after it aborts",
    auto parker = db->start_write_session();
    auto other  = db->start_write_session();
    // fill until a little over a megabyte is left above the reserve
-   const auto limit = db->usage();
    for (uint64_t n = 0;; n += 500)
    {
+      db->flush_releases();  // count only what is really in use
       const auto u = db->usage();
       if (u.used_bytes + u.reserve_bytes + (1300u << 10) >= u.limit_bytes)
          break;
@@ -2702,7 +2702,6 @@ TEST_CASE("Small Engine: lines a session parked are room again after it aborts",
       tx.commit();
       REQUIRE(n < 2'000'000);
    }
-   (void)limit;
    auto wants = [&](const char* prefix) {  // about three quarters of a megabyte
       try
       {
@@ -2810,4 +2809,125 @@ TEST_CASE("Small Engine: files left longer than the segment count by a stop duri
       REQUIRE(tx.remove(key) == 0);
       tx.commit();
    }
+}
+
+// gofractally/psitri#35 item 5. A write refused for lack of room part-way
+// through building its nodes must give back everything it had built. Routers
+// of every width, shared with a held snapshot so that each write copies its
+// path, and a store kept at its limit so that refusals land everywhere.
+TEST_CASE("Small Engine: writes refused at the limit leak nothing", "[small][limit][leak]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 2));
+   std::mt19937_64                    rng(env_u64("PSITRI_SMALL_SEED", 5));
+   std::map<std::string, std::string> model;
+   auto make_key = [&] {
+      std::string k;
+      switch (rng() % 4)
+      {
+         case 0:  // a wide root and a wide second level
+            k.push_back(char(rng() % 256));
+            k.push_back(char(rng() % 256));
+            k += std::to_string(rng() % 8);
+            break;
+         case 1:  // medium fan-out under one prefix
+            k = "m/" + std::string(1, char('a' + rng() % 20)) + std::string(1, char('a' + rng() % 20));
+            break;
+         case 2:  // nested prefixes: keys that end where routers begin
+            k = std::string(1 + rng() % 30, 'n');
+            break;
+         default:
+            k = "s/" + std::to_string(rng() % 40000);
+      }
+      return k;
+   };
+   auto make_value = [&] {
+      const auto r = rng() % 100;
+      return std::string(r < 60 ? rng() % 60 : r < 94 ? rng() % 900 : rng() % 6000,
+                         char('A' + rng() % 26));
+   };
+   uint64_t refused = 0, committed = 0;
+   {
+      auto ws = db->start_write_session();
+      const uint64_t rounds = env_u64("PSITRI_SMALL_LEAK_ROUNDS", 12000);
+      for (uint64_t r = 0; r < rounds; ++r)
+      {
+         // every third round a snapshot of the committed tree is held across
+         // the transaction, so its routers are shared and must be copied
+         std::optional<decltype(ws->get_root(0))> held;
+         if (r % 3 == 0)
+            held.emplace(ws->get_root(0));
+         auto tx   = ws->start_transaction(0);
+         bool full = false;
+         std::vector<std::pair<std::string, std::optional<std::string>>> undo;
+         auto remember = [&](const std::string& key) {
+            auto it = model.find(key);
+            undo.emplace_back(key, it == model.end() ? std::nullopt
+                                                     : std::optional<std::string>(it->second));
+         };
+         try
+         {
+            const int ops = 1 + int(rng() % 40);
+            for (int i = 0; i < ops; ++i)
+            {
+               const auto key = make_key();
+               if (rng() % 100 < 75)
+               {
+                  const auto value = make_value();
+                  tx.upsert(key, value);
+                  remember(key);
+                  model[key] = value;
+               }
+               else
+               {
+                  const bool had = model.count(key) > 0;
+                  REQUIRE((tx.remove(key) == 0) == had);
+                  remember(key);
+                  model.erase(key);
+               }
+            }
+         }
+         catch (const engine::storage_full&)
+         {
+            full = true;
+         }
+         if (full || rng() % 16 == 0)
+         {
+            refused += full;
+            tx.abort();
+            for (auto it = undo.rbegin(); it != undo.rend(); ++it)
+               if (it->second)
+                  model[it->first] = *it->second;
+               else
+                  model.erase(it->first);
+         }
+         else
+         {
+            tx.commit();
+            ++committed;
+         }
+      }
+      INFO("committed " << committed << ", refused " << refused);
+      REQUIRE(refused > 100);
+      {
+         auto rs  = db->start_read_session();
+         auto cur = rs->create_cursor(0);
+         require_matches(cur, model);
+      }
+      // empty it, one remove per transaction
+      for (const auto& [key, value] : model)
+      {
+         auto tx = ws->start_transaction(0);
+         REQUIRE(tx.remove(key) == 0);
+         tx.commit();
+      }
+   }
+   db->flush_releases();
+   const auto u = db->usage();
+   std::printf("refused-write leak check: %llu committed, %llu refused, left %llu + %llu bytes\n",
+               (unsigned long long)committed, (unsigned long long)refused,
+               (unsigned long long)u.used_bytes, (unsigned long long)u.large_used_bytes);
+   REQUIRE(u.used_bytes == 0);
+   REQUIRE(u.large_used_bytes == 0);
 }

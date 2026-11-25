@@ -7468,9 +7468,6 @@ namespace sal_art_ref::radix
       // The SAL allocator backing this database (dwal's btree_layer arena hook —
       // heart and psitri share sal::allocator, so the hook is engine-portable).
       sal::allocator& underlying_allocator() noexcept { return _engine.underlying_allocator(); }
-      // Data-layout selector (default = page model). Exposed so benches/tools can A/B the
-      // legacy byte-radix engine against radix-indexed leaf pages on identical workloads.
-      void set_page_mode(bool on) { _engine.set_page_mode(on); }
       // Waits until the background RELEASE queue is empty, so that an object count taken
       // afterwards is exact. It does not wait for the compactor: the name is the one the
       // engines share.

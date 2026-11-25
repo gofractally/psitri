@@ -567,12 +567,16 @@ namespace psitri
             return base.get(key, callback);
          }
 
-         // Remove every key in [lower, upper) by recording a removal for each.
+         // Remove every key in [lower, upper) by recording a removal for each. The range
+         // is the half-open range it says, as in the engines' own transactions: the empty
+         // lower bound is the beginning, and nothing is below the empty upper bound.
          std::uint64_t remove_each(cursor scan, std::string_view lower, std::string_view upper)
          {
+            if (!(lower < upper))
+               return 0;
             std::vector<std::string> keys;
             for (bool more = lower.empty() ? scan.seek_begin() : scan.lower_bound(lower);
-                 more && (upper.empty() || scan.key() < upper); more = scan.next())
+                 more && scan.key() < upper; more = scan.next())
                keys.emplace_back(scan.key());
             for (auto& key : keys)
                store().erase(key);
@@ -620,8 +624,9 @@ namespace psitri
          _store->erase(key);
          return 0;
       }
-      /// Removes every key in [lower, upper); an empty bound is open. Returns
-      /// how many keys were removed.
+      /// Removes every key in [lower, upper) and returns how many, as the engines'
+      /// transactions do: an empty lower bound is the beginning; an empty upper bound
+      /// leaves the range empty (pass a key above every key to remove to the end).
       std::uint64_t remove_range(std::string_view lower, std::string_view upper)
       {
          return this->remove_each(snapshot_cursor(), lower, upper);
@@ -704,8 +709,9 @@ namespace psitri
          _store->erase(key);
          return 0;
       }
-      /// Removes every key in [lower, upper); an empty bound is open. Returns
-      /// how many keys were removed.
+      /// Removes every key in [lower, upper) and returns how many, as the engines'
+      /// transactions do: an empty lower bound is the beginning; an empty upper bound
+      /// leaves the range empty (pass a key above every key to remove to the end).
       ///
       /// With both bounds given and no savepoint open, the changes made so far
       /// are written to the engine's transaction and the range is removed there

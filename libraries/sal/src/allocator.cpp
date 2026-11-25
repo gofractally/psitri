@@ -327,20 +327,20 @@ namespace sal
          auto arr = new (_root_object_file.data()) root_object_array();
          (void)arr;
       }
-      else if (_root_object_file.size() <
-               system_config::round_to_page(sizeof(root_object_array)))
+      else if (_root_object_file.size() < sizeof(root_object_array))
       {
-         std::array<uint64_t, 1024> legacy_roots{};
-         auto* legacy =
-             reinterpret_cast<std::atomic<uint64_t>*>(_root_object_file.data());
-         for (auto& root : legacy_roots)
-            root = legacy++->load(std::memory_order_relaxed);
-
+         throw std::runtime_error("sal: the roots file is " +
+                                  std::to_string(_root_object_file.size()) +
+                                  " bytes, smaller than the root table (" +
+                                  std::to_string(sizeof(root_object_array)) +
+                                  "); it is not a roots file of this format");
+      }
+      else if (!_read_only && _root_object_file.size() <
+                                  system_config::round_to_page(sizeof(root_object_array)))
+      {
+         // Written on a machine with smaller pages: the table is whole, the file just
+         // ends before this machine's page boundary.
          _root_object_file.resize(system_config::round_to_page(sizeof(root_object_array)));
-         auto arr = new (_root_object_file.data()) root_object_array();
-         for (uint32_t i = 0; i < arr->size(); ++i)
-            arr->at(i).store(tree_id::unpack(legacy_roots[i]), 0,
-                             std::memory_order_relaxed);
       }
       _mapped_state =
           reinterpret_cast<mapped_memory::allocator_state*>(_seg_alloc_state_file.data());

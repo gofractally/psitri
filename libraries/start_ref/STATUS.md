@@ -81,8 +81,8 @@ change to how nodes own their lines has to be made in both.
   second open of its directory throws.)
 - A multi-root commit publishes its root slots one at a time.
 - Each writer that is in a transaction needs a segment to itself; with more
-  simultaneous writers than segments an ordinary write waits up to 20 ms for
-  one to fall idle and is then refused. Removes do not need one.
+  simultaneous writers than segments the extra writers' ordinary writes are
+  refused at once. Removes do not need a segment.
 - A single transaction that removes very many keys from a full store can use
   up the remove reserve before it commits.
 - At the ceiling a session takes free lines from any segment, which gives up

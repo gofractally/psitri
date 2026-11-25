@@ -99,8 +99,9 @@ write is refused when no segment has a free run of lines long enough for the
 allocation. Before refusing, the writer releases versions that no reader holds
 any more, waits for the background releaser to finish what is queued, looks
 for free lines in every segment, including segments held by sessions that are
-between transactions, and waits up to 20 ms for a segment that another writer
-is in at that moment. In the tests a store of 100-byte values took 174,000
+between transactions. It does not wait for a segment that another writer is
+in: with more writers in transactions at once than the store has segments,
+the extra writers' ordinary writes are refused. In the tests a store of 100-byte values took 174,000
 keys and was 98% used (everything but the reserve) when it first refused. A
 node that needs many lines in a row (a value of several KiB) can be refused
 earlier on a fragmented store.

@@ -443,8 +443,6 @@ TEST_CASE("a run recycled from a segment the session has left does not move its 
    REQUIRE(a.stats().range_switches.load() == switches);
 }
 
-#include <future>
-#include <thread>
 
 // gofractally/psitri#39: the reserve is contiguous room, not a count of free
 // lines. Every ordinary line taken and every other one freed again leaves
@@ -547,37 +545,4 @@ TEST_CASE("ordinary allocation stops early while most of the reserve is lent out
    auto tx3 = ses.start_transaction(0);
    for (int k = 0; k < 2900; ++k)
       REQUIRE(tx3.alloc_lines(1) != null_idx);
-}
-
-// A segment with room that another writer is in for a moment is waited for.
-TEST_CASE("an allocation waits briefly for a segment another writer is in", "[arena][limit]")
-{
-   arena_config c  = cfg(tmp_dir("busy"));
-   c.max_segments  = 1;
-   c.reserve_lines = 0;
-   arena a(c);
-   auto  first = a.start_session();
-   auto  tx    = first.start_transaction(0);
-   tx.alloc_lines(1);  // the only segment is this writer's now
-   std::promise<void> asking;
-   bool               got = false, refused = false;
-   std::thread other([&] {
-      auto second = a.start_session();
-      auto tx2    = second.start_transaction(0);
-      asking.set_value();
-      try
-      {
-         got = tx2.alloc_lines(1) != null_idx;
-      }
-      catch (const arena_full&)
-      {
-         refused = true;
-      }
-   });
-   asking.get_future().wait();
-   tx.commit();
-   tx.close();  // the segment is idle: the waiting writer takes it
-   other.join();
-   REQUIRE_FALSE(refused);
-   REQUIRE(got);
 }

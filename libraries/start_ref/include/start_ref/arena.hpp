@@ -641,6 +641,20 @@ namespace start_ref
       }
       const arena_config& config() const noexcept { return _cfg; }
 
+      // Last-chance hook before an allocation reports arena_full: the owner
+      // may know of storage that is about to be freed (the kv layer's
+      // background releaser has a queue of dead subtrees). The hook waits for
+      // that work and returns true if there was any, in which case the
+      // allocation is tried again. Called on the allocating thread with no
+      // arena lock held.
+      using reclaim_fn = bool (*)(void*);
+      void set_reclaim(reclaim_fn f, void* ctx) noexcept
+      {
+         _reclaim_fn  = f;
+         _reclaim_ctx = ctx;
+      }
+      bool try_reclaim() noexcept { return _reclaim_fn && _reclaim_fn(_reclaim_ctx); }
+
       // Companion link to the large-value arena (the 32 KiB-grain second instance).
       // The line arena holds it so view/drain allocators (which carry only an
       // arena*) can resolve and free value_large leaves; null when no large
@@ -704,10 +718,22 @@ namespace start_ref
       // run (tie: nearest forward of `cur`), else grow. Returns segment index.
       // `cur` (the segment that just failed to satisfy) is excluded — claiming
       // it again would loop when it qualifies by count but lacks the needed run.
-      uint32_t claim_(uint32_t cur, bool prefer_grow = false)
+      //
+      // When the arena cannot grow any further the reuse threshold stops being
+      // useful: it exists to keep writes in mostly-empty segments, and would
+      // otherwise declare the store full while most of its lines are free but
+      // scattered. So, at the ceiling, `sweep` (or simply finding nothing that
+      // qualifies) takes ANY unowned segment with at least n free lines,
+      // going round from the one after `cur` and ending with `cur` itself, so
+      // that repeated calls visit every segment once per lap. Throws
+      // arena_full when no segment has n free lines.
+      uint32_t claim_(uint32_t cur, bool prefer_grow = false, uint32_t n = 1, bool sweep = false)
       {
          std::lock_guard g(_claim_mutex);
          const uint32_t  nseg = num_segments();
+         const bool      can_grow = nseg < _cfg.max_segments;
+         if (sweep && !can_grow)
+            return sweep_locked_(cur, n);
          // Anti-livelock: a large (multi-line) alloc that keeps failing on
          // "qualifying" but FRAGMENTED reuse segments (free lines exist but no
          // contiguous run) must grow a fresh segment to make progress, rather
@@ -748,18 +774,45 @@ namespace start_ref
             _stats.segments_reused.fetch_add(1, std::memory_order_relaxed);
             return best_start;
          }
-         return grow_locked_();
+         if (can_grow)
+            return grow_locked_();
+         return sweep_locked_(cur, n);
+      }
+
+      // At the ceiling: the next unowned segment after `cur` (wrapping, `cur`
+      // last) that has n free lines at all.
+      uint32_t sweep_locked_(uint32_t cur, uint32_t n)
+      {
+         const uint32_t nseg  = num_segments();
+         const uint32_t start = cur == UINT32_MAX ? 0 : cur + 1;
+         for (uint32_t k = 0; k < nseg; ++k)
+         {
+            const uint32_t s = (start + k) % nseg;
+            if (_segs[s].state.load(std::memory_order_relaxed) == SEG_UNOWNED &&
+                freeset_(s).free_lines() >= n)
+            {
+               _segs[s].state.store(SEG_OWNED, std::memory_order_relaxed);
+               _stats.segments_reused.fetch_add(1, std::memory_order_relaxed);
+               return s;
+            }
+         }
+         throw_full_();
+      }
+      [[gnu::cold, noreturn]] void throw_full_() const
+      {
+         throw arena_full("start_ref: storage limit reached: all " +
+                          std::to_string(_cfg.max_segments) + " segments (max_segments, " +
+                          std::to_string(uint64_t(_cfg.max_segments) * segment_bytes /
+                                         (1024 * 1024)) +
+                          " MiB) of " + _cfg.dir.generic_string() +
+                          " are in use and none has room for this allocation");
       }
 
       uint32_t grow_locked_()
       {
          const uint32_t first = num_segments();
          if (first >= _cfg.max_segments)
-            throw arena_full("start_ref: storage limit reached: all " +
-                             std::to_string(_cfg.max_segments) + " segments (max_segments, " +
-                             std::to_string(uint64_t(_cfg.max_segments) * segment_bytes /
-                                            (1024 * 1024)) +
-                             " MiB) of " + _cfg.dir.generic_string() + " are in use");
+            throw_full_();
          const uint32_t batch = std::min(_cfg.grow_batch, _cfg.max_segments - first);
          for (uint32_t k = 0; k < batch; ++k)
          {
@@ -846,6 +899,8 @@ namespace start_ref
       std::byte*                            _base = nullptr;
       defer_fn                              _defer_fn  = nullptr;
       void*                                 _defer_ctx = nullptr;
+      reclaim_fn                            _reclaim_fn  = nullptr;
+      void*                                 _reclaim_ctx = nullptr;
       std::byte*                            _free_base = nullptr;
       std::atomic<uint8_t>*                 _ref_base  = nullptr;
       std::mutex                            _claim_mutex;
@@ -1110,14 +1165,35 @@ namespace start_ref
       arena_t<Geo>&   a = *s._a;
       if (s._wmask)
          s.flush_window_();
+      // Claiming can end in arena_full. Before letting that out, give the
+      // owner's reclaim hook one chance per round to finish frees that are
+      // already queued; only if it had nothing to do is the arena full.
+      auto claim = [&](uint32_t cur, bool prefer_grow, bool sweep) -> uint32_t
+      {
+         for (;;)
+         {
+            try
+            {
+               return a.claim_(cur, prefer_grow, n, sweep);
+            }
+            catch (const arena_full&)
+            {
+               if (!a.try_reclaim())
+                  throw;
+            }
+         }
+      };
+      uint32_t swept = 0;  // segments tried in sweep mode since the last reclaim
       for (int attempts = 0;; ++attempts)
       {
          if (s._segment == UINT32_MAX)
          {
-            s._segment = a.claim_(UINT32_MAX);
+            s._segment = claim(UINT32_MAX, false, false);
             const line_idx base = line_idx(s._segment) * lines_per_segment;
-            s._floor            = std::max(s._floor, base);
-            s._cursor           = base;
+            // A segment claimed afresh is written from its start: the floor
+            // only ever applied to the segment it was set in.
+            s._floor  = base;
+            s._cursor = base;
          }
          const line_idx seg_base = line_idx(s._segment) * lines_per_segment;
          seg_freeset&   fs       = a.freeset_(s._segment);
@@ -1174,13 +1250,25 @@ namespace start_ref
          // After a few failed reuse switches the qualifying segments are too
          // fragmented to hold this (multi-line) alloc — grow a fresh segment so a
          // large alloc always makes progress instead of livelocking at scale.
+         // At the ceiling there is nothing to grow: go round every segment
+         // once instead, and if none can hold n lines in a row the arena is
+         // full for this allocation.
          const uint32_t prev = s._segment;
          a.release_claim_(prev);
-         s._segment = a.claim_(prev, /*prefer_grow=*/attempts >= 8);
+         s._segment = UINT32_MAX;  // nothing is claimed if the next claim throws
+         const bool at_ceiling = a.num_segments() >= a._cfg.max_segments;
+         const bool sweep      = at_ceiling && attempts >= 8;
+         if (sweep && ++swept > a.num_segments())
+         {
+            if (!a.try_reclaim())
+               a.throw_full_();
+            swept = 0;
+         }
+         s._segment = claim(prev, /*prefer_grow=*/attempts >= 8, sweep);
          s._floor   = line_idx(s._segment) * lines_per_segment;
          s._cursor  = s._floor;
          a._stats.range_switches.fetch_add(1, std::memory_order_relaxed);
-         if (attempts > 1024)
+         if (!at_ceiling && attempts > 1024)
             throw std::runtime_error("part: allocation livelock");
       }
    }

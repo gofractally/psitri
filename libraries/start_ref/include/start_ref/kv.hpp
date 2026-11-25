@@ -1001,6 +1001,8 @@ namespace start_ref::kv
          if (_rel_thread.joinable())
             _rel_thread.join();
          _arena.set_defer(nullptr, nullptr);  // remaining releases are inline
+         _arena.set_reclaim(nullptr, nullptr);
+         _large.set_reclaim(nullptr, nullptr);
          // No readers remain by contract: force-drain retired roots, then the
          // live root's slot reference.
          for (uint64_t raw : _retired)
@@ -1141,6 +1143,10 @@ namespace start_ref::kv
          // queue is permanently "blocked" — everything runs synchronously.
          if (cfg.background_release)
          {
+            // A writer that outruns the releaser must wait for it rather
+            // than be told the store is full.
+            _arena.set_reclaim(&reclaim_cb_, this);
+            _large.set_reclaim(&reclaim_cb_, this);
             _arena.set_defer(&defer_cb_, this);
             _rel_thread = sized_thread(release_stack_bytes, [this] { rel_loop_(); });
          }
@@ -1201,7 +1207,19 @@ namespace start_ref::kv
             throw std::runtime_error(
                 "start_ref::kv: the store at " + _arena.config().dir.generic_string() +
                 " was not closed cleanly and its tree could not be walked (" + failure +
-                "); it is left untouched for inspection or restore from backup");
+                "); its data and root slots are unchanged and it stays marked unclean, so "
+                "the next open tries again (the free map and reference counts, which this "
+                "rebuild resets, are derived from them)");
+      }
+      // True if the releaser had queued work, after waiting for it to finish.
+      static bool reclaim_cb_(void* ctx) noexcept
+      {
+         auto* db = static_cast<database*>(ctx);
+         if (db->_rel_tail.load(std::memory_order_acquire) ==
+             db->_rel_head.load(std::memory_order_acquire))
+            return false;
+         db->flush_releases();
+         return true;
       }
       static bool defer_cb_(void* ctx, uint64_t raw) noexcept
       {

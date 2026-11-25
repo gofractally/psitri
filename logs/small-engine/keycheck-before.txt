@@ -1,0 +1,5 @@
+churn: done in 3.6s (838704 updates/s), 0 reader snapshots; 
+churn: done in 3.5s (849266 updates/s), 0 reader snapshots; 
+churn: done in 3.5s (851863 updates/s), 0 reader snapshots; 
+churn: done in 3.6s (843168 updates/s), 0 reader snapshots; 
+churn: done in 3.5s (854880 updates/s), 0 reader snapshots; 

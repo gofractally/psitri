@@ -253,15 +253,30 @@ namespace start_ref::kv
       void write(char* dest) const noexcept { chunks.write(dest); }
    };
 
+   // The key limit of the common API (docs/api/reference.md). The tree's own
+   // length fields would take more; holding every engine to one limit keeps a
+   // key that one accepts from being refused by another.
+   inline constexpr size_t max_key_size = 1024;
+   [[gnu::cold, noreturn]] inline void throw_key_too_long(size_t size)
+   {
+      throw std::invalid_argument("start_ref: key of " + std::to_string(size) +
+                                  " bytes exceeds the " + std::to_string(max_key_size) +
+                                  "-byte limit");
+   }
+   inline void check_key(key_view key)
+   {
+      if (key.size() > max_key_size) [[unlikely]]
+         throw_key_too_long(key.size());
+   }
+
    inline void upsert_bytes(engine_t& tree, key_view key, value_view value)
    {
+      check_key(key);
       if (value.size() > large_value_detail::max_value_size)
          throw std::invalid_argument("start_ref: value exceeds UINT32_MAX");
       if (uint64_t(key.size()) + value.size() + large_value_detail::leaf_header_size + 2 >
           large_max_object_bytes)
       {
-         if (key.size() > UINT16_MAX)
-            throw std::invalid_argument("start_ref: key exceeds leaf length field");
          if constexpr (engine_t::cb_create)
             throw std::invalid_argument("start_ref: chunked values require the radix layout");
          else
@@ -1385,6 +1400,7 @@ namespace start_ref::kv
    inline void transaction::upsert(key_view k, T&& v)
    {
       using U                     = std::remove_cvref_t<T>;
+      check_key(k);  // before custody of the value moves
       const typename U::t_pod pod = std::move(v).take_pod();  // custody -> db
       if constexpr (engine_t::cb_create)
       {  // gated page engine: build the [type_id][pod] envelope in a CALLER-LOCAL buffer.
@@ -1638,11 +1654,16 @@ namespace start_ref::kv
    {
       static constexpr uint64_t max_value_size = large_value_detail::max_value_size;
       static constexpr uint32_t root_count     = kMaxRoots;
+      static constexpr size_t   max_key_size   = start_ref::kv::max_key_size;
       using database      = start_ref::kv::database;
       using write_session = start_ref::kv::write_session;
       using read_session  = start_ref::kv::read_session;
       using transaction   = start_ref::kv::transaction;
       using cursor        = start_ref::kv::cursor;
       using config        = start_ref::kv::runtime_config;
+      /// Thrown by a write that needs more storage than config::max_segments
+      /// allows. Abort the transaction; the database remains usable.
+      using storage_full  = start_ref::arena_full;
+      using usage         = start_ref::kv::usage_info;
    };
 }  // namespace start_ref::kv

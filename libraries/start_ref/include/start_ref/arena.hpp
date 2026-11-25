@@ -40,6 +40,7 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <sal/block_allocator.hpp>
@@ -53,6 +54,14 @@ namespace start_ref
    struct ref_overflow : std::runtime_error
    {
       ref_overflow() : std::runtime_error("part: refcount would reach the 255 sentinel") {}
+   };
+
+   // The arena has reached its configured ceiling (arena_config::max_segments)
+   // and no claimed segment has room. Thrown from allocation, so from any
+   // write; the caller's transaction is still intact and can be aborted.
+   struct arena_full : std::runtime_error
+   {
+      using std::runtime_error::runtime_error;
    };
 
    struct arena_config
@@ -737,7 +746,11 @@ namespace start_ref
       {
          const uint32_t first = num_segments();
          if (first >= _cfg.max_segments)
-            throw std::runtime_error("part: arena is full (max_segments)");
+            throw arena_full("start_ref: storage limit reached: all " +
+                             std::to_string(_cfg.max_segments) + " segments (max_segments, " +
+                             std::to_string(uint64_t(_cfg.max_segments) * segment_bytes /
+                                            (1024 * 1024)) +
+                             " MiB) of " + _cfg.dir.generic_string() + " are in use");
          const uint32_t batch = std::min(_cfg.grow_batch, _cfg.max_segments - first);
          for (uint32_t k = 0; k < batch; ++k)
          {

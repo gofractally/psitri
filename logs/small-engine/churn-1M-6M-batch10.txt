@@ -1,0 +1,17 @@
+Filters: [churn]
+Randomness seeded to: 2181891207
+churn: rows=1000000 batch=10 updates=6000000 reader=1
+churn: updates=    600000 used=  192.8 MiB mapped=  544.0 MiB
+churn: updates=   1200000 used=  315.8 MiB mapped=  928.0 MiB
+churn: updates=   1800000 used=  315.8 MiB mapped=  928.0 MiB
+churn: updates=   2400000 used=  315.8 MiB mapped=  928.0 MiB
+churn: updates=   3000000 used=  315.8 MiB mapped=  928.0 MiB
+churn: updates=   3600000 used=  315.8 MiB mapped=  928.0 MiB
+churn: updates=   4200000 used=  315.8 MiB mapped=  928.0 MiB
+churn: updates=   4800000 used=  315.8 MiB mapped=  928.0 MiB
+churn: updates=   5400000 used=  315.8 MiB mapped=  928.0 MiB
+churn: updates=   6000000 used=  315.8 MiB mapped=  928.0 MiB
+churn: done in 9.8s (614960 updates/s), 4679316 reader snapshots; used=315.8 MiB peak used=315.9 MiB mapped=928.0 MiB (settled: used 315.8, mapped 928.0)
+===============================================================================
+All tests passed (5000009 assertions in 1 test case)
+

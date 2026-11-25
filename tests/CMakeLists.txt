@@ -24,6 +24,12 @@ if(Catch2_FOUND)
     set_target_properties(root-writer-stress-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME root-writer-stress-tests COMMAND root-writer-stress-tests)
 
+    # Small Engine operating limits: process kill, space reuse, storage ceiling.
+    add_executable(small-engine-tests api/small_engine.cpp)
+    target_link_libraries(small-engine-tests PRIVATE psitri::api psitri::small Catch2::Catch2WithMain)
+    set_target_properties(small-engine-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME small-engine-tests COMMAND small-engine-tests)
+
     # The same writer and reader cases on the engines layered over others.
     if(TARGET psitri)
         add_executable(layered-conformance-tests api/layered.cpp)

@@ -105,6 +105,20 @@ namespace start_ref::kv
    class transaction;
    class tree_handle;
 
+   // What database::usage() reports. All figures are bytes of arena storage,
+   // which is file-backed mapped memory: `mapped` is what the store can have
+   // resident and what its data files occupy.
+   struct usage_info
+   {
+      uint64_t used_bytes   = 0;  // claimed 128-byte lines (live + retained + awaiting release)
+      uint64_t mapped_bytes = 0;  // segments created so far; never shrinks (high-water mark)
+      uint64_t limit_bytes  = 0;  // max_segments x 8 MiB: allocation beyond this throws
+      // The companion arena that holds values too large for a 64-line run.
+      uint64_t large_used_bytes   = 0;
+      uint64_t large_mapped_bytes = 0;
+      uint64_t large_limit_bytes  = 0;
+   };
+
    // A thread with a stack of a stated size. Releasing a tree descends one
    // call level per level of the tree, and a tree is as deep as its longest
    // key allows (about one level per two key bytes), so the stack this needs
@@ -851,6 +865,24 @@ namespace start_ref::kv
 
       void sync(sal::sync_type = sal::sync_type::none) {}  // commits sync per cfg already
 
+      /// Whether the store at `dir` was closed by its last owner, without
+      /// opening it. False means that owner stopped without closing (killed,
+      /// crashed, power lost) and the next open will rebuild the free map and
+      /// reference counts from the published roots before returning. A
+      /// directory with no store in it reports true: there is nothing to
+      /// recover.
+      static bool closed_cleanly(const std::filesystem::path& dir)
+      {
+         const auto lines  = start_ref::arena::read_clean_flag(dir);
+         const auto grains = start_ref::large_arena::read_clean_flag(dir / "large");
+         return lines.value_or(true) && grains.value_or(true);
+      }
+      /// Whether this open found the store not closed cleanly and rebuilt its
+      /// free map and reference counts. Committed data is what the published
+      /// roots held at the stop; see docs/api/operations.md for what each
+      /// sync mode promises about that.
+      bool recovered_on_open() const noexcept { return _recovered; }
+
       ~database()
       {
          // clean shutdown (SPEC §19): ring drained, releaser stopped and
@@ -889,6 +921,22 @@ namespace start_ref::kv
          for (uint32_t s = 0; s < ns; ++s)
             freeU += const_cast<start_ref::large_arena&>(_large).freeset_of(s).free_lines();
          return uint64_t(ns) * start_ref::lines_per_segment - freeU;
+      }
+
+      // Current storage use and the configured ceiling. Callable from any
+      // thread; while writers run the figures are a moment-in-time estimate.
+      // Call flush_releases() first for a figure that excludes nodes still
+      // queued for the background releaser.
+      usage_info usage() const noexcept
+      {
+         usage_info u;
+         u.used_bytes         = _arena.used_bytes();
+         u.mapped_bytes       = _arena.mapped_bytes();
+         u.limit_bytes        = _arena.limit_bytes();
+         u.large_used_bytes   = _large.used_bytes();
+         u.large_mapped_bytes = _large.mapped_bytes();
+         u.large_limit_bytes  = _large.limit_bytes();
+         return u;
       }
 
       // ── typed-value registry (locked adb API) ───────────────────────────
@@ -968,6 +1016,16 @@ namespace start_ref::kv
             _live_root[i] = p;
             _live_raw[i].store(durable, std::memory_order_seq_cst);
          }
+         // The free map and reference counts are derived state that is only
+         // settled by a clean close. If the last owner did not close, they
+         // still describe its unfinished transaction, its retired versions
+         // and its private reservations (and after a power loss, nothing in
+         // particular), so rebuild them from the published roots.
+         if (!_arena.was_clean() || !_large.was_clean())
+         {
+            recover_();
+            _recovered = true;
+         }
          // background releaser (SPEC §19): the writer pushes release-to-zero
          // subtree roots; this thread runs the cascades; a full ring makes the
          // writer release inline (graceful degradation to the old behavior).
@@ -978,6 +1036,64 @@ namespace start_ref::kv
             _arena.set_defer(&defer_cb_, this);
             _rel_thread = sized_thread(release_stack_bytes, [this] { rel_loop_(); });
          }
+      }
+      // Recovery marker: see kv_tree::recover_mark.
+      struct recover_marker
+      {
+         start_ref::arena&       lines;
+         start_ref::large_arena& grains;
+         void check_line(uint32_t i) const { lines.check_index(i); }
+         void check_large(uint32_t g) const { grains.check_index(g); }
+         bool line(uint32_t i) { return lines.mark_run(i, 1); }
+         void tail(uint32_t i, uint32_t n) { lines.claim_run(i, n); }
+         bool large(uint32_t g, uint32_t units) { return grains.mark_run(g, units); }
+         void leaf_value(std::string_view slot)
+         {
+            if (slot.size() < 2 || !large_value_detail::chunked(slot))
+               return;
+            // Each continuation is its own counted object in the large arena.
+            const large_value_detail::head_view head(slot);
+            for (size_t i = 0; i < head.entries().size(); ++i)
+            {
+               grains.check_index(head.entries()[i].grain);
+               grains.mark_run(head.entries()[i].grain,
+                               large_value_detail::units(head.length(i)));
+            }
+         }
+         [[noreturn]] void unsupported()
+         {
+            throw std::runtime_error("recovery does not cover this node layout");
+         }
+      };
+      // Rebuild both arenas' free maps and reference counts from the published
+      // roots. Runs before any session exists. The walk recurses once per tree
+      // level, so it gets the same stack the releaser does.
+      void recover_()
+      {
+         std::string failure;
+         sized_thread walker(release_stack_bytes, [&] {
+            try
+            {
+               _arena.rebuild_begin();
+               _large.rebuild_begin();
+               recover_marker marker{_arena, _large};
+               engine_t       view{part_alloc<bval>(&_arena)};
+               for (uint32_t i = 0; i < kMaxRoots; ++i)
+                  view.recover_mark(_live_root[i], marker);  // the root slot's own reference
+               _arena.rebuild_end();
+               _large.rebuild_end();
+            }
+            catch (const std::exception& e)
+            {
+               failure = e.what();
+            }
+         });
+         walker.join();
+         if (!failure.empty())
+            throw std::runtime_error(
+                "start_ref::kv: the store at " + _arena.config().dir.generic_string() +
+                " was not closed cleanly and its tree could not be walked (" + failure +
+                "); it is left untouched for inspection or restore from backup");
       }
       static bool defer_cb_(void* ctx, uint64_t raw) noexcept
       {
@@ -1103,6 +1219,7 @@ namespace start_ref::kv
       root_ptr              _live_root[kMaxRoots];     // committed root per slot
       std::atomic<uint64_t> _live_raw[kMaxRoots];      // raw per slot (reader publish-validate)
       std::vector<uint64_t> _retired;
+      bool                  _recovered = false;  // this open rebuilt the derived state
 
       // ── typed-value dispatch (slot envelope -> registered hooks) ────────
       struct type_entry

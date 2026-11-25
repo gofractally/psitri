@@ -7603,6 +7603,155 @@ namespace detail  // implementation types & node helpers — not part of the pub
          }
       }
 
+      // ── recovery: re-derive liveness from a root ────────────────────────────
+      // Visits everything reachable from `p` and tells the marker `m` which
+      // storage it occupies, so the arena's free map and reference counts can
+      // be rebuilt from the tree alone. It is the exact mirror of the release
+      // cascade (cow_release / cow_destroy_dead_): what a release would
+      // decrement, this counts; what a death would free, this claims.
+      //
+      //   m.check_line(i) / m.check_large(g)  throw unless the index is inside the arena
+      //   m.line(i)        one more reference to line i; true the first time
+      //   m.tail(i, n)     n lines owned by a node head (always one reference)
+      //   m.large(g, u)    one more reference to a u-grain large object; true the first time
+      //   m.leaf_value(b)  the value bytes of a leaf seen for the first time
+      //   m.unsupported()  a node kind this walk does not know
+      //
+      // A node reached a second time only gains a reference: its contents were
+      // counted when it was first reached. Depth follows key length.
+      template <class M>
+      void recover_mark(Ptr p, M& m) const
+      {
+         if (p.is_null() || p.tag() == K::value_inline)
+            return;
+         const K k = p.tag();
+         if constexpr (large_ok_)
+            if (k == K::value_large)
+            {
+               m.check_large(line_of(p));
+               const uint32_t units = uint32_t(
+                   (cow_node_bytes_(p) + start_ref::large_grain_bytes - 1) /
+                   start_ref::large_grain_bytes);
+               if (m.large(line_of(p), units))
+                  recover_leaf_(p, m);
+               return;
+            }
+         m.check_line(line_of(p));
+         if (!m.line(line_of(p)))
+            return;
+         const size_t bytes = cow_node_bytes_(p);
+         switch (k)
+         {
+            case K::value_ptr:
+               recover_leaf_(p, m);
+               break;
+            case K::value_large:
+            case K::value_inline:
+            case K::null:
+               return;
+            case K::bucket:
+            case K::cbucket:
+               m.unsupported();
+               return;
+            case K::prefix_node:
+               recover_mark(pn_next<Ptr>(static_cast<char*>(deref_(p))), m);
+               break;
+            case K::setlist_u8:
+            case K::setlist_u16:
+            {
+               const router_hdr* rh = static_cast<const router_hdr*>(deref_(p));
+               recover_mark(rh->term, m);
+               router_for_each(p, [&](unsigned, Ptr c) { recover_mark(c, m); });
+               break;
+            }
+            // Implicit multi-line routers: each line after the head carries its
+            // own count and owns the children inside it.
+            case K::c2:
+            case K::c4:
+            case K::c8:
+            {
+               const router_hdr* rh = static_cast<const router_hdr*>(deref_(p));
+               recover_mark(rh->term, m);
+               const unsigned lg        = k == K::c2 ? 1 : k == K::c4 ? 2 : 3;
+               const uint32_t base_line = line_of(p) + 1;
+               for (unsigned sg = 0; sg < (1u << lg); ++sg)
+                  recover_cx_line_(Ptr::from_off(size_t(base_line + sg) << 7, K::node_full), lg,
+                                   m);
+               return;
+            }
+            case K::node_full:
+            {
+               const router_hdr* rh = static_cast<const router_hdr*>(deref_(p));
+               recover_mark(rh->term, m);
+               const uint32_t base_line = line_of(p) + 1;
+               for (unsigned li = 0; li < full_lines_v<Ptr>; ++li)
+                  recover_fx_line_(Ptr::from_off(size_t(base_line + li) << 7, K::node_full), m);
+               return;
+            }
+            case K::full_x:
+            {
+               if constexpr (cow_enabled)
+               {
+                  const node_fullx* x = static_cast<const node_fullx*>(deref_(p));
+                  recover_mark(x->rh.term, m);
+                  for (unsigned li = 0; li < full_lines_v<Ptr>; ++li)
+                     recover_fx_line_(x->lines[li], m);
+               }
+               break;
+            }
+            case K::cx:
+            {
+               if constexpr (cow_enabled)
+               {
+                  const node_cx* x = static_cast<const node_cx*>(deref_(p));
+                  recover_mark(x->rh.term, m);
+                  for (unsigned sg = 0; sg < (1u << x->lg); ++sg)
+                     recover_cx_line_(x->seglines[sg], x->lg, m);
+               }
+               break;
+            }
+         }
+         const uint32_t nl = uint32_t((bytes + 127) / 128);
+         if (nl > 1)
+            m.tail(line_of(p) + 1, nl - 1);
+      }
+
+     private:
+      template <class M>
+      void recover_leaf_(Ptr p, M& m) const
+      {
+         if constexpr (raw_vals)
+            m.leaf_value(leaf_bytes(static_cast<const char*>(deref_(p))));
+      }
+      template <class M>
+      void recover_fx_line_(Ptr lp, M& m) const
+      {
+         if (lp.is_null())
+            return;
+         m.check_line(line_of(lp));
+         if (!m.line(line_of(lp)))
+            return;
+         const auto* L = static_cast<const cline_direct_t<Ptr>*>(deref_(lp));
+         for (unsigned sl = 0; sl < full_per_line_v<Ptr>; ++sl)
+            if (!L->ptr[sl].is_null())
+               recover_mark(L->ptr[sl], m);
+      }
+      template <class M>
+      void recover_cx_line_(Ptr lp, unsigned lg, M& m) const
+      {
+         if (lp.is_null())
+            return;
+         m.check_line(line_of(lp));
+         if (!m.line(line_of(lp)))
+            return;
+         uint8_t*  seg = static_cast<uint8_t*>(deref_(lp));
+         Ptr*      br  = cx_branches<Ptr>(seg, lg);
+         const int cnt = bm_count(seg, int(cx_maskb(lg)));
+         for (int i = 0; i < cnt; ++i)
+            recover_mark(br[i], m);
+      }
+
+     public:
       // ── debug census: walk the live tree, report every node (read-only) ──
       // f(kind, inclusive_bytes, nbranch, lines_used, lines_alloc); inclusive
       // means demoted kinds / cbucket count their riding lines, so Σbytes is

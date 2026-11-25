@@ -35,7 +35,10 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <cstddef>
+#include <cstdio>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -278,6 +281,12 @@ namespace start_ref
 
          _was_clean = _hdr->clean.load(std::memory_order_relaxed) != 0;
          _hdr->clean.store(0, std::memory_order_relaxed);
+         // The free map and reference counts are never synced, so after a
+         // power loss they are only trustworthy if the "open" mark got to
+         // storage before anything changed them. Only stores that asked for
+         // synchronization pay for that.
+         if (_cfg.sync_mode != sync_type::none && _cfg.sync_mode != sync_type::mprotect)
+            _meta->sync(_cfg.sync_mode);
 
          // Re-attach existing segments (maps existing file contents).
          const uint32_t nseg = _hdr->num_segments.load(std::memory_order_relaxed);
@@ -308,6 +317,24 @@ namespace start_ref
       }
 
       bool was_clean() const noexcept { return _was_clean; }
+
+      // Whether the arena in `dir` was closed by its destructor, read from its
+      // header without mapping or changing anything. Empty when there is no
+      // arena there (or not one this build can read).
+      static std::optional<bool> read_clean_flag(const std::filesystem::path& dir)
+      {
+         std::FILE* f = std::fopen((dir / "meta.part").c_str(), "rb");
+         if (!f)
+            return std::nullopt;
+         alignas(meta_hdr) unsigned char raw[sizeof(meta_hdr)];
+         const size_t got = std::fread(raw, 1, sizeof(raw), f);
+         std::fclose(f);
+         uint64_t magic;
+         std::memcpy(&magic, raw, sizeof(magic));
+         if (got != sizeof(raw) || magic != meta_magic)
+            return std::nullopt;
+         return raw[offsetof(meta_hdr, clean)] != 0;
+      }
 
       // ── addressing ─────────────────────────────────────────────────────────
       void* get(line_idx i) noexcept
@@ -506,6 +533,46 @@ namespace start_ref
             _ref_base[i].store(uint8_t(cur + 1), std::memory_order_relaxed);
          }
       }
+      // Recovery marking for one allocation of n units whose head is i. The
+      // first mark claims all n (each with one reference) and returns true;
+      // a later mark is another reference to the head and returns false.
+      // Throws on an index or run the allocator could not have produced:
+      // that is a damaged image, not a state to guess at.
+      void check_index(uint64_t i, uint32_t n = 1) const
+      {
+         if (n == 0 || n > max_alloc_lines ||
+             i + n > uint64_t(num_segments()) * lines_per_segment || (i % 64) + n > 64)
+            throw std::runtime_error("part: recovery reached storage outside the arena");
+      }
+      bool mark_run(line_idx i, uint32_t n)
+      {
+         check_index(i, n);
+         auto&          fs    = freeset_(i / lines_per_segment);
+         const uint32_t local = i % lines_per_segment;
+         if (!fs.is_free(local))
+         {
+            const uint8_t cur = _ref_base[i].load(std::memory_order_relaxed);
+            if (cur == 0 || cur >= ref_ceiling)
+               throw std::runtime_error("part: recovery found an impossible reference count");
+            _ref_base[i].store(uint8_t(cur + 1), std::memory_order_relaxed);
+            return false;
+         }
+         claim_run(i, n);
+         return true;
+      }
+      // Claim n units that nothing has claimed yet, one reference each.
+      void claim_run(line_idx i, uint32_t n)
+      {
+         check_index(i, n);
+         auto&          fs    = freeset_(i / lines_per_segment);
+         const uint32_t local = i % lines_per_segment;
+         for (uint32_t k = 0; k < n; ++k)
+            if (!fs.is_free(local + k))
+               throw std::runtime_error("part: recovery found two nodes on one line");
+         fs.claim_exact(local, n);
+         for (uint32_t k = 0; k < n; ++k)
+            _ref_base[i + k].store(1, std::memory_order_relaxed);
+      }
       void rebuild_end()
       {
          const uint32_t nseg = num_segments();
@@ -523,6 +590,22 @@ namespace start_ref
          return _hdr->num_segments.load(std::memory_order_acquire);
       }
       uint32_t    segment_of(line_idx i) const noexcept { return i / lines_per_segment; }
+      // Space accounting, in bytes. Reads one counter per segment; safe from any
+      // thread while writers run (the sum is then a moment-in-time estimate).
+      // "Used" counts every claimed unit: live nodes, nodes of retained
+      // snapshots, nodes waiting on the releaser, and the few units a write
+      // session holds privately between commits.
+      uint64_t used_bytes() const noexcept
+      {
+         const uint32_t nseg  = num_segments();
+         uint64_t       freeU = 0;
+         for (uint32_t s = 0; s < nseg; ++s)
+            freeU += const_cast<arena_t*>(this)->freeset_(s).free_lines();
+         return (uint64_t(nseg) * lines_per_segment - freeU) * line_bytes;
+      }
+      // Segments are never returned to the OS: this is the high-water mark.
+      uint64_t mapped_bytes() const noexcept { return uint64_t(num_segments()) * segment_bytes; }
+      uint64_t limit_bytes() const noexcept { return uint64_t(_cfg.max_segments) * segment_bytes; }
       seg_freeset& freeset_of(uint32_t s) noexcept { return freeset_(s); }
       const arena_stats& stats() const noexcept { return _stats; }
       const void* refs_base_dbg() const noexcept { return _ref_base; }

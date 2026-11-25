@@ -5121,6 +5121,35 @@ namespace sal_art_ref::radix
             return std::move(_working);
          }
 
+         // What a savepoint keeps of a handle: its working root and, for every subtree open
+         // at that moment, the same again. Restoring puts each of them back and drops the
+         // subtrees opened since. (Writes through a subtree handle go to that handle's own
+         // working root, not to its parent's, until commit writes them back.)
+         struct savepoint
+         {
+            root_ptr               working;
+            size_t                 nchild = 0;
+            std::vector<savepoint> children;
+         };
+         savepoint save() const
+         {
+            savepoint s{_working, _children.size(), {}};
+            s.children.reserve(_children.size());
+            for (const auto& c : _children)
+               s.children.push_back(c.h->save());
+            return s;
+         }
+         void restore(savepoint&& s) noexcept
+         {
+            _working = std::move(s.working);
+            if (_children.size() > s.nchild)
+               _children.resize(s.nchild);  // drop children opened since
+            // (set_root() since the savepoint closed the handles open then: nothing of
+            // theirs is left to restore.)
+            for (size_t i = 0; i < _children.size() && i < s.children.size(); ++i)
+               _children[i].h->restore(std::move(s.children[i]));
+         }
+
         public:
          tree_handle()                              = default;
          tree_handle(tree_handle&&) noexcept        = default;
@@ -5378,8 +5407,27 @@ namespace sal_art_ref::radix
          {
             if (!_open) return;
             PSITRI_DEBUG(if (std::FILE* f = oplog()) std::fputc('C', f););  // [RADIX_OPLOG] commit marker
-            publish(_primary_idx, _primary.flush());      // flush bottom-up + publish primary
-            for (auto& [i, h] : _extra) publish(i, h->flush());
+            // Flush every root bottom-up first: a flush can throw (a subtree that cannot be
+            // written back, an allocation). Only when every root's final tree exists is any
+            // of them published, so a commit that throws has published nothing; it leaves
+            // the transaction aborted, because the flushed handles are spent.
+            root_ptr                                   primary;
+            std::vector<std::pair<uint32_t, root_ptr>> extras;
+            try
+            {
+               extras.reserve(_extra.size());
+               primary = _primary.flush();
+               for (auto& [i, h] : _extra)
+                  extras.emplace_back(i, h->flush());
+            }
+            catch (...)
+            {
+               abort();
+               throw;
+            }
+            publish(_primary_idx, std::move(primary));
+            for (auto& [i, w] : extras)
+               publish(i, std::move(w));
             _extra.clear();
             _open = false;
             unlock_roots();
@@ -5397,27 +5445,26 @@ namespace sal_art_ref::radix
       };
       transaction start_transaction(uint32_t idx = 0) { return transaction(this, idx); }
 
-      // A savepoint over a transaction's PRIMARY handle: snapshots its working root + open-child
-      // count; abort restores the working root and drops children opened during the frame (LIFO).
+      // A savepoint over a transaction's PRIMARY handle: snapshots its working root and those of
+      // every subtree open under it; abort restores them and drops the subtrees opened during
+      // the frame (LIFO). Other roots of the transaction (open_root) are not covered.
       class frame
       {
        private:
          friend class transaction;
          using root_ptr = sal::smart_ptr<sal::alloc_header>;
-         transaction* _tx = nullptr;
-         root_ptr     _sp;            // retained copy of primary working at savepoint
-         size_t       _nchild = 0;    // primary open-child count at savepoint
-         bool         _active = false;
-         frame(transaction* tx, root_ptr sp, size_t nchild)
-             : _tx(tx), _sp(std::move(sp)), _nchild(nchild), _active(true)
+         transaction*           _tx = nullptr;
+         tree_handle::savepoint _sp;  // the primary handle and its open subtrees, retained
+         bool                   _active = false;
+         frame(transaction* tx, tree_handle::savepoint sp)
+             : _tx(tx), _sp(std::move(sp)), _active(true)
          {
          }
 
         public:
          // The moved-from frame is no longer the savepoint: left active, its destructor
          // would "abort" and put its now-empty saved root in place of the working one.
-         frame(frame&& o) noexcept
-             : _tx(o._tx), _sp(std::move(o._sp)), _nchild(o._nchild), _active(o._active)
+         frame(frame&& o) noexcept : _tx(o._tx), _sp(std::move(o._sp)), _active(o._active)
          {
             o._active = false;
          }
@@ -5440,12 +5487,10 @@ namespace sal_art_ref::radix
          template <class F>
             requires adb::detail::value_callback<F>
          bool get(key_view k, F&& fn, uint64_t offset = 0, uint64_t length = adb::read_all) const { return _tx->get(k, std::forward<F>(fn), offset, length); }
-         void commit() noexcept { _sp.release(); _active = false; }  // keep working + children
+         void commit() noexcept { _sp = {}; _active = false; }  // keep working + children
          void abort() noexcept
          {
-            _tx->_primary._working = std::move(_sp);  // restore working
-            if (_tx->_primary._children.size() > _nchild)
-               _tx->_primary._children.resize(_nchild);  // drop children opened in the frame
+            _tx->_primary.restore(std::move(_sp));
             _active = false;
          }
       };
@@ -7609,8 +7654,8 @@ namespace sal_art_ref::radix
    }
    inline radix_tree::frame radix_tree::transaction::sub_transaction()
    {
-      // snapshot the primary handle's working root (copy → retain) + its open-child count
-      return frame(this, _primary._working, _primary._children.size());
+      // snapshot the primary handle and its open subtrees (copies of their roots → retained)
+      return frame(this, _primary.save());
    }
 
    // ── psitri-compatible public entry: database → write_session → transaction/tree/... ──────────

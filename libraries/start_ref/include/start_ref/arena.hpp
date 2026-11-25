@@ -290,6 +290,21 @@ namespace start_ref
             throw std::runtime_error("part: max_segments crosses the sentinel index band");
          namespace fs = std::filesystem;
          fs::create_directories(_cfg.dir);
+         // An existing arena larger than the requested ceiling cannot be
+         // opened: segments are never moved or given back, and mapping the
+         // files into a reservation sized for the smaller ceiling would put
+         // them over whatever lies beyond it. Refuse before anything is
+         // opened, locked, mapped or resized.
+         if (const uint64_t existing = existing_segments_(_cfg.dir);
+             existing > _cfg.max_segments)
+            throw std::runtime_error(
+                "start_ref: the store at " + _cfg.dir.generic_string() + " already has " +
+                std::to_string(existing) + " segments (" +
+                std::to_string(existing * segment_bytes / (1024 * 1024)) +
+                " MiB) and cannot be opened with max_segments = " +
+                std::to_string(_cfg.max_segments) + " segments (" +
+                std::to_string(uint64_t(_cfg.max_segments) * segment_bytes / (1024 * 1024)) +
+                " MiB); open it with max_segments of at least " + std::to_string(existing));
 
          _data = std::make_unique<sal::block_allocator>(_cfg.dir / "data.part", segment_bytes,
                                                         _cfg.max_segments,
@@ -307,7 +322,11 @@ namespace start_ref
 
          const size_t meta_bytes = sizeof(meta_hdr) + size_t(_cfg.max_segments) * sizeof(seg_entry);
          const bool   fresh      = _meta->size() < sizeof(meta_hdr);
-         _meta->resize(meta_bytes);
+         // A lower ceiling than the one the file was made for (but still at
+         // or above the arena's size) needs fewer segment entries; the file
+         // keeps the ones it has rather than being cut down.
+         if (_meta->size() < meta_bytes)
+            _meta->resize(meta_bytes);
          _hdr  = _meta->as<meta_hdr>();
          _segs = reinterpret_cast<seg_entry*>(reinterpret_cast<char*>(_hdr) + sizeof(meta_hdr));
 
@@ -398,6 +417,32 @@ namespace start_ref
          if (got != sizeof(raw) || magic != meta_magic)
             return std::nullopt;
          return raw[offsetof(meta_hdr, clean)] != 0;
+      }
+
+      // How many segments the arena in `dir` occupies, read without mapping
+      // or changing anything; 0 when there is none. The larger of the
+      // recorded count and what the data file holds, since a stop during
+      // growth can leave the two apart.
+      static uint64_t existing_segments_(const std::filesystem::path& dir)
+      {
+         uint64_t        segments = 0;
+         std::error_code ec;
+         const auto      bytes = std::filesystem::file_size(dir / "data.part", ec);
+         if (!ec)
+            segments = (uint64_t(bytes) + segment_bytes - 1) / segment_bytes;
+         if (std::FILE* f = std::fopen((dir / "meta.part").c_str(), "rb"))
+         {
+            alignas(meta_hdr) unsigned char raw[sizeof(meta_hdr)];
+            const size_t got = std::fread(raw, 1, sizeof(raw), f);
+            std::fclose(f);
+            uint64_t magic;
+            uint32_t recorded;
+            std::memcpy(&magic, raw, sizeof(magic));
+            std::memcpy(&recorded, raw + offsetof(meta_hdr, num_segments), sizeof(recorded));
+            if (got == sizeof(raw) && magic == meta_magic)
+               segments = std::max<uint64_t>(segments, recorded);
+         }
+         return segments;
       }
 
       // ── addressing ─────────────────────────────────────────────────────────

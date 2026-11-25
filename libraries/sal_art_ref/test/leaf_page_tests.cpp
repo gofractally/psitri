@@ -125,6 +125,13 @@ namespace
          ++i;
       }
    }
+   // One half of a split with the half's whole common prefix factored out: what a split
+   // builds when plan_split finds room for it.
+   leaf_page::split_op natural_half(const leaf_page* pg, uint16_t lo, uint16_t hi,
+                                    sal_art_ref::kv_resolver res = {})
+   {
+      return leaf_page::split_op{pg, lo, hi, res, {}, pg->natural_cpfx(lo, hi)};
+   }
 }  // namespace
 
 TEST_CASE("leaf_page empty init", "[leaf_page]")
@@ -423,8 +430,8 @@ TEST_CASE("leaf_page split divider and halves", "[leaf_page]")
    REQUIRE(sp.index >= p->num_keys() * 3 / 8);
    REQUIRE(sp.index <= p->num_keys() * 5 / 8 + 1);
 
-   page_buf left(leaf_page::page_bytes(), leaf_page::split_op{p.pg, 0, sp.index});
-   page_buf right(leaf_page::page_bytes(), leaf_page::split_op{p.pg, sp.index, p->num_keys()});
+   page_buf left(leaf_page::page_bytes(), natural_half(p.pg, 0, sp.index));
+   page_buf right(leaf_page::page_bytes(), natural_half(p.pg, sp.index, p->num_keys()));
    REQUIRE(left->validate_invariants());
    REQUIRE(right->validate_invariants());
    REQUIRE(left->num_keys() + right->num_keys() == p->num_keys());
@@ -465,7 +472,7 @@ TEST_CASE("leaf_page reprefix on diverging insert", "[leaf_page]")
    page_buf src;
    for (int i = 0; i < 20; ++i)
       src->apply(ins_bytes("team" + std::to_string(100 + i), "v" + std::to_string(i)));
-   page_buf half(leaf_page::page_bytes(), leaf_page::split_op{src.pg, 0, src->num_keys()});
+   page_buf half(leaf_page::page_bytes(), natural_half(src.pg, 0, src->num_keys()));
    REQUIRE(half->common_prefix().size() >= 4);  // "team1.." factored
    std::map<std::string, std::string> m;
    for (uint32_t i = 0; i < half->num_keys(); ++i)
@@ -635,9 +642,9 @@ TEST_CASE("leaf_page big items: truncated fragments resolve through key_val reco
    const auto sp = p->get_split_pos(test_resolver());
    REQUIRE(sp.index > 0);
    REQUIRE(sp.index < p->num_keys());
-   page_buf bl(leaf_page::page_bytes(), leaf_page::split_op{p.pg, 0, sp.index, test_resolver()});
+   page_buf bl(leaf_page::page_bytes(), natural_half(p.pg, 0, sp.index, test_resolver()));
    page_buf br2(leaf_page::page_bytes(),
-                leaf_page::split_op{p.pg, sp.index, p->num_keys(), test_resolver()});
+                natural_half(p.pg, sp.index, p->num_keys(), test_resolver()));
    REQUIRE(bl->validate_invariants());
    REQUIRE(br2->validate_invariants());
    REQUIRE(bl->num_keys() + br2->num_keys() == p->num_keys());
@@ -648,4 +655,67 @@ TEST_CASE("leaf_page big items: truncated fragments resolve through key_val reco
    ++it;
    REQUIRE(left < div);
    REQUIRE(div <= it->first);
+}
+
+// gofractally/psitri#27: a page's common prefix and its divider live in its own
+// tail. After a split the divider is the keys' shared bytes plus one, so the two
+// are stored once; and plan_split settles each half's prefix and the split point
+// so that both halves are known to fit before either is built.
+TEST_CASE("leaf_page: prefix and divider share bytes, and a split is planned to fit",
+          "[leaf_page][split]")
+{
+   // (An entry over 128 bytes arrives as an external record; the engine tests
+   // in review_fixes_tests.cpp cover prefixes up to the key limit.)
+   for (uint32_t shared : {8u, 60u, 120u})
+   {
+      INFO("shared prefix " << shared);
+      const std::string prefix(shared, 'q');
+      page_buf          p(leaf_page::page_bytes());
+      std::map<std::string, std::string> m;
+      // fill an unfactored page (no common prefix yet) until it is full
+      for (int i = 0;; ++i)
+      {
+         char suf[8];
+         std::snprintf(suf, sizeof suf, "%03d", i);
+         const std::string k = prefix + suf;
+         const std::string v   = "v";
+         const auto        ins = ins_bytes(k, v);
+         if (p->can_apply(ins) != leaf_page::can_apply_mode::modify)
+            break;
+         p->apply(ins);
+         m[k] = "v";
+      }
+      REQUIRE(m.size() >= 4);
+      const auto plan = p->plan_split(sal_art_ref::kv_resolver{});
+      REQUIRE(plan.ok);
+      REQUIRE(plan.pos.index > 0);
+      REQUIRE(plan.pos.index < p->num_keys());
+      page_buf left(leaf_page::page_bytes(),
+                    leaf_page::split_op{p.pg, 0, plan.pos.index, {}, {}, plan.left_cp, plan.left_w});
+      page_buf right(leaf_page::page_bytes(),
+                     leaf_page::split_op{p.pg, plan.pos.index, p->num_keys(), {},
+                                         plan.pos.divider(), plan.right_cp, plan.right_w});
+      REQUIRE(left->validate_invariants());
+      REQUIRE(right->validate_invariants());
+      REQUIRE(left->num_keys() + right->num_keys() == p->num_keys());
+      // the right half's prefix lies inside its divider (or the divider inside it): the
+      // tail holds the longer of the two once
+      const auto cp = right->common_prefix();
+      const auto dv = right->divider();
+      REQUIRE(std::string(reinterpret_cast<const char*>(dv.data()), dv.size()) ==
+              std::string(reinterpret_cast<const char*>(plan.pos.div), plan.pos.div_len));
+      REQUIRE(right->meta_live() == std::max(cp.size(), dv.size()));
+      REQUIRE(right->meta_live() <= leaf_page::max_key_bytes);
+      uint32_t i = 0;
+      for (const auto& [k, v] : m)
+      {
+         const leaf_page& half = i < plan.pos.index ? *left : *right;
+         REQUIRE(half.find(reinterpret_cast<const uint8_t*>(k.data()), uint32_t(k.size())) >= 0);
+         ++i;
+      }
+      // a blit clone and a compaction of the right half keep the shared bytes
+      page_buf copy(leaf_page::page_bytes(), leaf_page::clone_op{right.pg});
+      REQUIRE(copy->validate_invariants());
+      REQUIRE(copy->meta_live() == right->meta_live());
+   }
 }

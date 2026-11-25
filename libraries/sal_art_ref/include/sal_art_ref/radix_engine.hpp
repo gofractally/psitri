@@ -2536,6 +2536,7 @@ namespace sal_art_ref::radix
                return np;
             }
             _page_split = page;
+            _page_edge  = false;
             return page;
          }
          _old_value_size = -1;
@@ -2561,7 +2562,13 @@ namespace sal_art_ref::radix
             retain_page_children(pg, -1);
             return np;
          }
+         // The page cannot take the key even rebuilt. A key outside the page's common prefix
+         // sorts before or after everything the page holds, and halving the page does not
+         // help it in: every half keeps the prefix. It gets a page of its own instead (see
+         // page_edge_split). So does a key for an empty page whose old prefix and divider
+         // leave it no room.
          _page_split = page;
+         _page_edge  = pg->num_keys() == 0 || ncp < cp.size();
          return page;
       }
 
@@ -3137,17 +3144,28 @@ namespace sal_art_ref::radix
                                      std::to_string(unsigned(pg->num_keys())) +
                                      " key(s) (size " + std::to_string(pg->size()) + ")");
          }
-         const auto       sp = pg->get_split_pos(kvres(*_ses));
+         // Where to split, and each half's common prefix, chosen so that both halves are
+         // known to fit a page before either is built (leaf_page::plan_split). Nothing is
+         // allocated yet, so a plan that cannot be made unwinds like the case above.
+         const auto plan = pg->plan_split(kvres(*_ses));
+         if (!plan.ok)
+            throw std::runtime_error("sal_art_ref: no split of page " + std::to_string(*P) +
+                                     " (" + std::to_string(unsigned(pg->num_keys())) +
+                                     " keys) fits two pages");
+         const auto& sp = plan.pos;
          // The page divider rides on each half: L keeps pg's own divider (its radix slot is
          // unchanged); R's divider IS the split divider (sp.divider()), the same key inserted into
          // the radix below. This populates leaf_page::_div for the canonical-collapse read path.
          ptr_address      L  = _ses->alloc<leaf_page>(
-             sal::alloc_hint{}, leaf_page::split_op{pg, 0, sp.index, kvres(*_ses), pg->divider()});
+             sal::alloc_hint{},
+             leaf_page::split_op{pg, 0, sp.index, kvres(*_ses), pg->divider(), plan.left_cp,
+                                 plan.left_w});
          _ses->get_ref<leaf_page>(L).obj()->for_each_child([&](ptr_address c) { _ses->retain(c); });
          retain_page_typed(L);
          ptr_address R = _ses->alloc<leaf_page>(
              sal::alloc_hint{},
-             leaf_page::split_op{pg, sp.index, uint16_t(pg->num_keys()), kvres(*_ses), sp.divider()});
+             leaf_page::split_op{pg, sp.index, uint16_t(pg->num_keys()), kvres(*_ses), sp.divider(),
+                                 plan.right_cp, plan.right_w});
          _ses->get_ref<leaf_page>(R).obj()->for_each_child([&](ptr_address c) { _ses->retain(c); });
          retain_page_typed(R);
          ++_cc.page_splits;
@@ -3169,12 +3187,165 @@ namespace sal_art_ref::radix
                 (void)pgp;
                 return L;
              });
-         if (c2 != cur && cur != borrowed)
+         // (b) the new divider → R. `cur` stays the caller's to release until both steps are
+         // done: on a throw the caller releases it, and only the generation made here is
+         // dropped here (it was released twice before: here after (a) and again by the caller).
+         ptr_address c3;
+         try
+         {
+            c3 = divider_insert<upsert_mode{}>(c2, sp.divider(), 0, R);
+         }
+         catch (...)
+         {
+            if (c2 != cur)
+               _ses->release(c2);
+            throw;
+         }
+         if (c2 != cur)
+         {
+            if (cur != borrowed)
+               _ses->release(cur);
+            if (c3 != c2)
+               _ses->release(c2);
+         }
+         else if (c3 != cur && cur != borrowed)
             _ses->release(cur);
-         // (b) the new divider → R
-         ptr_address c3 = divider_insert<upsert_mode{}>(c2, sp.divider(), 0, R);
-         if (c3 != c2 && c2 != borrowed)
-            _ses->release(c2);
+         return c3;
+      }
+
+      // Give the key a page of its own. Called when the page it routes to (stashed in
+      // _page_split) cannot take it even rebuilt and halving that page would not help: the
+      // key lies outside the page's common prefix, so it sorts below or above everything
+      // the page holds, or the page is empty. The new page holds only the key:
+      //   above: the page stays as it is; the new page is attached at the shortest
+      //          separator between the page's last key and the key.
+      //   below: the new page takes the page's slot and divider; the page is rebuilt under
+      //          a new divider, a prefix of its first key, and attached there.
+      //   empty: the new page replaces it under the same divider.
+      // Returns the working root with the key stored; `cur`/`borrowed` as in
+      // page_split_and_attach.
+      ptr_address page_edge_split(ptr_address cur, ptr_address borrowed, bytes D, bytes kb,
+                                  bytes val)
+      {
+         const ptr_address P = _page_split;
+         _page_split         = sal::null_ptr_address;
+         _page_edge          = false;
+         auto             pr = _ses->get_ref<leaf_page>(P);
+         const leaf_page* pg = pr.obj();
+         enum class side { empty, above, below } where = side::empty;
+         leaf_page::split_pos sp{};
+         if (pg->num_keys() != 0)
+         {
+            auto     cp  = pg->common_prefix();
+            uint32_t ncp = 0;
+            while (ncp < cp.size() && ncp < kb.size() && cp[ncp] == kb[ncp])
+               ++ncp;
+            if (ncp >= cp.size())
+               throw std::logic_error("sal_art_ref: a key inside its page's prefix was sent to a page of its own");
+            where = (ncp < kb.size() && kb[ncp] > cp[ncp]) ? side::above : side::below;
+            sp    = where == side::above
+                        ? pg->divider_above(kb.data(), uint32_t(kb.size()), kvres(*_ses))
+                        : pg->divider_below(kb.data(), uint32_t(kb.size()), kvres(*_ses));
+            if (where == side::below && !pg->redivided_fits(sp.divider()))
+               throw std::runtime_error("sal_art_ref: page " + std::to_string(*P) +
+                                        " does not fit under its new divider");
+         }
+         // The key's page: empty, reached through its divider, then the ordinary insert.
+         sal::smart_ptr<sal::alloc_header> fresh(
+             _ses, _ses->alloc<leaf_page>(sal::alloc_hint{},
+                                          leaf_page::empty_op{where == side::above
+                                                                  ? sp.divider()
+                                                                  : pg->divider()}));
+         if (page_apply_upsert(fresh.address(), false, kb, val) != fresh.address() ||
+             _page_split != sal::null_ptr_address)
+         {
+            _page_split = sal::null_ptr_address;
+            _page_edge  = false;
+            throw std::runtime_error("sal_art_ref: a key of " + std::to_string(kb.size()) +
+                                     " bytes does not fit a page of its own");
+         }
+         // The page rebuilt under its new divider (below): it shares the old page's children.
+         sal::smart_ptr<sal::alloc_header> moved;
+         if (where == side::below)
+         {
+            moved = sal::smart_ptr<sal::alloc_header>(
+                _ses, _ses->alloc<leaf_page>(sal::alloc_hint{},
+                                             leaf_page::redivide_op{pg, sp.divider()}));
+            _ses->get_ref<leaf_page>(moved.address())
+                .obj()
+                ->for_each_child([&](ptr_address c) { _ses->retain(c); });
+            retain_page_typed(moved.address());
+         }
+         ++_cc.page_splits;
+         // What stays in the old page's slot, and what is attached at the new divider.
+         const ptr_address in_slot  = where == side::above ? P : fresh.address();
+         const ptr_address attached = where == side::above   ? fresh.address()
+                                      : where == side::below ? moved.address()
+                                                             : sal::null_ptr_address;
+         if (cur == P)  // the root IS the page
+         {
+            if (where == side::empty)
+            {
+               if (cur != borrowed)
+                  _ses->release(cur);
+               return fresh.take();
+            }
+            // grow a radix above: the "" divider leads to the slot's page
+            sal::smart_ptr<sal::alloc_header> top(_ses, make_node<setlist_u8>(bytes{}));
+            mut<setlist_u8>(top.address())->set_term_value(smart_address::from_pointer(in_slot));
+            if (where == side::above)
+               _ses->retain(P);     // the new root holds the page with a reference of its own
+            else
+               (void)fresh.take();  // the new root owns the key's page
+            // A throw from here unwinds `top` with exactly what it owns.
+            const ptr_address nr2 =
+                divider_insert<upsert_mode{}>(top.address(), sp.divider(), 0, attached);
+            (void)(where == side::above ? fresh.take() : moved.take());
+            if (nr2 == top.address())
+               (void)top.take();
+            if (cur != borrowed)
+               _ses->release(cur);  // the loop's claim on the old page
+            return nr2;
+         }
+         ptr_address c2 = cur;
+         if (where != side::above)  // the key's page takes the old page's slot
+         {
+            c2 = page_path_mut<upsert_mode{}>(cur, D, 0, [&](ptr_address pgp, bool) {
+               assert(pgp == P);
+               (void)pgp;
+               return in_slot;
+            });
+            (void)fresh.take();
+            if (where == side::empty)
+            {
+               if (c2 != cur && cur != borrowed)
+                  _ses->release(cur);
+               return c2;
+            }
+         }
+         // `cur` stays the caller's to release until the whole change is in place: on a
+         // throw the caller releases it, and only the generation made here is dropped here.
+         ptr_address c3;
+         try
+         {
+            c3 = divider_insert<upsert_mode{}>(c2, sp.divider(), 0, attached);
+         }
+         catch (...)
+         {
+            if (c2 != cur)
+               _ses->release(c2);
+            throw;
+         }
+         (void)(where == side::above ? fresh.take() : moved.take());
+         if (c2 != cur)
+         {
+            if (cur != borrowed)
+               _ses->release(cur);
+            if (c3 != c2)
+               _ses->release(c2);
+         }
+         else if (c3 != cur && cur != borrowed)
+            _ses->release(cur);
          return c3;
       }
 
@@ -3194,7 +3365,10 @@ namespace sal_art_ref::radix
          ptr_address cur = root;  // borrowed; intermediates are owned (released) in-loop
          for (int pass = 0;; ++pass)
          {
-            if (pass >= 64)  // hard guard in EVERY build — a silent livelock is the worst failure
+            // Hard guard in EVERY build — a silent livelock is the worst failure. Each pass
+            // splits the page the key routes to and leaves fewer keys in it; a page of large
+            // records can shed them one at a time, and holds a few hundred at most.
+            if (pass >= 512)
             {
                // Every completed pass was a split (a content no-op), so the working generation
                // is a CONSISTENT tree holding all pre-existing keys; release it if we own it
@@ -3203,10 +3377,11 @@ namespace sal_art_ref::radix
                // consumes the stash — so that diagnostic was itself dead.)
                if (cur != root)
                   _ses->release(cur);
-               throw std::runtime_error("heart: page split did not converge after 64 passes (key " +
+               throw std::runtime_error("heart: page split did not converge after 512 passes (key " +
                                         std::to_string(kb.size()) + " bytes)");
             }
             _page_split = sal::null_ptr_address;
+            _page_edge  = false;
             uint8_t     db[1056];  // divider <= max key + 1 (the 520 smashed at deep keys)
             uint32_t    dl = 0;
             ptr_address nxt;
@@ -3225,8 +3400,11 @@ namespace sal_art_ref::radix
                   _ses->release(cur);
                return nxt == cur ? cur : nxt;
             }
+            const bool edge = _page_edge;
             try
             {
+               if (edge)  // the key gets a page of its own: stored, no retry
+                  return page_edge_split(cur, root, bytes{db, dl}, kb, val);
                cur = page_split_and_attach(cur, root, bytes{db, dl});
             }
             catch (...)
@@ -7295,6 +7473,8 @@ namespace sal_art_ref::radix
       bool        _page_mode    = true;   // radix-indexed leaf pages; legacy knobs turn it off
       bool        _page_emptied = false;  // page op: the page drained → drop divider + page
       ptr_address _page_split   = sal::null_ptr_address;  // page op: full page → split + retry
+      bool        _page_edge    = false;  // with _page_split: the key needs a page of its own
+      static_assert(leaf_page::max_key_bytes == key_val_node::max_key_len);
       bool                            _wide_stems     = false;  // gate: off = byte radix
       bool                            _bucket_mode    = false;  // leaf=bucket, split to radix
       bool                            _adaptive       = false;  // gate: radix→bucket on deep-narrow

@@ -1,5 +1,7 @@
 #pragma once
 #include <cassert>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <span>
 
@@ -84,6 +86,9 @@ namespace sal_art_ref
       // An extern record keeps a comparison FRAGMENT of the suffix, capped so the record
       // honors the 128-byte item limit: 3 (header) + fragment + 2 (cbase code) <= 128.
       static constexpr uint16_t ext_frag_cap = 123;
+      // The key limit (key_val_node::max_key_len; radix_engine.hpp asserts they agree). A
+      // page's common prefix and divider together never take more tail than one key.
+      static constexpr uint32_t max_key_bytes = 1024;
 
       uint16_t         _nkeys;
       uint16_t         _cap;        // column capacity, always a multiple of 4
@@ -166,6 +171,23 @@ namespace sal_art_ref
          uint16_t                 lo, hi;
          kv_resolver              res{};
          std::span<const uint8_t> div{};  // this half's divider: left = src's, right = split divider
+         // The half's common prefix length and the widest prefix column it may pick, as
+         // chosen by plan_split (which checked the half fits a page with them).
+         uint16_t ncp   = 0;
+         uint8_t  max_w = 4;
+      };
+      // An empty page reached through `div`: the page a key gets to itself when no page
+      // that already holds keys can take it (see radix_tree::page_edge_split).
+      struct empty_op
+      {
+         std::span<const uint8_t> div{};
+      };
+      // The same entries under a different divider (the page's lower bound moved up because
+      // a new page was put in front of it).
+      struct redivide_op
+      {
+         const leaf_page*         src;
+         std::span<const uint8_t> div{};
       };
 
       // ── SAL lifecycle ────────────────────────────────────────────────────────────
@@ -177,7 +199,50 @@ namespace sal_art_ref
       static uint32_t alloc_size(const clone_update_op&) noexcept { return page_bytes(); }
       static uint32_t alloc_size(const clone_remove_op&) noexcept { return page_bytes(); }
       static uint32_t alloc_size(const split_op&) noexcept { return page_bytes(); }
+      static uint32_t alloc_size(const empty_op&) noexcept { return page_bytes(); }
+      static uint32_t alloc_size(const redivide_op&) noexcept { return page_bytes(); }
       uint32_t        cow_size() const noexcept { return size(); }
+
+      /// A page about to be built or changed beyond what it can hold, or from inputs that
+      /// cannot be right. Callers decide fit beforehand (can_apply, rebuilt_fits, plan_split);
+      /// arriving here means one of them is wrong. Stopping is the only safe answer: carrying
+      /// on would write over the page's own columns or the next object.
+      [[noreturn]] static void page_fault(const char* what, uint32_t detail) noexcept
+      {
+         std::fprintf(stderr, "sal_art_ref leaf_page: %s (%u); stopping\n", what, detail);
+         std::abort();
+      }
+      /// Every tail allocation of a page is checked against the page's size in every build.
+      char* alloc_tail(uint16_t n) noexcept
+      {
+         if (head_size() + uint32_t(tail_used()) + n > size()) [[unlikely]]
+            page_fault("content does not fit the page", n);
+         return paged::alloc_tail(n);
+      }
+
+      // ── the common prefix and the divider share their bytes ──────────────────────
+      // Both are prefixes of keys near this page, and after a split one is usually a prefix
+      // of the other (the divider is the keys' shared bytes plus one). When that holds the
+      // longer one is stored once and both views start at it, so a long shared prefix costs
+      // its length once, not twice. The rule is a pure function of the two byte strings, so
+      // every rebuild of the same content makes the same choice.
+      static bool meta_aliases(const uint8_t* cp, uint32_t ncp, const uint8_t* dv,
+                               uint32_t dn) noexcept
+      {
+         return ncp && dn && std::memcmp(cp, dv, ncp < dn ? ncp : dn) == 0;
+      }
+      static uint32_t meta_bytes(const uint8_t* cp, uint32_t ncp, const uint8_t* dv,
+                                 uint32_t dn) noexcept
+      {
+         return meta_aliases(cp, ncp, dv, dn) ? (ncp > dn ? ncp : dn) : ncp + dn;
+      }
+      /// Tail bytes this page spends on its common prefix and divider.
+      uint32_t meta_live() const noexcept
+      {
+         if (_cpfx_len && _div_len && _cpfx_pos.offset_from_tail == _div_pos.offset_from_tail)
+            return _cpfx_len > _div_len ? _cpfx_len : _div_len;
+         return uint32_t(_cpfx_len) + _div_len;
+      }
       static uint16_t round_cap(uint32_t n) noexcept
       {
          return uint16_t(ucc::round_up_multiple<4>(n < 8 ? 8u : n));
@@ -314,13 +379,32 @@ namespace sal_art_ref
          this->init_page(asize, type_id, seq);
          const leaf_page* s = op.src;
          assert(op.lo < op.hi && op.hi <= s->_nkeys);
-         // common prefix of a SORTED range == common prefix of its first & last suffix;
-         // splits are the only place factoring tightens.
-         auto       a     = s->suffix(op.lo);
-         auto       b     = s->suffix(op.hi - 1);
-         const auto extra = shared_prefix(a.data(), a.size(), b.data(), b.size());
-         init_from(s, op.lo, op.hi, uint16_t(s->_cpfx_len + extra), a.data(), uint32_t(extra),
-                   nullptr, nullptr, -1, 4, op.res, op.div);
+         // Splits are the only place factoring tightens. How far is plan_split's decision
+         // (at most the half's natural common prefix; less when that would not fit).
+         if (op.ncp < s->_cpfx_len || op.ncp > s->natural_cpfx(op.lo, op.hi)) [[unlikely]]
+            page_fault("split with a common prefix the half does not have", op.ncp);
+         init_from(s, op.lo, op.hi, op.ncp, s->suffix(op.lo).data(),
+                   uint32_t(op.ncp - s->_cpfx_len), nullptr, nullptr, -1, op.max_w, op.res,
+                   op.div);
+      }
+      leaf_page(uint32_t asize, sal::ptr_address_seq seq, const empty_op& op) noexcept
+      {
+         this->init_page(asize, type_id, seq);
+         init_empty();
+         _div_len = uint16_t(op.div.size());
+         if (!op.div.empty())
+         {
+            std::memcpy(alloc_tail(uint16_t(op.div.size())), op.div.data(), op.div.size());
+            _div_pos = tail_pos();
+         }
+      }
+      leaf_page(uint32_t asize, sal::ptr_address_seq seq, const redivide_op& op) noexcept
+      {
+         this->init_page(asize, type_id, seq);
+         // Same prefix, same records, same width: only the divider differs, and the caller
+         // checked redivided_fits().
+         init_from(op.src, 0, op.src->_nkeys, op.src->_cpfx_len, nullptr, 0, nullptr, nullptr,
+                   -1, op.src->_pfxw, kv_resolver{}, op.div);
       }
 
       // ── accessors ────────────────────────────────────────────────────────────────
@@ -580,8 +664,12 @@ namespace sal_art_ref
          const uint32_t sn  = n - ncp;
          if (ins.vtype != inline_value::vt_extern && sn > max_suffix_len)
             return false;  // big items must arrive classified vt_extern
-         if (uint32_t(_cpfx_len - ncp) + max_live_suffix() > max_suffix_len)
-            return false;  // re-expanding INLINE suffixes must stay within the u8 bound
+         // Re-expanding the suffixes kept whole in the page must stay within their u8
+         // length. Full-key external records keep a re-capped fragment and an empty page
+         // has nothing to re-expand, so neither constrains.
+         if (const int mls = max_live_suffix();
+             mls >= 0 && uint32_t(_cpfx_len - ncp) + uint32_t(mls) > max_suffix_len)
+            return false;
          uint32_t cb = live_cbase_count();
          if (inline_value::external_value(ins.vtype))
             cb += 1;  // conservative: may need a fresh base
@@ -590,8 +678,10 @@ namespace sal_art_ref
          // width upper bound: the rebuild picks pick(min suffix), and `ins` is in the set,
          // so its (post-ncp) suffix bounds the chosen width from above.
          const uint32_t wb      = pick_pfx_width(sn);
-         const uint32_t content = head_bytes() + (3u + wb) * round_cap(_nkeys + 1u) + ncp +
-                                  (live_tail() - _cpfx_len) +
+         // the rebuilt page keeps cpfx[0..ncp) and the divider, sharing bytes where it can
+         const uint32_t new_meta = meta_bytes(cpfx_data(), ncp, div_data(), _div_len);
+         const uint32_t content = head_bytes() + (3u + wb) * round_cap(_nkeys + 1u) + new_meta +
+                                  (live_tail() - meta_live()) +
                                   uint32_t(_cpfx_len - ncp) * _nkeys + record_bytes(sn, ins) +
                                   // a FRESH 16-slot cbase block only if the rebuild gains externs and
                                   // this page has none yet (an existing block is already in live_tail)
@@ -647,9 +737,14 @@ namespace sal_art_ref
          uint8_t  div[1056];  // a divider never exceeds a max-length key + 1
          std::span<const uint8_t> divider() const noexcept { return {div, div_len}; }
       };
-      split_pos get_split_pos(const kv_resolver& R = {}) const noexcept
+      /// The shortest separator between entries ia < ib: their shared prefix plus one
+      /// byte v with key[ia] < divider <= key[ib], v snapped toward trailing zeros when
+      /// `snap` (rounder dividers are cheaper in the radix above). The split index is the
+      /// divider's lower bound, in (ia, ib].
+      split_pos separator(uint32_t ia, uint32_t ib, const kv_resolver& R, bool snap = true) const
+          noexcept
       {
-         assert(_nkeys >= 2);
+         assert(ia < ib && ib < _nkeys);
          // Separator math needs the REAL suffix of an extern record (its in-page fragment can
          // tie); splits are cold, so resolving the two probes through the key_val_node is fine.
          auto real_suffix = [&](uint32_t i) -> std::span<const uint8_t> {
@@ -659,23 +754,16 @@ namespace sal_art_ref
             auto kk = R(decode_extern(iv));
             return {kk.data() + _cpfx_len, kk.size() - _cpfx_len};
          };
-         const uint32_t n  = _nkeys;
-         uint32_t       ia = (n * 2) / 5, ib = (n * 3) / 5;
-         if (ib >= n)
-            ib = n - 1;
-         if (ib < 1)
-            ib = 1;
-         if (ia >= ib)
-            ia = ib - 1;
          auto     a = real_suffix(ia), b = real_suffix(ib);
          uint32_t p = shared_prefix(a.data(), a.size(), b.data(), b.size());
-         assert(p < b.size());  // strict order: b can't be a prefix of a
+         if (p >= b.size()) [[unlikely]]
+            page_fault("entries out of order", ib);  // strict order: b can't be a prefix of a
          // separator = b[0..p) + v, valid v in (a[p], b[p]] — or [0, b[p]] when a
          // is a prefix of b. Maximize trailing zeros of v (simple bit math, no scans).
          const int     lo_excl = p < a.size() ? int(a[p]) : -1;
          const uint8_t hi_v    = b[p];
          uint8_t       v       = hi_v;
-         for (int z = 8; z >= 1; --z)
+         for (int z = snap ? 8 : 0; z >= 1; --z)
          {
             const uint8_t cand = uint8_t(hi_v & ~((1u << z) - 1u));
             if (int(cand) > lo_excl)
@@ -690,9 +778,204 @@ namespace sal_art_ref
          r.div[_cpfx_len + p] = v;
          r.div_len            = uint16_t(_cpfx_len + p + 1);
          const int idx        = lower_bound(r.div, r.div_len, R);
-         assert(idx > int(ia) && idx <= int(ib));  // key[ia] < divider <= key[ib]
+         if (idx <= int(ia) || idx > int(ib)) [[unlikely]]
+            page_fault("divider does not separate its entries", uint32_t(idx));
          r.index = uint16_t(idx);
          return r;
+      }
+      /// The balanced choice: probes at 40% and 60% of the page.
+      split_pos get_split_pos(const kv_resolver& R = {}) const noexcept
+      {
+         assert(_nkeys >= 2);
+         const uint32_t n  = _nkeys;
+         uint32_t       ia = (n * 2) / 5, ib = (n * 3) / 5;
+         if (ib >= n)
+            ib = n - 1;
+         if (ib < 1)
+            ib = 1;
+         if (ia >= ib)
+            ia = ib - 1;
+         return separator(ia, ib, R);
+      }
+
+      // ── split planning: both halves are known to fit before either is built ──────
+      // A half carries its divider and its common prefix in its tail as well as its
+      // records, and a divider is as long as the bytes its neighbours share. With keys of
+      // up to 1,024 bytes that is most of a page, so the balanced split is not always
+      // possible: a half's prefix is then tightened less (its records stay as they are),
+      // and if the right half still does not fit, the split point moves right until it
+      // does. Splitting off the last entry alone always fits (one record, its divider and a
+      // prefix that shares the divider's bytes: at most 1,508 bytes of a 2,048-byte page),
+      // and the left half then holds what the page held before, less one record.
+      struct split_plan
+      {
+         bool      ok = false;
+         split_pos pos;                   // right half = [pos.index, nkeys), reached by pos.divider()
+         uint16_t  left_cp = 0, right_cp = 0;  // each half's common prefix length
+         uint8_t   left_w = 4, right_w = 4;    // each half's widest prefix column
+      };
+      /// Longest common prefix a rebuild of entries [lo,hi) can factor out, from the bytes
+      /// the page holds (a sorted range's common prefix is that of its first and last).
+      uint16_t natural_cpfx(uint32_t lo, uint32_t hi) const noexcept
+      {
+         auto a = suffix(lo);
+         auto b = suffix(hi - 1);
+         return uint16_t(_cpfx_len + shared_prefix(a.data(), a.size(), b.data(), b.size()));
+      }
+      /// Upper bound on the bytes a page built from entries [lo,hi) needs under common
+      /// prefix length `ncp` (>= this page's), divider `div` and prefix columns of at most
+      /// `max_w` bytes. Mirrors init_from's record sizes; the column width is the bound.
+      /// Does the half fit a page? With `bound_meta`, its prefix and divider together must
+      /// also stay within one key's length: the rule that leaves every page, down to a
+      /// single record, room to take an update of that record or one more key.
+      bool half_fits(uint32_t lo, uint32_t hi, uint32_t ncp, std::span<const uint8_t> div,
+                     uint32_t max_w, const kv_resolver& R, bool bound_meta = true) const noexcept
+      {
+         uint32_t meta = 0;
+         return half_bytes(lo, hi, ncp, div, max_w, R, &meta) <= page_bytes() &&
+                (!bound_meta || meta <= max_key_bytes);
+      }
+      uint32_t half_bytes(uint32_t lo, uint32_t hi, uint32_t ncp, std::span<const uint8_t> div,
+                          uint32_t max_w, const kv_resolver& R, uint32_t* meta_out = nullptr) const
+          noexcept
+      {
+         uint8_t cp[sizeof(split_pos::div)];
+         std::memcpy(cp, cpfx_data(), _cpfx_len);
+         std::memcpy(cp + _cpfx_len, suffix(lo).data(), ncp - _cpfx_len);
+         const uint32_t strip = ncp - _cpfx_len;
+         const uint32_t meta  = meta_bytes(cp, ncp, div.data(), uint32_t(div.size()));
+         uint32_t       total = head_bytes() + (3u + max_w) * round_cap(hi - lo) + meta;
+         if (meta_out)
+            *meta_out = meta;
+         bool ext = false;
+         for (uint32_t si = lo; si < hi; ++si)
+         {
+            const inline_value* iv = record(si);
+            ext |= inline_value::external_value(iv->value_type);
+            uint32_t sn;
+            if (iv->value_type == inline_value::vt_extern && strip)
+            {
+               const uint32_t real = uint32_t(R(decode_extern(iv)).size()) - ncp;
+               sn                  = real < ext_frag_cap ? real : uint32_t(ext_frag_cap);
+            }
+            else if (iv->value_type == inline_value::vt_extern)
+               sn = iv->suffix_len;
+            else
+               sn = iv->suffix_len - strip;
+            total += 3u + sn + iv->value_len;
+         }
+         return total + (ext ? 64u : 0u);
+      }
+      split_plan plan_split(const kv_resolver& R) const noexcept
+      {
+         split_plan     pl;
+         const uint32_t n = _nkeys;
+         if (n < 2)
+            return pl;
+         pl.pos = get_split_pos(R);
+         for (;;)
+         {
+            const uint32_t i = pl.pos.index;
+            // left half: this page's divider; tighten the prefix if the result fits
+            const uint16_t nl = natural_cpfx(0, i);
+            bool           l_ok = true;
+            if (half_fits(0, i, nl, divider(), 4, R))
+               pl.left_cp = nl, pl.left_w = 4;
+            else if (half_fits(0, i, _cpfx_len, divider(), _pfxw, R, /*bound_meta=*/false))
+               pl.left_cp = _cpfx_len, pl.left_w = _pfxw;  // what the page already holds
+            else
+               l_ok = false;
+            // right half: the new divider. A prefix no longer than the divider's shared
+            // part lies inside the divider's bytes and costs nothing.
+            const uint16_t nr     = natural_cpfx(i, n);
+            const uint16_t within = uint16_t(pl.pos.div_len - 1) < nr ? uint16_t(pl.pos.div_len - 1)
+                                                                      : nr;
+            bool r_ok = false;
+            for (const uint8_t w : {uint8_t(4), uint8_t(_pfxw)})
+            {
+               for (const uint16_t cp : {nr, within})
+                  if (half_fits(i, n, cp, pl.pos.divider(), w, R))
+                  {
+                     pl.right_cp = cp, pl.right_w = w, r_ok = true;
+                     break;
+                  }
+               if (r_ok)
+                  break;
+            }
+            if (l_ok && r_ok)
+            {
+               pl.ok = true;
+               return pl;
+            }
+            if (i + 1 >= n)
+               return pl;  // not even the last entry alone: the caller reports it
+            pl.pos = separator(i, i + 1, R);
+         }
+      }
+
+      // ── a page for one key that no existing page can take ────────────────────────
+      /// Entry i's whole key into `out` (>= 1,024 bytes); returns its length.
+      uint32_t real_key(uint32_t i, uint8_t* out, const kv_resolver& R) const noexcept
+      {
+         const inline_value* iv = record(i);
+         if (iv->value_type == inline_value::vt_extern)
+         {
+            auto kk = R(decode_extern(iv));
+            std::memcpy(out, kk.data(), kk.size());
+            return uint32_t(kk.size());
+         }
+         return full_key(i, out);
+      }
+      /// The divider of a new page that holds only (k,n), a key above every entry here:
+      /// the shortest separator between the last entry and the key.
+      split_pos divider_above(const uint8_t* k, uint32_t n, const kv_resolver& R) const noexcept
+      {
+         uint8_t        last[sizeof(split_pos::div)];
+         const uint32_t ln = real_key(_nkeys - 1u, last, R);
+         const uint32_t p  = shared_prefix(last, ln, k, n);
+         if (p >= n) [[unlikely]]
+            page_fault("key is not above the page", n);
+         const int lo_excl = p < ln ? int(last[p]) : -1;
+         uint8_t   v       = k[p];
+         for (int z = 8; z >= 1; --z)
+         {
+            const uint8_t cand = uint8_t(k[p] & ~((1u << z) - 1u));
+            if (int(cand) > lo_excl)
+            {
+               v = cand;
+               break;
+            }
+         }
+         split_pos r;
+         std::memcpy(r.div, k, p);
+         r.div[p]  = v;
+         r.div_len = uint16_t(p + 1);
+         r.index   = _nkeys;
+         return r;
+      }
+      /// This page's divider once a new page holding only (k,n), a key below every entry
+      /// here, is put in front of it: the first entry's bytes up to and including the one
+      /// where it leaves the key. A prefix of this page's keys, so it shares the common
+      /// prefix's bytes.
+      split_pos divider_below(const uint8_t* k, uint32_t n, const kv_resolver& R) const noexcept
+      {
+         split_pos      r;
+         const uint32_t fn = real_key(0, r.div, R);
+         const uint32_t p  = shared_prefix(k, n, r.div, fn);
+         if (p >= fn) [[unlikely]]
+            page_fault("key is not below the page", n);
+         r.div_len = uint16_t(p + 1);
+         r.index   = 0;
+         return r;
+      }
+      /// Would this page's entries fit under `div` in place of its divider?
+      bool redivided_fits(std::span<const uint8_t> div) const noexcept
+      {
+         const uint32_t meta =
+             meta_bytes(cpfx_data(), _cpfx_len, div.data(), uint32_t(div.size()));
+         return head_bytes() + (3u + _pfxw) * round_cap(_nkeys) + meta +
+                    (live_tail() - meta_live()) <=
+                page_bytes();
       }
 
       // ── diagnostics ──────────────────────────────────────────────────────────────
@@ -703,7 +986,7 @@ namespace sal_art_ref
          if (head_size() + tail_used() > size())
             return false;
          // cpfx + divider + (the 16-slot cbase block, when present) are all live tail content
-         uint32_t live = _cpfx_len + _div_len + (_cbases_pos.offset_from_tail ? 64u : 0u);
+         uint32_t live = meta_live() + (_cbases_pos.offset_from_tail ? 64u : 0u);
          uint8_t  kbuf[1056];  // full key <= 1024 (+slack)
          uint8_t  pbuf[1056];
          uint32_t plen     = 0;
@@ -1002,16 +1285,17 @@ namespace sal_art_ref
       }
       /// Largest live INLINE suffix length (rebuild prepend must keep them <= 255; extern
       /// fragments re-cap at ext_frag_cap during the rebuild, so they never constrain).
-      uint32_t max_live_suffix() const noexcept
+      /// -1 when no record keeps its whole suffix in the page.
+      int max_live_suffix() const noexcept
       {
-         uint32_t m = 0;
+         int m = -1;
          for (uint32_t i = 0; i < _nkeys; ++i)
          {
             const inline_value* iv = record(i);
             // inline + vt_extern_val carry the full post-cpfx suffix (re-expands on rebuild);
             // vt_extern keeps only a re-capped fragment so it never constrains.
-            if (inline_value::suffix_complete(iv->value_type) && iv->suffix_len > m)
-               m = iv->suffix_len;
+            if (inline_value::suffix_complete(iv->value_type) && int(iv->suffix_len) > m)
+               m = int(iv->suffix_len);
          }
          return m;
       }
@@ -1207,30 +1491,46 @@ namespace sal_art_ref
                w = max_w;  // compaction clamps to the source width (shrink-only)
             _pfxw = uint8_t(w);
          }
-         assert(head_bytes() + (3u + _pfxw) * _cap <= size());
+         if (head_bytes() + (3u + _pfxw) * _cap > size()) [[unlikely]]
+            page_fault("columns do not fit the page", cnt);
+         if (ncp > sizeof(split_pos::div) || div.size() > sizeof(split_pos::div)) [[unlikely]]
+            page_fault("prefix or divider longer than a key", ncp);
 
          // new common prefix bytes: src's cpfx truncated-or-extended
-         _cpfx_len = uint16_t(ncp);
-         if (ncp)
+         uint8_t cp[sizeof(split_pos::div)];
          {
-            uint8_t* d = reinterpret_cast<uint8_t*>(alloc_tail(uint16_t(ncp)));
             const uint32_t keep = ncp < src->_cpfx_len ? ncp : src->_cpfx_len;
-            std::memcpy(d, src->cpfx_data(), keep);
+            std::memcpy(cp, src->cpfx_data(), keep);
             if (ncp > src->_cpfx_len)
             {
                assert(extra_n == uint32_t(ncp - src->_cpfx_len) && extra_src);
-               std::memcpy(d + keep, extra_src, extra_n);
+               std::memcpy(cp + keep, extra_src, extra_n);
             }
-            _cpfx_pos = tail_pos();
          }
-         // the page divider: copied verbatim (inherit) or set (split right-half). Like cpfx, it is
-         // live tail content; allocate it here so the blit/compact used-tail region carries it.
-         _div_len = uint16_t(div.size());
-         if (!div.empty())
+         // The common prefix and the page divider (copied verbatim, or set for a split's right
+         // half) are live tail content, allocated here so the blit/compact used-tail region
+         // carries them: stored once when one is a prefix of the other (see meta_aliases).
+         _cpfx_len = uint16_t(ncp);
+         _div_len  = uint16_t(div.size());
+         if (meta_aliases(cp, ncp, div.data(), uint32_t(div.size())))
          {
-            uint8_t* dd = reinterpret_cast<uint8_t*>(alloc_tail(uint16_t(div.size())));
-            std::memcpy(dd, div.data(), div.size());
-            _div_pos = tail_pos();
+            const bool     div_longer = div.size() > ncp;
+            const uint32_t len        = div_longer ? uint32_t(div.size()) : uint32_t(ncp);
+            std::memcpy(alloc_tail(uint16_t(len)), div_longer ? div.data() : cp, len);
+            _cpfx_pos = _div_pos = tail_pos();
+         }
+         else
+         {
+            if (ncp)
+            {
+               std::memcpy(alloc_tail(uint16_t(ncp)), cp, ncp);
+               _cpfx_pos = tail_pos();
+            }
+            if (!div.empty())
+            {
+               std::memcpy(alloc_tail(uint16_t(div.size())), div.data(), div.size());
+               _div_pos = tail_pos();
+            }
          }
          const int prepend = int(src->_cpfx_len) - int(ncp);  // >0: suffixes re-expand
 
@@ -1264,7 +1564,8 @@ namespace sal_art_ref
             uint8_t pay = iv->value_len;
             if (upd && si == upd->index)
                pay = uint8_t(payload_bytes(upd->value.size(), upd->vtype));
-            assert(sn <= max_suffix_len);
+            if (sn > max_suffix_len) [[unlikely]]
+               page_fault("suffix too long for a page record", sn);
             auto* nv = reinterpret_cast<inline_value*>(alloc_tail(uint16_t(3u + sn + pay)));
             const uint16_t off = tail_used();  // capture BEFORE encode_extern may alloc the cbase block
             nv->suffix_len = uint8_t(sn);
@@ -1331,8 +1632,8 @@ namespace sal_art_ref
             ++w;
          }
          _nkeys = uint16_t(w);
-         assert(w == cnt);
-         assert(head_size() + tail_used() <= size());
+         if (w != cnt || head_size() + uint32_t(tail_used()) > size()) [[unlikely]]
+            page_fault("rebuilt page is inconsistent", w);
          rebuild_clidx();
          clear_checksum();  // compact path: dst keeps its own SAL header, content is fresh
       }

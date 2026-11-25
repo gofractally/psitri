@@ -2073,3 +2073,232 @@ TEST_CASE("Small Engine: two writers feed the release queue at once",
    // every line is accounted for: nothing lost in the queue, nothing freed twice
    REQUIRE(db->usage().used_bytes <= 64 * 128);
 }
+
+namespace
+{
+   // A typed value that counts how often the engine duplicates and destroys
+   // its bytes: a copy of a leaf shows up as a retain.
+   struct counted_value
+   {
+      static constexpr uint16_t type_id = 78;
+      struct t_pod
+      {
+         uint64_t n;
+         static void retain(void*, const t_pod&) { retains.fetch_add(1, std::memory_order_relaxed); }
+         static void release(void*, const t_pod&) { releases.fetch_add(1, std::memory_order_relaxed); }
+      };
+      uint64_t n = 0;
+      t_pod    take_pod() && { return {n}; }
+      static counted_value make_from_pod(const t_pod& p, bool) { return {p.n}; }
+      static inline std::atomic<uint64_t> retains{0};
+      static inline std::atomic<uint64_t> releases{0};
+   };
+}  // namespace
+
+// gofractally/psitri#33. A value that is about to be removed or replaced is
+// not copied first. The copy was made of the whole leaf, only to be freed in
+// the same call, so on a full store a remove needed a free run as long as the
+// value it was deleting and could be refused.
+TEST_CASE("Small Engine: a full store of multi-line values can be emptied one remove at a time",
+          "[small][limit][brim][multiline]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 2));
+   auto ws = db->start_write_session();
+   std::mt19937_64                                rng(33);
+   std::vector<std::pair<std::string, size_t>>    rows;
+   for (uint64_t n = 0;; ++n)
+   {
+      const size_t size = 900 + rng() % 2200;  // 8 to 25 lines
+      try
+      {
+         auto tx = ws->start_transaction(0);
+         tx.upsert(scattered_key("m", n), std::string(size, char('a' + n % 26)));
+         tx.commit();
+         rows.emplace_back(scattered_key("m", n), size);
+      }
+      catch (const engine::storage_full&)
+      {
+         break;
+      }
+      REQUIRE(n < 1'000'000);
+   }
+   db->flush_releases();
+   const auto full = db->usage();
+   std::printf("multi-line brim: %zu values; used %.2f of %.2f MiB, reserve %.2f MiB\n",
+               rows.size(), full.used_bytes / 1048576.0, full.limit_bytes / 1048576.0,
+               full.reserve_bytes / 1048576.0);
+   std::shuffle(rows.begin(), rows.end(), rng);
+   uint64_t refused = 0;
+   for (const auto& [key, size] : rows)
+   {
+      auto tx = ws->start_transaction(0);
+      try
+      {
+         REQUIRE(tx.remove(key) == 0);
+         tx.commit();
+      }
+      catch (const engine::storage_full&)
+      {
+         ++refused;
+         tx.abort();
+      }
+   }
+   REQUIRE(refused == 0);
+   ws.reset();
+   db->flush_releases();
+   REQUIRE(db->usage().used_bytes <= 64 * 128);
+}
+
+TEST_CASE("Small Engine: replacing or removing a value does not copy the old one first",
+          "[small][cow][no-clone]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 4));
+   db->register_value_types<counted_value>();
+   auto ws = db->start_write_session();
+   const std::string at_leaf = "k/leaf";  // a leaf of its own
+   const std::string at_term = "k";       // ends where a router begins: the router's term
+   {
+      auto tx = ws->start_transaction(0);
+      for (int i = 0; i < 200; ++i)
+         tx.upsert("k/pad/" + std::to_string(i), std::string(40, 'p'));
+      tx.upsert(at_leaf, counted_value{1});
+      tx.upsert(at_term, counted_value{2});
+      tx.commit();
+   }
+   db->flush_releases();
+   auto settle = [&] {
+      counted_value::retains  = 0;
+      counted_value::releases = 0;
+   };
+   // every transaction below starts on a tree it shares with the committed
+   // version, so the value's leaf is shared when the write reaches it
+   for (const std::string& key : {at_leaf, at_term})
+   {
+      INFO("key " << key);
+      settle();
+      {  // same size: the old leaf used to be cloned and the clone overwritten
+         auto tx = ws->start_transaction(0);
+         tx.upsert(key, counted_value{10});
+         CHECK(counted_value::retains.load() == 0);
+         CHECK(counted_value::releases.load() == 0);  // the committed version still holds it
+         tx.commit();
+      }
+      db->flush_releases();
+      CHECK(counted_value::retains.load() == 0);
+      CHECK(counted_value::releases.load() == 1);  // the replaced value, once
+      settle();
+      {  // another size: plain bytes replace the typed value
+         auto tx = ws->start_transaction(0);
+         tx.upsert(key, std::string(300, 'b'));
+         CHECK(counted_value::retains.load() == 0);
+         tx.commit();
+      }
+      db->flush_releases();
+      CHECK(counted_value::retains.load() == 0);
+      CHECK(counted_value::releases.load() == 1);
+      {
+         auto tx = ws->start_transaction(0);
+         tx.upsert(key, counted_value{20});
+         tx.commit();
+      }
+      db->flush_releases();
+      settle();
+      {  // remove: the leaf used to be cloned and the clone freed
+         auto tx = ws->start_transaction(0);
+         REQUIRE(tx.remove(key) == 0);
+         CHECK(counted_value::retains.load() == 0);
+         CHECK(counted_value::releases.load() == 0);
+         tx.commit();
+      }
+      db->flush_releases();
+      CHECK(counted_value::retains.load() == 0);
+      CHECK(counted_value::releases.load() == 1);
+      {  // an aborted remove and an aborted overwrite leave the value alone
+         auto put = ws->start_transaction(0);
+         put.upsert(key, counted_value{30});
+         put.commit();
+         db->flush_releases();
+         settle();
+         auto tx = ws->start_transaction(0);
+         REQUIRE(tx.remove(key) == 0);
+         tx.abort();
+         auto tx2 = ws->start_transaction(0);
+         tx2.upsert(key, std::string(50, 'c'));
+         tx2.abort();
+         db->flush_releases();
+         CHECK(counted_value::retains.load() == 0);
+         CHECK(counted_value::releases.load() == 0);
+         auto rs = db->start_read_session();
+         auto cur = rs->create_cursor(0);
+         REQUIRE(cur.template get<counted_value>(key).has_value());
+      }
+   }
+   // a split that moves a shared value into a new node duplicates it: one
+   // retain, balanced when the old version dies
+   settle();
+   {
+      auto tx = ws->start_transaction(0);
+      tx.upsert(at_leaf + "/deeper", std::string(10, 'd'));  // at_leaf's leaf becomes a term
+      tx.commit();
+   }
+   db->flush_releases();
+   CHECK(counted_value::retains.load() == counted_value::releases.load());
+   {
+      auto rs  = db->start_read_session();
+      auto cur = rs->create_cursor(0);
+      auto a   = cur.template get<counted_value>(at_leaf);
+      auto b   = cur.template get<counted_value>(at_term);
+      REQUIRE(a.has_value());
+      REQUIRE(b.has_value());
+      CHECK(a->n == 30);
+      CHECK(b->n == 30);
+   }
+   ws.reset();
+   db.reset();
+   // every stored value was released exactly as often as it was stored or copied
+}
+
+// Not part of the suite: `small-engine-tests "[.bench][overwrite]"`.
+TEST_CASE("Small Engine: overwrite throughput by value size", "[.bench][overwrite]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 64));
+   auto ws = db->start_write_session();
+   for (size_t size : {size_t(100), size_t(4000), size_t(200) << 10, size_t(1536) << 10})
+   {
+      const int   keys   = 16;
+      const int   rounds = size > (64u << 10) ? 400 : 20000;
+      std::string value(size, 'v');
+      {
+         auto tx = ws->start_transaction(0);
+         for (int k = 0; k < keys; ++k)
+            tx.upsert("o/" + std::to_string(k), value);
+         tx.commit();
+      }
+      for (int same = 1; same >= 0; --same)
+      {
+         const auto t0 = std::chrono::steady_clock::now();
+         for (int r = 0; r < rounds; ++r)
+         {
+            auto tx = ws->start_transaction(0);
+            if (!same)
+               value.resize(size + (r % 2 ? 64 : 0), 'w');
+            tx.upsert("o/" + std::to_string(r % keys), value);
+            tx.commit();
+         }
+         const double us = std::chrono::duration<double, std::micro>(
+                               std::chrono::steady_clock::now() - t0)
+                               .count() /
+                           rounds;
+         std::printf("overwrite %8zu bytes, %s size: %9.2f us per transaction\n", size,
+                     same ? "same   " : "changed", us);
+         value.resize(size, 'v');
+      }
+      db->flush_releases();
+   }
+}

@@ -493,3 +493,51 @@ TEST_CASE("review: a subtree whose attach is refused is not leaked", "[review]")
    tx.commit();
    CHECK(ws->get_root(0).get<std::string>("after") == std::optional<std::string>("bytes"));
 }
+
+// gofractally/psitri#30 (6): a second transaction, or set_root, on a root that an
+// open transaction of the same write session holds waited for that root's writer
+// lock, which its own session held: a wait that never ends. It is a misuse the
+// session can see for itself, and now refuses.
+TEST_CASE("review: a session does not wait for a root it holds itself", "[review]")
+{
+   temp_dir dir("self-wait");
+   auto     db = engine::database::open(dir.path);
+   auto     ws = db->start_write_session();
+   {
+      auto tx = ws->start_transaction(0);
+      tx.upsert("a", "1");
+      CHECK_THROWS_AS(ws->start_transaction(0), std::logic_error);
+      CHECK_THROWS_AS(ws->set_root(0, ws->create_temporary_tree()), std::logic_error);
+      // another root is free, and a root this transaction opened is held too
+      tx.open_root(2).upsert("b", "2");
+      CHECK_THROWS_AS(ws->start_transaction(2), std::logic_error);
+      {
+         auto other = ws->start_transaction(1);
+         CHECK_THROWS_AS(other.open_root(2), std::logic_error);
+         other.abort();
+      }
+      tx.commit();
+   }
+   // everything was given back: each root can be written again, in any way
+   {
+      auto tx = ws->start_transaction(0);
+      tx.open_root(1).upsert("c", "3");
+      tx.open_root(2).upsert("d", "4");
+      tx.abort();
+   }
+   ws->set_root(0, ws->create_temporary_tree());
+   {
+      std::optional<sal_art_ref::radix::radix_tree::transaction> moved;
+      {
+         auto tx = ws->start_transaction(0);
+         moved.emplace(std::move(tx));
+      }
+      CHECK_THROWS_AS(ws->start_transaction(0), std::logic_error);  // still held, by `moved`
+      moved->abort();
+   }
+   auto tx = ws->start_transaction(0);
+   tx.upsert("e", "5");
+   tx.commit();
+   CHECK(ws->get_root(0).count_keys() == 1);
+   // a second session's writer waits as before (not shown: it would be another thread)
+}

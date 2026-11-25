@@ -1971,6 +1971,8 @@ namespace start_ref::kv
       const root_ptr old     = w.root_handle();
       const size_t   old_cnt = w.size_hint();
       w.adopt_root(t._root, t._count);  // repoint working to the incoming root
+      if (t._db && !t._root.is_null())
+         t._db->tree_gone_();  // the handle no longer holds a root
       t._db   = nullptr;  // the working now owns the incoming's ref
       t._root = root_ptr::null();
       return tree(_tx->_ws->_db, old, old_cnt);  // owned tree takes the working's old ref

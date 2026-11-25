@@ -140,8 +140,7 @@ typed-object IDs are 1 through 65,534; IDs zero and 65,535 are reserved. Native
 `get_any().bytes(offset, length)` supports the same range rules and owns any
 crossing-range assembly until its next byte read or destruction. Copies share
 an existing assembly buffer. The transaction must still protect the underlying
-slot for subsequent reads. Chunking applies to the maintained radix layout;
-the optional `PART_CBUCKET` layout remains experimental and rejects large values.
+slot for subsequent reads.
 
 ## Limits shared by both profiles
 

@@ -4,8 +4,7 @@
 (`psitri::small_engine` = `start_ref::kv::engine`). The user-facing contract is
 in `docs/api/`; this page records what the library is today and what is known
 to be missing. Design background is in `SPEC.md` (allocator and durability
-model), `BUCKET_SPEC.md` (the page layout that is compiled out) and
-`MULT_THREAD_MATRIX.md`.
+model) and `MULT_THREAD_MATRIX.md`.
 
 ## What it is
 
@@ -14,7 +13,7 @@ model), `BUCKET_SPEC.md` (the page layout that is compiled out) and
 | Free map | `include/start_ref/freeset.hpp` | One bitmap tree per 8 MiB segment; runs of 1 to 64 lines |
 | Arena | `include/start_ref/arena.hpp` | `data.part`, `free.part`, `refs.part`, `meta.part`; 128-byte lines at fixed addresses; one u8 reference count per line; 64 reader slots; 16 root slots |
 | Large values | `include/start_ref/large_value.hpp` | The same arena at a 32 KiB grain in `large/`; values over about 8 KiB, chunked above 2 MiB |
-| Tree | `include/start_ref/hkv/` | Radix tree with copy-on-write and line-granular sharing; the page ("cbucket") layout is behind `PART_CBUCKET` and off |
+| Tree | `include/start_ref/hkv/` | Radix tree with copy-on-write and line-granular sharing |
 | Database | `include/start_ref/kv.hpp` | `database`, `write_session`, `read_session`, `transaction`, `cursor`, owned `tree` snapshots |
 
 Nothing is relocated or compacted. Freed lines are reused where they are; a

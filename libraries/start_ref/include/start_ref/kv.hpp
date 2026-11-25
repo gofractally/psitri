@@ -307,19 +307,8 @@ namespace start_ref::kv
       if (uint64_t(key.size()) + value.size() + large_value_detail::leaf_header_size + 2 >
           large_max_object_bytes)
       {
-         if constexpr (engine_t::cb_create)
-            throw std::invalid_argument("start_ref: chunked values require the radix layout");
-         else
-         {
-            chunked_val source(*tree.allocator_mut().lses, uint32_t(key.size()), value);
-            tree.cow_insert(key, source);
-         }
-      }
-      else if constexpr (engine_t::cb_create)
-      {
-         std::string env(value.size() + 2, '\0');
-         std::memcpy(env.data() + 2, value.data(), value.size());
-         tree.pg_upsert(key, env);
+         chunked_val source(*tree.allocator_mut().lses, uint32_t(key.size()), value);
+         tree.cow_insert(key, source);
       }
       else
          tree.cow_insert(key, tagged_val{kRawType, value});
@@ -454,14 +443,7 @@ namespace start_ref::kv
       void find(key_view k)
       {
          _rend = false;
-         if constexpr (engine_t::cb_create)
-         {  // pages: position at lower_bound and demand an exact key match
-            _it = _view.lower_bound(k);
-            if (_it != _view.end() && (*_it).first != k)
-               _it = _view.end();
-         }
-         else
-            _it = _view.find(k);
+         _it = _view.find(k);
       }
       bool next()
       {
@@ -616,7 +598,6 @@ namespace start_ref::kv
       }
       bool find_slot_(key_view key, value_view& out) const
       {
-         if constexpr (engine_t::cb_create) return _view.pg_find(key, out);
          bval value;
          if (!_view.find(key, value)) return false;
          out = value.v;
@@ -1656,15 +1637,6 @@ namespace start_ref::kv
       write_session::use_scope use(_ws);
       check_key(k);  // before custody of the value moves
       const typename U::t_pod pod = std::move(v).take_pod();  // custody -> db
-      if constexpr (engine_t::cb_create)
-      {  // gated page engine: build the [type_id][pod] envelope in a CALLER-LOCAL buffer.
-         char           buf[2 + sizeof(pod)];
-         const uint16_t id = U::type_id;
-         std::memcpy(buf, &id, 2);
-         std::memcpy(buf + 2, &pod, sizeof(pod));
-         _ws->tree_for(_roots[0].index).pg_upsert(k, value_view(buf, sizeof(buf)));
-      }
-      else
       {
          // [type_id][pod] gathered straight into the leaf. cow_insert copies the
          // pod synchronously (descends + materializes before returning) — the pod
@@ -1696,13 +1668,6 @@ namespace start_ref::kv
    inline any_value transaction::get_any(key_view k) const
    {
       write_session::use_scope use(_ws);
-      if constexpr (engine_t::cb_create)
-      {
-         std::string_view out;
-         if (!_ws->tree_for(_roots[0].index).pg_find(k, out))
-            return {};
-         return any_value{out.data(), out.size(), &_ws->_db->_large};
-      }
       bval out;
       if (!_ws->tree_for(_roots[0].index).find(k, out))
          return {};
@@ -1714,10 +1679,7 @@ namespace start_ref::kv
       // A remove copies the path to its key and frees the old one at commit:
       // it may use the reserve, so that a full store can always be shrunk.
       const auto reserve = _ws->_ses.use_reserve();
-      if constexpr (engine_t::cb_create)
-         return _ws->tree_for(_roots[0].index).pg_remove(k) ? 0 : -1;
-      else
-         return _ws->tree_for(_roots[0].index).cow_remove(k) ? 0 : -1;
+      return _ws->tree_for(_roots[0].index).cow_remove(k) ? 0 : -1;
    }
    inline uint64_t transaction::remove_range_counted(key_view low, key_view high)
    {

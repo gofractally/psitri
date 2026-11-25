@@ -18,6 +18,8 @@
 #include <functional>
 #include <adb/value_range.hpp>
 #include <cassert>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -648,6 +650,44 @@ namespace start_ref::kv
 
    class write_session;
 
+   // A root's writer lock, held by a transaction from start to commit or
+   // abort. It remembers which thread holds it, so that a thread asking for a
+   // root it already holds is told so instead of waiting for itself forever.
+   // Only the holder can read its own id there, so the check cannot misfire.
+   class root_writer_lock
+   {
+     public:
+      root_writer_lock(std::mutex& m, std::atomic<std::thread::id>& owner, uint32_t root_index)
+      {
+         const auto me = std::this_thread::get_id();
+         if (owner.load(std::memory_order_relaxed) == me)
+            throw std::logic_error(
+                "start_ref::kv: this thread already has a transaction open on root " +
+                std::to_string(root_index) +
+                "; commit or abort it before starting another on the same root");
+         m.lock();
+         owner.store(me, std::memory_order_relaxed);
+         _m     = &m;
+         _owner = &owner;
+      }
+      root_writer_lock(root_writer_lock&& o) noexcept : _m(o._m), _owner(o._owner) { o._m = nullptr; }
+      root_writer_lock(const root_writer_lock&)            = delete;
+      root_writer_lock& operator=(const root_writer_lock&) = delete;
+      ~root_writer_lock() { unlock(); }
+      void unlock() noexcept
+      {
+         if (!_m)
+            return;
+         _owner->store(std::thread::id{}, std::memory_order_relaxed);
+         _m->unlock();
+         _m = nullptr;
+      }
+
+     private:
+      std::mutex*                   _m     = nullptr;
+      std::atomic<std::thread::id>* _owner = nullptr;
+   };
+
    class transaction
    {
      public:
@@ -696,7 +736,7 @@ namespace start_ref::kv
          uint32_t                     index;
          root_ptr                     start_root;   // committed root at txn start
          size_t                       start_count;
-         std::unique_lock<std::mutex> lock;         // per-root writer lock (ordered)
+         root_writer_lock             lock;         // per-root writer lock (ordered)
       };
       engine_t&   tree_(uint32_t root_index);       // working tree for a held root
       write_session*          _ws;
@@ -814,6 +854,48 @@ namespace start_ref::kv
       friend class tree;
       friend class tree_handle;
       explicit write_session(database* db);
+
+      // A write session is not thread-safe. It may be used from any thread,
+      // one at a time: the caller serializes. Builds with assertions enabled
+      // stop the process when two threads are inside one session at once,
+      // which otherwise corrupts the session's allocation state silently.
+      // Re-entry from the same thread (a read callback that reads) is fine.
+      struct use_scope
+      {
+#ifndef NDEBUG
+         explicit use_scope(write_session* s) : _s(s)
+         {
+            const auto me = std::this_thread::get_id();
+            if (s->_active.load(std::memory_order_relaxed) != me)
+            {
+               std::thread::id nobody{};
+               if (!s->_active.compare_exchange_strong(nobody, me, std::memory_order_acquire))
+               {
+                  std::fputs("start_ref::kv: two threads are using one write session at the "
+                             "same time; a session may move between threads only while "
+                             "nothing else is using it\n",
+                             stderr);
+                  std::abort();
+               }
+            }
+            ++s->_active_depth;
+         }
+         ~use_scope()
+         {
+            if (--_s->_active_depth == 0)
+               _s->_active.store(std::thread::id{}, std::memory_order_release);
+         }
+         write_session* _s;
+#else
+         explicit use_scope(write_session*) noexcept {}
+#endif
+         use_scope(const use_scope&)            = delete;
+         use_scope& operator=(const use_scope&) = delete;
+      };
+      // Present in every build so the layout does not depend on NDEBUG.
+      std::atomic<std::thread::id> _active{};
+      uint32_t                     _active_depth = 0;
+
       // working tree for root i: root 0 is THE hot member; roots >= 1 are lazy
       // (first open adopts the committed root and takes the working's ref).
       engine_t& tree_for(uint32_t i);
@@ -1231,6 +1313,7 @@ namespace start_ref::kv
       start_ref::large_arena _large;
       std::mutex            _root_mx;                  // serializes commit publication
       std::mutex            _root_locks[kMaxRoots];    // per-root writer locks (ordered)
+      std::atomic<std::thread::id> _root_owner[kMaxRoots] = {};  // thread holding each
       root_ptr              _live_root[kMaxRoots];     // committed root per slot
       std::atomic<uint64_t> _live_raw[kMaxRoots];      // raw per slot (reader publish-validate)
       std::vector<uint64_t> _retired;
@@ -1393,6 +1476,7 @@ namespace start_ref::kv
 
    inline void transaction::upsert(key_view k, value_view v)
    {
+      write_session::use_scope use(_ws);
       upsert_bytes(_ws->tree_for(_roots[0].index), k, v);
    }
    template <class T>
@@ -1400,6 +1484,7 @@ namespace start_ref::kv
    inline void transaction::upsert(key_view k, T&& v)
    {
       using U                     = std::remove_cvref_t<T>;
+      write_session::use_scope use(_ws);
       check_key(k);  // before custody of the value moves
       const typename U::t_pod pod = std::move(v).take_pod();  // custody -> db
       if constexpr (engine_t::cb_create)
@@ -1422,6 +1507,7 @@ namespace start_ref::kv
    }
    inline any_value transaction::get_any(key_view k) const
    {
+      write_session::use_scope use(_ws);
       if constexpr (engine_t::cb_create)
       {
          std::string_view out;
@@ -1436,6 +1522,7 @@ namespace start_ref::kv
    }
    inline int transaction::remove(key_view k)
    {
+      write_session::use_scope use(_ws);
       if constexpr (engine_t::cb_create)
          return _ws->tree_for(_roots[0].index).pg_remove(k) ? 0 : -1;
       else
@@ -1443,6 +1530,7 @@ namespace start_ref::kv
    }
    inline uint64_t transaction::remove_range_counted(key_view low, key_view high)
    {
+      write_session::use_scope use(_ws);
       auto& t = tree_(_roots[0].index);
       uint64_t count = 0;
       auto it = t.lower_bound(low);
@@ -1460,6 +1548,7 @@ namespace start_ref::kv
    template <class F> requires adb::detail::value_callback<F>
    inline bool transaction::get(key_view k, F&& fn, uint64_t offset, uint64_t length) const
    {
+      write_session::use_scope use(_ws);  // the callback's view borrows the session
       const auto found = get_any(k);
       if (!found) return false;
       slot_visit({found._s, found._n}, &_ws->_db->_large, std::forward<F>(fn), offset, length);
@@ -1473,11 +1562,17 @@ namespace start_ref::kv
       return slot_decode<S>({found._s, found._n}, &_ws->_db->_large, offset, length);
    }
 
+   inline void check_root_index(uint32_t root_index)
+   {
+      if (root_index >= kMaxRoots)
+         throw std::out_of_range("root index out of range");
+   }
    inline transaction::transaction(write_session* ws, uint32_t root_index,
                                    start_ref::transaction&& tx)
        : _ws(ws), _tx(std::move(tx)), _large_tx(ws->_lses.start_transaction())
    {
-      std::unique_lock lock(ws->_db->_root_locks[root_index]);
+      root_writer_lock lock(ws->_db->_root_locks[root_index], ws->_db->_root_owner[root_index],
+                            root_index);
       auto& t = ws->refresh_tree(root_index);
       _roots.push_back({root_index, t.root_handle(), t.size_hint(), std::move(lock)});
    }
@@ -1485,10 +1580,19 @@ namespace start_ref::kv
    inline tree_handle transaction::primary() { return tree_handle(this, _roots[0].index); }
    inline tree_handle transaction::open_root(uint32_t root_index)
    {
-      assert(root_index < kMaxRoots && !_roots.empty());
-      assert(root_index > _roots.back().index &&
-             "roots must be opened in ascending index order (deadlock freedom)");
-      std::unique_lock lock(_ws->_db->_root_locks[root_index]);
+      write_session::use_scope use(_ws);
+      check_root_index(root_index);
+      if (_roots.empty())
+         throw std::logic_error("start_ref::kv: open_root on a finished transaction");
+      // Ascending order is what keeps two multi-root transactions from each
+      // waiting for a root the other holds.
+      if (root_index <= _roots.back().index)
+         throw std::logic_error(
+             "start_ref::kv: open_root(" + std::to_string(root_index) +
+             ") after root " + std::to_string(_roots.back().index) +
+             ": a transaction opens each additional root once, in ascending index order");
+      root_writer_lock lock(_ws->_db->_root_locks[root_index], _ws->_db->_root_owner[root_index],
+                            root_index);
       auto& t = _ws->refresh_tree(root_index);
       _roots.push_back({root_index, t.root_handle(), t.size_hint(), std::move(lock)});
       return tree_handle(this, root_index);
@@ -1497,6 +1601,7 @@ namespace start_ref::kv
    {
       if (_done)
          return;
+      write_session::use_scope use(_ws);
       _done = true;
       // roll EVERY held root back to its txn-start root; release each diverged
       // generation (the working's ref on it). set_root displaced trees are
@@ -1519,6 +1624,9 @@ namespace start_ref::kv
    }
    inline void transaction::commit()
    {
+      if (_done)
+         throw std::logic_error("start_ref::kv: commit on a finished transaction");
+      write_session::use_scope use(_ws);
       _done = true;
       _large_tx.commit(); // continuation/head data must precede root publication
       _tx.commit();  // data msync + floor advance (layer 1)
@@ -1549,6 +1657,7 @@ namespace start_ref::kv
 
    inline cursor transaction::snapshot_cursor()
    {
+      write_session::use_scope use(_ws);
       database*      db   = _ws->_db;
       engine_t&      tree = _ws->tree_for(_roots[0].index);
       const root_ptr root = tree.root_handle();
@@ -1558,14 +1667,15 @@ namespace start_ref::kv
          throw std::runtime_error("start_ref::kv: root retain refused");
       return cursor(&db->_arena, root, nullptr, &db->_vh);
    }
-   inline void check_root_index(uint32_t root_index)
-   {
-      if (root_index >= kMaxRoots)
-         throw std::out_of_range("root index out of range");
-   }
    inline transaction write_session::start_transaction(uint32_t root_index)
    {
+      use_scope use(this);
       check_root_index(root_index);
+      if (_ses.in_transaction())
+         throw std::logic_error(
+             "start_ref::kv: this write session already has a transaction open; a session "
+             "runs one transaction at a time (use open_root for more roots, or another "
+             "session on another thread)");
       return transaction(this, root_index, _ses.start_transaction(0));
    }
    inline tree write_session::get_root(uint32_t root_index)
@@ -1610,10 +1720,12 @@ namespace start_ref::kv
 
    inline void tree_handle::upsert(key_view k, value_view v)
    {
+      write_session::use_scope use(_tx->_ws);
       upsert_bytes(_tx->tree_(_ri), k, v);
    }
    inline int tree_handle::remove(key_view k)
    {
+      write_session::use_scope use(_tx->_ws);
       return _tx->tree_(_ri).cow_remove(k) ? 0 : -1;
    }
    template <class S>

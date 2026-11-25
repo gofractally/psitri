@@ -697,3 +697,164 @@ TEST_CASE("Small Engine: keys up to 1,024 bytes are stored and longer ones are r
    REQUIRE(tx.remove(at_limit) == 0);
    tx.commit();
 }
+
+// A thread that asks for a root it already holds used to wait for itself
+// forever. These are caller errors, reported as such, and they leave the
+// open transaction and the store untouched.
+TEST_CASE("Small Engine: a second transaction from the holding thread is refused, not hung",
+          "[small][threads]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 16));
+   auto first  = db->start_write_session();
+   auto second = db->start_write_session();
+   {
+      auto tx = first->start_transaction(0);
+      tx.upsert("a", "1");
+      // same root, another session, same thread
+      REQUIRE_THROWS_AS(second->start_transaction(0), std::logic_error);
+      // same session, any root
+      REQUIRE_THROWS_AS(first->start_transaction(0), std::logic_error);
+      REQUIRE_THROWS_AS(first->start_transaction(5), std::logic_error);
+      // additional roots: once each, ascending
+      auto r3 = tx.open_root(3);
+      r3.upsert("in-3", "x");
+      REQUIRE_THROWS_AS(tx.open_root(3), std::logic_error);
+      REQUIRE_THROWS_AS(tx.open_root(2), std::logic_error);
+      REQUIRE_THROWS_AS(tx.open_root(0), std::logic_error);
+      REQUIRE_THROWS_AS(tx.open_root(16), std::out_of_range);
+      REQUIRE_THROWS_AS(second->start_transaction(3), std::logic_error);
+      // a different root from another session is fine on the same thread
+      {
+         auto other = second->start_transaction(1);
+         other.upsert("b", "2");
+         other.commit();
+      }
+      tx.commit();
+      REQUIRE_THROWS_AS(tx.commit(), std::logic_error);
+   }
+   // the refusals released nothing they should not have, and held nothing
+   {
+      auto tx = second->start_transaction(0);
+      REQUIRE(tx.get<std::string>("a") == std::optional<std::string>("1"));
+      tx.upsert("c", "3");
+      tx.commit();
+   }
+   {
+      auto tx = first->start_transaction(3);
+      REQUIRE(tx.get<std::string>("in-3") == std::optional<std::string>("x"));
+      tx.abort();
+   }
+   // Another thread asking for a held root waits, as before, and gets it.
+   {
+      auto              tx = first->start_transaction(0);
+      std::atomic<bool> got{false};
+      std::thread       waiter([&] {
+         auto ws    = db->start_write_session();
+         auto inner = ws->start_transaction(0);
+         got        = true;
+         REQUIRE(inner.get<std::string>("d") == std::optional<std::string>("4"));
+         inner.abort();
+      });
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      REQUIRE_FALSE(got.load());
+      tx.upsert("d", "4");
+      tx.commit();
+      waiter.join();
+      REQUIRE(got.load());
+   }
+}
+
+// A write session is not tied to the thread that made it: it may be handed
+// from thread to thread as long as only one uses it at a time.
+TEST_CASE("Small Engine: sessions may move between threads when use is serialized",
+          "[small][threads]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 16));
+   auto ws = db->start_write_session();
+   auto rs = db->start_read_session();
+   for (int round = 0; round < 50; ++round)
+   {
+      std::thread worker([&] {
+         auto tx = ws->start_transaction(0);
+         tx.upsert("k" + std::to_string(round), std::to_string(round));
+         tx.commit();
+         auto cur = rs->create_cursor(0);
+         REQUIRE(cur.get<std::string>("k" + std::to_string(round)) ==
+                 std::optional<std::string>(std::to_string(round)));
+      });
+      worker.join();
+      auto tx = ws->start_transaction(0);
+      REQUIRE(tx.get<std::string>("k" + std::to_string(round)));
+      tx.abort();
+   }
+   auto     cur = rs->create_cursor(0);
+   uint64_t n   = 0;
+   for (cur.seek_begin(); !cur.is_end(); cur.next())
+      ++n;
+   REQUIRE(n == 50);
+}
+
+// There are 64 reader slots. Running out is an exception that names the
+// limit; nothing else is disturbed and a freed slot is usable again.
+TEST_CASE("Small Engine: the 65th reader is refused with a clear error", "[small][readers]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 16));
+   auto ws = db->start_write_session();
+   {
+      auto tx = ws->start_transaction(0);
+      tx.upsert("k", "v0");
+      tx.commit();
+   }
+   auto expect_refused = [](auto&& make) {
+      try
+      {
+         make();
+         FAIL("a 65th reader slot was handed out");
+      }
+      catch (const std::runtime_error& e)
+      {
+         REQUIRE(std::string(e.what()).find("64 reader slots") != std::string::npos);
+      }
+   };
+   {
+      std::vector<std::shared_ptr<engine::read_session>> sessions;
+      for (int i = 0; i < 64; ++i)
+         sessions.push_back(db->start_read_session());
+      expect_refused([&] { return db->start_read_session(); });
+      // each session's first cursor uses the session's own slot ...
+      std::vector<engine::cursor> cursors;
+      for (auto& s : sessions)
+         cursors.push_back(s->create_cursor(0));
+      // ... a second cursor on any of them needs a slot of its own
+      expect_refused([&] { return sessions[0]->create_cursor(0); });
+      // the writer is unaffected, and existing snapshots stay what they were
+      for (int i = 1; i <= 20; ++i)
+      {
+         auto tx = ws->start_transaction(0);
+         tx.upsert("k", "v" + std::to_string(i));
+         tx.commit();
+      }
+      for (auto& c : cursors)
+         REQUIRE(c.get<std::string>("k") == std::optional<std::string>("v0"));
+      cursors.clear();  // cursors before the sessions they came from
+   }
+   // every slot is free again
+   {
+      auto                        one = db->start_read_session();
+      std::vector<engine::cursor> cursors;
+      for (int i = 0; i < 64; ++i)
+         cursors.push_back(one->create_cursor(0));
+      expect_refused([&] { return one->create_cursor(0); });
+      REQUIRE(cursors.back().get<std::string>("k") == std::optional<std::string>("v20"));
+   }
+   db->flush_releases();
+   auto another = db->start_read_session();
+   auto cur     = another->create_cursor(0);
+   REQUIRE(cur.get<std::string>("k") == std::optional<std::string>("v20"));
+}

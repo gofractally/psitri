@@ -161,6 +161,7 @@ namespace start_ref
       }
 
       arena_t<Geo>& store() noexcept { return *_a; }
+      bool          in_transaction() const noexcept { return _txn_open; }
 
      private:
       friend class arena_t<Geo>;
@@ -493,7 +494,9 @@ namespace start_ref
          while (true)
          {
             if (cur == ~0ull)
-               throw std::runtime_error("part: all 64 read-session slots in use");
+               throw std::runtime_error(
+                   "start_ref: all 64 reader slots are in use (each read session holds one, "
+                   "and so does each cursor a session has open beyond its first)");
             const uint32_t slot = uint32_t(std::countr_one(cur));
             if (_read_slots.compare_exchange_weak(cur, cur | (1ull << slot),
                                                   std::memory_order_acquire))

@@ -298,6 +298,8 @@ namespace sal
       /// instead of destroying inline. A reader dropping a pinned snapshot must not pay the
       /// dead lineage's destroy cascade on its own thread — that work belongs to the releaser.
       void set_defer_destroy(bool defer) noexcept { _defer_destroy = defer; }
+      /// The number the next commit of `ro` carries (see make_sync_root_info).
+      uint64_t next_root_commit(root_object_number ro) const noexcept;
       [[nodiscard]] operation_scope record_operation(mapped_memory::session_operation op,
                                                      uint64_t count = 1) noexcept;
 

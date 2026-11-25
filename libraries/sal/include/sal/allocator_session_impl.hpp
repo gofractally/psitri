@@ -556,17 +556,24 @@ namespace sal
       return smart_ptr<T>(allocator_session_ptr(this, true), tid.root, false);
    }
 
-   inline sync_root_info make_sync_root_info(
-       const allocator_session& /*session*/,
-       root_object_number       ro,
-       tree_id                  tid) noexcept
+   inline uint64_t allocator_session::next_root_commit(root_object_number ro) const noexcept
    {
-      // root_version is the commit's stamp. The same stamp goes into the root's record in
-      // the roots file and into every sync header this commit writes, so power-loss
-      // recovery can tell which of the two saw the newer commit of a root. (A header is
-      // gone once its segment is compacted and recycled, so the newest header that
-      // survives may be older than the roots file.)
-      return sync_root_info{*ro, *tid.root, *null_ptr_address, *next_commit_stamp()};
+      return _sega.next_root_commit(ro);
+   }
+
+   inline sync_root_info make_sync_root_info(const allocator_session& session,
+                                             root_object_number       ro,
+                                             tree_id                  tid) noexcept
+   {
+      // root_version numbers the commits of this root: one more than the number in the
+      // root's record. The same number goes into the record with this commit and into every
+      // sync header the commit writes, so power-loss recovery can tell which of the two saw
+      // the newer commit of a root. (A header is gone once its segment is compacted and
+      // recycled, so the newest header that survives may be older than the roots file.)
+      // It is read from the record the commit is about to write: no clock, no counter
+      // shared between roots, nothing a reader's cache line holds that was not already
+      // written by every commit.
+      return sync_root_info{*ro, *tid.root, *null_ptr_address, session.next_root_commit(ro)};
    }
 
    template <typename T>

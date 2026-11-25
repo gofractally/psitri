@@ -115,22 +115,48 @@ namespace
    }
 }  // namespace
 
-TEST_CASE("commit stamps follow the wall clock and never repeat", "[sal][recovery][stamp]")
+// The commits of a root are numbered from its own record: each commit is one
+// more than the last, whatever the clock does and whatever other roots do.
+TEST_CASE("each root numbers its own commits", "[sal][recovery][commit_number]")
 {
-   const uint64_t wall = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
-                                      std::chrono::system_clock::now().time_since_epoch())
-                                      .count());
-   uint64_t last = *sal::next_commit_stamp();
-   // Time since boot would be smaller than the wall clock by decades.
-   CHECK(last + 60'000'000 > wall);
-   for (int i = 0; i < 100000; ++i)
+   const auto path = fs::temp_directory_path() / "sal_commit_number_test";
+   fs::remove_all(path);
+   fs::create_directories(path);
    {
-      uint64_t next = *sal::next_commit_stamp();
-      REQUIRE(next > last);
-      last = next;
+      sal::allocator a(path, recovery_test_config(), false);
+      a.register_type_ops<recovery_test_node>();
+      a.start_background_threads();
+      auto ses    = a.create_session();
+      auto commit = [&](uint32_t root)
+      {
+         auto adr =
+             ses->alloc<recovery_test_node>(uint32_t(128), sal::alloc_hint{}, uint64_t(root));
+         (void)ses->set_root(sal::root_object_number(root),
+                             sal::smart_ptr<recovery_test_node>(ses, adr), sal::sync_type::none);
+      };
+      CHECK(ses->next_root_commit(sal::root_object_number(0)) == 1);
+      commit(0);
+      commit(0);
+      commit(0);
+      CHECK(ses->next_root_commit(sal::root_object_number(0)) == 4);
+      CHECK(ses->next_root_commit(sal::root_object_number(1)) == 1);
+      commit(1);
+      CHECK(ses->next_root_commit(sal::root_object_number(1)) == 2);
+      CHECK(ses->next_root_commit(sal::root_object_number(0)) == 4);
+      // Clearing a root is a commit of it too.
+      (void)ses->set_root(sal::root_object_number(1), sal::smart_ptr<recovery_test_node>(),
+                          sal::sync_type::none);
+      CHECK(ses->next_root_commit(sal::root_object_number(1)) == 3);
    }
-   sal::commit_stamp_at_least(sal::usec_timestamp(last + 1'000'000'000));
-   CHECK(*sal::next_commit_stamp() > last + 1'000'000'000);
+   {
+      // The numbers are in the roots file: they go on after a reopen.
+      sal::allocator a(path, recovery_test_config(), false);
+      a.register_type_ops<recovery_test_node>();
+      auto ses = a.create_session();
+      CHECK(ses->next_root_commit(sal::root_object_number(0)) == 4);
+      CHECK(ses->next_root_commit(sal::root_object_number(1)) == 3);
+   }
+   fs::remove_all(path);
 }
 
 // gofractally/psitri#23. The newest commit of a root may have cleared it; an
@@ -163,10 +189,11 @@ TEST_CASE("power-loss recovery keeps a root cleared by its newest commit", "[sal
    fs::remove_all(path);
 }
 
-// gofractally/psitri#23. Commits are ordered by their stamps. An old commit
-// can carry a stamp larger than the clock gives now (the clock that stamped
-// it restarted, or was set back); once a recovery has seen it, every later
-// commit is stamped above it and wins the next recovery.
+// gofractally/psitri#23. A sync header can carry a commit number above the
+// roots file's (its commit was flushed and the file's update was not). Once a
+// recovery has taken that header, the root's record carries its number, so
+// every later commit of the root is numbered above it and wins the next
+// recovery.
 TEST_CASE("a commit made after a recovery is newer than every commit the recovery found",
           "[sal][recovery]")
 {
@@ -182,12 +209,11 @@ TEST_CASE("a commit made after a recovery is newer than every commit the recover
           ses->alloc<recovery_test_node>(uint32_t(128), sal::alloc_hint{}, uint64_t(0xAAAA));
       (void)ses->set_root(sal::root_object_number(0),
                           sal::smart_ptr<recovery_test_node>(ses, adr), sal::sync_type::none);
-      // That commit's stamp, as a clock running far ahead of this one would have written
-      // it: in its sync header, where a power loss that kept the header and lost the roots
-      // file's update would leave it.
+      // That commit's number as a later commit's would be, in its sync header: what a
+      // power loss that kept a later header and lost the roots file's update leaves.
       auto* header = sync_header_after(a.resolve(adr).first);
       auto  info   = *header->get_root_info();
-      info.root_version += 86'400'000'000ull * 365;
+      info.root_version += 1000;
       header->set_user_data(info);
    }
    {
@@ -210,27 +236,6 @@ TEST_CASE("a commit made after a recovery is newer than every commit the recover
       CHECK(root_magic(a, *ses) == 0xBBBB);
    }
    fs::remove_all(path);
-}
-
-// A commit's stamp is wall-clock time; ages (what the compactor and the read
-// cache compare) are measured on the clock that counts from boot. Converting
-// one to the other must keep "how long ago", not the number.
-TEST_CASE("a commit stamp converts to the age clock by how long ago it was", "[sal][recovery][stamp]")
-{
-   const uint64_t now_age = *sal::get_current_time_msec();
-   const auto     just    = sal::next_commit_stamp();
-   const uint64_t fresh   = *sal::age_time_of_commit_stamp(just);
-   CHECK(fresh <= now_age + 50);
-   CHECK(fresh + 2000 >= now_age);
-
-   const uint64_t hour_ago = *sal::age_time_of_commit_stamp(
-       sal::usec_timestamp(*just - 3'600'000'000ull));
-   CHECK(fresh - hour_ago >= 3'599'000);
-   CHECK(fresh - hour_ago <= 3'601'000);
-
-   // A stamp from the future (a clock that was set back) is "now", not later than now.
-   CHECK(*sal::age_time_of_commit_stamp(sal::usec_timestamp(*just + 3'600'000'000ull)) <=
-         now_age + 50);
 }
 
 // A finalized segment is closed by a sync header that runs to the end of its

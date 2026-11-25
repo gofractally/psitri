@@ -105,56 +105,13 @@ namespace sal
                                 .count());
                                 */
    }
-   namespace detail
+   /// The time written into a sync header: the same clock ages are measured on (time since
+   /// boot). The compactor gives the objects it moves the age of the commit that wrote them.
+   inline usec_timestamp get_current_time_usec()
    {
-      inline std::atomic<uint64_t> last_commit_stamp{0};
-   }
-
-   /// The stamp of a commit of a root. It is written to the root's record in the roots
-   /// file and into the sync headers of the commit; power-loss recovery takes, for each
-   /// root, the commit with the newest stamp. So it must keep increasing across a restart
-   /// of the machine, which a steady clock (time since boot) does not. It is wall-clock
-   /// microseconds, never less than one more than the last stamp given out in this
-   /// process; opening a store and recovering one raise that floor above every stamp
-   /// found in it (commit_stamp_at_least), so a clock set backwards does not reorder
-   /// commits either.
-   inline usec_timestamp next_commit_stamp() noexcept
-   {
-      const uint64_t wall = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
-                                         std::chrono::system_clock::now().time_since_epoch())
-                                         .count());
-      uint64_t last = detail::last_commit_stamp.load(std::memory_order_relaxed);
-      uint64_t next;
-      do
-      {
-         next = std::max(wall, last + 1);
-      } while (!detail::last_commit_stamp.compare_exchange_weak(last, next,
-                                                                std::memory_order_relaxed));
-      return usec_timestamp(next);
-   }
-   /// A commit stamp expressed on the clock that ages are measured on
-   /// (get_current_time_msec: time since boot): the moment that lies as far in the past
-   /// as the commit does. The compactor gives the objects it moves the age of the commit
-   /// that wrote them, and must not compare a wall-clock stamp with that clock directly.
-   inline msec_timestamp age_time_of_commit_stamp(usec_timestamp stamp) noexcept
-   {
-      const uint64_t wall_ms = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                            std::chrono::system_clock::now().time_since_epoch())
-                                            .count());
-      const uint64_t stamp_ms = *stamp / 1000;
-      const uint64_t age_ms   = wall_ms > stamp_ms ? wall_ms - stamp_ms : 0;
-      const uint64_t now_ms   = *get_current_time_msec();
-      return msec_timestamp(now_ms > age_ms ? now_ms - age_ms : 0);
-   }
-
-   /// Recovery: no later commit may be stamped at or below `stamp`.
-   inline void commit_stamp_at_least(usec_timestamp stamp) noexcept
-   {
-      uint64_t last = detail::last_commit_stamp.load(std::memory_order_relaxed);
-      while (last < *stamp && !detail::last_commit_stamp.compare_exchange_weak(
-                                  last, *stamp, std::memory_order_relaxed))
-      {
-      }
+      return usec_timestamp(std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count());
    }
 
 }  // namespace sal

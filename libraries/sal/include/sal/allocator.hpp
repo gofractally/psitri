@@ -431,6 +431,13 @@ namespace sal
          return tid;
       }
 
+      /// One more than the number of the last commit of `ro`. The caller is that root's one
+      /// writer, so nothing else changes the number between this and its commit.
+      uint64_t next_root_commit(root_object_number ro) const noexcept
+      {
+         return _root_objects->at(*ro).commit_number() + 1;
+      }
+
       /**
        * Caller is responsible for *giving* a valid root reference,
        * and releasing the returned tree_id's root.
@@ -552,6 +559,13 @@ namespace sal
          tree_id load(std::memory_order order) const noexcept
          {
             return tree_id::unpack(tree.load(order));
+         }
+
+         /// The number of the last commit of this root, as stored (not checked against
+         /// the record's check word: a writer only needs a number above it).
+         uint64_t commit_number() const noexcept
+         {
+            return version.load(std::memory_order_relaxed);
          }
 
          uint64_t version_for(tree_id tid) const noexcept

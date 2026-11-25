@@ -644,7 +644,7 @@ namespace psitri
       }
       /// Removes every key in [lower, upper) and returns how many, as the engines'
       /// transactions do: an empty lower bound is the beginning; an empty upper bound
-      /// leaves the range empty (pass a key above every key to remove to the end).
+      /// leaves the range empty (pass psitri::above_every_key to remove to the end).
       std::uint64_t remove_range(std::string_view lower, std::string_view upper)
       {
          return this->remove_each(snapshot_cursor(), lower, upper);
@@ -733,7 +733,7 @@ namespace psitri
       }
       /// Removes every key in [lower, upper) and returns how many, as the engines'
       /// transactions do: an empty lower bound is the beginning; an empty upper bound
-      /// leaves the range empty (pass a key above every key to remove to the end).
+      /// leaves the range empty (pass psitri::above_every_key to remove to the end).
       ///
       /// With both bounds given and no savepoint open, the changes made so far
       /// are written to the engine's transaction and the range is removed there

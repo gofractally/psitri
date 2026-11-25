@@ -2,6 +2,9 @@
 #include <adb/concepts.hpp>
 #include <sal/config.hpp>
 
+#include <array>
+#include <string_view>
+
 namespace psitri
 {
    // Source-level API version. This does not version an engine's disk format.
@@ -9,6 +12,22 @@ namespace psitri
    using open_mode = sal::open_mode;
    using sync_mode = sal::sync_type;
    using adb::read_all;
+
+   namespace detail
+   {
+      // One byte longer than the longest key any engine takes (1,024 bytes), all 0xFF.
+      inline constexpr std::array<char, 1025> above_every_key_data = []()
+      {
+         std::array<char, 1025> bytes{};
+         for (auto& c : bytes)
+            c = '\xFF';
+         return bytes;
+      }();
+   }  // namespace detail
+   /// An upper bound above every key. Ranges are half-open, [low, high), with no special
+   /// meaning for an empty bound; pass this as `high` to mean "to the end".
+   inline constexpr std::string_view above_every_key{detail::above_every_key_data.data(),
+                                                     detail::above_every_key_data.size()};
 
    /// The complete portable byte-database contract. See docs/api/reference.md.
    ///

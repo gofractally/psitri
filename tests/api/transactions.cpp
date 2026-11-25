@@ -339,8 +339,8 @@ TEMPLATE_TEST_CASE("Transactions: a range remove is the same half-open range in 
       expected.erase(expected.begin(), expected.lower_bound("d"));
       REQUIRE(tx.remove_range_counted("p", "s") == 3);
       expected.erase(expected.lower_bound("p"), expected.lower_bound("s"));
-      // to the end: an upper bound above every key
-      REQUIRE(tx.remove_range_counted("w", "\xff") == 4);
+      // to the end: the upper bound above every key
+      REQUIRE(tx.remove_range_counted("w", psitri::above_every_key) == 4);
       expected.erase(expected.lower_bound("w"), expected.end());
       require_same_scan(tx.snapshot_cursor(), expected);
    };
@@ -368,6 +368,55 @@ TEMPLATE_TEST_CASE("Transactions: a range remove is the same half-open range in 
       check(tx);
       tx.rollback(point);
       tx.abort();
+   }
+}
+
+// "To the end" used to be spelled with an engine's max_key, 256 bytes of 0xFF, which is
+// not above a longer key of 0xFF bytes (keys go up to 1,024). psitri::above_every_key
+// is longer than any key, so every transaction, whether it recognises the constant or
+// only compares keys with it, removes to the end.
+TEMPLATE_TEST_CASE("Transactions: the upper bound above every key is above every key",
+                   "[api][transactions]",
+                   psitri::small_engine,
+                   psitri::big_engine)
+{
+   using E  = TestType;
+   using DB = psitri::database_for<E>;
+   temporary_directory temp;
+   auto                db = DB::open(temp.path / "db", psitri::open_mode::create_only, config<E>());
+   auto                writer = db->start_write_session();
+   const std::string   ff256(256, '\xff'), ff300(300, '\xff'), ff1024(1024, '\xff');
+   REQUIRE(std::string_view(ff1024) < psitri::above_every_key);
+   {
+      auto tx = writer->start_transaction(1);
+      for (const std::string& k : {std::string("a"), std::string("m"), ff256, ff300, ff1024})
+         tx.upsert(k, "v");
+      tx.commit();
+   }
+   SECTION("the engine's own transaction")
+   {
+      auto tx = writer->start_transaction(1);
+      REQUIRE(tx.remove_range_counted("b", psitri::above_every_key) == 4);
+      tx.abort();
+   }
+   SECTION("a transient transaction")
+   {
+      psitri::transient_transaction tx(writer->get_root(1));
+      REQUIRE(tx.remove_range_counted("b", psitri::above_every_key) == 4);
+      auto c = tx.snapshot_cursor();
+      REQUIRE(c.seek_begin());
+      REQUIRE(std::string(c.key()) == "a");
+      REQUIRE_FALSE(c.next());
+   }
+   SECTION("a delta transaction, inside a savepoint and outside")
+   {
+      psitri::delta_transaction<E> tx(*writer, 1);
+      auto                         point = tx.save();
+      REQUIRE(tx.remove_range_counted("m", psitri::above_every_key) == 4);
+      tx.release(point);
+      REQUIRE(tx.remove_range_counted("", psitri::above_every_key) == 1);
+      tx.commit();
+      REQUIRE(writer->get_root(1).snapshot_cursor().seek_begin() == false);
    }
 }
 

@@ -658,19 +658,141 @@ TEST_CASE("the reserve is collected again at every open", "[arena][limit][reserv
          auto tx = ses.start_transaction(0);
          REQUIRE_THROWS_AS(tx.alloc_lines(1), arena_full);
       }
-      for (int k = 0; k < 50; ++k)
+      // Fifty single lines come free, none adjacent. The flexible stock's
+      // share of the shortfall is repaid; what the guaranteed runs are short
+      // of stays owed, since single lines cannot make a run; the rest is
+      // ordinary room.
+      for (int k = 0; k < 100; k += 2)
          a.release(taken[k]);
-      REQUIRE(a.reserve_free_lines() == 1024);  // the first forty went to the reserve
-      REQUIRE(a.reserve_owed_lines() == 0);
-      auto tx = ses.start_transaction(0);
-      for (int k = 0; k < 10; ++k)
-         REQUIRE(tx.alloc_lines(1) != null_idx);  // the other ten are ordinary room
-      REQUIRE_THROWS_AS(tx.alloc_lines(1), arena_full);
+      const uint64_t still_owed = a.reserve_owed_lines();
+      REQUIRE(still_owed < 40);
+      REQUIRE(a.reserve_free_lines() == 1024 - still_owed);
+      auto     tx       = ses.start_transaction(0);
+      uint32_t ordinary = 0;
+      try
+      {
+         for (;; ++ordinary)
+            tx.alloc_lines(1);
+      }
+      catch (const arena_full&)
+      {
+      }
+      REQUIRE(ordinary == 10 + still_owed);
    }
    {
+      // 984 lines in the runs the reserve gave back plus what the frees
+      // repaid: fewer than 1,024 are free, so it is still short, by exactly
+      // what ordinary allocation took
       arena a(one_segment_with_reserve(dir));
-      REQUIRE(a.reserve_free_lines() == 1024);
-      REQUIRE(a.reserve_owed_lines() == 0);
+      REQUIRE(a.reserve_free_lines() + a.reserve_owed_lines() == 1024);
       (void)lent;
    }
+}
+
+// The property the reserve is built for: no number of short draws takes away
+// its ability to serve a longer one. Single lines are drawn until refused;
+// after that every length from 2 to 16 can still be drawn as often as its
+// quota says, and one run of 64.
+TEST_CASE("short draws cannot use up the reserve's longer runs", "[arena][limit][reserve]")
+{
+   arena_config c  = cfg(tmp_dir("classes"));
+   c.max_segments  = 1;
+   c.reserve_lines = 2048;
+   arena a(c);
+   auto  ses   = a.start_session();
+   auto  taken = take_everything(ses, 1);
+   REQUIRE(a.reserve_free_lines() == 2048);
+   REQUIRE(a.reserve_quota(2) == 16);
+   REQUIRE(a.reserve_quota(8) == 4);
+   REQUIRE(a.reserve_quota(14) == 2);
+   REQUIRE(a.reserve_quota(16) == 2);
+   REQUIRE(a.reserve_big_quota() == 1);
+
+   auto tx  = ses.start_transaction(0);
+   auto use = ses.use_reserve();
+   uint32_t singles = 0;
+   try
+   {
+      for (;; ++singles)
+         tx.alloc_lines(1);
+   }
+   catch (const arena_full&)
+   {
+   }
+   // everything flexible, and nothing else: a little over three quarters
+   REQUIRE(singles > 1500);
+   REQUIRE(singles < 1600);
+   REQUIRE(a.reserve_free_lines() == 2048 - singles);
+   REQUIRE(a.reserve_longest_run() == 64);
+   uint32_t h[max_alloc_lines + 1];
+   a.reserve_histogram(h);
+   REQUIRE(h[1] == 0);
+   for (uint32_t k = 2; k <= 16; ++k)
+   {
+      INFO("length " << k);
+      REQUIRE(h[k] == a.reserve_quota(k));
+      for (uint32_t q = 0; q < a.reserve_quota(k); ++q)
+         REQUIRE(tx.alloc_lines(k) != null_idx);
+      REQUIRE_THROWS_AS(tx.alloc_lines(k), arena_full);  // its own quota, and no other length's
+   }
+   REQUIRE(tx.alloc_lines(40) != null_idx);  // the long run, for anything over 16
+   REQUIRE(a.reserve_longest_run() == 24);   // what was left of it is flexible now
+   REQUIRE_THROWS_AS(tx.alloc_lines(30), arena_full);
+}
+
+// A guaranteed run's place is refilled only by a freed run at least as long:
+// short frees top up the flexible stock and leave the longer debt standing.
+TEST_CASE("a guaranteed run is repaid only by a run as long", "[arena][limit][reserve]")
+{
+   arena_config c  = cfg(tmp_dir("inkind"));
+   c.max_segments  = 1;
+   c.reserve_lines = 1024;
+   arena a(c);
+   auto  ses    = a.start_session();
+   auto  singles = take_everything(ses, 1);
+   {
+      auto tx  = ses.start_transaction(0);
+      auto use = ses.use_reserve();
+      try  // use up the flexible stock
+      {
+         for (;;)
+            tx.alloc_lines(64);
+      }
+      catch (const arena_full&)
+      {
+      }
+      try
+      {
+         for (;;)
+            tx.alloc_lines(1);
+      }
+      catch (const arena_full&)
+      {
+      }
+      REQUIRE(a.reserve_quota(9) == 1);
+      REQUIRE(tx.alloc_lines(9) != null_idx);            // the guaranteed nine-line run
+      REQUIRE_THROWS_AS(tx.alloc_lines(9), arena_full);
+      tx.commit();
+   }
+   const uint64_t owed = a.reserve_owed_lines();
+   const uint32_t long_runs = a.reserve_runs_at_least(9);  // lengths 10 to 16, untouched
+   // eighteen single lines come free, none adjacent: the flexible stock takes
+   // them, the nine-line debt stands
+   for (int k = 0; k < 36; k += 2)
+      a.release(singles[k]);
+   REQUIRE(a.reserve_owed_lines() == owed - 18);
+   REQUIRE(a.reserve_runs_at_least(9) == long_runs);
+   {
+      auto tx  = ses.start_transaction(0);
+      auto use = ses.use_reserve();
+      REQUIRE_THROWS_AS(tx.alloc_lines(9), arena_full);
+      REQUIRE(tx.alloc_lines(1) != null_idx);
+   }
+   // twelve adjacent lines come free as one run (lines 100..111 were
+   // allocated one at a time; release_run frees them together): now it is repaid
+   a.release_run(singles[100], 12);
+   REQUIRE(a.reserve_runs_at_least(9) == long_runs + 1);
+   auto tx  = ses.start_transaction(0);
+   auto use = ses.use_reserve();
+   REQUIRE(tx.alloc_lines(9) != null_idx);
 }

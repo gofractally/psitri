@@ -144,6 +144,7 @@ Choose `Engine::config`, not another engine's config type. Set it before open.
 |---|---|
 | Small Engine: `max_segments` | Ordinary arena ceiling in 8 MiB segments; default 4,096 = 32 GiB. Writes that need more throw `storage_full`; see [bounding and watching storage](engines.md#bounding-and-watching-storage). Companion large arena reserves up to `min(max_segments, 512)` segments of 2 GiB. |
 | Small Engine: `background_release` | Use the release thread (default true), or reclaim inline |
+| Small Engine: `reserve_bytes` | Room kept for removes once the store is at its limit; 0 (default) is a sixty-fourth of the store between 128 KiB and 1 MiB, at most 4 MiB. See [bounding and watching storage](engines.md#bounding-and-watching-storage). |
 | Small Engine: `write_protect_on_commit`, `checksum_on_commit` | Accepted for source compatibility and ignored |
 | Large Engine: `max_pinned_cache_size_mb` | Budget for pinned SAL segments; not a total RSS cap |
 | Large Engine: `enable_read_cache` | Enable read-driven hot object promotion; profile default false |

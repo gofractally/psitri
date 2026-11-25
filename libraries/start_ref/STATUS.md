@@ -84,7 +84,14 @@ change to how nodes own their lines has to be made in both.
   simultaneous writers than segments the extra writers' ordinary writes are
   refused at once. Removes do not need a segment.
 - A single transaction that removes very many keys from a full store can use
-  up the remove reserve before it commits.
+  up the remove reserve before it commits (about 9,800 small keys on a
+  two-segment store in the tests); `reserve_bytes` sizes it.
+- The reserve's guaranteed runs cover node lengths of 2 to 16 lines exactly
+  and longer ones with a few 64-line runs; a guaranteed run is repaid only by
+  a freed run at least as long, so a remove that built a longer node than any
+  it freed would leave that length owed (no tested shape does).
+- While the reserve is owed a run of some length, every free of a run that
+  long or longer takes the reserve's mutex (gofractally/psitri#36).
 - At the ceiling a session takes free lines from any segment, which gives up
   the placement policy's low write amplification for as long as it lasts.
 - Reverse cursor steps are a series of forward probes (cost follows key

@@ -85,28 +85,31 @@ large-value arena separately:
 | `limit_bytes` | `max_segments` × segment size |
 
 | `reserve_bytes` | Part of the limit kept for removes once the store cannot grow |
-| `reserve_free_bytes` | Of the reserve, what a remove can draw right now |
-| `reserve_owed_bytes` | Of the reserve, what it is waiting to get back (lent to removes, or not found free at open) |
+| `reserve_free_bytes` | Lines the reserve holds now, in whatever runs |
+| `reserve_longest_run_bytes` | The longest single run it can hand to a remove now |
+| `reserve_long_runs` | How many runs of nine lines (1,152 bytes) or more it can hand out now |
+| `reserve_owed_bytes` | What it is waiting to get back (lent to removes, or not found free at open) |
 
 It may be called from any thread. A write that would take the store past its
 limit throws `psitri::small_engine::storage_full` (a `std::runtime_error`)
 from the write call. Abort the transaction: it rolls back completely and what
 was committed before is untouched.
 
-What "full" means: once the store has all its segments, a sixty-fourth of it
-(between 128 KiB and 1 MiB; 512 KiB of a 32 MiB store) is held out of ordinary
-allocation as the **reserve**: free runs of lines, taken out of the free map,
-counted in `limit_bytes` and never in `used_bytes`. An ordinary write is
-refused when no segment has a free run of lines long enough for the
-allocation. Before refusing, the writer releases versions that no reader holds
-any more, waits for the background releaser to finish what is queued, and
-looks for free lines in every segment, including segments held by sessions
-that are between transactions. It does not wait for a segment that another
-writer is in: with more writers in transactions at once than the store has
-segments, the extra writers' ordinary writes are refused. In the tests a store
-of 100-byte values took 174,000 keys and was 98% used (everything but the
-reserve) when it first refused. A node that needs many lines in a row (a value
-of several KiB) can be refused earlier on a fragmented store.
+What "full" means: once the store has all its segments, a part of it is held
+out of ordinary allocation as the **reserve** (by default a sixty-fourth of
+the store, between 128 KiB and 1 MiB: 512 KiB of a 32 MiB store;
+`config::reserve_bytes` sets it, up to 4 MiB). It is counted in `limit_bytes`
+and never in `used_bytes`. An ordinary write is refused when no segment has a
+free run of lines long enough for the allocation. Before refusing, the writer
+releases versions that no reader holds any more, waits for the background
+releaser to finish what is queued, and looks for free lines in every segment,
+including segments held by sessions that are between transactions. It does not
+wait for a segment that another writer is in: with more writers in
+transactions at once than the store has segments, the extra writers' ordinary
+writes are refused. In the tests a store of 100-byte values took 174,000 keys
+and was 98% used (everything but the reserve) when it first refused. A node
+that needs many lines in a row (a value of several KiB) can be refused earlier
+on a fragmented store.
 
 A full store is never stuck:
 
@@ -114,42 +117,97 @@ A full store is never stuck:
   path is freed. On a store at its ceiling, `remove` and
   `remove_range_counted` take that room from the session's own segment if it
   has some and otherwise from the reserve. They claim no segment and wait for
-  nothing, so they are not held up by other writers and do not depend on how
-  many there are.
+  no other writer.
 
-  What a remove draws from the reserve is owed back, and every run of lines
-  freed anywhere in the store is offered to the reserve first while anything
-  is owed. A debt is repaid with a run of the same length when a freed run is
-  long enough (the old versions of the nodes the remove copied are such
-  runs), and line for line when only shorter runs come free. Nothing about
-  the reserve is kept on storage or remembered across an open: it returns to
-  the free map at a clean close and is collected again, longest runs first,
-  at every open and after every recovery.
+  A remove needs *runs* of consecutive 128-byte lines, one per node it
+  copies, and how long depends on the node:
 
-  **Guaranteed:** after a transaction that only removes keys has committed
-  and the versions it replaced have been released, the reserve holds at least
-  as many lines as before it, indefinitely, across clean reopens and across
-  recoveries, whatever else the store is doing; and ordinary writes never
-  get lines of the reserve. `tests/api/small_engine.cpp` checks this after
-  each of 30,000 rounds of "remove one key, refill until refused" with a
-  reopen every 300 rounds, the same with a kill every 250 rounds, and with
-  binary keys; no remove is refused.
+  | Node on the path | Lines |
+  |---|---|
+  | Router with few branches, or one line of a wide router | 1 |
+  | Compact routers of 2, 4 or 8 lines of branches | 3, 5, 9 |
+  | Full 256-way router copied whole | up to 14 |
+  | Key prefix of p bytes | (p + 7) / 128, rounded up: 9 for a 1,024-byte key |
+  | Leaf rebuilt beside the removed key | (key bytes kept + value + 8) / 128, rounded up; up to 64 for a value near 8 KiB |
 
-  **The boundary:** the guarantee is in lines. A remove that needs a run of
-  several lines (a node on the path that spans lines: a long key prefix, a
-  leaf rebuilt next to the removed key whose value fills more than one line)
-  gets it while the reserve has a run that long. The reserve starts as whole
-  64-line runs and is repaid with runs as long as the ones it lent whenever
-  the freed nodes are that long, so in practice it keeps runs of every size
-  removes ask for; but it is not guaranteed for a node longer than any run
-  the reserve has at that moment, and one transaction that removes very many
-  keys can draw more than the reserve holds before it commits (commit in
-  batches; a refused transaction rolls back and can be retried smaller).
-  Values above 8 KiB live in the other arena and are not copied by a remove.
-  `usage().reserve_free_bytes` is what removes can draw right now and
-  `usage().reserve_owed_bytes` what the reserve is waiting to get back; a
-  store opened too full to collect its reserve shows the shortfall there, and
-  the first lines freed go to it.
+  So the reserve is kept as runs, in two parts:
+
+  - **Guaranteed runs.** For each length from 2 to 16 lines, a fixed number
+    of runs of exactly that length, and separately a few runs of 64 lines
+    for anything longer. A guaranteed run is handed only to a draw of its own
+    length, and its place is refilled only by a freed run at least that long.
+    No number of shorter draws can use them up.
+  - **Flexible room**: the rest, a little over three quarters. Any draw may
+    cut a piece from it, and it is refilled line for line with whatever is
+    freed, so short draws turn it into short runs over time.
+
+  | Reserve | Flexible | Runs of 2 | of 4 | of 8 | of 9 | of 14 | of 16 | of 64 |
+  |---|---|---|---|---|---|---|---|---|
+  | 256 KiB (a 16 MiB store) | 194 KiB | 16 | 8 | 4 | 3 | 2 | 2 | 1 |
+  | 512 KiB (32 MiB) | 383 KiB | 32 | 16 | 8 | 7 | 4 | 4 | 2 |
+  | 1 MiB (64 MiB and up) | 759 KiB | 64 | 32 | 16 | 14 | 9 | 8 | 4 |
+
+  (For a length k from 2 to 16 the number is the reserve's lines divided by
+  64k, at least one.) A draw uses flexible room while that still has a run
+  long enough, and a guaranteed run otherwise.
+
+  What is drawn is owed back. Every run of lines freed anywhere in the store
+  is offered to the reserve first while it is owed something that run can
+  repay, and a node of several lines is freed as the one run it was. Nothing
+  about the reserve is kept on storage or remembered across an open: it
+  returns to the free map at a clean close and is collected again, longest
+  free runs first, at every open and after every recovery. Collection takes
+  one pass over the free map when whole free 64-line words are to be had (any
+  store that is not nearly full) and at most seven otherwise; a pass reads one
+  word per 8 KiB of store, about four million for a 32 GiB store.
+
+  **Guaranteed, on a store at its ceiling:**
+  - One transaction that only removes keys can draw at least the flexible
+    room in runs of any length up to 64 lines while that room is fresh, and
+    always, whatever was drawn before or earlier in the same transaction, the
+    guaranteed number of runs of each length from 2 to 16 and of 64. Single
+    lines come from the flexible room only.
+  - After that transaction has committed and the versions it replaced have
+    been released, every run it drew has been repaid with a run of the same
+    length, provided the versions released contained one, which they do for
+    every node a remove copies. The reserve then holds what it held before:
+    indefinitely, across clean reopens and across recoveries.
+  - Ordinary writes never get lines of the reserve.
+
+  `tests/api/small_engine.cpp` checks the reserve after each of 30,000 rounds
+  of "remove one key, refill until refused" with a reopen every 300 rounds,
+  with a kill every 250, with binary keys, and with a syncing commit mode;
+  checks that 40 removes behind a 900-byte key prefix succeed after one
+  transaction of 1,500 short removes, after 1,500 removes under a reader, and
+  after a batch that was refused and rolled back; and that removes through
+  long nodes of several shapes leave nothing owed.
+
+  **Not guaranteed:**
+  - A transaction that removes more than the reserve can lend before it
+    commits is refused; it rolls back and nothing is lost. In the tests one
+    transaction removed about 9,800 small keys from a full two-segment store
+    before that happened. Commit removes in batches, or raise
+    `config::reserve_bytes`: the numbers above scale with it. This matters
+    when one unit of work is one transaction, however large.
+  - A remove that has to build a node longer than every run it frees leaves
+    that length owed until a run that long is freed anywhere in the store.
+    None of the shapes tested does this.
+  - A node of more than 16 lines (a leaf with a value of two kilobytes or
+    more, rebuilt because the key beside it was removed) depends on the few
+    64-line runs.
+  - While a reader stays on a version that removes have replaced, what they
+    drew stays owed: the old nodes cannot be freed under it. A reader twenty
+    rounds behind was seen holding nearly the whole reserve owed.
+
+  `usage()` says where things stand: `reserve_free_bytes` is how many lines
+  the reserve holds, which is not what a remove can get;
+  `reserve_longest_run_bytes` is the longest run it can hand out now, and a
+  remove that must copy a longer node is refused; `reserve_long_runs` is how
+  many runs of nine lines or more it has; `reserve_owed_bytes` is what it is
+  waiting to get back. A store opened too full to collect its reserve shows
+  the shortfall as owed, gives the flexible room its share of what was found,
+  and fills the rest from frees; guaranteed runs it could not find stay owed
+  until runs that long are freed or the store is reopened with room.
 - **Drop the root.** `tx.primary().set_root({})` followed by `commit()`
   allocates nothing and frees the whole tree.
 - **Raise the limit.** Close the store and open it with a larger

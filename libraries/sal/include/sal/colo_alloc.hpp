@@ -474,11 +474,13 @@ namespace sal
 
       void release_address(ptr_address address)
       {
-         assert(not is_free(address));
-         auto prior = _free_list_base[*address / 64].fetch_add(1ull << (*address % 64),
-                                                               std::memory_order_release);
-         assert(not(prior & (1ull << (*address % 64))));
-         (void)prior;
+         // fetch_or, not fetch_add: adding a bit that is already set carries into the
+         // neighbouring address's bit and frees or claims a slot that is not ours.
+         const uint64_t bit   = 1ull << (*address % 64);
+         const uint64_t prior =
+             _free_list_base[*address / 64].fetch_or(bit, std::memory_order_release);
+         if (prior & bit) [[unlikely]]
+            sal_double_free_abort(*address);
       }
 
       std::unique_ptr<block_allocator> _zone_allocator;

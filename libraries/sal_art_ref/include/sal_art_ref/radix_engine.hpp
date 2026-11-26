@@ -14,8 +14,8 @@
 // COW-to-root (ref-based unique|shared); `versioned`/version_history unused.
 #pragma once
 #include <array>
+#include <atomic>
 #include <mutex>
-#include <semaphore>
 #include <adb/value_range.hpp>
 #include <algorithm>
 #include <array>
@@ -286,14 +286,34 @@ namespace sal_art_ref::radix
       // or aborts. A transaction may be finished by another thread than the one that
       // started it (a session is not thread-safe, but it may move between threads when its
       // use is serialized), and a std::mutex may only be unlocked by the thread that locked
-      // it. A binary semaphore has no owner, so any thread may release it. One per cache
-      // line, so writers of neighbouring roots do not share one.
+      // it. This lock has no owner, so any thread may release it: one word that is free,
+      // held, or held with someone waiting. Taking and releasing it uncontended is one
+      // atomic operation each and never a system call (a std::binary_semaphore's release
+      // wakes through the kernel every time, waiter or not). One per cache line, so
+      // writers of neighbouring roots do not share one.
       struct alignas(64) writer_gate
       {
-         std::binary_semaphore free{1};
-         void                  lock() { free.acquire(); }
-         bool                  try_lock() { return free.try_acquire(); }
-         void                  unlock() { free.release(); }
+         std::atomic<uint32_t> state{0};  // 0 free, 1 held, 2 held and at least one waiter
+         bool try_lock() noexcept
+         {
+            uint32_t expected = 0;
+            return state.compare_exchange_strong(expected, 1, std::memory_order_acquire,
+                                                 std::memory_order_relaxed);
+         }
+         void lock() noexcept
+         {
+            if (try_lock())
+               return;
+            // Mark the gate contended and sleep while it stays so; whoever gets it this way
+            // leaves it marked, since others may still be waiting.
+            while (state.exchange(2, std::memory_order_acquire) != 0)
+               state.wait(2, std::memory_order_relaxed);
+         }
+         void unlock() noexcept
+         {
+            if (state.exchange(0, std::memory_order_release) == 2)
+               state.notify_one();
+         }
       };
 
       // Roots held by this writer context's own open transactions. A second claim on
@@ -4973,9 +4993,21 @@ namespace sal_art_ref::radix
          struct claims
          {
             radix_tree*           t = nullptr;
-            std::vector<uint32_t> roots;
-            claims(radix_tree* tree, uint32_t idx) : t(tree) { add(idx); }
-            claims(claims&& o) noexcept : t(o.t), roots(std::move(o.roots)) { o.roots.clear(); }
+            bool                  has_primary = false;
+            uint32_t              primary     = 0;  // kept inline: no allocation per transaction
+            std::vector<uint32_t> roots;            // roots opened beyond the primary
+            claims(radix_tree* tree, uint32_t idx) : t(tree)
+            {
+               t->claim_root(idx);
+               primary     = idx;
+               has_primary = true;
+            }
+            claims(claims&& o) noexcept
+                : t(o.t), has_primary(o.has_primary), primary(o.primary), roots(std::move(o.roots))
+            {
+               o.has_primary = false;
+               o.roots.clear();
+            }
             claims(const claims&)            = delete;
             claims& operator=(const claims&) = delete;
             ~claims() { drop(); }
@@ -4992,6 +5024,9 @@ namespace sal_art_ref::radix
             }
             void drop() noexcept
             {
+               if (has_primary)
+                  t->unclaim_root(primary);
+               has_primary = false;
                for (uint32_t idx : roots)
                   t->unclaim_root(idx);
                roots.clear();

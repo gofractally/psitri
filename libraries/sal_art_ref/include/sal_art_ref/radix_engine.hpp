@@ -3937,13 +3937,26 @@ namespace sal_art_ref::radix
          static constexpr int32_t value_subtree   = -2;  // value is a subtree, not bytes
 
         private:
+         // A frame's node address, stored raw. ptr_address zero-initializes itself, and a
+         // cursor is constructed for every point read: an array of frames holding one would
+         // be cleared, all of it, each time (1,026 frames is 8 KB). A frame is written
+         // before it is read (next_frame, then ++_depth), so it needs no initial value.
+         struct frame_addr
+         {
+            uint32_t raw;
+            frame_addr() = default;
+            frame_addr(ptr_address a) noexcept : raw(*a) {}
+            operator ptr_address() const noexcept { return ptr_address(raw); }
+         };
          struct frame  // 8 bytes (lean push/pop); psitri-style
          {
-            ptr_address addr;
-            int16_t     pos;    // -1 = at this node's term value; else entry cursor (0..256)
-            uint16_t    klen1;  // _klen after this node's prefix (entry stems append from here)
+            frame_addr addr;
+            int16_t    pos;    // -1 = at this node's term value; else entry cursor (0..256)
+            uint16_t   klen1;  // _klen after this node's prefix (entry stems append from here)
          };
          static_assert(sizeof(frame) == 8, "lean 8-byte cursor frame");
+         static_assert(std::is_trivially_default_constructible_v<frame>,
+                       "constructing a cursor must not touch its path array");
 
          void reset() noexcept
          {

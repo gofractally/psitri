@@ -62,10 +62,19 @@ namespace sal
          /// Moves the segment to a state of its life cycle and keeps `pinned`, which
          /// another thread sets and clears (set_pinned) on its own schedule: a load
          /// followed by a store here would undo a change of it made in between.
+         ///
+         /// The new state is published with release order. The state word is what hands
+         /// the segment from one thread to the next along its life cycle (session ->
+         /// compactor -> read-lock queue -> provider -> session), and each of them reads
+         /// or rewrites the segment itself (its footer, its header): the thread that
+         /// takes the segment over must see everything the previous one did to it. The
+         /// reader of that hand-off is may_compact(), an acquire load. set_pinned() stays
+         /// relaxed: a read-modify-write continues the release sequence it lands in.
          void enter(uint32_t state) noexcept
          {
             uint32_t cur = flags.load(std::memory_order_relaxed);
             while (!flags.compare_exchange_weak(cur, (cur & pinned) | state,
+                                                std::memory_order_release,
                                                 std::memory_order_relaxed))
             {
             }
@@ -148,14 +157,14 @@ namespace sal
          {
             vage.store(vage_value, std::memory_order_relaxed);
             _freed_space_LOCKED.store(freed, std::memory_order_relaxed);
-            flags.store(read_only, std::memory_order_relaxed);
+            flags.store(read_only, std::memory_order_release);
          }
          /// Recovery: a segment holding no live object is free for reuse.
          void recovered_free()
          {
             vage.store(0, std::memory_order_relaxed);
             _freed_space_LOCKED.store(0, std::memory_order_relaxed);
-            flags.store(free, std::memory_order_relaxed);
+            flags.store(free, std::memory_order_release);
          }
          void set_pinned(bool is_pinned)
          {
@@ -165,9 +174,10 @@ namespace sal
                flags.fetch_and(~pinned, std::memory_order_relaxed);
          }
          // compactor may only consider segments that are read only and not in one of the other states
+         // (acquire: pairs with the release in enter(), see there)
          bool may_compact() const
          {
-            return (flags.load(std::memory_order_relaxed) & ~pinned) == read_only;
+            return (flags.load(std::memory_order_acquire) & ~pinned) == read_only;
          }
          bool     is_read_only() const { return flags.load(std::memory_order_relaxed) & read_only; }
          bool     is_pinned() const { return flags.load(std::memory_order_relaxed) & pinned; }

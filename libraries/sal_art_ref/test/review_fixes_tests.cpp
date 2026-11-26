@@ -6,7 +6,11 @@
 #include <cstdio>
 #include <filesystem>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <mutex>
+#include <future>
+#include <condition_variable>
 #include <map>
 #include <optional>
 #include <random>
@@ -609,4 +613,132 @@ TEST_CASE("review: the upper bound above every key is above every key", "[review
    CHECK(tx.remove_range_counted("", std::string(1024, '\xff') + '\x01') == 1);
    tx.commit();
    CHECK(ws->get_root(0).count_keys() == 0);
+}
+
+// The per-root writer lock under contention: eight write sessions on eight threads
+// take the SAME root, one upsert per transaction, for a few seconds. Half of them hand
+// each transaction to another thread, which commits it. Inside a transaction a thread
+// must be alone (the counter is never seen above one), every commit must build on the
+// one before it (the stored total equals the number of commits: nothing lost), and
+// every thread must get its turn.
+TEST_CASE("review: writers contending for one root exclude each other and all progress",
+          "[review][contention]")
+{
+   temp_dir dir("contention");
+   auto     db = engine::database::open(dir.path);
+   using tx_t  = sal_art_ref::radix::radix_tree::transaction;
+   constexpr int             writers = 8;
+   std::atomic<int>          inside{0};
+   std::atomic<uint64_t>     violations{0};
+   std::atomic<bool>         stop{false};
+   std::vector<uint64_t>     commits(writers, 0);
+   std::vector<std::thread>  threads;
+   for (int w = 0; w < writers; ++w)
+      threads.emplace_back([&, w] {
+         auto ws = db->start_write_session();
+         // a committer for the writers that hand their transaction over
+         std::mutex              m;
+         std::condition_variable cv;
+         tx_t*                   handed = nullptr;
+         bool                    quit   = false;
+         std::thread             committer;
+         if (w % 2 == 0)
+            committer = std::thread([&] {
+               std::unique_lock lk(m);
+               for (;;)
+               {
+                  cv.wait(lk, [&] { return handed || quit; });
+                  if (!handed)
+                     return;
+                  inside.fetch_sub(1);
+                  handed->commit();
+                  handed = nullptr;
+                  cv.notify_all();
+               }
+            });
+         while (!stop.load(std::memory_order_relaxed))
+         {
+            std::optional<tx_t> tx(ws->start_transaction(0));
+            if (inside.fetch_add(1) != 0)
+               violations.fetch_add(1);
+            const uint64_t total = std::stoull(tx->get<std::string>("total").value_or("0"));
+            tx->upsert("total", std::to_string(total + 1));
+            if (w % 2 == 0)
+            {
+               std::unique_lock lk(m);
+               handed = &*tx;
+               cv.notify_all();
+               cv.wait(lk, [&] { return handed == nullptr; });
+            }
+            else
+            {
+               inside.fetch_sub(1);
+               tx->commit();
+            }
+            ++commits[size_t(w)];
+         }
+         if (committer.joinable())
+         {
+            {
+               std::lock_guard lk(m);
+               quit = true;
+            }
+            cv.notify_all();
+            committer.join();
+         }
+      });
+   std::this_thread::sleep_for(std::chrono::seconds(3));
+   stop = true;
+   for (auto& t : threads)
+      t.join();
+   uint64_t sum = 0;
+   for (int w = 0; w < writers; ++w)
+   {
+      INFO("writer " << w);
+      CHECK(commits[size_t(w)] > 0);
+      sum += commits[size_t(w)];
+   }
+   CHECK(violations.load() == 0);
+   auto ws = db->start_write_session();
+   CHECK(std::stoull(ws->get_root(0).get<std::string>("total").value_or("0")) == sum);
+}
+
+// A writer waiting for a root is woken however the holder lets go of it: by commit,
+// by abort, or by its transaction being destroyed without either.
+TEST_CASE("review: a waiting writer is woken when the holder commits, aborts or is dropped",
+          "[review][contention]")
+{
+   temp_dir dir("waiter");
+   auto     db = engine::database::open(dir.path);
+   using tx_t  = sal_art_ref::radix::radix_tree::transaction;
+   auto holder_session = db->start_write_session();
+   for (int how = 0; how < 3; ++how)
+   {
+      INFO("release by " << (how == 0 ? "commit" : how == 1 ? "abort" : "destruction"));
+      std::optional<tx_t> holder(holder_session->start_transaction(0));
+      holder->upsert("k", std::to_string(how));
+      std::atomic<bool> got{false};
+      // two waiters, so a wake-up that reaches only one of them would leave the other asleep
+      auto waiter = [&] {
+         auto ws = db->start_write_session();
+         auto tx = ws->start_transaction(0);
+         got     = true;
+         tx.upsert("w", "1");
+         tx.commit();
+      };
+      auto a = std::async(std::launch::async, waiter);
+      auto b = std::async(std::launch::async, waiter);
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      CHECK_FALSE(got.load());  // both are waiting behind the holder
+      if (how == 0)
+         holder->commit();
+      else if (how == 1)
+         holder->abort();
+      holder.reset();
+      REQUIRE(a.wait_for(std::chrono::seconds(20)) == std::future_status::ready);
+      REQUIRE(b.wait_for(std::chrono::seconds(20)) == std::future_status::ready);
+      a.get();
+      b.get();
+      CHECK(got.load());
+   }
 }

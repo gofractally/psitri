@@ -1637,6 +1637,147 @@ TEST_CASE("Small Engine: a releaser that is not being scheduled is waited for",
    REQUIRE(db->usage().used_bytes * 4 < db->usage().limit_bytes);
 }
 
+namespace
+{
+   // A typed value whose release on the background releaser does not return
+   // until the test lets it: a releaser stuck in a release hook.
+   struct stuck_value
+   {
+      static constexpr uint16_t type_id = 80;
+      struct t_pod
+      {
+         uint64_t n;
+         char     filler[2000];
+         static void retain(void*, const t_pod&) {}
+         static void release(void*, const t_pod&)
+         {
+            if (std::this_thread::get_id() == writer.load())
+               return;
+            stuck.store(true);
+            while (!let_go.load())
+               std::this_thread::sleep_for(std::chrono::milliseconds(1));
+         }
+      };
+      t_pod pod{};
+      t_pod take_pod() && { return pod; }
+      static stuck_value make_from_pod(const t_pod& p, bool) { return {p}; }
+      static inline std::atomic<std::thread::id> writer{};
+      static inline std::atomic<bool>            stuck{false}, let_go{false};
+   };
+}  // namespace
+
+// A releaser that completes nothing is waited for once, for the stall limit,
+// and then the write is refused: not once per reclaim round (sixteen times
+// the limit), during all of which the writer holds its root's lock.
+TEST_CASE("Small Engine: a releaser that never advances holds a writer for one stall limit",
+          "[small][limit][releaser][stuck]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 4));
+   db->register_value_types<stuck_value>();
+   stuck_value::writer = std::this_thread::get_id();
+   stuck_value::stuck  = false;
+   stuck_value::let_go = false;
+   const auto limit    = std::chrono::milliseconds(500);
+   db->set_reclaim_stall_limit_dbg(limit);
+   bool                                  refused = false;
+   std::chrono::steady_clock::time_point last_ok = std::chrono::steady_clock::now();
+   {
+      auto     ws = db->start_write_session();
+      uint64_t n  = 0;
+      while (n < 40000 && !refused)
+      {
+         try
+         {
+            auto tx = ws->start_transaction(0);
+            for (int j = 0; j < 200; ++j, ++n)
+            {
+               stuck_value v;
+               v.pod.n = n;
+               tx.upsert(scattered_key("w", n % 2000), std::move(v));
+            }
+            tx.commit();
+            last_ok = std::chrono::steady_clock::now();
+         }
+         catch (const engine::storage_full&)
+         {
+            refused = true;
+         }
+      }
+   }
+   const auto held = std::chrono::steady_clock::now() - last_ok;
+   stuck_value::let_go = true;  // the releaser may finish, so the store can close
+   INFO("the refused transaction took "
+        << std::chrono::duration_cast<std::chrono::milliseconds>(held).count() << " ms");
+   REQUIRE(stuck_value::stuck.load());
+   REQUIRE(refused);
+   REQUIRE(held >= limit);
+   REQUIRE(held < 8 * limit);  // sixteen rounds of the limit before this was fixed
+}
+
+// A header file of zeros beside data files that hold segments is not a new
+// store (no process death leaves that): opening it must not write a fresh
+// header and cut the data off.
+TEST_CASE("Small Engine: a blank header beside data is refused, not taken for a new store",
+          "[small][open][header]")
+{
+   namespace fs = std::filesystem;
+   temporary_directory tmp;
+   const model         m{2000, 20};
+   {
+      auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                               small_config(psitri::sync_mode::none, 8));
+      auto ws = db->start_write_session();
+      for (uint64_t seq = 1; seq <= 50; ++seq)
+      {
+         auto tx = ws->start_transaction(0);
+         m.apply(tx, seq);
+         tx.commit();
+      }
+   }
+   const auto data_size = fs::file_size(tmp.path / "data.part");
+   REQUIRE(data_size > 0);
+   const auto  meta_size = fs::file_size(tmp.path / "meta.part");
+   std::string saved(meta_size, '\0');
+   {
+      std::FILE* f = std::fopen((tmp.path / "meta.part").c_str(), "r+b");
+      REQUIRE(f);
+      REQUIRE(std::fread(saved.data(), 1, meta_size, f) == meta_size);
+      std::rewind(f);
+      const std::string zeros(meta_size, '\0');
+      REQUIRE(std::fwrite(zeros.data(), 1, meta_size, f) == meta_size);
+      std::fclose(f);
+   }
+   for (auto mode : {psitri::open_mode::create_or_open, psitri::open_mode::create_only})
+   {
+      std::string said;
+      try
+      {
+         auto db = database::open(tmp.path, mode, small_config(psitri::sync_mode::none, 8));
+      }
+      catch (const std::runtime_error& e)
+      {
+         said = e.what();
+      }
+      INFO("said: " << said);
+      REQUIRE(said.find("has no header but") != std::string::npos);
+      REQUIRE(fs::file_size(tmp.path / "data.part") == data_size);
+   }
+   // with its header back the store is whole
+   {
+      std::FILE* f = std::fopen((tmp.path / "meta.part").c_str(), "r+b");
+      REQUIRE(f);
+      REQUIRE(std::fwrite(saved.data(), 1, meta_size, f) == meta_size);
+      std::fclose(f);
+   }
+   auto db  = database::open(tmp.path, psitri::open_mode::open_existing,
+                             small_config(psitri::sync_mode::none, 8));
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+   REQUIRE(m.verify(cur) == 50);
+}
+
 // A transaction may be handed from the thread that started it to another,
 // as long as only one of them uses it at a time. The root's writer lock goes
 // with the transaction, not with a thread: the first thread asking for the

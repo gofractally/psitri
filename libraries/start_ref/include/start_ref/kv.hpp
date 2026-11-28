@@ -997,7 +997,10 @@ namespace start_ref::kv
                                             sal::open_mode        mode,
                                             runtime_config        cfg = {})
       {
-         const bool exists = std::filesystem::exists(dir / "data.part");
+         // A store exists once its header has been written. Files left by a
+         // process that died while creating one are not a store: create_only
+         // finishes the creation, open_existing reports that there is none.
+         const bool exists = start_ref::arena::read_clean_flag(dir).has_value();
          switch (mode)
          {
             case sal::open_mode::create_only:
@@ -1362,8 +1365,10 @@ namespace start_ref::kv
             // (more runnable threads than processors), and what it holds is
             // room this writer is entitled to; only a releaser that has
             // stopped altogether ends the wait.
-            const auto limit = patient ? clock::duration(reclaim_stall_limit)
-                                       : clock::duration(reclaim_max_wait);
+            const auto limit =
+                patient ? clock::duration(std::chrono::microseconds(
+                              db->_reclaim_stall_us.load(std::memory_order_relaxed)))
+                        : clock::duration(reclaim_max_wait);
             for (uint32_t spins = 0;; ++spins)
             {
                const uint32_t tail = db->_rel_tail.load(std::memory_order_acquire);
@@ -1373,7 +1378,15 @@ namespace start_ref::kv
                if (patient && tail != seen)
                   seen = tail, mark = now;
                else if (now - mark >= limit)
+               {
+                  // A patient wait that ends here found a releaser that
+                  // completed nothing for the whole stall limit: it is
+                  // reported as "nothing to wait for", so the allocation
+                  // is refused now and not after sixteen such waits.
+                  if (patient)
+                     return false;
                   break;
+               }
                if (patient && spins > 64)  // give the releaser a processor
                   std::this_thread::sleep_for(std::chrono::microseconds(50));
                else
@@ -1388,9 +1401,22 @@ namespace start_ref::kv
       // How long a patient call (an ordinary allocation about to be refused)
       // goes on waiting for a releaser that has not completed a single
       // queued release. Far beyond any scheduling delay: past it the
-      // releaser is taken to be stuck (in a typed value's release hook, say)
-      // and the allocation is refused after all.
+      // releaser is taken to be stuck (in a typed value's release hook, say),
+      // the call reports that there is nothing to wait for, and the
+      // allocation is refused. A writer is therefore held by a stuck
+      // releaser for this long once, with its root's writer lock.
       static constexpr std::chrono::seconds reclaim_stall_limit{30};
+      std::atomic<int64_t> _reclaim_stall_us{
+          std::chrono::duration_cast<std::chrono::microseconds>(reclaim_stall_limit).count()};
+
+     public:
+      // debug/tests: shorten the stall limit above.
+      void set_reclaim_stall_limit_dbg(std::chrono::microseconds limit) noexcept
+      {
+         _reclaim_stall_us.store(limit.count(), std::memory_order_relaxed);
+      }
+
+     private:
       static bool defer_cb_(void* ctx, uint64_t raw) noexcept
       {
          return static_cast<database*>(ctx)->rel_push_(raw);

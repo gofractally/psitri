@@ -339,14 +339,24 @@ namespace start_ref
          _hdr  = _meta->as<meta_hdr>();
          _segs = reinterpret_cast<seg_entry*>(reinterpret_cast<char*>(_hdr) + sizeof(meta_hdr));
 
-         // The header is new when its magic number is not there yet. The
+         // The header is new when its magic number is not there yet: the
          // file is sized first (all zeros) and the magic is written last, so
          // a process that stopped anywhere while creating the arena leaves a
-         // header with no magic: nothing was ever stored under it, and it is
-         // simply written again. (It used to be told apart by the file's
-         // size alone, and a stop after the sizing left a file that every
-         // later open refused as a geometry mismatch.)
+         // header with no magic and files with no segments, and the header
+         // is simply written again. A header with no magic beside files
+         // that DO hold segments is not that: no death of a process produces
+         // it (growth comes after the header), so it is a damaged or
+         // mis-restored store, and writing a new header would cut its data
+         // off. It is refused, untouched.
          const bool fresh = _hdr->magic == 0;
+         if (fresh && (_data->num_blocks() || _free->num_blocks() || _refs->num_blocks()))
+            throw std::runtime_error(
+                "start_ref: " + (_cfg.dir / "meta.part").generic_string() +
+                " has no header but the arena's other files hold " +
+                std::to_string(std::max({_data->num_blocks(), _free->num_blocks(),
+                                         _refs->num_blocks()})) +
+                " segments; refusing to treat it as a new store (that would discard them). "
+                "Restore meta.part, or remove the directory to start again");
          if (fresh)
          {
             START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "create.before_header" : "large.create.before_header"));

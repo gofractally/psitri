@@ -2267,3 +2267,35 @@ TEST_CASE("Small Engine: the process is killed at every marker the engine has",
    INFO("markers never died at:" << left);
    REQUIRE(todo.empty());
 }
+
+// Files left by a process that died while creating a store are not a store:
+// create_only finishes the job, open_existing says there is none.
+TEST_CASE("Small Engine: a store whose creation was cut short can be created, not opened",
+          "[small][crash][create]")
+{
+   for (const char* point : {"create.before_header", "create.in_header"})
+   {
+      temporary_directory tmp;
+      auto                plan = base_plan(psitri::sync_mode::none, 64);
+      plan.point               = point;
+      plan.at                  = 1;
+      REQUIRE(run_life(tmp.path, plan).killed());
+      REQUIRE(std::filesystem::exists(tmp.path / "meta.part"));
+      std::string said;
+      try
+      {
+         auto db = database::open(tmp.path, psitri::open_mode::open_existing, plan.cfg);
+      }
+      catch (const std::runtime_error& e)
+      {
+         said = e.what();
+      }
+      INFO(point << ": open_existing said: " << said);
+      REQUIRE(said.find("does not exist") != std::string::npos);
+      auto db = database::open(tmp.path, psitri::open_mode::create_only, plan.cfg);
+      auto ws = db->start_write_session();
+      auto tx = ws->start_transaction(0);
+      tx.upsert("first", "value");
+      tx.commit();
+   }
+}

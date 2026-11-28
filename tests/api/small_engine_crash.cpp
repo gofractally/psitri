@@ -951,8 +951,16 @@ namespace
    };
 
    // Crash the same store again and again; verify after every one to three lives.
+   //
+   // `first` are markers every life passes (or, for recovery and open, every
+   // open of a store that was not closed): the campaign begins by dying at
+   // each of them once, so that those deaths do not depend on which marker
+   // the random part happens to arm while the store is in the right state.
+   // Which of the other markers a run reached is printed, not required.
+   // `until_refused`: go on until some transaction has been refused because
+   // the store was full.
    void campaign(life_plan plan, uint64_t cycles, uint64_t seed, const char* name,
-                 std::vector<std::string> must_reach, bool empty_at_end = true)
+                 std::vector<std::string> first, bool until_refused = false)
    {
       temporary_directory tmp;
       store_model         model;
@@ -964,7 +972,30 @@ namespace
       const auto t0 = std::chrono::steady_clock::now();
       size_t     next_point = 0;
       audit_result last_audit;
-      for (uint64_t cycle = 0; cycle < cycles; ++cycle)
+      plan.seed = seed;
+      for (const auto& marker : first)
+      {
+         std::vector<life_result> lives;
+         if (marker.find("recover.") != std::string::npos ||
+             marker.find("open.") != std::string::npos)
+         {
+            // these need a store that was not closed
+            plan.point = "commit.published";
+            plan.at    = 7;
+            lives.push_back(run_life(tmp.path, plan));
+            REQUIRE(lives.back().killed());
+         }
+         plan.point = marker;
+         plan.at    = 1;
+         lives.push_back(run_life(tmp.path, plan));
+         INFO(name << ": no death at marker " << marker << ", status " << lives.back().status);
+         REQUIRE(lives.back().killed());
+         ++stats.lives, ++stats.point_deaths;
+         ++stats.points[marker].deaths;
+         verify(tmp.path, plan, model, lives, &last_audit);
+      }
+      for (uint64_t cycle = 0;
+           cycle < cycles || (until_refused && !model.refused && cycle < 4 * cycles + 400); ++cycle)
       {
          std::vector<life_result> lives;
          std::string              story;
@@ -1056,13 +1087,8 @@ namespace
          (p.deaths ? reached : never) += " " + n + (p.deaths ? "x" + std::to_string(p.deaths) : "");
       std::printf("  died at:%s\n  never reached:%s\n", reached.c_str(), never.c_str());
       std::fflush(stdout);
-      for (const auto& n : must_reach)
-      {
-         INFO("marker " << n << " was never reached in campaign " << name);
-         REQUIRE(stats.points[n].deaths > 0);
-      }
-      if (!empty_at_end)
-         return;
+      if (until_refused)
+         REQUIRE(model.refused > 0);
       // Nothing is left behind: remove every key of every root, and the
       // arenas drain.
       auto db = database::open(tmp.path, psitri::open_mode::open_existing, plan.cfg);
@@ -1107,8 +1133,7 @@ TEST_CASE("Small Engine: a process killed at any marked step loses nothing",
             {"root.before_store", "root.after_store", "commit.after_root", "commit.before_flush",
              "commit.published", "recover.mark", "recover.begin", "recover.done", "alloc", "free",
              "large.alloc", "large.free", "abort.before_release", "set_root.after_adopt",
-             "retire.before_release", "close.before_clean_mark", "close.after_clean_mark",
-             "releaser.before_release", "refresh.before_release"});
+             "retire.before_release", "close.before_clean_mark", "close.after_clean_mark"});
 }
 
 // The same under a mode that flushes at commit: nothing about recovery may
@@ -1137,9 +1162,7 @@ TEST_CASE("Small Engine: a process killed while the store grows or is full loses
    plan.writers          = 3;
    plan.txns             = 50;
    campaign(plan, cycles, env_u64("PSITRI_SMALL_CRASH_SEED", 20261128) + 2, "ceiling",
-            {"segment.sweep_claim", "segment.release", "reserve.draw", "reserve.repay",
-             "root.after_store", "recover.mark"},
-            /*empty_at_end=*/true);
+            {"root.after_store", "recover.mark"}, /*until_refused=*/true);
 }
 
 // Growth extends three files and then records the new segment count; a

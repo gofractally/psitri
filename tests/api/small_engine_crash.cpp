@@ -1052,8 +1052,7 @@ namespace
       {
          std::vector<life_result> lives;
          std::string              story;
-         // (at the ceiling one life per verification: see removes_ahead)
-         const uint32_t           chain = plan.prof.fill ? 1 : 1 + uint32_t(rng() % 3);
+         const uint32_t           chain = 1 + uint32_t(rng() % 3);
          for (uint32_t link = 0; link < chain; ++link)
          {
             plan.seed  = seed;
@@ -1061,7 +1060,24 @@ namespace
             int64_t        kill_us = -1;
             const uint32_t pick    = uint32_t(rng() % 100);
             const bool     unclean = !database::closed_cleanly(tmp.path);
-            if (link > 0 && unclean && pick < 70)
+            bool           certain = false;
+            if (link > 0 && plan.prof.fill)
+            {
+               // At the ceiling a life that writes is verified before the
+               // next one writes (see removes_ahead), so the further links
+               // of a chain are deaths inside recovery and nothing else:
+               // markers every recovery passes, at their first passing.
+               if (!unclean)
+                  break;
+               static const char* const always[] = {
+                   "recover.begin", "recover.reset_map", "recover.before_reset_counts",
+                   "recover.between_resets", "recover.mark", "recover.after_root",
+                   "recover.finish_map", "recover.between_ends", "recover.done",
+                   "open.after_unclean_mark"};
+               plan.point = always[rng() % std::size(always)];
+               certain    = true;
+            }
+            else if (link > 0 && unclean && pick < 70)
             {
                // die again while the store is being recovered
                static const char* const recovery[] = {
@@ -1082,6 +1098,8 @@ namespace
                auto& p = stats.points[plan.point];
                // mostly walk outwards from the first hit; sometimes anywhere below
                plan.at = rng() % 4 ? p.next_at : 1 + rng() % p.next_at;
+               if (certain)
+                  plan.at = plan.point == "recover.mark" ? 1 + rng() % 50 : 1;
             }
             const life_result life = run_life(tmp.path, plan, kill_us);
             ++stats.lives;
@@ -1089,6 +1107,8 @@ namespace
                       << "' at " << plan.at << " kill_us " << kill_us << " status "
                       << life.status);
             REQUIRE((life.killed() || life.finished()));
+            if (certain)
+               REQUIRE(life.killed());
             if (!plan.point.empty())
             {
                auto& p = stats.points[plan.point];

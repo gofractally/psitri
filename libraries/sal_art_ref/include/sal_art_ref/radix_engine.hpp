@@ -4889,34 +4889,46 @@ namespace sal_art_ref::radix
          }
 
          // What a savepoint keeps of a handle: its working root and, for every subtree open
-         // at that moment, the same again. Restoring puts each of them back and drops the
-         // subtrees opened since. (Writes through a subtree handle go to that handle's own
-         // working root, not to its parent's, until commit writes them back.)
+         // at that moment, its key and the same again. Restoring puts the handle back as it
+         // was: the same subtrees open, each with the working root it had, and none of those
+         // opened since. (Writes through a subtree handle go to that handle's own working
+         // root, not to its parent's, until commit writes them back.)
          struct savepoint
          {
-            root_ptr               working;
-            size_t                 nchild = 0;
-            std::vector<savepoint> children;
+            root_ptr                                       working;
+            std::vector<std::pair<std::string, savepoint>> children;
          };
          savepoint save() const
          {
-            savepoint s{_working, _children.size(), {}};
+            savepoint s{_working, {}};
             SAL_CRASH_POINT("savepoint:working_retained");
             s.children.reserve(_children.size());
             for (const auto& c : _children)
-               s.children.push_back(c.h->save());
+               s.children.emplace_back(c.key, c.h->save());
             return s;
          }
-         void restore(savepoint&& s) noexcept
+         void restore(savepoint&& s)
          {
             _working = std::move(s.working);
             SAL_CRASH_POINT("savepoint:working_restored");
-            if (_children.size() > s.nchild)
-               _children.resize(s.nchild);  // drop children opened since
-            // (set_root() since the savepoint closed the handles open then: nothing of
-            // theirs is left to restore.)
-            for (size_t i = 0; i < _children.size() && i < s.children.size(); ++i)
-               _children[i].h->restore(std::move(s.children[i]));
+            // The subtrees open at the savepoint are found by KEY. A set_root() since then
+            // closed every handle that was open, and a subtree opened after it sits where
+            // another one sat at the savepoint: restoring by position gave that handle the
+            // other subtree's working root, and commit stored it under the wrong key.
+            std::vector<open_child> restored;
+            restored.reserve(s.children.size());
+            for (auto& [key, saved] : s.children)
+            {
+               std::unique_ptr<tree_handle> h;
+               for (auto& c : _children)
+                  if (c.h && c.key == key)
+                     h = std::move(c.h);  // still open: the caller's reference stays good
+               if (!h)
+                  h.reset(new tree_handle(_t, sal::null_ptr_address, false));
+               h->restore(std::move(saved));
+               restored.push_back({key, std::move(h)});
+            }
+            _children = std::move(restored);  // drops the subtrees opened since
          }
 
         public:

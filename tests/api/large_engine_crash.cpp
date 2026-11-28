@@ -930,17 +930,22 @@ namespace
       return point.starts_with("recover:") || point.starts_with("open:");
    }
 
-   void throttle(database& db)
+   // Writers pause while the store's file is near its ceiling, so that the compactor and
+   // the provider turn freed segments around before the file would have to grow past it.
+   // (The file's size is asked of the file system: the allocator's own dump() reads
+   // segment headers that other threads are writing.)
+   fs::path g_segment_file;
+   void throttle(database&)
    {
       for (int i = 0; i < 2000; ++i)
       {
-         const auto d    = db.dump();
-         uint32_t   busy = 0;
-         for (auto& s : d.segments)
-            busy += !s.is_free;
-         if (busy < segment_limit_for_writers)
+         struct stat st;
+         if (::stat(g_segment_file.c_str(), &st) != 0 ||
+             uint64_t(st.st_size) < uint64_t(segment_limit_for_writers) * sal::segment_size)
             return;
          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+         if (i > 20)
+            return;  // the file never shrinks while open: a short pause is all there is
       }
    }
 
@@ -1210,6 +1215,7 @@ namespace
    void run_child(const fs::path& dir, const life_plan& plan, campaign_state state)
    {
       crash::install();
+      g_segment_file = dir / "segs";
       crash::counting.store(plan.counting);
       crash::special.store(plan.special);
       if (arms_before_open(plan.point))
@@ -2228,6 +2234,7 @@ TEST_CASE("large engine: what a published root reaches does not change before th
    // and through compaction, and dies with work in progress.
    auto failure = in_child([&] {
       crash::install();
+      g_segment_file = dir.path / "segs";
       crash::counting.store(true);
       auto               db = database::open(dir.path, psitri::open_mode::create_only, store_config());
       auto               ws = db->start_write_session();
@@ -2624,4 +2631,47 @@ TEST_CASE("large engine: death while a value of several chunks is written and re
       wait_for_store_lock(dir.path);
       expect = st.allowed;
    }
+}
+
+// Not a process-death case; found while reading the savepoint code for the in-place
+// question (see the test's last comment for what happens today).
+TEST_CASE("large engine: aborting a savepoint after set_root restores the subtrees that were open",
+          "[large-crash][savepoint]")
+{
+   temporary_directory dir;
+   const auto failure = in_child([&] {
+      auto db = database::open(dir.path, psitri::open_mode::create_only, store_config());
+      auto ws = db->start_write_session();
+      {
+         auto tx = ws->start_transaction(0);
+         tx.upsert_subtree("a", small_tree(*ws, 1));
+         tx.upsert_subtree("b", small_tree(*ws, 2));
+         tx.commit();
+      }
+      const auto b_before = [&] {
+         auto     c = ws->get_root(0).get_subtree("b").snapshot_cursor();
+         uint64_t n = 0;
+         return content_hash(c, n);
+      }();
+      {
+         auto tx = ws->start_transaction(0);
+         tx.open_subtree("a").upsert("edit", "of a");
+         {
+            auto frame = tx.sub_transaction();
+            (void)tx.primary().set_root(ws->get_root(0));  // closes the handle on "a"
+            tx.open_subtree("b").upsert("edit", "of b, thrown away");
+            frame.abort();
+         }
+         tx.commit();
+      }
+      auto     root = ws->get_root(0);
+      auto     c    = root.get_subtree("b").snapshot_cursor();
+      uint64_t n    = 0;
+      check(content_hash(c, n) == b_before,
+            "subtree 'b' is not what it was: the abort gave the handle opened on 'b' inside "
+            "the frame the saved working root of 'a', and commit stored that under 'b'");
+      check(root.get_subtree("a").get<std::string>("edit") == std::optional<std::string>("of a"),
+            "the edit of 'a' made before the savepoint was lost");
+   });
+   REQUIRE(failure == "");
 }

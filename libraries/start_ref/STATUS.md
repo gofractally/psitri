@@ -24,8 +24,7 @@ segment is claimed again once an eighth of its 8-line groups are free.
 - The shared API suites `tests/api/` (`api-conformance-tests`) and the
   library's own `test/` (`start_ref-tests`).
 - `tests/api/small_engine.cpp` (`small-engine-tests`):
-  - process kill at random points, repeated on one store, every sync mode
-    except `mprotect`: no acknowledged transaction lost, tree matches its
+  - process kill at random points, repeated on one store, every sync mode: no acknowledged transaction lost, tree matches its
     model, no storage leaked;
   - recovery when root slots share nodes and a snapshot and a transaction
     were abandoned;
@@ -64,17 +63,25 @@ change to how nodes own their lines has to be made in both.
 
 ## Known gaps
 
-- Power loss and operating-system crash are untested for every sync mode. The
-  rebuild makes the derived files irrelevant to that case, but nothing checks
-  that the data pages a root points to reached storage (#11).
-- `msync` results on data pages are ignored (`arena::sync_segment_`) (#11).
-- `sync_mode::mprotect` protects nothing here, and
-  `write_protect_on_commit` / `checksum_on_commit` are ignored (#12).
-- There is no checksum on nodes or root slots; a damaged image is detected
-  only when the recovery walk leaves the arena (#11).
+- The failure defended against is the death of the process with the
+  operating system still running (`tests/api/small_engine_crash.cpp`). Power
+  loss and operating-system failure are not defended against, by decision:
+  nothing orders a root slot behind its nodes on the device in `none` and
+  `msync_async`, nodes and root slots carry no checksum, and with two write
+  sessions a flushing commit can return with some of its pages not yet
+  flushed (dirty bits are per segment and cleared by whichever session syncs
+  it) (#11, #35).
+- A commit of several roots stores the root slots one after another: a
+  process that dies between two stores leaves the earlier roots new and the
+  later ones old.
+- A failed data-page `msync` ends the process (exit 74), like every other
+  flush of the store. `sync_mode::mprotect`, `write_protect_on_commit` and
+  `checksum_on_commit` are refused at open (#12).
 - The recovery walk does not cover the compiled-out page layout (#14).
 - Typed values registered with `register_value_types` hold references the
-  arena does not know; recovery does not replay their retain hooks (#14).
+  arena does not know; recovery calls no hooks and reports how many typed
+  values it found (`typed_values_found_by_recovery()`); reconciling what they
+  refer to is the application's (#14).
 - `database::sync()` is a no-op; durability follows the configured mode at
   commit.
 - Read-only open is not implemented. (A store that is open is locked: a

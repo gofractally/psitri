@@ -217,7 +217,7 @@ storage fault can also require recovery or operator repair. Validate the store
 using the supported engine recovery procedures and the application's
 authoritative log. A read-only open does not repair the original store.
 This failure contract does not strengthen `none` or `mprotect` into durable
-policies, and does not change the Small Engine's failure handling.
+policies.
 
 Transactions in the Small Engine sync their companion arena's heads and continuations before
 the ordinary arena and root publication, using the configured policy. This
@@ -246,33 +246,61 @@ of the live data. If the walk reaches storage outside the arena, `open` throws;
 the data and root slots are unchanged and the store stays marked unclean, so
 every later open tries again. It does not come back empty.
 
-What `tests/api/small_engine.cpp` shows, and nothing beyond it: a writer
-running committed transactions was killed with `SIGKILL` at random moments
-2,202 times, repeatedly on the same store. After every kill the store reported
-that it had not been closed, reopened, held every transaction whose `commit()`
-had returned and at most the one that was in flight, matched its model in a
-full forward scan with exact row and index counts, and kept its storage use
-where it had settled; after the last kill, removing every key drained the
-arenas to zero.
+**What is defended against.** The Small Engine's failure model is the death of
+the process: killed, aborted or crashed in any thread, at any instruction,
+while the operating system keeps running. The operating system keeps every
+byte the process wrote to its shared mappings, so a commit is complete the
+moment the new root is stored in the mapped root slot (one atomic 64-bit
+store), in every `sync_mode` including `none`. Loss of power and failure of
+the operating system are **not defended against, by decision**: after one, a
+store may be missing recent transactions or be unreadable in ways `open` cannot
+detect (nodes and root slots carry no checksums), whatever the `sync_mode`.
+The flushing modes ask the operating system to write earlier; nothing tests
+what survives.
 
-| `sync_mode` | After the process is killed (operating system keeps running) | After power loss or an operating-system crash |
-|---|---|---|
-| `none` | Every committed transaction present (tested) | Not tested. Nothing is flushed by commit: expect to lose recent transactions, and the root slot can reach storage before the nodes it points to, which open may or may not be able to detect |
-| `mprotect` | Not tested. The Small Engine applies no page protection; it flushes data pages as `msync_sync` does but not the root slot | Not tested |
-| `msync_async` | Every committed transaction present (tested) | Not tested. Flushes are only requested, so the same exposure as `none` applies |
-| `msync_sync` | Every committed transaction present (tested) | Not tested. Commit waits for `msync(MS_SYNC)` of the data pages, then of the root slot |
-| `fsync` | Every committed transaction present (tested) | Not tested. As `msync_sync`, plus `fsync` of the data and root files before commit returns |
-| `full` | Every committed transaction present (tested) | Not tested. As `fsync`, with the platform's device flush (`F_FULLFSYNC` on macOS) |
+After the process dies, the next `open`:
 
-A process kill leaves the operating system holding every page the process
-wrote, which is why all modes pass that test alike; the modes differ only in
-what has reached the device, and that has not been exercised by cutting power.
-In every mode a clean close writes the free map and reference counts out
-synchronously before it writes the clean mark, so the mark is not handed to
-storage ahead of them. Flush errors are not checked on the Small
-Engine's data pages. A transaction
-that commits several roots writes one root slot after another, so a stop
-between them leaves some roots new and others old.
+- holds every transaction whose `commit()` returned, and each transaction that
+  was in flight either wholly or not at all;
+- rebuilds the free map and reference counts exactly (no storage is leaked and
+  none is freed while referenced), from the root slots and node bytes alone:
+  nothing that lived only in the dead process is needed;
+- can itself be interrupted at any point and repeated.
+
+A transaction that commits several roots stores one root slot after another
+(in ascending root order). Readers and owned snapshots taken in a running
+process see such a commit whole, but a process that dies between two of the
+stores leaves the earlier roots new and the later ones old: **a multi-root
+commit is not atomic across a process death.** An application that needs it to
+be must be able to tell and repair (for example by storing the same sequence
+number in each root).
+
+`tests/api/small_engine_crash.cpp` is the evidence: writers on six roots (two
+of them written by one transaction), slots that share whole trees, old
+snapshots put back as roots, rolled-back transactions, values in one line,
+several lines, the large-value arena and in chunks, readers and owned
+snapshots; the process is killed at each marked step of commit, release,
+growth, creation, the storage ceiling and its reserve, clean close and
+recovery itself, and at random times; after every death the store is opened,
+compared key by key with a model, and every reference count and free-map bit
+is checked against an independent walk of the roots; then writing continues
+on the same store. A second test checks, after single operations, that no
+byte reachable from a root slot changes before the next root store.
+`tests/api/small_engine.cpp` kills a single writer at random moments in each
+flushing mode.
+
+Typed values (`register_value_types`): recovery rebuilds the engine's own
+counts and calls no retain or release hook. Every stored typed value is there
+and keeps the reference it was stored with; values of the unfinished
+transaction and of versions that were waiting to be released keep references
+nothing will release. `db->typed_values_found_by_recovery()` says how many
+typed values the recovery walked over; an application whose types count
+references outside the store reconciles them itself when it is not zero.
+
+A failed `msync`, `fsync` or `F_FULLFSYNC` in a flushing mode ends the process
+with exit code 74 before the commit returns, as for the Large Engine.
+`sync_mode::mprotect`, `write_protect_on_commit` and `checksum_on_commit` are
+not implemented by the Small Engine and are refused at open.
 
 Use `create_only` for new databases and `open_existing` for expected existing
 ones so missing data is not mistaken for a fresh successful open. Keep external

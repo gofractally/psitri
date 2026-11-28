@@ -1053,6 +1053,21 @@ namespace start_ref::kv
       /// roots held at the stop; see docs/api/operations.md for what each
       /// sync mode promises about that.
       bool recovered_on_open() const noexcept { return _recovered; }
+      /// How many stored values of registered types (typed values) the
+      /// recovery of this open found, counting a value shared by several
+      /// roots once. Zero when the store was closed cleanly.
+      ///
+      /// Recovery rebuilds the engine's own counts only. It does not call a
+      /// type's retain or release hooks: types are registered after open
+      /// returns. So after an unclean stop the references that typed values
+      /// hold on things outside the store are whatever the stopped process
+      /// left: every stored value still has the reference it was stored
+      /// with, and the values of the unfinished transaction and of versions
+      /// that were waiting to be released keep references that nothing will
+      /// ever release. An application whose types count such references
+      /// has to reconcile them itself when this is not zero. Stores of plain
+      /// bytes are not affected.
+      uint64_t typed_values_found_by_recovery() const noexcept { return _recovered_typed; }
 
       ~database()
       {
@@ -1244,8 +1259,11 @@ namespace start_ref::kv
          bool line(uint32_t i) { return lines.mark_run(i, 1); }
          void tail(uint32_t i, uint32_t n) { lines.claim_run(i, n); }
          bool large(uint32_t g, uint32_t units) { return grains.mark_run(g, units); }
+         uint64_t typed = 0;  // values of a registered type the walk came across
          void leaf_value(std::string_view slot)
          {
+            if (slot.size() >= 2 && slot_type(slot) != kRawType)
+               ++typed;
             if (slot.size() < 2 || !large_value_detail::chunked(slot))
                return;
             // Each continuation is its own counted object in the large arena.
@@ -1285,6 +1303,7 @@ namespace start_ref::kv
                _arena.rebuild_end();
                START_REF_CRASH_POINT("recover.between_ends");
                _large.rebuild_end();
+               _recovered_typed = marker.typed;
                START_REF_CRASH_POINT("recover.done");
             }
             catch (const std::exception& e)
@@ -1437,6 +1456,22 @@ namespace start_ref::kv
       static start_ref::arena_config checked_cfg_(const std::filesystem::path& dir,
                                                   runtime_config               cfg)
       {
+         // What this engine does not implement is refused, not ignored: a
+         // caller that asked for page protection or checksums must not be
+         // left believing it has them.
+         if (cfg.sync_mode == sal::sync_type::mprotect)
+            throw std::invalid_argument(
+                "start_ref::kv: sync_mode::mprotect is not implemented by the Small Engine (it "
+                "applies no page protection); open " + dir.generic_string() +
+                " with none, msync_async, msync_sync, fsync or full");
+         if (cfg.write_protect_on_commit)
+            throw std::invalid_argument(
+                "start_ref::kv: write_protect_on_commit is not implemented by the Small Engine; "
+                "open " + dir.generic_string() + " without it");
+         if (cfg.checksum_on_commit)
+            throw std::invalid_argument(
+                "start_ref::kv: checksum_on_commit is not implemented by the Small Engine (its "
+                "nodes carry no checksums); open " + dir.generic_string() + " without it");
          const auto lines  = make_cfg_(dir, cfg);
          const auto grains = make_large_cfg_(dir, cfg);
          start_ref::arena::require_fits(lines.dir, lines.max_segments);
@@ -1550,6 +1585,7 @@ namespace start_ref::kv
       std::atomic<uint64_t> _live_raw[kMaxRoots];      // raw per slot (reader publish-validate)
       std::vector<uint64_t> _retired;
       bool                  _recovered = false;  // this open rebuilt the derived state
+      uint64_t              _recovered_typed = 0;  // typed values that rebuild walked over
 
       // ── typed-value dispatch (slot envelope -> registered hooks) ────────
       struct type_entry

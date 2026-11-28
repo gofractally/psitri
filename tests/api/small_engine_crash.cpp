@@ -1541,3 +1541,170 @@ TEST_CASE("Small Engine: nothing a published root reaches is written before the 
    REQUIRE(st.old_snapshots > 0);
    REQUIRE(st.reopened_killed > 0);
 }
+
+// ── not gating under the process-death model, but not left silently wrong ──
+
+// A flush that fails. Every other flush of the store already ends the
+// process (sal's rule for durable I/O: exit code 74, no acknowledgement);
+// the msync of the data pages ignored its result and the commit went on to
+// store the root.
+TEST_CASE("Small Engine: a failed flush of data pages ends the process before the root is stored",
+          "[small][crash][flush-error]")
+{
+   temporary_directory tmp;
+   auto                cfg = base_plan(psitri::sync_mode::msync_sync, 64).cfg;
+   int                 fds[2];
+   REQUIRE(::pipe(fds) == 0);
+   std::fflush(nullptr);
+   const pid_t pid = ::fork();
+   REQUIRE(pid >= 0);
+   if (pid == 0)
+   {
+      ::close(fds[0]);
+      ::close(STDERR_FILENO);  // the diagnostic is expected
+      auto db = database::open(tmp.path, psitri::open_mode::create_only, cfg);
+      auto ws = db->start_write_session();
+      for (uint64_t k = 1; k <= 2; ++k)
+      {
+         auto tx = ws->start_transaction(0);
+         tx.upsert("version", std::string(1, char('0' + k)));
+         tx.upsert("payload", std::string(3000, char('a' + k)));
+         if (k == 2)
+            fail_msync_in.store(1);  // the next msync: this commit's data pages
+         tx.commit();
+         ack(fds[1], 0, k);
+      }
+      ::_exit(0);
+   }
+   ::close(fds[1]);
+   uint64_t   acked = 0;
+   ack_record rec;
+   while (::read(fds[0], &rec, sizeof(rec)) == ssize_t(sizeof(rec)))
+      acked = rec.version;
+   ::close(fds[0]);
+   int status = 0;
+   ::waitpid(pid, &status, 0);
+   REQUIRE(WIFEXITED(status));
+   REQUIRE(WEXITSTATUS(status) == sal::durable_io_failure_exit_code);
+   REQUIRE(acked == 1);
+   auto db  = database::open(tmp.path, psitri::open_mode::open_existing, cfg);
+   auto rs  = db->start_read_session();
+   auto cur = rs->create_cursor(0);
+   REQUIRE(db->recovered_on_open());
+   REQUIRE(cur.get<std::string>("version") == std::optional<std::string>("1"));
+   REQUIRE(cur.get<std::string>("payload") == std::optional<std::string>(std::string(3000, 'b')));
+}
+
+// Settings the engine does not implement are refused at open, with nothing created.
+TEST_CASE("Small Engine: page protection and checksums are refused, not ignored",
+          "[small][crash][config]")
+{
+   temporary_directory tmp;
+   const auto          dir = tmp.path / "store";
+   auto refused = [&](engine::config cfg, const char* word) {
+      std::string said;
+      try
+      {
+         auto db = database::open(dir, psitri::open_mode::create_or_open, cfg);
+      }
+      catch (const std::invalid_argument& e)
+      {
+         said = e.what();
+      }
+      INFO("said: " << said);
+      REQUIRE(said.find(word) != std::string::npos);
+      REQUIRE(said.find("not implemented") != std::string::npos);
+      REQUIRE_FALSE(std::filesystem::exists(dir));
+   };
+   engine::config a, b, c;
+   a.sync_mode               = psitri::sync_mode::mprotect;
+   b.write_protect_on_commit = true;
+   c.checksum_on_commit      = true;
+   refused(a, "mprotect");
+   refused(b, "write_protect_on_commit");
+   refused(c, "checksum_on_commit");
+}
+
+namespace
+{
+   // A typed value that refers to something outside the store.
+   struct ticket
+   {
+      static constexpr uint16_t type_id = 91;
+      struct t_pod
+      {
+         uint64_t id;
+         static void retain(void*, const t_pod&) {}
+         static void release(void*, const t_pod&) {}
+      };
+      uint64_t id = 0;
+      t_pod    take_pod() && { return {id}; }
+      static ticket make_from_pod(const t_pod& p, bool) { return {p.id}; }
+   };
+}  // namespace
+
+// Typed values after an unclean stop: every committed one is there and still
+// reads as its type, and the open reports how many it walked over, so an
+// application whose types count references outside the store knows it has
+// to reconcile them (recovery calls no hooks; see
+// database::typed_values_found_by_recovery).
+TEST_CASE("Small Engine: recovery keeps typed values and says that it found them",
+          "[small][crash][typed]")
+{
+   temporary_directory tmp;
+   auto                cfg = base_plan(psitri::sync_mode::none, 64).cfg;
+   std::fflush(nullptr);
+   const pid_t pid = ::fork();
+   REQUIRE(pid >= 0);
+   if (pid == 0)
+   {
+      auto db = database::open(tmp.path, psitri::open_mode::create_only, cfg);
+      db->register_value_types<ticket>();
+      auto ws = db->start_write_session();
+      {
+         auto tx = ws->start_transaction(0);
+         for (uint64_t i = 0; i < 500; ++i)
+            tx.upsert(key_of(uint32_t(i)), ticket{i});
+         tx.upsert("plain", "bytes");
+         auto r1 = tx.open_root(1);
+         tx.commit();
+      }
+      {
+         // a second root that shares the first one's tree
+         auto tx = ws->start_transaction(1);
+         tx.primary().set_root(ws->get_root(0));
+         tx.commit();
+      }
+      auto tx = ws->start_transaction(0);  // never committed
+      for (uint64_t i = 500; i < 600; ++i)
+         tx.upsert(key_of(uint32_t(i)), ticket{i});
+      ::kill(::getpid(), SIGKILL);
+      ::_exit(1);
+   }
+   int status = 0;
+   ::waitpid(pid, &status, 0);
+   REQUIRE(WIFSIGNALED(status));
+   auto db = database::open(tmp.path, psitri::open_mode::open_existing, cfg);
+   REQUIRE(db->recovered_on_open());
+   REQUIRE(db->typed_values_found_by_recovery() == 500);  // shared by two roots, counted once
+   db->register_value_types<ticket>();
+   auto ws = db->start_write_session();
+   {
+      auto tx = ws->start_transaction(0);
+      for (uint64_t i = 0; i < 500; ++i)
+      {
+         const auto v = tx.get_any(key_of(uint32_t(i)));
+         REQUIRE(v.is<ticket>());
+         REQUIRE(v.as<ticket>().id == i);
+      }
+      REQUIRE_FALSE(tx.get_any(key_of(550)));
+      tx.abort();
+   }
+   ws.reset();
+   audit(*db);
+   db.reset();
+   // a clean close and open reports nothing to reconcile
+   db = database::open(tmp.path, psitri::open_mode::open_existing, cfg);
+   REQUIRE_FALSE(db->recovered_on_open());
+   REQUIRE(db->typed_values_found_by_recovery() == 0);
+}

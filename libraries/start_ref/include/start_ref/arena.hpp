@@ -48,6 +48,7 @@
 #include <vector>
 
 #include <sal/block_allocator.hpp>
+#include <sal/durable_io.hpp>
 #include <sal/mapping.hpp>
 
 #include <start_ref/config.hpp>
@@ -1566,7 +1567,12 @@ namespace start_ref
          {
             const size_t off = size_t(run_start) * disk_page_bytes;
             const size_t len = size_t(end_incl - uint32_t(run_start) + 1) * disk_page_bytes;
-            ::msync(segbase + off, len, flags);
+            // As every other flush of the store (sal::mapping::sync, the
+            // data file's fsync): an interrupted call is retried, and a
+            // failed one ends the process with sal::durable_io_failure_exit_code
+            // before the commit can return or a root be stored over pages
+            // that may not have been written.
+            sal::durable_msync(segbase + off, len, flags);
             _stats.sync_calls.fetch_add(1, std::memory_order_relaxed);
             synced += len;
          };

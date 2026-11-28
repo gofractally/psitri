@@ -30,6 +30,15 @@ if(Catch2_FOUND)
     set_target_properties(small-engine-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME small-engine-tests COMMAND small-engine-tests)
 
+    # Small Engine under the process-death model: the engine's crash markers
+    # (START_REF_CRASH_POINT) exist only in this target's translation unit.
+    add_executable(small-engine-crash-tests api/small_engine_crash.cpp)
+    target_compile_definitions(small-engine-crash-tests PRIVATE START_REF_CRASH_POINTS)
+    target_link_libraries(small-engine-crash-tests PRIVATE psitri::api psitri::small Catch2::Catch2WithMain ${CMAKE_DL_LIBS})
+    set_target_properties(small-engine-crash-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME small-engine-crash-tests COMMAND small-engine-crash-tests)
+    set_tests_properties(small-engine-crash-tests PROPERTIES TIMEOUT 900)
+
     # The same writer and reader cases on the engines layered over others.
     if(TARGET psitri)
         add_executable(layered-conformance-tests api/layered.cpp)

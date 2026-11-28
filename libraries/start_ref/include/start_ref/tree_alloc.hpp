@@ -245,8 +245,12 @@ namespace start_ref
                      [&](line_idx)
                      {
                         d();  // object died: fire the leaf-dies hook once
+                        // The tail grains carry the count of one they were
+                        // allocated with (only the head is ever shared): they
+                        // are released, not just freed, so that no free grain
+                        // is left with a count.
                         if (units > 1)
-                           la->free_lines_now(grain + 1, units - 1);
+                           la->release_run(grain + 1, units - 1);
                      });
       }
    };

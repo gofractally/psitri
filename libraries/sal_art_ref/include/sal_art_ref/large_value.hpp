@@ -121,6 +121,7 @@ namespace sal_art_ref
          auto head = ses.smart_alloc<key_val_node>(
              sal::alloc_hint{}, key, value.first(placement.first_size), type,
              uint32_t(value.size()), std::span<const chunk_entry>(entries));
+         SAL_CRASH_POINT("large:head_allocated");
          auto pin = ses.lock();
          auto ref = ses.get_ref<key_val_node>(head.address());
          assert(!ses.is_read_only(head.address()));
@@ -136,7 +137,9 @@ namespace sal_art_ref
                 i + 1 < entries.size() ? entries[i + 1].start : uint32_t(value.size());
             auto child =
                 ses.smart_alloc<value_chunk>(sal::alloc_hint{}, value.subspan(start, end - start));
+            SAL_CRASH_POINT("large:chunk_allocated");
             directory[i].child = child.take();
+            SAL_CRASH_POINT("large:chunk_linked");
          }
          return head.take();
       }

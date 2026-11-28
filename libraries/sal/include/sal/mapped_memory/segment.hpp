@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <sal/config.hpp>
 #include <sal/control_block_alloc.hpp>
+#include <sal/crash_point.hpp>
 #include <sal/debug.hpp>
 #include <sal/debug/free_range_tracker.hpp>
 #include <sal/mapping.hpp>
@@ -373,6 +374,7 @@ namespace sal
             // the eventual set_alloc_pos at sync/finalize.
             uint32_t pos = _alloc_pos_LOCKED.load(std::memory_order_relaxed);
             auto result  = new (data + pos) T(size, std::forward<decltype(args)>(args)...);
+            SAL_CRASH_POINT("segment:object_constructed");
             // Lock the tracker around {alloc_pos bump + mark_alloc} so a
             // concurrent verifier observation cannot land between them.
             SAL_TRACK_LOCK();

@@ -9,6 +9,7 @@
 #include <sal/alloc_header.hpp>
 #include <sal/block_allocator.hpp>
 #include <sal/control_block_alloc.hpp>
+#include <sal/crash_point.hpp>
 #include <sal/implicit_ref_pool.hpp>
 #include <sal/debug/free_range_tracker.hpp>
 #include <sal/mapped_memory/allocator_state.hpp>
@@ -418,6 +419,7 @@ namespace sal
          std::shared_lock<std::shared_mutex> lock(_root_object_mutex[*ro]);
          auto tid = _root_objects->at(*ro).load(std::memory_order_acquire);
          SAL_TRACE("get root object: {} adr: {}", ro, tid.root);
+         SAL_CRASH_POINT("root:get_loaded");
          if (tid.root != null_ptr_address)
             retain(tid.root);
          return tid;
@@ -441,8 +443,10 @@ namespace sal
       {
          std::lock_guard<std::mutex>        wlock(_write_mutex[*ro]);
          std::lock_guard<std::shared_mutex> rlock(_root_object_mutex[*ro]);
+         SAL_CRASH_POINT("root:store_before");
          auto result = _root_objects->at(*ro).exchange(tid, root_version,
                                                        std::memory_order_release);
+         SAL_CRASH_POINT("root:store_after");
          sync(st);
          return result;
       }
@@ -591,8 +595,10 @@ namespace sal
          {
             auto packed = tid.pack();
             version.store(root_version, std::memory_order_relaxed);
+            SAL_CRASH_POINT("root:record_version_stored");
             check.store(root_object_check(packed, root_version),
                         std::memory_order_relaxed);
+            SAL_CRASH_POINT("root:record_check_stored");
             return tree_id::unpack(tree.exchange(packed, order));
          }
 
@@ -937,10 +943,13 @@ namespace sal
             segnum = _mapped_state->_segment_provider.ready_unpinned_segments.pop();
          }
          auto shp = get_segment(segnum);
+         SAL_CRASH_POINT("segment:popped");
          shp->age_accumulator.reset(*sal::get_current_time_msec());
          shp->_provider_sequence = _mapped_state->_segment_provider._next_alloc_seq.fetch_add(
              1, std::memory_order_relaxed);
+         SAL_CRASH_POINT("segment:sequenced");
          _mapped_state->_segment_data.allocated_by_session(segnum);
+         SAL_CRASH_POINT("segment:claimed");
          // Drop any tracker entries from the segment's prior life so a fresh
          // session starts with a clean accounting.
          SAL_TRACK_SEG_RESET(shp, segment_size);

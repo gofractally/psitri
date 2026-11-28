@@ -10,6 +10,7 @@
 #include <optional>
 #include <sal/block_allocator.hpp>
 #include <sal/control_block.hpp>
+#include <sal/crash_point.hpp>
 #include <sal/debug.hpp>
 #include <sal/mapping.hpp>
 #include <sal/numbers.hpp>
@@ -404,6 +405,7 @@ namespace sal
                continue;
             }
             ptr_address    ptr(flblock * 64 + index);
+            SAL_CRASH_POINT("cb:bit_claimed");
             control_block& p = _ptr_base[*ptr];
             return allocation{{ptr, _header_ptr->inc_alloc_count(ptr)}, &p};
          }
@@ -446,6 +448,7 @@ namespace sal
          assert(_ptr_base[*address].ref() == 0);
 
          release_address(address);
+         SAL_CRASH_POINT("cb:bit_released");
          _header_ptr->dec_alloc_count(address);
       }
 

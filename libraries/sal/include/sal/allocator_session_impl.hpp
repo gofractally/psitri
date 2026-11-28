@@ -100,12 +100,15 @@ namespace sal
       static_assert(std::is_base_of_v<alloc_header, T>, "T must derive from alloc_header");
 
       allocation palloc = _ptr_alloc.alloc(hint);
+      SAL_CRASH_POINT("alloc:cb_claimed");
 
       auto [loc, node_ptr] =
           alloc_data<T>(size, palloc.addr_seq, std::forward<decltype(args)>(args)...);
+      SAL_CRASH_POINT("alloc:data_written");
 
       palloc.ptr->store(control_block_data().set_loc(loc).set_ref(1),
                         std::memory_order_release);
+      SAL_CRASH_POINT("alloc:cb_stored");
 
       return palloc.addr_seq.address;
    }
@@ -139,8 +142,10 @@ namespace sal
       auto [loc, node_ptr] =
           alloc_data<To>(size, from->address_seq(), std::forward<decltype(args)>(args)...);
       assert(loc != from.loc());
+      SAL_CRASH_POINT("realloc:data_written");
 
       control_block_data old_control = from.control().move(loc);
+      SAL_CRASH_POINT("realloc:redirected");
       // Some tree algorithms take one transient lifetime retain while cascading a
       // unique remove, then still relocate the same logical object. That extra
       // retain is not a second published owner; it is released before the mutation
@@ -203,7 +208,9 @@ namespace sal
 
       _sega.type_ops(ptr.obj()).active_copy_to(ptr.obj(), node_ptr, get_session_ptr());
 
+      SAL_CRASH_POINT("cow:copied");
       auto old_cached = ptr._control.move(loc);
+      SAL_CRASH_POINT("cow:redirected");
       record_freed_space(get<alloc_header>(old_cached.loc()), "session_move");
       ptr._cached = old_cached;
       ptr._obj    = node_ptr;
@@ -406,7 +413,10 @@ namespace sal
       auto& cb = get(adr);
       // Others still own it: one decrement and done.
       if (cb.release_if_shared())
+      {
+         SAL_CRASH_POINT("release:shared_decremented");
          return;
+      }
       // We hold the ONLY reference, so no other thread can hold or acquire one and the count
       // stays at 1 until this thread changes it. It must not reach zero before the object's
       // bytes are safe from recycling: the compactor treats a zero count as already freed and
@@ -437,6 +447,7 @@ namespace sal
             probe(cb, true);
          if (_release_queue.try_push(adr)) [[likely]]
          {
+            SAL_CRASH_POINT("release:queued");
 #ifdef SAL_RELEASE_DEBUG_COUNTERS
             ++g_sal_spill_push;
             g_sal_producer_queue   = (uint64_t)&_release_queue;
@@ -468,7 +479,9 @@ namespace sal
       if (auto probe = detail::release_last_reference_probe.load(std::memory_order_relaxed))
           [[unlikely]]
          probe(cb, false);
+      SAL_CRASH_POINT("release:before_last_decrement");
       auto prev = cb.release();
+      SAL_CRASH_POINT("release:at_zero");
 
       // Destroy `adr` via the fast templated per-tier destroy (NOT the std::function vtable
       // visit_children) — it releases each child through release() above, so the cascade unwinds
@@ -477,11 +490,14 @@ namespace sal
       allocator_session_ptr ses_ptr(this);
       const alloc_header*   node = get<alloc_header>(prev.loc());
       _sega.type_ops(node).destroy(node, ses_ptr);
+      SAL_CRASH_POINT("release:children_released");
       record_freed_space(node, "release_destroy");
+      SAL_CRASH_POINT("release:space_freed");
 #ifdef SAL_RELEASE_DEBUG_COUNTERS
       ++g_sal_inline_destroy;
 #endif
       _ptr_alloc.free(adr);
+      SAL_CRASH_POINT("release:cb_freed");
 
       if (top)
       {
@@ -497,6 +513,7 @@ namespace sal
       bool  custom = is_custom_cb(pre);
 
       auto  prev = cb.release();
+      SAL_CRASH_POINT("final_release:decremented");
 #ifdef SAL_RELEASE_DEBUG_COUNTERS
       ++g_sal_final_release;
       if (prev.ref > 1)
@@ -515,7 +532,9 @@ namespace sal
 
             const alloc_header* nptr = get<alloc_header>(loc);
             _sega.type_ops(nptr).destroy(nptr, ptr);
+            SAL_CRASH_POINT("final_release:children_released");
             record_freed_space(nptr, "release_destroy");
+            SAL_CRASH_POINT("final_release:space_freed");
 #ifdef SAL_RELEASE_DEBUG_COUNTERS
             ++g_sal_final_destroy;
 #endif
@@ -531,6 +550,7 @@ namespace sal
          _sega._on_custom_cb_released(pre.cacheline_offset);
       }
       _ptr_alloc.free(adr);
+      SAL_CRASH_POINT("final_release:cb_freed");
    }
 
    /// called by the allocator_session_ptr destructor to release the session,
@@ -549,6 +569,7 @@ namespace sal
    smart_ptr<T> allocator_session::get_root(root_object_number ro) noexcept
    {
       auto tid = _sega.get(ro);
+      SAL_CRASH_POINT("root:get_retained");
       return smart_ptr<T>(allocator_session_ptr(this, true), tid.root, false);
    }
 
@@ -579,8 +600,11 @@ namespace sal
    {
       tree_id new_tid{ptr.take()};
       auto root_info = make_sync_root_info(*this, ro, new_tid);
+      SAL_CRASH_POINT("root:publish_begin");
       sync(st, _sega._mapped_state->_config, root_info);
+      SAL_CRASH_POINT("root:publish_synced");
       auto old_tid = _sega.set(ro, new_tid, st, root_info.root_version);
+      SAL_CRASH_POINT("root:publish_stored");
       return smart_ptr<T>(allocator_session_ptr(this, true), old_tid.root, false);
    }
 
@@ -639,6 +663,7 @@ namespace sal
       if (_nested_read_lock++)
          return;
       _session_rlock.lock();
+      SAL_CRASH_POINT("rlock:locked");
    }
    inline void allocator_session::release_read_lock() noexcept
    {
@@ -646,6 +671,7 @@ namespace sal
       if (--_nested_read_lock)
          return;
       _session_rlock.unlock();
+      SAL_CRASH_POINT("rlock:unlocked");
    }
 
    inline uint64_t allocator_session::get_total_allocated_objects() const noexcept

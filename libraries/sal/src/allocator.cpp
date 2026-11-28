@@ -386,6 +386,7 @@ namespace sal
       // otherwise block the segment provider from draining the recycled-segments
       // queue, eventually causing a circular_buffer overflow in the compactor.
       _mapped_state->_read_lock_queue.reset_all_session_locks();
+      SAL_CRASH_POINT("open:process_state_reset");
 
       mlock_pinned_segments();
 
@@ -395,6 +396,7 @@ namespace sal
          provider_populate_pinned_segments();
          provider_populate_unpinned_segments();
       }
+      SAL_CRASH_POINT("open:provider_populated");
       if (start_threads_now && !_read_only)
          start_background_threads();
    }
@@ -425,9 +427,12 @@ namespace sal
 
    allocator::~allocator()
    {
+      SAL_CRASH_POINT("close:begin");
       stop_background_threads();
+      SAL_CRASH_POINT("close:threads_stopped");
       if (!_read_only)
          drain_releases_stopped();
+      SAL_CRASH_POINT("close:releases_drained");
       // The utility session releases its session slot through mapped state.
       // Destroy it before member teardown unmaps that state.
       _utility_ses = allocator_session_ptr(nullptr);
@@ -438,7 +443,9 @@ namespace sal
       assert(_mapped_state->_session_data.active_session_count() == 0 &&
              "a session, tree or cursor outlived its database");
       truncate_free_tail_stopped();
+      SAL_CRASH_POINT("close:tail_truncated");
       sync_control_state(_close_sync);
+      SAL_CRASH_POINT("close:control_synced");
       free_allocator_index(_allocator_index);
    }
 
@@ -457,6 +464,7 @@ namespace sal
          provider_state.free_segments.set(*(*seg));
       while (auto seg = provider_state.ready_unpinned_segments.try_pop())
          provider_state.free_segments.set(*(*seg));
+      SAL_CRASH_POINT("close:ready_queues_returned");
 
       uint32_t num_segs  = _block_alloc.num_blocks();
       uint32_t new_count = num_segs;
@@ -484,7 +492,9 @@ namespace sal
                num_segs, new_count,
                (num_segs - new_count) * (segment_size / (1024 * 1024)));
 
+      SAL_CRASH_POINT("close:before_truncate");
       _block_alloc.truncate(new_count);
+      SAL_CRASH_POINT("close:truncated");
    }
 
    void allocator::truncate_free_tail()
@@ -608,6 +618,7 @@ namespace sal
       }
 
       auto prev = cb->retain();
+      SAL_CRASH_POINT("recover:reference_counted");
       auto& visited = *static_cast<recovery_visit_set*>(visited_ptr);
       if (!visited.first_visit(addr))
          return;
@@ -645,7 +656,10 @@ namespace sal
    {
       _recovery_unresolved = 0;
       if (_recovery.walk)
+      {
          _iref.clear_all();
+         SAL_CRASH_POINT("recover:range_counters_cleared");
+      }
       else if (_iref.used() != 0)
          throw std::runtime_error(
              "sal: this store has shared branch-set counters; its engine must install a "
@@ -665,6 +679,7 @@ namespace sal
       provider.ready_unpinned_segments.clear();
       _mapped_state->_read_lock_queue.reset_recycled_segments();
       _mapped_state->_read_lock_queue.reset_all_session_locks();
+      SAL_CRASH_POINT("recover:provider_state_cleared");
 
       const uint32_t num_segs  = _block_alloc.num_blocks();
       uint32_t       with_data = 0;
@@ -699,6 +714,7 @@ namespace sal
             // Nothing references this segment. Return its blocks where the
             // platform can, and leave a header later scans read as unused.
             _block_alloc.punch_hole(block_allocator::block_number(i));
+            SAL_CRASH_POINT("recover:segment_emptied");
             if (seg->get_alloc_pos() != 0)
                seg->set_alloc_pos(0);
             if (seg->_first_writable_page.load(std::memory_order_relaxed) != 0)
@@ -709,6 +725,7 @@ namespace sal
                seg->_last_aheader_pos = 0;
             provider.free_segments.set(i);
             seg_data.recovered_free(num);
+            SAL_CRASH_POINT("recover:segment_freed");
             continue;
          }
 
@@ -723,6 +740,7 @@ namespace sal
             seg->_first_writable_page.store(pages_per_segment, std::memory_order_relaxed);
          seg_data.recovered_with_data(num, seg->age_accumulator.average(),
                                       static_cast<uint32_t>(seg->end_pos() - live));
+         SAL_CRASH_POINT("recover:segment_kept");
          ++with_data;
       }
       SAL_WARN("rebuild_segment_metadata: {} segments hold live data, {} are free", with_data,
@@ -1084,8 +1102,10 @@ namespace sal
       SAL_WARN("Resetting reference counts...");
 
       stop_background_threads();
+      SAL_CRASH_POINT("recover:begin");
 
       _ptr_alloc.reset_all_refs();
+      SAL_CRASH_POINT("recover:counts_reset");
 
       begin_recovery_walk();
       recovery_visit_set visited(_ptr_alloc.current_max_address_count());
@@ -1093,17 +1113,24 @@ namespace sal
       {
          auto tid = _root_objects->at(i).load(std::memory_order_relaxed);
          if (tid.root != null_ptr_address)
+         {
+            SAL_CRASH_POINT("recover:walk_root");
             recursive_retain_all(tid.root, &visited);
+         }
       }
 
       finish_recovery_walk();
+      SAL_CRASH_POINT("recover:walk_finished");
       _ptr_alloc.release_unreachable();
+      SAL_CRASH_POINT("recover:unreachable_released");
 
       if (_recovery.rebuild_segment_metadata)
       {
          rebuild_segment_metadata();
+         SAL_CRASH_POINT("recover:segments_rebuilt");
          provider_populate_pinned_segments();
          provider_populate_unpinned_segments();
+         SAL_CRASH_POINT("recover:provider_populated");
       }
       if (_recovery.restart_threads)
          start_background_threads();
@@ -1639,6 +1666,7 @@ namespace sal
       for (ptr_address adr : q)
       {
          ses.release(adr);
+         SAL_CRASH_POINT("release_thread:posted_applied");
          _post_release_pending.fetch_sub(1, std::memory_order_release);
       }
       return !q.empty();
@@ -1667,6 +1695,7 @@ namespace sal
                   sesr.retain_read_lock();
                   sesr.final_release(read_ids[i]);
                   sesr.release_read_lock();
+                  SAL_CRASH_POINT("close:queued_release_done");
                }
             }
          }
@@ -1697,6 +1726,8 @@ namespace sal
             _release_in_flight.store(1, std::memory_order_release);
             auto num_loaded = rqueue.pop(read_ids, 1024);
             _release_in_flight.store(num_loaded, std::memory_order_release);
+            if (num_loaded)
+               SAL_CRASH_POINT("release_thread:popped");
             for (uint32_t i = 0; i < num_loaded; ++i)
             {
                // Fine-grained read lock prevents the compactor from recycling
@@ -1706,6 +1737,7 @@ namespace sal
                sesr.retain_read_lock();
                sesr.final_release(read_ids[i]);
                sesr.release_read_lock();
+               SAL_CRASH_POINT("release_thread:released_one");
                _release_in_flight.store(num_loaded - i - 1, std::memory_order_release);
             }
          }
@@ -2006,6 +2038,7 @@ namespace sal
       auto        state = ses.lock();
       const auto* s     = get_segment(seg_num);
       const auto* shead = (const mapped_memory::segment*)s;
+      SAL_CRASH_POINT("compact:begin");
 
       // Runtime guard (not just assert, which is gone in release): only ever
       // walk a segment the writer has frozen. A non-read-only segment may still
@@ -2072,8 +2105,10 @@ namespace sal
          auto compact_size = ops.compact_size(nh);
          auto [loc, head] = ses.alloc_data_vage<alloc_header>(compact_size, vage,
                                                               nh->type(), nh->address_seq());
+         SAL_CRASH_POINT("compact:destination_allocated");
          pending_release_list pending_releases(pending_storage);
          ops.passive_compact_to(nh, head, pending_releases);
+         SAL_CRASH_POINT("compact:copied");
          // update checksum if needed, because the user may
          // have used config::update_checksum_on_upsert = false
          // to get better user performance and offload the checksum
@@ -2090,8 +2125,10 @@ namespace sal
             return;
          }
 
+         SAL_CRASH_POINT("compact:before_redirect");
          if (obj_ref.control().cas_move(obj_ref.loc(), loc))
          {
+            SAL_CRASH_POINT("compact:redirected");
 #if PSITRI_DEEP_INVARIANTS
             // Diagnostic: the cas succeeded against the LIVE control, but every
             // guard above ran on the smart_ref's CACHED snapshot. If the source
@@ -2109,6 +2146,7 @@ namespace sal
             }
 #endif
             ses.record_freed_space(obj_ref.obj(), "compactor_segment_move");
+            SAL_CRASH_POINT("compact:source_space_freed");
             release_pending_relocation_refs(ses, pending_releases);
          }
          else
@@ -2142,12 +2180,15 @@ namespace sal
       {
          auto compact_cfg = _mapped_state->_config;
          compact_cfg.checksum_on_commit = compact_cfg.checksum_on_compact;
+         SAL_CRASH_POINT("compact:all_moved");
          ses.sync(_mapped_state->_config.sync_mode, compact_cfg);
+         SAL_CRASH_POINT("compact:destination_synced");
       }
 
       // ensures that the segment will not get selected for compaction again until
       // after it is reused by the provider thread.
       _mapped_state->_segment_data.added_to_read_lock_queue(seg_num);
+      SAL_CRASH_POINT("compact:source_pending");
 
       if (left_behind)
       {
@@ -2165,6 +2206,7 @@ namespace sal
 
       //   ARBTRIE_DEBUG("pushing recycled segment: ", seg_num);
       _mapped_state->_read_lock_queue.push_recycled_segment(seg_num);
+      SAL_CRASH_POINT("compact:source_queued");
    }
 
    // called when a segment is being prepared for use by the provider thread
@@ -2382,10 +2424,14 @@ namespace sal
          // holes to release disk space and commit charge immediately.
          for (int i = 0; i < popped; ++i)
          {
+            SAL_CRASH_POINT("provider:recycled_taken");
             _block_alloc.punch_hole(
                 block_allocator::block_number(*segs[i]));
+            SAL_CRASH_POINT("provider:recycled_emptied");
             provider_state.free_segments.set(*segs[i]);
+            SAL_CRASH_POINT("provider:recycled_bit_set");
             _mapped_state->_segment_data.added_to_free_segments(segs[i]);
+            SAL_CRASH_POINT("provider:recycled_freed");
          }
       }
    }
@@ -2424,6 +2470,7 @@ namespace sal
       if (provider_state.ready_pinned_segments.usage() > 4)
          return;
       // prioritize segments that are free and pinned
+      SAL_CRASH_POINT("provider:take_free");
       std::optional<segment_number> free_pinned_seg = find_first_free_and_pinned_segment();
 
       segment_number seg_num;
@@ -2445,12 +2492,16 @@ namespace sal
             seg_num = provider_allocate_new_segment();
       }
 
+      SAL_CRASH_POINT("provider:taken");
       provider_prepare_segment(seg_num, true /* pin it*/);
+      SAL_CRASH_POINT("provider:prepared");
       // Mark it queued BEFORE it can be popped: once it is in the queue a
       // session may take it at once and mark it active, and a later store of
       // `queued` here would overwrite that.
       _mapped_state->_segment_data.added_to_provider_queue(seg_num);
+      SAL_CRASH_POINT("provider:marked_queued");
       provider_state.ready_pinned_segments.push(seg_num);
+      SAL_CRASH_POINT("provider:pushed");
    }
    void allocator::provider_populate_unpinned_segments()
    {
@@ -2458,17 +2509,23 @@ namespace sal
       if (provider_state.ready_unpinned_segments.usage() > 2)
          return;
 
+      SAL_CRASH_POINT("provider:take_free");
       segment_number seg_num{provider_state.free_segments.unset_first_set()};
       if (seg_num == provider_state.free_segments.invalid_index)
          seg_num = provider_allocate_new_segment();
+      SAL_CRASH_POINT("provider:taken");
       provider_prepare_segment(seg_num, false /* don't pin it*/);
+      SAL_CRASH_POINT("provider:prepared");
       _mapped_state->_segment_data.added_to_provider_queue(seg_num);
+      SAL_CRASH_POINT("provider:marked_queued");
       provider_state.ready_unpinned_segments.push(seg_num);
+      SAL_CRASH_POINT("provider:pushed");
    }
 
    segment_number allocator::provider_allocate_new_segment()
    {
       auto [block_num, offset] = _block_alloc.alloc();
+      SAL_CRASH_POINT("provider:file_grown");
       return segment_number(*block_num);
    }
 
@@ -2526,6 +2583,7 @@ namespace sal
          }
       }
       auto shp = new (sp) mapped_memory::segment();
+      SAL_CRASH_POINT("provider:header_reset");
       shp->set_alloc_pos(0);
       shp->_first_writable_page = 0;
       shp->_session_id          = allocator_session_number(-1);

@@ -161,6 +161,16 @@ namespace sal
             flags.store(read_only, std::memory_order_release);
          }
          /// Recovery: a segment holding no live object is free for reuse.
+         /// A segment the provider had taken from the free map, or prepared and queued,
+         /// and that no session has claimed: it holds nothing. (The free map's bit is set
+         /// before `free` is stored here and `queued` is stored before the push, so at any
+         /// instant a segment in either state is one no session has written to since.)
+         bool is_unclaimed() const
+         {
+            const uint32_t state = flags.load(std::memory_order_relaxed) & ~uint32_t(pinned);
+            return state == free || state == queued;
+         }
+         void returned_to_free() { enter(free); }
          void recovered_free()
          {
             vage.store(0, std::memory_order_relaxed);
@@ -250,6 +260,8 @@ namespace sal
             meta[*segment].recovered_with_data(vage, freed);
          }
          void recovered_free(segment_number segment) { meta[*segment].recovered_free(); }
+         bool is_unclaimed(segment_number segment) const { return meta[*segment].is_unclaimed(); }
+         void returned_to_free(segment_number segment) { meta[*segment].returned_to_free(); }
          void allocated_by_session(segment_number segment)
          {
             //        ARBTRIE_INFO("allocated: ", segment);

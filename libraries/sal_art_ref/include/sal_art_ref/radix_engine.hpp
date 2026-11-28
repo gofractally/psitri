@@ -2217,21 +2217,28 @@ namespace sal_art_ref::radix
          // full: the caller splits and retries with a new record) must die without firing
          // the type's release hook: the value was never stored, and the reference it would
          // have carried is still the caller's until an upsert succeeds.
-         struct unadopted_typed
+         // The same holds for a record built for a subtree (a subtree at a key whose suffix
+         // does not fit a page record): destroying it as a subtree record would release the
+         // subtree's root, which is still the caller's (attach_subtree_step holds it) and
+         // which the retry stores again. The root would be one reference short, or already
+         // destroyed, when the retried record is published.
+         struct unadopted_owner
          {
             radix_tree*                        tree;
             sal::smart_ptr<sal::alloc_header>& record;
-            bool                               typed;
-            ~unadopted_typed()
+            bool                               owns;
+            ~unadopted_owner()
             {
-               if (typed && record)
+               if (owns && record)
                   tree->_ses->template get_ref<key_val_node>(record.address())
                       .modify()
                       .get()
                       ->value_type = inline_value::vt_bytes;
             }
          } unadopted{this, pending,
-                     _ins_value_type == inline_value::vt_typed && ins.ext != sal::null_ptr_address};
+                     (_ins_value_type == inline_value::vt_typed ||
+                      _ins_value_type == inline_value::vt_subtree) &&
+                         ins.ext != sal::null_ptr_address};
          if (idx >= 0)  // UPDATE — capture the displaced record's identity first
          {
             const inline_value* old       = pg->record(uint32_t(idx));

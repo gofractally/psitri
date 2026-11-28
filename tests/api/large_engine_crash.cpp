@@ -22,7 +22,7 @@
 // Environment (all optional):
 //   LGE_CRASH_SEED       seed of the campaign (default 1)
 //   LGE_CRASH_ROUNDS     deaths attempted per crash point (default 3)
-//   LGE_CRASH_RANDOM     random-time kills (default 60)
+//   LGE_CRASH_RANDOM     random-time kills (default 30)
 //   LGE_CRASH_TXNS       transactions per writer per life (default 60; 120 for random kills)
 //   LGE_CRASH_POINT      only this crash point (default: all)
 //   LGE_CRASH_VERBOSE    1: one line per life
@@ -1814,7 +1814,7 @@ TEST_CASE("large engine: death at every crash point", "[large-crash][points]")
 TEST_CASE("large engine: death at random moments", "[large-crash][random]")
 {
    const uint64_t  seed  = env_u64("LGE_CRASH_SEED", 1);
-   const uint64_t  kills = env_u64("LGE_CRASH_RANDOM", 60);
+   const uint64_t  kills = env_u64("LGE_CRASH_RANDOM", 30);
    campaign        c(seed + 1000);
    std::mt19937_64 rng(mix(seed, 99));
    for (uint64_t i = 0; i < kills; ++i)

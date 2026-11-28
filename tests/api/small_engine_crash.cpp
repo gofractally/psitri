@@ -1246,3 +1246,298 @@ TEST_CASE("Small Engine: a process killed while a store is created or grows lose
                (unsigned long long)deaths, (unsigned long long)trims,
                (unsigned long long)regrow_deaths);
 }
+
+// ── is committed data ever written in place? ───────────────────────────────
+// The model stands on one property: between two root stores, no byte that a
+// published root reaches is changed. The writer does change nodes in place
+// when it holds the only reference to them, so the property is that a node
+// (or one line of a node of several lines) reachable from a root slot is
+// never in that state. `frozen` records a checksum of every line and every
+// large-value grain reachable from the sixteen root slots; intact() says
+// whether all of them still read the same.
+namespace
+{
+   uint64_t checksum(const void* p, size_t n)
+   {
+      const auto* b = static_cast<const unsigned char*>(p);
+      uint64_t    h = 0x9E3779B97F4A7C15ull;
+      for (size_t i = 0; i + 8 <= n; i += 8)
+      {
+         uint64_t w;
+         std::memcpy(&w, b + i, 8);
+         h = (h ^ w) * 0xFF51AFD7ED558CCDull;
+         h ^= h >> 32;
+      }
+      return h;
+   }
+   struct frozen
+   {
+      database*                              db = nullptr;
+      std::vector<std::pair<uint32_t, uint64_t>> lines, grains;
+      std::string                            damage;
+
+      void take(database& d)
+      {
+         db = &d;
+         lines.clear(), grains.clear();
+         const census c = walk_roots(d);
+         for (const auto& [i, refs] : c.line_refs)
+            lines.emplace_back(i, checksum(d.store().get(i), start_ref::line_bytes));
+         for (const auto& [g, refs] : c.grain_refs)
+            grains.emplace_back(g, checksum(d.large_store().get(g), start_ref::large_grain_bytes));
+      }
+      bool intact()
+      {
+         for (const auto& [i, sum] : lines)
+            if (checksum(db->store().get(i), start_ref::line_bytes) != sum)
+            {
+               damage = "line " + std::to_string(i);
+               return false;
+            }
+         for (const auto& [g, sum] : grains)
+            if (checksum(db->large_store().get(g), start_ref::large_grain_bytes) != sum)
+            {
+               damage = "large-value grain " + std::to_string(g);
+               return false;
+            }
+         return true;
+      }
+   };
+
+   // A transaction (or root handle) that checks after every single operation.
+   template <class Tx>
+   struct watched
+   {
+      Tx&         tx;
+      frozen&     ice;
+      std::string where;
+      void        look(const char* op, std::string_view key)
+      {
+         if (!ice.intact())
+            throw std::runtime_error("committed data changed in place: " + ice.damage +
+                                     " during " + op + " of '" + std::string(key.substr(0, 24)) +
+                                     "' (" + where + ")");
+      }
+      void upsert(std::string_view k, std::string_view v)
+      {
+         tx.upsert(k, v);
+         look("upsert", k);
+      }
+      int remove(std::string_view k)
+      {
+         const int r = tx.remove(k);
+         look("remove", k);
+         return r;
+      }
+      uint64_t remove_range_counted(std::string_view a, std::string_view b)
+         requires requires(Tx& t) { t.remove_range_counted(a, b); }
+      {
+         const uint64_t n = tx.remove_range_counted(a, b);
+         look("range remove", a);
+         return n;
+      }
+   };
+
+   struct in_place_stats
+   {
+      uint64_t commits = 0, aborts = 0, stashes = 0, reverts = 0, old_snapshots = 0, pairs = 0,
+               checks = 0, reopened_clean = 0, reopened_killed = 0;
+   };
+
+   // `rounds` transactions of every kind on an open store, checking that the
+   // published bytes stand still until each root store.
+   void write_and_watch(database& db, uint64_t seed, uint64_t rounds, const profile& prof,
+                        in_place_stats& st)
+   {
+      std::mt19937_64 rng(seed);
+      auto            sessions = {db.start_write_session(), db.start_write_session()};
+      auto            rs       = db.start_read_session();
+      frozen          ice;
+      ice.take(db);
+      {
+         // the detector detects: one byte of one published line, put back
+         if (!ice.lines.empty())
+         {
+            auto* p = static_cast<unsigned char*>(db.store().get(ice.lines.front().first)) + 77;
+            *p ^= 0x40;
+            REQUIRE_FALSE(ice.intact());
+            *p ^= 0x40;
+         }
+         REQUIRE(ice.intact());
+      }
+      auto model_of = [&](uint32_t root) {
+         auto c = rs->create_cursor(root);
+         return scan(c);
+      };
+      std::vector<std::pair<uint32_t, start_ref::kv::tree>> kept;  // old owned snapshots
+      std::vector<std::unique_ptr<engine::cursor>>          readers;
+      for (uint64_t round = 0; round < rounds; ++round)
+      {
+         auto&          ws   = *(sessions.begin() + rng() % 2);
+         const uint32_t r    = uint32_t(rng() % single_roots);
+         const uint32_t what = uint32_t(rng() % 100);
+         const std::string where = "round " + std::to_string(round) + ", root " + std::to_string(r);
+         INFO(where << ", kind " << what);
+         auto still = [&](const char* when) {
+            ++st.checks;
+            if (!ice.intact())
+            {
+               INFO(ice.damage << " changed " << when);
+               REQUIRE(false);
+            }
+         };
+         // readers come and go; old owned snapshots are kept for a while
+         if (rng() % 5 == 0)
+            readers.push_back(std::make_unique<engine::cursor>(rs->create_cursor(uint32_t(rng() % 12))));
+         if (readers.size() > 6 || (!readers.empty() && rng() % 7 == 0))
+            readers.erase(readers.begin() + rng() % readers.size());
+         if (rng() % 6 == 0)
+            kept.emplace_back(r, ws->get_root(r));
+         if (kept.size() > 8)
+            kept.erase(kept.begin() + rng() % kept.size());
+
+         model_map cur = model_of(r);
+         uint64_t  k   = seq_of(cur) + 1;
+         if (what < 10)
+         {
+            // rolled back
+            model_map scratch = cur;
+            auto      tx      = ws->start_transaction(r);
+            watched   w{tx, ice, where};
+            apply_txn(&w, scratch, log_of(cur), seed ^ round, r, k, plain, 0, prof);
+            still("before an abort");
+            tx.abort();
+            still("by an abort");
+            ++st.aborts;
+         }
+         else if (what < 20)
+         {
+            // a second slot takes the same tree
+            auto tx = ws->start_transaction(stash_base + r);
+            tx.primary().set_root(ws->get_root(r));
+            still("by set_root of the live tree into another slot");
+            tx.commit();
+            ice.take(db);
+            ++st.stashes;
+         }
+         else if (what < 32)
+         {
+            // write, replace the root by the stashed or a kept old snapshot, write again
+            model_map base = model_of(stash_base + r);
+            auto      tx   = ws->start_transaction(r);
+            watched   w{tx, ice, where};
+            for (uint32_t j = 0; j < 4; ++j)
+               w.upsert("junk/" + std::to_string(j), std::string(30 + j * 400, 'j'));
+            bool old = false;
+            for (auto it = kept.begin(); it != kept.end(); ++it)
+               if (it->first == r && rng() % 2)
+               {
+                  {
+                     auto c = it->second.snapshot_cursor();
+                     base   = scan(c);
+                  }
+                  tx.primary().set_root(std::move(it->second));
+                  kept.erase(it);
+                  old = true;
+                  break;
+               }
+            if (!old)
+               tx.primary().set_root(ws->get_root(stash_base + r));
+            still("by set_root of an old snapshot");
+            apply_txn(&w, base, log_of(cur), seed ^ round, r, k, revert, seq_of(base), prof);
+            still("by writes on top of an old snapshot");
+            tx.commit();
+            ice.take(db);
+            ++(old ? st.old_snapshots : st.reverts);
+         }
+         else if (what < 44)
+         {
+            // two roots in one transaction; the first root store ends the
+            // watch (the second root is published a moment later)
+            model_map a = model_of(pair_a), b = model_of(pair_b);
+            const uint64_t pk = seq_of(a) + 1;
+            auto           tx = ws->start_transaction(pair_a);
+            auto           hb = tx.open_root(pair_b);
+            watched        wa{tx, ice, where};
+            watched        wb{hb, ice, where};
+            apply_txn(&wa, a, log_of(a), seed ^ round, pair_a, pk, plain, 0, prof);
+            apply_txn(&wb, b, log_of(b), seed ^ round, pair_b, pk, plain, 0, prof);
+            still("by a two-root transaction");
+            tx.commit();
+            ice.take(db);
+            ++st.pairs;
+         }
+         else
+         {
+            auto tx = ws->start_transaction(r);
+            if (round % 3 == 0)
+            {
+               watched w{tx, ice, where};  // after every operation
+               apply_txn(&w, cur, log_of(cur), seed ^ round, r, k, plain, 0, prof);
+            }
+            else
+               apply_txn(&tx, cur, log_of(cur), seed ^ round, r, k, plain, 0, prof);
+            still("by a transaction before its commit");
+            tx.commit();
+            ice.take(db);
+            ++st.commits;
+         }
+      }
+      readers.clear();
+      kept.clear();
+   }
+}  // namespace
+
+// Every kind of transaction, with roots that share nodes, old snapshots put
+// back as roots, readers and owned snapshots held and dropped, two sessions
+// taking turns on the same roots, on a store that is reopened cleanly and
+// reopened after being killed (so that the counts the writer consults were
+// rebuilt by recovery). After every operation that could write: every line
+// and grain the root slots reach still has the bytes it had at the last
+// root store. PSITRI_SMALL_INPLACE_ROUNDS scales it.
+TEST_CASE("Small Engine: nothing a published root reaches is written before the next root store",
+          "[small][crash][inplace]")
+{
+   const uint64_t      rounds = env_u64("PSITRI_SMALL_INPLACE_ROUNDS", 1200);
+   const uint64_t      seed   = env_u64("PSITRI_SMALL_CRASH_SEED", 20261128) + 4;
+   temporary_directory tmp;
+   in_place_stats      st;
+   auto                plan = base_plan(psitri::sync_mode::none, 1024);
+   plan.seed                = seed;
+   plan.prof.keyspace       = 400;  // small trees, checked often; every node kind still occurs
+   plan.prof.chunk_every    = 25;
+   plan.txns                = 25;
+   std::mt19937_64 rng(seed);
+   const uint64_t  phases = 12;
+   for (uint64_t phase = 0; phase < phases; ++phase)
+   {
+      {
+         auto db = database::open(tmp.path, psitri::open_mode::create_or_open, plan.cfg);
+         write_and_watch(*db, seed + phase, rounds / phases, plan.prof, st);
+         db->flush_releases();
+      }
+      if (phase % 2 == 0)
+      {
+         // Other writers, then a kill: the next phase runs on counts that
+         // recovery rebuilt from the root slots.
+         const life_result life = run_life(tmp.path, plan, int64_t(rng() % 20000));
+         REQUIRE((life.killed() || life.finished()));
+         st.reopened_killed += life.killed();
+      }
+      else
+         ++st.reopened_clean;
+      auto db = database::open(tmp.path, psitri::open_mode::open_existing, plan.cfg);
+      audit(*db);
+   }
+   std::printf("in place: %llu commits, %llu aborts, %llu shared-slot stashes, %llu reverts to "
+               "the stash, %llu to older owned snapshots, %llu two-root commits; %llu checks of "
+               "every published byte; reopened after a kill %llu times, cleanly %llu\n",
+               (unsigned long long)st.commits, (unsigned long long)st.aborts,
+               (unsigned long long)st.stashes, (unsigned long long)st.reverts,
+               (unsigned long long)st.old_snapshots, (unsigned long long)st.pairs,
+               (unsigned long long)st.checks, (unsigned long long)st.reopened_killed,
+               (unsigned long long)st.reopened_clean);
+   REQUIRE(st.reverts > 0);
+   REQUIRE(st.old_snapshots > 0);
+   REQUIRE(st.reopened_killed > 0);
+}

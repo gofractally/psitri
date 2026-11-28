@@ -51,6 +51,10 @@ segment is claimed again once an eighth of its 8-line groups are free.
   - what a reader sees of a two-root commit;
   - read-only open refused; second open of an open store refused;
   - more owned snapshots of one version than a writer reference can join.
+  - a failed `msync` of data pages in a flushing mode ends the process with
+    exit code 74 before the root is stored; `sync_mode::mprotect`,
+    `write_protect_on_commit` and `checksum_on_commit` are refused at open
+    (`tests/api/small_engine_crash.cpp`).
 
 ## Open on unclean stop
 
@@ -74,9 +78,6 @@ change to how nodes own their lines has to be made in both.
 - A commit of several roots stores the root slots one after another: a
   process that dies between two stores leaves the earlier roots new and the
   later ones old.
-- A failed data-page `msync` ends the process (exit 74), like every other
-  flush of the store. `sync_mode::mprotect`, `write_protect_on_commit` and
-  `checksum_on_commit` are refused at open (#12).
 - The recovery walk does not cover the compiled-out page layout (#14).
 - Typed values registered with `register_value_types` hold references the
   arena does not know; recovery calls no hooks and reports how many typed

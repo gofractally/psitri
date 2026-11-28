@@ -283,9 +283,16 @@ snapshots; the process is killed at each marked step of commit, release,
 growth, creation, the storage ceiling and its reserve, clean close and
 recovery itself, and at random times; after every death the store is opened,
 compared key by key with a model, and every reference count and free-map bit
-is checked against an independent walk of the roots; then writing continues
-on the same store. A second test checks, after single operations, that no
-byte reachable from a root slot changes before the next root store.
+is checked against a recount of the roots; then writing continues on the same
+store. The recount keeps its own tallies but visits nodes with the engine's
+own walk, so it checks the count bookkeeping, not node decoding; the key by
+key comparison is the check on what is reachable. One case dies at every
+marker the engine has except two of the large-value arena that need about
+2 GiB of large values (`large.segment.release`, `large.segment.sweep_claim`).
+A second test checks, after single operations, before each root store inside
+commit and after commit, that no byte reachable from a root slot, or from a
+version a snapshot or reader holds, has changed. These tests have run on
+macOS arm64.
 `tests/api/small_engine.cpp` kills a single writer at random moments in each
 flushing mode.
 

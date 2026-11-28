@@ -567,12 +567,10 @@ TEST_CASE("Small Engine: storage stays bounded under churn at constant live size
 }
 
 // What the churn test above depends on, without the timing. A reader that is
-// slow to let go of its snapshot keeps that whole version alive; when the
-// writer has made its last commit by then, nothing used to release the
-// version until some later commit, and flush_releases() returned with it
-// still counted as in use (the churn bound failed this way whenever the
-// reader thread was not scheduled for the last few hundred transactions).
-// flush_releases() releases versions no reader holds any more.
+// slow to let go of its snapshot keeps that whole version alive, and the
+// writer may have made its last commit by the time it lets go: no later
+// commit comes to release the version. flush_releases() releases versions
+// no reader holds, so usage() after it counts live data only.
 TEST_CASE("Small Engine: flush_releases gives back a version its last reader has left",
           "[small][churn][retired]")
 {
@@ -1590,13 +1588,11 @@ namespace
    };
 }  // namespace
 
-// A store is full when it has no room, not when the releaser is late. The
-// wait for queued releases used to give up after 16 waits of half a
-// millisecond, so on a machine with more runnable threads than processors
-// (where the releaser can go unscheduled for far longer) a writer was told
-// "storage limit reached" on a store that was an eighth full. This is that
-// situation made certain: the releaser stops for 400 ms with most of the
-// store queued behind it.
+// A store is full when it has no room, not when the releaser is late. On a
+// machine with more runnable threads than processors the releaser can go
+// unscheduled for a long time with most of the store queued behind it; an
+// allocation that finds no room waits for that queue for as long as the
+// releaser advances. Here the releaser stops for 400 ms.
 TEST_CASE("Small Engine: a releaser that is not being scheduled is waited for",
           "[small][limit][releaser][stall]")
 {

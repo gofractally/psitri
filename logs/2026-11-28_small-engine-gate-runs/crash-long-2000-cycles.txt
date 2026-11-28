@@ -1,0 +1,4 @@
+crash campaign none: 2974 lives (960 died at a marker, 441 of those inside recovery or open; 794 killed at a random time; 1220 closed cleanly), 2017 verifications, 736504 transactions kept (38218 of them on a root put back to an older snapshot, 0 after the store refused the write as full), two-root commits found half published 4 times; store 2.7 MiB lines, 27.1 MiB large; 551.2s
+in place: 3315 commits, 614 aborts, 605 shared-slot stashes, 321 reverts to the stash, 457 to older owned snapshots, 688 two-root commits; 68817 checks of every published byte; reopened after a kill 6 times, cleanly 6
+test cases:       3 |       2 passed | 1 failed
+assertions: 1703510 | 1703509 passed | 1 failed

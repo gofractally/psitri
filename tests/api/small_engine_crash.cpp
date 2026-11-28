@@ -12,8 +12,16 @@
 // and kills itself with SIGKILL the n-th time a chosen marker is passed (or
 // the parent kills it at a random moment). The parent then reopens the store
 // with the ordinary engine and checks it against a model, audits every
-// reference count and the free map against an independent walk of the
-// published roots, and the next child carries on writing to the same store.
+// reference count and the free map against a recount of the published roots,
+// and the next child carries on writing to the same store.
+//
+// What the recount is independent of: the engine's stored counts and free
+// maps (it keeps its own tallies). What it is not independent of: it visits
+// nodes with the engine's own walk (kv_tree::recover_mark) and reads chunk
+// directories with the engine's head_view, so an error in how nodes are
+// decoded or in what is reachable would be shared by both sides. The model
+// comparison (every key and value read back through cursors) is the check
+// on that.
 //
 // The second part asks the question the model stands on: is any byte
 // reachable from a published root ever changed before the next root store?
@@ -826,9 +834,9 @@ namespace
       return r;
    }
 
-   // ── the independent audit ───────────────────────────────────────────────
-   // Walks every published root and counts, for every line and every grain,
-   // how many references the tree holds on it. The engine's reference counts
+   // ── the audit ───────────────────────────────────────────────────────────
+   // Visits every published root with the engine's walk and tallies, for every
+   // line and every grain, how many references the tree holds on it. The engine's reference counts
    // and free maps must say exactly that: a count too low frees live data, a
    // count too high or a line that is neither referenced nor free is a leak.
    struct census
@@ -1904,10 +1912,9 @@ TEST_CASE("Small Engine: nothing a published root reaches is written before the 
 
 // ── not gating under the process-death model, but not left silently wrong ──
 
-// A flush that fails. Every other flush of the store already ends the
-// process (sal's rule for durable I/O: exit code 74, no acknowledgement);
-// the msync of the data pages ignored its result and the commit went on to
-// store the root.
+// A flush that fails ends the process before the commit returns or the root
+// is stored (sal's rule for durable I/O: exit code 74, no acknowledgement),
+// for the msync of the data pages as for every other flush of the store.
 TEST_CASE("Small Engine: a failed flush of data pages ends the process before the root is stored",
           "[small][crash][flush-error]")
 {

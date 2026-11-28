@@ -1278,8 +1278,11 @@ namespace sal_art_ref::radix
          {
             n->for_each_entry([&](uint8_t, smart_address sa)
                               { if (sa.is_pointer()) _ses->retain(sa.as_pointer()); });
+            SAL_CRASH_POINT("range:rehome_children_retained");
             for (int r = 0; r < range_count; ++r) rr_leave<N>(n, r);
+            SAL_CRASH_POINT("range:rehome_left_shared");
             rr_birth<N>(n);
+            SAL_CRASH_POINT("range:rehomed");
          }
       }
 
@@ -1332,6 +1335,7 @@ namespace sal_art_ref::radix
                int r = 0;
                while (r < range_count && _ses->rr_try_retain(nn->rc_ctr(r)))
                   ++r;
+               SAL_CRASH_POINT("clone:ranges_shared");
                if (r < range_count) [[unlikely]]
                {
                   // Own every branch first, then give back the shares already taken on

@@ -1788,6 +1788,7 @@ namespace
 {
    // Run `fn` in a forked child; what went wrong, or empty. A failure in the child (an
    // abort, a fault, an exception, a failed check) must not take the test process with it.
+   std::vector<std::string>* g_notes = nullptr;  // where in_child puts the child's m_note texts
    template <class Fn>
    std::string in_child(Fn&& fn, int timeout_s = 120)
    {
@@ -1831,6 +1832,13 @@ namespace
             break;
          if (n == ssize_t(sizeof(m)) && m.type == m_fail && failure.empty())
             failure = m.text;
+         if (n == ssize_t(sizeof(m)) && m.type == m_note && g_notes)
+         {
+            if (m.a && !g_notes->empty())
+               g_notes->back() += m.text;  // the rest of a long note
+            else
+               g_notes->push_back(m.text);
+         }
       }
       ::close(fds[0]);
       int status = 0;
@@ -2687,4 +2695,207 @@ TEST_CASE("large engine: aborting a savepoint after set_root restores the subtre
             "the edit of 'a' made before the savepoint was lost");
    });
    REQUIRE(failure == "");
+}
+
+
+// ── gofractally/psitri#45 on a store of more than 64 segments ──────────────────────────
+// Opt-in (LGE_CRASH_BIG=1): it writes about 2.4 GiB, twice.
+//
+// The free-segment map's lowest level has one 64-bit word per 64 segments. When the provider
+// takes the last free segment of word 0 and the process dies between the store that clears
+// the bit and the store that clears word 0's summary bit, the search for the first free
+// segment follows the summary into the empty word and returns 0 * 64 + ctz(0) = 64: segment
+// 64, whatever it holds. This test builds a store whose segment 64 holds committed values,
+// makes that death happen, and opens the store twice from identical copies: once as the
+// allocator opened it before the repair of #45, once as it opens it now.
+namespace
+{
+   constexpr uint32_t big_value_size = (1u << 20) - 4096;
+   std::string big_key(uint32_t i)
+   {
+      char k[24];
+      std::snprintf(k, sizeof(k), "big/%06u", i);
+      return k;
+   }
+   engine::config big_config()
+   {
+      auto cfg              = store_config();
+      cfg.max_database_size = int64_t(4) << 30;
+      return cfg;
+   }
+   uint64_t free_word0()
+   {
+      return reinterpret_cast<std::atomic<uint64_t>*>(g_state_file + layout().free_level0)->load();
+   }
+   // Bytes of objects root 0 reaches that lie in `segment`.
+   uint64_t live_bytes_in(database& db, uint32_t segment)
+   {
+      uint64_t   live = 0;
+      const auto img  = image_of(db, 0);
+      for (auto& [addr, o] : img.objects)
+         if (o.location * sal::cacheline_size / sal::segment_size == segment)
+            live += o.size;
+      return live;
+   }
+   // Keys [first, last) present and intact; how many are not.
+   uint32_t damaged_keys(database& db, uint32_t first, uint32_t last)
+   {
+      auto     rs  = db.start_read_session();
+      auto     c   = rs->create_cursor(0);
+      uint32_t bad = 0;
+      for (uint32_t i = first; i < last; ++i)
+      {
+         auto v = c.get<std::string>(big_key(i));
+         bad += !v || *v != *make_value(0, i, 0, big_value_size);
+      }
+      return bad;
+   }
+   void note(const std::string& text)
+   {
+      for (size_t at = 0; at < text.size() || at == 0; at += 100)
+         send(m_note, 0, at != 0, 0, std::string_view(text).substr(at, 100));
+   }
+   // What an open of the torn store finds, as notes; then more writing, and again.
+   void open_torn_store(const fs::path& dir, bool repair, uint32_t removed, uint32_t written)
+   {
+      sal::testing::skip_provider_repair.store(!repair);
+      auto db = database::open(dir, psitri::open_mode::open_existing, big_config());
+      note("recovery mode " + std::to_string(int(db->recovery_performed())));
+      auto a = audit(*db, true);
+      note("audit after open: " + (a.error.empty() ? "clean" : a.error));
+      note("committed keys damaged after open: " +
+           std::to_string(damaged_keys(*db, removed, written)));
+      // the store is used: 400 MiB of new values, in four steps
+      for (uint32_t step = 0; step < 4; ++step)
+      {
+         {
+            auto ws = db->start_write_session();
+            for (uint32_t i = step * 100; i < step * 100 + 100; ++i)
+            {
+               auto tx = ws->start_transaction(1);
+               tx.upsert(big_key(i), std::string_view(*make_value(1, i, 0, big_value_size)));
+               tx.commit();
+            }
+         }
+         note("committed keys damaged after " + std::to_string(step * 100 + 100) +
+              " MiB more were written: " + std::to_string(damaged_keys(*db, removed, written)));
+      }
+      a = audit(*db, true);
+      note("audit after writing: " + (a.error.empty() ? "clean" : a.error));
+   }
+}  // namespace
+
+TEST_CASE("large engine: the torn free map on a store of more than 64 segments (opt-in)",
+          "[large-crash][provider-big]")
+{
+   if (env_u64("LGE_CRASH_BIG", 0) == 0)
+   {
+      SUCCEED("set LGE_CRASH_BIG=1 to run (writes about 5 GiB under the temporary directory)");
+      return;
+   }
+   temporary_directory torn, copy;
+   int                 fds[2];
+   REQUIRE(::pipe(fds) == 0);
+   const uint32_t removed = 260;
+   // 1: build the store, make free segments among the first 64, die in the tear
+   static const fs::path* dir;
+   dir          = &torn.path;
+   auto failure = in_child(
+       [&] {
+          crash::install();
+          auto db = database::open(torn.path, psitri::open_mode::create_only, big_config());
+          map_state_file(torn.path);
+          auto     ws      = db->start_write_session();
+          uint32_t written = 0;
+          auto     write   = [&](uint32_t n) {
+             auto tx = ws->start_transaction(0);
+             for (uint32_t i = 0; i < n; ++i, ++written)
+                tx.upsert(big_key(written), std::string_view(*make_value(0, written, 0, big_value_size)));
+             tx.commit();
+          };
+          struct stat st;
+          while (::stat((torn.path / "segs").c_str(), &st) == 0 &&
+                 uint64_t(st.st_size) < uint64_t(76) * sal::segment_size)
+             write(8);
+          const uint64_t live64 = live_bytes_in(*db, 64);
+          check(live64 > (4u << 20), "segment 64 holds too little committed data: " +
+                                         std::to_string(live64));
+          {
+             auto tx = ws->start_transaction(0);
+             for (uint32_t i = 0; i < removed; ++i)
+                tx.remove(big_key(i));
+             tx.commit();
+          }
+          for (int i = 0; i < 60000 && std::popcount(free_word0()) < 2; ++i)
+             std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          check(std::popcount(free_word0()) >= 2, "the compactor freed no segment among the first 64");
+          check(live_bytes_in(*db, 64) == live64, "segment 64 changed");
+          const uint64_t report[2] = {written, live64};
+          if (::write(fds[1], report, sizeof(report)) != ssize_t(sizeof(report)))
+             child_fail("cannot report");
+          // everything up to here is committed and acknowledged; now the death
+          crash::special.store(&tear_free_map);
+          crash::arm("provider:take_free", 1);
+          // new keys only: nothing becomes garbage, so the free segments just get used up
+          for (uint32_t i = 0; i < 1200; ++i)
+             write(1);
+          child_fail("the state to tear never came up");
+       },
+       600);
+   REQUIRE(failure == "the child died of signal 9");
+   uint64_t report[2];
+   REQUIRE(::read(fds[0], report, sizeof(report)) == ssize_t(sizeof(report)));
+   const uint32_t written = uint32_t(report[0]);
+   std::printf("torn store: %u committed values of %u bytes (the first %u removed), segment 64 "
+               "held %llu bytes of them when the process died\n",
+               written, big_value_size, removed, (unsigned long long)report[1]);
+   wait_for_store_lock(torn.path);
+   fs::copy(torn.path, copy.path, fs::copy_options::recursive);
+
+   // 2: the open as it was before the repair
+   std::vector<std::string> before, after;
+   g_notes = &before;
+   failure = in_child([&] { open_torn_store(torn.path, false, removed, written); }, 600);
+   std::printf("open WITHOUT the repair: %s\n", failure.empty() ? "returned" : failure.c_str());
+   for (auto& n : before)
+      std::printf("   %s\n", n.c_str());
+   {
+      // and what is left of that store for a later open (with today's allocator)
+      std::vector<std::string> later;
+      g_notes = &later;
+      wait_for_store_lock(torn.path);
+      const auto f = in_child(
+          [&] {
+             auto db = database::open(torn.path, psitri::open_mode::open_existing, big_config());
+             note("recovery mode " + std::to_string(int(db->recovery_performed())));
+             note("committed keys damaged: " + std::to_string(damaged_keys(*db, removed, written)) +
+                  " of " + std::to_string(written - removed));
+          },
+          600);
+      std::printf("a later open of that store: %s\n", f.empty() ? "returned" : f.c_str());
+      for (auto& n : later)
+         std::printf("   %s\n", n.c_str());
+   }
+   fs::remove_all(torn.path);
+   // 3: the open as it is
+   g_notes = &after;
+   const auto fixed = in_child([&] { open_torn_store(copy.path, true, removed, written); }, 600);
+   g_notes          = nullptr;
+   std::printf("open WITH the repair: %s\n", fixed.empty() ? "returned" : fixed.c_str());
+   for (auto& n : after)
+      std::printf("   %s\n", n.c_str());
+   std::fflush(stdout);
+   ::close(fds[0]);
+   ::close(fds[1]);
+   REQUIRE(fixed == "");
+   REQUIRE(after.size() == 8);
+   CHECK(after[1] == "audit after open: clean");
+   CHECK(after[2] == "committed keys damaged after open: 0");
+   for (int i = 3; i < 7; ++i)
+      CHECK(after[size_t(i)].ends_with("written: 0"));
+   CHECK(after[7] == "audit after writing: clean");
+   // What the unrepaired open does is the defect; the test records it and requires that it
+   // is one (if this ever stops failing, the reasoning in #45 about large stores is wrong).
+   const bool defect = !failure.empty() || before != after;
+   CHECK(defect);
 }

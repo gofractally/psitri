@@ -390,7 +390,11 @@ namespace sal
 
       // Before anything reads the provider's maps or queues: the owner before this one
       // may have died in the middle of updating one of them.
+#ifdef SAL_CRASH_POINTS
+      if (!_read_only && !testing::skip_provider_repair.load(std::memory_order_relaxed))
+#else
       if (!_read_only)
+#endif
          repair_provider_state();
 
       mlock_pinned_segments();

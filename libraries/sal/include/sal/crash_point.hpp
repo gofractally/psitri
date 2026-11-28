@@ -22,6 +22,9 @@ namespace sal::testing
    // thread passes it. Null: nothing happens.
    using crash_hook_fn = void (*)(const char* point);
    inline std::atomic<crash_hook_fn> crash_hook{nullptr};
+   // For the test that shows what an open did before it repaired the segment provider's
+   // state (gofractally/psitri#45): true makes the allocator skip that repair.
+   inline std::atomic<bool> skip_provider_repair{false};
 }  // namespace sal::testing
 
 #define SAL_CRASH_POINT(name)                                                              \

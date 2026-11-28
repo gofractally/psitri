@@ -922,6 +922,7 @@ namespace
       sal::recovery_mode recovery  = sal::recovery_mode::none;  // none: the engine decides
       bool               expect_clean = false;                  // the store was closed cleanly
       bool               leaks_allowed = false;                 // after a deferred-cleanup open
+      uint32_t           writers = 0x7f;  // which of the seven writers run (bit per writer)
       bool (*special)()            = nullptr;
    };
 
@@ -944,8 +945,8 @@ namespace
              uint64_t(st.st_size) < uint64_t(segment_limit_for_writers) * sal::segment_size)
             return;
          std::this_thread::sleep_for(std::chrono::milliseconds(1));
-         if (i > 20)
-            return;  // the file never shrinks while open: a short pause is all there is
+         if (i > 60)
+            return;  // the file never shrinks while open: a pause is all there is
       }
    }
 
@@ -1253,13 +1254,18 @@ namespace
                };
             };
             for (uint32_t r = 0; r < 4; ++r)
+               if (plan.writers >> r & 1)
+                  writers.emplace_back(
+                      guard([&, r] { transaction_writer(*db, plan, r, state[r], stop); }));
+            if (plan.writers >> 4 & 1)
                writers.emplace_back(
-                   guard([&, r] { transaction_writer(*db, plan, r, state[r], stop); }));
-            writers.emplace_back(
-                guard([&] { pair_writer(*db, plan, state[pair_a], state[pair_b], stop); }));
-            writers.emplace_back(guard([&] { keep_writer(*db, plan, state[keep_root], stop); }));
-            writers.emplace_back(
-                guard([&] { replace_writer(*db, plan, state[replace_root], stop); }));
+                   guard([&] { pair_writer(*db, plan, state[pair_a], state[pair_b], stop); }));
+            if (plan.writers >> 5 & 1)
+               writers.emplace_back(
+                   guard([&] { keep_writer(*db, plan, state[keep_root], stop); }));
+            if (plan.writers >> 6 & 1)
+               writers.emplace_back(
+                   guard([&] { replace_writer(*db, plan, state[replace_root], stop); }));
             for (uint32_t i = 0; i < plan.readers; ++i)
                readers.emplace_back(guard([&, i] { reader(*db, mix(plan.seed, 77, i), stop); }));
             for (auto& t : writers)
@@ -2534,12 +2540,18 @@ TEST_CASE("large engine: deaths around opens that defer cleanup", "[large-crash]
    std::mt19937_64 rng(mix(seed, 501));
    for (int round = 0; round < int(env_u64("LGE_CRASH_DEFERRED", 8)); ++round)
    {
+      // An open that defers cleanup leaves every segment a dead session was writing where
+      // it is, until a later light pass: a few writers at a time, so that two such deaths
+      // in a row stay under the test's small store ceiling.
+      const uint32_t some = round % 3 == 0 ? 0x23 : round % 3 == 1 ? 0x4c : 0x31;
       auto p      = c.plan();
       p.clean_end = false;
+      p.writers   = some;
       c.life(p, int64_t(rng() % 120000));  // a death
       // opened without recounting: everything published is there, counts are never too
       // low, the store is written to; then it dies or closes
       p               = c.plan();
+      p.writers       = some;
       p.recovery      = sal::recovery_mode::deferred_cleanup;
       p.leaks_allowed = true;
       p.clean_end     = round % 3 == 0;
@@ -2547,6 +2559,7 @@ TEST_CASE("large engine: deaths around opens that defer cleanup", "[large-crash]
       if (round % 2)
       {
          p               = c.plan();  // twice in a row
+         p.writers       = some;
          p.recovery      = sal::recovery_mode::deferred_cleanup;
          p.leaks_allowed = true;
          p.clean_end     = false;

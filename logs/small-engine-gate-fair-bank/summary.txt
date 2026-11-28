@@ -1,0 +1,18 @@
+fair-bank-small, sync_mode none: main b637805 ("base") against claude/small-engine-gate at c272671 ("new").
+Diagnostic comparison on a shared, loaded development machine (load average 11 to 14 from other
+work during the runs), not release evidence.
+
+Machine: Apple M5 Max, 18 cores, macOS 26.3.1, arm64.
+Compiler: Homebrew clang version 22.1.2; CMAKE_BUILD_TYPE=Release.
+psio/ucc: the local checkouts under ~/gofractally (CMake co-development default).
+Each binary: benchmarks/fair_bank/main.cpp with FAIR_small=1 linked to psitri::small.
+Command, per run, base and new alternating, 8 runs each per batch size, fresh directory each run:
+  fair-bank-small --path DIR/db --result FILE.json --durability none --accounts 100000 \
+      --transfers 1000000 --warmup 100000 --batch {1|100}      (readers 2, seed 12345, 8-byte values)
+
+transfers/s, median (min .. max) of 8:
+  batch 1    write        base 767,031 (737,912 .. 774,839)   new 764,828 (690,622 .. 780,739)
+  batch 1    mixed_write  base 783,583 (648,266 .. 817,525)   new 782,465 (661,722 .. 814,425)
+  batch 100  write        base 815,718 (765,784 .. 826,081)   new 814,527 (728,691 .. 827,407)
+  batch 100  mixed_write  base 826,462 (774,940 .. 842,342)   new 815,318 (793,794 .. 834,814)
+Every run passed the benchmark's validation (read-your-writes, rollback, snapshot, balance, reopen).

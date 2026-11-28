@@ -795,7 +795,7 @@ namespace
    struct store_model
    {
       root_history roots[6];
-      uint64_t     torn_pairs = 0, verified = 0;
+      uint64_t     torn_pairs = 0, verified = 0, refused = 0, reverted = 0;
       store_model()
       {
          for (auto& r : roots)
@@ -864,6 +864,8 @@ namespace
             std::memcpy(&base, log.data() + at + 1, 8);
             model_map         m    = h.versions.at(v - 1);
             const std::string prev = log_of(m);
+            model.refused += kind == shrink;
+            model.reverted += kind == revert;
             if (kind == revert)
             {
                REQUIRE(h.versions.count(base));
@@ -1038,12 +1040,15 @@ namespace
           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
       std::printf("crash campaign %s: %llu lives (%llu died at a marker, %llu of those inside "
                   "recovery or open; %llu killed at a random time; %llu closed cleanly), %llu "
-                  "verifications, %llu transactions kept, two-root commits found half "
-                  "published %llu times; store %.1f MiB lines, %.1f MiB large; %.1fs\n",
+                  "verifications, %llu transactions kept (%llu of them on a root put back to an "
+                  "older snapshot, %llu after the store refused the write as full), two-root "
+                  "commits found half published %llu times; store %.1f MiB lines, %.1f MiB "
+                  "large; %.1fs\n",
                   name, (unsigned long long)stats.lives, (unsigned long long)stats.point_deaths,
                   (unsigned long long)stats.recovery_deaths,
                   (unsigned long long)stats.timed_kills, (unsigned long long)stats.clean,
                   (unsigned long long)model.verified, (unsigned long long)versions,
+                  (unsigned long long)model.reverted, (unsigned long long)model.refused,
                   (unsigned long long)model.torn_pairs, last_audit.lines * 128 / 1048576.0,
                   last_audit.grains * 32768 / 1048576.0, secs);
       std::string reached, never;
@@ -1275,6 +1280,7 @@ namespace
       database*                              db = nullptr;
       std::vector<std::pair<uint32_t, uint64_t>> lines, grains;
       std::string                            damage;
+      uint64_t                               looks = 0;  // how often intact() was asked
 
       void take(database& d)
       {
@@ -1288,6 +1294,7 @@ namespace
       }
       bool intact()
       {
+         ++looks;
          for (const auto& [i, sum] : lines)
             if (checksum(db->store().get(i), start_ref::line_bytes) != sum)
             {
@@ -1379,7 +1386,6 @@ namespace
          const std::string where = "round " + std::to_string(round) + ", root " + std::to_string(r);
          INFO(where << ", kind " << what);
          auto still = [&](const char* when) {
-            ++st.checks;
             if (!ice.intact())
             {
                INFO(ice.damage << " changed " << when);
@@ -1485,6 +1491,7 @@ namespace
       }
       readers.clear();
       kept.clear();
+      st.checks += ice.looks;
    }
 }  // namespace
 

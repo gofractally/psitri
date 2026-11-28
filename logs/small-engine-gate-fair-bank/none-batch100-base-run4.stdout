@@ -1,0 +1,10 @@
+small psitri API 2
+sync_mode=none; fixed arena; default max_segments=4096; background release enabled
+load
+contract checks
+warmup
+write
+mixed
+read
+close/reopen validation
+PASS small final_hash=5667074460394285768

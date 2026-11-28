@@ -391,9 +391,7 @@ namespace sal
       // Before anything reads the provider's maps or queues: the owner before this one
       // may have died in the middle of updating one of them.
 #ifdef SAL_CRASH_POINTS
-      if (!_read_only && !testing::skip_provider_repair.load(std::memory_order_relaxed))
-#else
-      if (!_read_only)
+      if (!testing::skip_provider_repair.load(std::memory_order_relaxed))
 #endif
          repair_provider_state();
 
@@ -769,14 +767,22 @@ namespace sal
     * occupied slots in another; a death between the two leaves a slot marked that no
     * count covers, and the next push to that slot waits for it forever.
     *
-    * Both are consumed by this constructor (it prepares the first segments) before any
-    * recovery the engine decides on, and by an open that runs no recovery at all (the
-    * store's record says it was closed, because the death fell inside the previous open;
-    * or the caller asked to defer cleanup). So they are rebuilt here, on every read-write
-    * open, from the parts a single store keeps true: the lowest level of each bitmap and
-    * each segment's own state word. Every segment that was free, taken from the free map,
-    * or prepared and queued, and that no session had claimed, goes back to the free map,
-    * as a clean close leaves it; the queues start empty.
+    * Both are consumed by the constructor (it prepares the first segments) before any
+    * recovery the engine decides on, and by an open that runs no recovery at all. So they
+    * are rebuilt on every open from facts that one store each keeps true:
+    *
+    *  - a bit of the free map's lowest level: the segment was recycled, or drained from a
+    *    queue at a clean close, or found empty by a recovery;
+    *  - a segment whose state word says free, queued, or nothing at all (a block the file
+    *    grew by and nothing has used) AND whose own footer says nothing is allocated in
+    *    it. The state word alone is not enough: a recovery that does not rebuild the
+    *    segment states (allocators opened without that hook) can leave `free` on a
+    *    segment whose bytes it went on to use.
+    *
+    * Each such segment gets an empty footer and the state `free` first; these are the
+    * record a repair interrupted here is resumed from. Then the queues are emptied and
+    * the maps rebuilt. A read-only open does the same on its private copy of the state
+    * and writes no segment.
     */
    void allocator::repair_provider_state()
    {
@@ -787,19 +793,29 @@ namespace sal
       std::vector<uint32_t> free_segs, pinned_segs;
       for (uint32_t i = 0; i < num_segs; ++i)
       {
-         if (provider.free_segments.test(i) || seg_data.is_unclaimed(segment_number(i)))
+         const segment_number num(i);
+         if (provider.free_segments.test(i) ||
+             (seg_data.is_unclaimed(num) && get_segment(num)->get_alloc_pos() == 0))
             free_segs.push_back(i);
          if (provider.mlock_segments.test(i))
             pinned_segs.push_back(i);
       }
-      provider.ready_pinned_segments.clear();
-      provider.ready_unpinned_segments.clear();
-      provider.free_segments.reset();
       for (uint32_t i : free_segs)
       {
-         provider.free_segments.set(i);
-         seg_data.returned_to_free(segment_number(i));
+         const segment_number num(i);
+         if (!_read_only && get_segment(num)->get_alloc_pos() != 0)
+            get_segment(num)->set_alloc_pos(0);  // recycled where no hole could be punched
+         seg_data.returned_to_free(num);
       }
+      SAL_CRASH_POINT("repair:states_stored");
+      provider.ready_pinned_segments.clear();
+      provider.ready_unpinned_segments.clear();
+      SAL_CRASH_POINT("repair:queues_emptied");
+      provider.free_segments.reset();
+      SAL_CRASH_POINT("repair:free_map_cleared");
+      for (uint32_t i : free_segs)
+         provider.free_segments.set(i);
+      SAL_CRASH_POINT("repair:free_map_rebuilt");
       provider.mlock_segments.reset();
       for (uint32_t i : pinned_segs)
          provider.mlock_segments.set(i);

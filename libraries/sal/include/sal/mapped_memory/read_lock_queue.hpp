@@ -116,10 +116,17 @@ namespace sal
 
          /// Recovery: forget segments queued for recycling. Their state is
          /// recomputed from the segments themselves. No session may be active.
+         /// Forget every queued segment. The queue's positions are left where they are:
+         /// emptying it by taking its entries is one store, while resetting both positions
+         /// is two, and a death between them would leave a queue that reads as full of
+         /// segment numbers from long ago, which the provider would free.
          void reset_recycled_segments()
          {
-            recycled_segments.reset();
-            broadcast_end_ptr(0);
+            segment_number discard[64];
+            while (recycled_segments.pop(discard, 64))
+            {
+            }
+            broadcast_end_ptr(uint32_t(recycled_segments.get_push_pos()));
          }
 
          /// Current depth of the recycled segments queue.

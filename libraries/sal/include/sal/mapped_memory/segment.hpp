@@ -161,14 +161,14 @@ namespace sal
             flags.store(read_only, std::memory_order_release);
          }
          /// Recovery: a segment holding no live object is free for reuse.
-         /// A segment the provider had taken from the free map, or prepared and queued,
-         /// and that no session has claimed: it holds nothing. (The free map's bit is set
-         /// before `free` is stored here and `queued` is stored before the push, so at any
-         /// instant a segment in either state is one no session has written to since.)
+         /// The state of a segment no session has claimed: free, prepared and queued, or
+         /// never used at all (a block the file grew by). A session stores `active` before
+         /// it writes to a segment. On its own this does not prove the segment empty (see
+         /// allocator::repair_provider_state).
          bool is_unclaimed() const
          {
             const uint32_t state = flags.load(std::memory_order_relaxed) & ~uint32_t(pinned);
-            return state == free || state == queued;
+            return state == free || state == queued || state == 0;
          }
          void returned_to_free() { enter(free); }
          void recovered_free()

@@ -67,6 +67,7 @@ namespace sal
                _last_aheader_pos = alloc_pos;
                set_alloc_pos(alloc_pos + marker_size);
                SAL_TRACK_ALLOC(ahead, marker_size, "metadata_sync_header");
+               SAL_CRASH_POINT("segsync:marker_written");
                if (st >= sync_type::msync_async)
                {
                   const uint32_t page_size = system_config::os_page_size();
@@ -110,10 +111,12 @@ namespace sal
             set_alloc_pos(alloc_pos + terminal_size);
             // Track AFTER alloc_pos bumped so the invariant holds.
             SAL_TRACK_ALLOC(ahead, terminal_size, "fall_through_terminal_header");
+            SAL_CRASH_POINT("segsync:terminal_written");
 
             // Make the entire remainder of the segment read-only.
             uint32_t old_fwp_pos = cur_first_writable_page_pos;
             _first_writable_page.store(pages_per_segment, std::memory_order_relaxed);
+            SAL_CRASH_POINT("segsync:terminal_read_only");
             uint64_t protect_size = segment_size - old_fwp_pos;
 
             if (st == sync_type::none)
@@ -161,6 +164,7 @@ namespace sal
          auto cheksum_size = alloc_pos + ahead->checksum_offset() - ahead->start_checksum_pos();
 
          assert(alloc_pos <= segment_size - 64);
+         SAL_CRASH_POINT("segsync:header_built");
          _last_aheader_pos = alloc_pos;
 
          // TODO: maybe restore this once we are validating it in recovery
@@ -171,8 +175,10 @@ namespace sal
              uint32_t(_first_writable_page.load(std::memory_order_relaxed))
              << system_config::os_page_size_log2;
 
+         SAL_CRASH_POINT("segsync:header_linked");
          _first_writable_page.store(next_page_pos >> system_config::os_page_size_log2,
                                     std::memory_order_relaxed);
+         SAL_CRASH_POINT("segsync:read_only_advanced");
          uint64_t protect_size = next_page_pos - old_first_writable_page_pos;
          assert(protect_size > 0);
          {
@@ -181,6 +187,7 @@ namespace sal
             set_alloc_pos(new_alloc_pos);
             SAL_TRACK_ALLOC(ahead, asize, "active_sync_header");
          }
+         SAL_CRASH_POINT("segsync:alloc_pos_advanced");
 
          if (st == sync_type::none)
             return protect_size;

@@ -95,6 +95,7 @@ namespace sal
       _zone_free_list->reserve(req_zones, true);
       _zone_free_list->resize(num_zones);
       _zone_allocator->resize(num_zones);
+      SAL_CRASH_POINT("cb:zone_files_grown");
 
       // Verify base addresses are stable after resize. Skip on first call (when _ptr_base is
       // still null — it's assigned after ensure_capacity(1) returns in the constructor).
@@ -129,6 +130,7 @@ namespace sal
          ++azone;
       }
 
+      SAL_CRASH_POINT("cb:zone_initialized");
       azone = _header_ptr->allocated_zones.load(std::memory_order_relaxed);
       while (azone < num_zones)
          _header_ptr->allocated_zones.compare_exchange_strong(azone, num_zones,
@@ -198,6 +200,7 @@ namespace sal
                   if (ref == 1)
                      cb.release();
                   cb.reset();
+                  SAL_CRASH_POINT("recover:unreachable_cb_reset");
                   new_free |= (1ULL << bit);
                   changed = true;
                   total_freed++;
@@ -205,13 +208,17 @@ namespace sal
                else
                {
                   cb.release();
+                  SAL_CRASH_POINT("recover:walk_reference_dropped");
                   _header_ptr->zone_alloc_count[z].fetch_add(1, std::memory_order_relaxed);
                   _header_ptr->total_allocations.fetch_add(1, std::memory_order_relaxed);
                   total_surviving++;
                }
             }
             if (changed)
+            {
                flb.store(new_free, std::memory_order_relaxed);
+               SAL_CRASH_POINT("recover:free_word_stored");
+            }
          }
       }
 
@@ -241,7 +248,10 @@ namespace sal
                auto&       cb = _ptr_base[*addr];
 
                if (cb.ref() > 1)
+               {
                   cb.set_ref(1, std::memory_order_relaxed);
+                  SAL_CRASH_POINT("recover:count_reset_one");
+               }
             }
          }
       }

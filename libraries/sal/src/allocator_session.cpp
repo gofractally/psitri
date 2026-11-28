@@ -29,6 +29,7 @@ namespace sal
    {
       SAL_INFO("allocator_session: constructor: {} {} ref: {}", this, ses_num, _ref_count);
       _block_base_ptr = a._block_alloc.get(offset_ptr(0));
+      SAL_CRASH_POINT("session:created");
    }
 
    allocator_session::~allocator_session()
@@ -36,7 +37,9 @@ namespace sal
       SAL_INFO("allocator_session: destructor: {} {} ref: {}", this, _session_num, _ref_count);
       if (_session_num == allocator_session_number(-1))
          return;
+      SAL_CRASH_POINT("session:destroy_begin");
       finalize_active_segment();
+      SAL_CRASH_POINT("session:destroy_finalized");
       // The queue belongs to the session NUMBER, in mapped state. Left
       // undrained, the segment just finalized stays flagged active for good:
       // the next open resets the queue, and a later session that is given
@@ -54,7 +57,9 @@ namespace sal
          // A destructor cannot report it; the segments stay flagged active
          // (never compacted), which wastes space and loses nothing.
       }
+      SAL_CRASH_POINT("session:destroy_drained");
       _sega.release_session_num(_session_num);
+      SAL_CRASH_POINT("session:destroy_released");
       _session_num = allocator_session_number(-1);
    }
 
@@ -67,7 +72,9 @@ namespace sal
       {
          if (not _alloc_seg_ptr->is_finalized())
             _alloc_seg_ptr->finalize();
+         SAL_CRASH_POINT("segment:finalized");
          _dirty_segments.push(_alloc_seg_num);
+         SAL_CRASH_POINT("segment:dirty_queued");
       }
       _alloc_seg_ptr = nullptr;
       _alloc_seg_num = segment_number(-1);
@@ -80,6 +87,7 @@ namespace sal
       auto [num, ptr] = _sega.get_new_segment(_alloc_to_pinned);
       _alloc_seg_num  = num;
       _alloc_seg_ptr  = ptr;
+      SAL_CRASH_POINT("segment:handed_out");
 
       // Initialize segment header with session information
       _alloc_seg_ptr->_session_id = _session_num;
@@ -87,6 +95,7 @@ namespace sal
           _sega._mapped_state->_session_data.next_session_segment_seq(_session_num);
       _alloc_seg_ptr->_open_time_usec  = sal::get_current_time_msec();
       _alloc_seg_ptr->_close_time_usec = msec_timestamp(0);  // Will be set when segment is closed
+      SAL_CRASH_POINT("segment:initialized");
 
       ++_seg_alloc_count;
       _seg_alloc_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -111,6 +120,7 @@ namespace sal
                  ->size() == size);
 
       _alloc_seg_ptr->unalloc(size);
+      SAL_CRASH_POINT("segment:unallocated");
       return true;
    }
    void allocator_session::sync(sync_type st)
@@ -139,9 +149,11 @@ namespace sal
              _alloc_seg_ptr->data + pos_before,
              sync_hdr_size,
              "active_sync_padding");
+         SAL_CRASH_POINT("sync:active_synced");
       }
 
       drain_dirty_segments(st, cfg, user_data);
+      SAL_CRASH_POINT("sync:dirty_drained");
       _sega.sync(st);
    }
 
@@ -158,6 +170,7 @@ namespace sal
       segment_number seg_num = _dirty_segments.pop();
       while (seg_num != segment_number(-1))
       {
+         SAL_CRASH_POINT("sync:dirty_popped");
          auto seg = _sega.get_segment(seg_num);
 
          // Snapshot alloc_pos before sync(). If sync()'s fall-through path
@@ -172,6 +185,7 @@ namespace sal
              seg->is_finalized() and not seg->is_read_only();
 
          const auto bytes_synced = seg->sync(st, cfg, user_data);
+         SAL_CRASH_POINT("sync:dirty_synced");
          _sega.record_session_write(_session_num, bytes_synced);
 
          // Only attribute last_aheader to freed_space when sync() actually
@@ -215,8 +229,11 @@ namespace sal
 
          assert(seg->is_finalized() ? seg->is_read_only() : true);
          if (seg->is_read_only())
+         {
             _sega._mapped_state->_segment_data.prepare_for_compaction(
                 seg_num, seg->age_accumulator.average());
+            SAL_CRASH_POINT("sync:dirty_compactable");
+         }
          seg_num = _dirty_segments.pop();
       }
    }

@@ -1,4 +1,5 @@
 #pragma once
+#include <sal/crash_point.hpp>
 #include <sal/numbers.hpp>
 #include <ucc/circular_buffer.hpp>
 
@@ -152,7 +153,10 @@ namespace sal
       };
       inline void read_lock_queue::push_recycled_segment(segment_number seg_num)
       {
-         broadcast_end_ptr(recycled_segments.push(seg_num));
+         const auto end = recycled_segments.push(seg_num);
+         SAL_CRASH_POINT("rlq:recycled_pushed");
+         broadcast_end_ptr(uint32_t(end));
+         SAL_CRASH_POINT("rlq:end_broadcast");
       }
 
       /**
@@ -223,7 +227,9 @@ namespace sal
       inline uint32_t read_lock_queue::pop_recycled_segments(segment_number* seg_nums,
                                                              int             size_seg_num)
       {
-         return recycled_segments.pop(seg_nums, size_seg_num);
+         const auto popped = recycled_segments.pop(seg_nums, size_seg_num);
+         SAL_CRASH_POINT("rlq:recycled_popped");
+         return uint32_t(popped);
       }
       // read_lock_queue constructor implementation
       inline read_lock_queue::read_lock_queue()

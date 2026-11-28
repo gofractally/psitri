@@ -257,6 +257,7 @@ namespace sal_art_ref::radix
          // counts, range counters, or segment state left by an owner that never closed.
          recover_before_use(dir, cfg, recovery);
          _alloc->start_background_threads();
+         SAL_CRASH_POINT("open:threads_started");
       }
 
       /// A writer's own view of an open store: the same allocator, roots and settings as
@@ -508,6 +509,7 @@ namespace sal_art_ref::radix
             root = std::move(old);  // restore on exception (psitri's guard)
             throw;
          }
+         SAL_CRASH_POINT("mutate:descended");
          if (nr != old.address())
          {
             // Adopt the new root bound to THE ENGINE SESSION (a default-constructed tree{}'s
@@ -1257,9 +1259,12 @@ namespace sal_art_ref::radix
          if constexpr (is_big<N>)
          {
             if (_ses->rr_release(n->rc_ctr(r)))
+            {
+               SAL_CRASH_POINT("range:last_share_released");
                n->for_each_entry([&](uint8_t byte, smart_address sa) {
                   if (sa.is_pointer() && range_of(byte) == r) _ses->release(sa.as_pointer());
                });
+            }
          }
       }
 
@@ -1296,7 +1301,9 @@ namespace sal_art_ref::radix
             n->for_each_entry([&](uint8_t byte, smart_address sa) {
                if (sa.is_pointer() && range_of(byte) == r) _ses->retain(sa.as_pointer());
             });
+            SAL_CRASH_POINT("range:diverge_children_retained");
             rr_leave<N>(n, r);  // leave the old shared set (its branches are held above)
+            SAL_CRASH_POINT("range:diverge_left_shared");
             n->rc_set_off(r, sal::offset_of(*a));
          }
       }
@@ -1311,6 +1318,7 @@ namespace sal_art_ref::radix
          ptr_address na = _ses->alloc<N>(need, sal::alloc_hint{}, src->prefix());
          N*          nn = mut<N>(na);
          blit<N>(nn, src);
+         SAL_CRASH_POINT("clone:copied");
          if constexpr (is_big<N>)
          {
             if (nn->rc_has_ctrs())  // share the per-range counters (blit copied region+offsets)
@@ -1346,6 +1354,7 @@ namespace sal_art_ref::radix
          }
          else
             nn->for_each_child([&](ptr_address c) { _ses->retain(c); ++_cc.child_retains; });
+         SAL_CRASH_POINT("clone:children_owned");
          stamp<N>(na);
          ++_cc.clones;
          return na;
@@ -2200,7 +2209,10 @@ namespace sal_art_ref::radix
          // Keep the completed external graph owned until a page adopts it.
          sal::smart_ptr<sal::alloc_header> pending;
          if (ins.ext != sal::null_ptr_address)
+         {
             pending = sal::smart_ptr<sal::alloc_header>(_ses, ins.ext);
+            SAL_CRASH_POINT("page:external_built");
+         }
          // An external record built for a typed value that no page adopts (the page was
          // full: the caller splits and retries with a new record) must die without firing
          // the type's release hook: the value was never stored, and the reference it would
@@ -2250,6 +2262,7 @@ namespace sal_art_ref::radix
                              oiv->value().size()});
                   }
                   ref.modify().get()->apply(upd);
+                  SAL_CRASH_POINT("page:update_in_place");
                   (void)pending.take();
                   if (old_child != sal::null_ptr_address)
                      _ses->release(old_child);  // the replaced external/subtree child
@@ -2260,6 +2273,7 @@ namespace sal_art_ref::radix
                ptr_address np =
                    _ses->alloc<leaf_page>(sal::alloc_hint{}, leaf_page::clone_op{pg});
                mut<leaf_page>(np)->apply(upd);
+               SAL_CRASH_POINT("page:update_cloned");
                (void)pending.take();
                retain_page_children(pg, idx);
                return np;
@@ -2270,6 +2284,7 @@ namespace sal_art_ref::radix
                // the old page, releasing every child including the replaced one.
                ptr_address np =
                    _ses->alloc<leaf_page>(sal::alloc_hint{}, leaf_page::clone_update_op{pg, upd, kvres(*_ses)});
+               SAL_CRASH_POINT("page:update_rebuilt");
                (void)pending.take();
                retain_page_children(pg, idx);
                return np;
@@ -2284,11 +2299,13 @@ namespace sal_art_ref::radix
             if (!shared)
             {
                ref.modify().get()->apply(ins);
+               SAL_CRASH_POINT("page:insert_in_place");
                (void)pending.take();
                return page;
             }
             ptr_address np = _ses->alloc<leaf_page>(sal::alloc_hint{}, leaf_page::clone_op{pg});
             mut<leaf_page>(np)->apply(ins);
+            SAL_CRASH_POINT("page:insert_cloned");
             (void)pending.take();
             retain_page_children(pg, -1);
             return np;
@@ -2297,6 +2314,7 @@ namespace sal_art_ref::radix
          {
             ptr_address np =
                 _ses->alloc<leaf_page>(sal::alloc_hint{}, leaf_page::clone_insert_op{pg, ins});
+            SAL_CRASH_POINT("page:insert_rebuilt");
             (void)pending.take();
             retain_page_children(pg, -1);
             return np;
@@ -2345,6 +2363,7 @@ namespace sal_art_ref::radix
                fire_typed_release({reinterpret_cast<const char*>(old->value().data()),
                                    old->value().size()});
             ref.modify().get()->apply(leaf_page::remove_op{uint16_t(idx)});
+            SAL_CRASH_POINT("page:remove_in_place");
             if (old_child != sal::null_ptr_address)
                _ses->release(old_child);
             return page;
@@ -2353,6 +2372,7 @@ namespace sal_art_ref::radix
          // child stays owned by the snapshot's page (not retained, not referenced by the clone).
          ptr_address np = _ses->alloc<leaf_page>(sal::alloc_hint{}, leaf_page::clone_op{pg});
          mut<leaf_page>(np)->apply(leaf_page::remove_op{uint16_t(idx)});
+         SAL_CRASH_POINT("page:remove_cloned");
          retain_page_children(pg, idx);
          return np;
       }
@@ -2413,6 +2433,7 @@ namespace sal_art_ref::radix
             {
                N* n = cow<mode, N>(ref, addr);
                n->set_term_value(smart_address::from_pointer(np));
+               SAL_CRASH_POINT("router:term_repointed");
                _ses->release(page);
             }
             return addr;
@@ -2433,6 +2454,7 @@ namespace sal_art_ref::radix
          {
             const ptr_address pre = addr;
             N*                n   = cow<mode, N>(ref, addr);
+            SAL_CRASH_POINT("router:made_writable");
             rr_diverge<N>(n, range_of(b));
             if (!n->set_branch(b, smart_address::from_pointer(nc)))
             {
@@ -2443,13 +2465,17 @@ namespace sal_art_ref::radix
                   ptr_address up =
                       grow_and_set<N>(addr, b, smart_address::from_pointer(nc), bytes{}, bytes{},
                                       chint);
+                  SAL_CRASH_POINT("router:grown");
                   if (addr != pre)
                      _ses->release(addr);
                   return up;
                }
             }
             else
+            {
+               SAL_CRASH_POINT("router:branch_repointed");
                _ses->release(child);
+            }
          }
          return addr;
       }
@@ -2873,12 +2899,14 @@ namespace sal_art_ref::radix
                                  plan.left_w});
          _ses->get_ref<leaf_page>(L).obj()->for_each_child([&](ptr_address c) { _ses->retain(c); });
          retain_page_typed(L);
+         SAL_CRASH_POINT("split:left_built");
          ptr_address R = _ses->alloc<leaf_page>(
              sal::alloc_hint{},
              leaf_page::split_op{pg, sp.index, uint16_t(pg->num_keys()), kvres(*_ses), sp.divider(),
                                  plan.right_cp, plan.right_w});
          _ses->get_ref<leaf_page>(R).obj()->for_each_child([&](ptr_address c) { _ses->retain(c); });
          retain_page_typed(R);
+         SAL_CRASH_POINT("split:right_built");
          ++_cc.page_splits;
          if (cur == P)  // the root IS the page → grow a radix above it
          {
@@ -2987,6 +3015,7 @@ namespace sal_art_ref::radix
                 ->for_each_child([&](ptr_address c) { _ses->retain(c); });
             retain_page_typed(moved.address());
          }
+         SAL_CRASH_POINT("split:edge_built");
          ++_cc.page_splits;
          // What stays in the old page's slot, and what is attached at the new divider.
          const ptr_address in_slot  = where == side::above ? P : fresh.address();
@@ -4842,6 +4871,7 @@ namespace sal_art_ref::radix
                ptr_address sub   = child.take();  // consume the child's ref → the terminal owns it
                _t->mutate_root(_working, [&](ptr_address pre)
                                { return _t->attach_subtree_step(pre, c.key, sub); });
+               SAL_CRASH_POINT("subtree:written_back");
             }
             _children.clear();
             return std::move(_working);
@@ -4860,6 +4890,7 @@ namespace sal_art_ref::radix
          savepoint save() const
          {
             savepoint s{_working, _children.size(), {}};
+            SAL_CRASH_POINT("savepoint:working_retained");
             s.children.reserve(_children.size());
             for (const auto& c : _children)
                s.children.push_back(c.h->save());
@@ -4868,6 +4899,7 @@ namespace sal_art_ref::radix
          void restore(savepoint&& s) noexcept
          {
             _working = std::move(s.working);
+            SAL_CRASH_POINT("savepoint:working_restored");
             if (_children.size() > s.nchild)
                _children.resize(s.nchild);  // drop children opened since
             // (set_root() since the savepoint closed the handles open then: nothing of
@@ -4903,6 +4935,7 @@ namespace sal_art_ref::radix
          {
             tree old(_t, std::move(_working));  // wrap the current working (ref transfers)
             _working = std::move(t._root);      // adopt the incoming root (ref transfers)
+            SAL_CRASH_POINT("tree:working_replaced");
             _children.clear();
             return old;
          }
@@ -5062,6 +5095,7 @@ namespace sal_art_ref::radix
          {
             auto old = _t->_ses->set_root<sal::alloc_header>(sal::root_object_number(idx),
                                                              std::move(w), _t->sync_mode());
+            SAL_CRASH_POINT("commit:old_root_held");
          }
 
         public:
@@ -5171,21 +5205,30 @@ namespace sal_art_ref::radix
                abort();
                throw;
             }
+            SAL_CRASH_POINT("commit:flushed");
             publish(_primary_idx, std::move(primary));
             for (auto& [i, w] : extras)
+            {
+               SAL_CRASH_POINT("commit:between_roots");
                publish(i, std::move(w));
+            }
+            SAL_CRASH_POINT("commit:published");
             _extra.clear();
             _open = false;
             unlock_roots();
+            SAL_CRASH_POINT("commit:unlocked");
          }
          void abort() noexcept
          {
             if (!_open) return;
+            SAL_CRASH_POINT("abort:begin");
             _primary._working.release();  // drop the working lineage + opened children (RAII)
+            SAL_CRASH_POINT("abort:working_released");
             _primary._children.clear();
             _extra.clear();
             _open = false;
             unlock_roots();
+            SAL_CRASH_POINT("abort:done");
          }
          frame sub_transaction();  // savepoint (defined after frame)
       };
@@ -5327,8 +5370,10 @@ namespace sal_art_ref::radix
             ~unclaim() { t->unclaim_root(idx); }
          } done{this, idx};
          std::lock_guard<writer_gate> writer(root_writer(idx));
+         SAL_CRASH_POINT("set_root:locked");
          auto old =
              _ses->set_root<sal::alloc_header>(sal::root_object_number(idx), std::move(t._root), st);
+         SAL_CRASH_POINT("set_root:old_root_held");
       }
       uint64_t get_total_allocated_objects() const { return object_count(); }
       uint64_t get_pending_release_count() const { return pending_releases(); }
@@ -7220,9 +7265,11 @@ namespace sal_art_ref::radix
                break;
          }
          _recovered = mode;
+         SAL_CRASH_POINT("open:recovered");
          // Durable before the first mutation: from here on, a stop without the matching
          // clean record below is detected by the next open.
          sal::shutdown_record::mark_open(dir, cfg.sync_mode);
+         SAL_CRASH_POINT("open:record_written");
          _alloc->sync_control_state_on_close(cfg.sync_mode);
          _clean_close = {dir, cfg.sync_mode, true};
       }
@@ -7250,7 +7297,11 @@ namespace sal_art_ref::radix
          ~clean_close()
          {
             if (armed)
+            {
+               SAL_CRASH_POINT("close:before_clean_record");
                sal::shutdown_record::mark_clean(dir, sync);
+               SAL_CRASH_POINT("close:clean_record_written");
+            }
          }
       };
       clean_close         _clean_close;

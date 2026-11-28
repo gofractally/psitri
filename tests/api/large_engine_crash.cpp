@@ -353,6 +353,12 @@ namespace
       uint32_t keyspace = 900;
       uint32_t max_ops  = 20;
    };
+   // Root 3 grows wide: thousands of keys, so its routers reach the dense kinds whose
+   // versions share branch sets through counters.
+   profile profile_of(uint32_t root)
+   {
+      return root == 3 ? profile{20000, 90} : profile{};
+   }
 
    // The operations of one phase of one publication, on the store through `h` (null: on the
    // model only) and on the model `m`. `fixed` holds keys this publication must not touch
@@ -395,16 +401,16 @@ namespace
          if (pick < 52)  // insert or replace
          {
             size_t size;
-            if (pick < 30)
+            if (pick < 30 || (root == 3 && pick < 50))
                size = r % 97;  // inline in the page
             else if (pick < 44)
                size = 120 + r % 5000;  // an external record
-            else if (pick < 51)
+            else if (pick < 48 || root != 0)
                size = 9000 + r % 150000;
-            else if (root == 0)
-               size = (2u << 20) + 200000 + r % (2u << 20);  // above the split threshold
+            else if (pick < 51)
+               size = 300000 + r % 1700000;  // split in two when it meets the end of a segment
             else
-               size = 30000 + r % 200000;
+               size = (2u << 20) + 200000 + r % (2u << 20);  // above the split threshold
             std::string key = size > (2u << 20) ? std::string("k/BIG")
                                                 : key_of(uint32_t((r >> 20) % p.keyspace));
             if (fixed.count(key))
@@ -512,8 +518,9 @@ namespace
    // Publication k of `root`: the operations on the store through `h` and on the model.
    template <class H, class WS>
    void apply_publication(H* h, WS* ws, root_state& rs, uint64_t seed, uint32_t root, uint64_t k,
-                          const profile& p)
+                          const profile&)
    {
+      const profile p = profile_of(root);
       if (reverts(root, k))  // the caller has put the stash in place of the root
       {
          rs.model = rs.stash;
@@ -716,7 +723,7 @@ namespace
    // no root reaches; the shared branch-set counters; the segments' free-space accounting.
    struct audit_result
    {
-      uint64_t    objects = 0, data_segments = 0, bytes = 0;
+      uint64_t    objects = 0, data_segments = 0, bytes = 0, shared_counters = 0;
       std::string error;
    };
    template <class N>
@@ -863,6 +870,7 @@ namespace
                      " counters in use, the roots reach " + std::to_string(counters.size());
          return out;
       }
+      out.shared_counters = counters.size();
       // segments
       uint32_t orphans = 0;
       for (size_t s = 0; s < dump.segments.size(); ++s)
@@ -982,7 +990,7 @@ namespace
       const auto a = audit(*db, !plan.leaks_allowed);
       if (!a.error.empty())
          child_fail("audit: " + a.error);
-      send(m_audit, 0, a.objects, a.data_segments);
+      send(m_audit, uint32_t(a.shared_counters), a.objects, a.data_segments);
       return db;
    }
 
@@ -1027,6 +1035,17 @@ namespace
                     std::atomic<bool>& stop)
    {
       auto ws = db.start_write_session();
+      if (b.version < a.version)
+      {
+         // The last life died between the two root stores of one commit, which is allowed:
+         // roots are published one after another. Bring the second root level.
+         auto tx = ws->start_transaction(pair_b);
+         apply_publication(&tx, ws.get(), b, plan.seed, pair_b, b.version + 1, plan.prof);
+         tx.commit();
+         send(m_ack, pair_b, b.version);
+         if (stash_scheduled(b.version))
+            stash_now(*ws, pair_b, b.version);
+      }
       for (uint32_t n = 0; n < plan.txns && !stop.load(std::memory_order_relaxed); ++n)
       {
          const uint64_t k = a.version + 1;
@@ -1054,9 +1073,34 @@ namespace
    {
       auto ws   = db.start_write_session();
       auto mine = ws->get_root(keep_root);
+      // A tree of the session's own that is never published and is edited across the
+      // session's publications: what it wrote before a publication is frozen by it, so the
+      // next edit of a node only this tree owns has to move the node.
+      auto                               side = ws->create_temporary_tree();
+      std::map<std::string, std::string> side_model;
+      std::mt19937_64                    side_rng(mix(plan.seed, 0x51DE, st.version));
       for (uint32_t n = 0; n < plan.txns && !stop.load(std::memory_order_relaxed); ++n)
       {
          const uint64_t k = st.version + 1;
+         {
+            auto wt = ws->start_write_transaction(std::move(side));
+            for (int i = 0; i < 6; ++i)
+            {
+               const std::string key = key_of(uint32_t(side_rng() % 300));
+               if (side_rng() % 4 == 0)
+               {
+                  wt.remove(key);
+                  side_model.erase(key);
+               }
+               else
+               {
+                  const std::string v(size_t(side_rng() % 400), char('a' + i));
+                  wt.upsert(key, v);
+                  side_model[key] = v;
+               }
+            }
+            side = wt.get_tree();
+         }
          if (mix(plan.seed ^ 0xD00D, keep_root, k) % 5 == 0 && !reverts(keep_root, k))
          {
             root_state scratch = st;
@@ -1076,6 +1120,14 @@ namespace
          if (n % 8 == 7)
             throttle(db);
       }
+      auto     c = side.snapshot_cursor();
+      auto     it = side_model.begin();
+      for (bool ok = c.seek_begin(); ok; ok = c.next(), ++it)
+         if (it == side_model.end() || c.key() != it->first ||
+             c.template value<std::string>() != it->second)
+            child_fail("the session's unpublished tree differs from what was written to it");
+      if (it != side_model.end())
+         child_fail("the session's unpublished tree lost keys");
    }
    // The node's main root: a tree built outside, put in place of the root by a transaction.
    void replace_writer(database& db, const life_plan& plan, root_state& st, std::atomic<bool>& stop)
@@ -1255,6 +1307,7 @@ namespace
       std::string                     failure;  // from the child, or about the child
       std::map<std::string, uint64_t> counts;
       uint64_t                        acks = 0, roots_verified = 0, audited_objects = 0;
+      uint64_t                        audited_counters = 0;
       bool                            audited = false;
    };
 
@@ -1310,6 +1363,7 @@ namespace
             case m_audit:
                res.audited         = true;
                res.audited_objects = m.a;
+               res.audited_counters = m.root;
                break;
             case m_ready:
                res.ready = true;
@@ -1406,9 +1460,11 @@ namespace
       uint64_t                             seed;
       profile                              prof;
       bool                                 dirty = false;  // the last life did not close the store
+      bool unknown = false;  // it died where the test cannot tell which side of the record
       // totals
       uint64_t lives = 0, deaths = 0, deaths_in_recovery = 0, clean_closes = 0;
       uint64_t publications = 0, roots_verified = 0, audits = 0, stores = 0;
+      uint64_t objects_audited = 0, max_objects = 0, max_counters = 0;
       std::map<std::string, uint64_t> deaths_at;
       std::vector<std::string>        failures;
       bool                            verbose = env_u64("LGE_CRASH_VERBOSE", 0) != 0;
@@ -1418,7 +1474,8 @@ namespace
       {
          dir = std::make_unique<temporary_directory>();
          state = {};
-         dirty = false;
+         dirty   = false;
+         unknown = false;
          ++stores;
       }
       life_plan plan() const
@@ -1438,6 +1495,9 @@ namespace
          publications += res.acks;
          roots_verified += res.roots_verified;
          audits += res.audited;
+         objects_audited += res.audited_objects;
+         max_objects  = std::max(max_objects, res.audited_objects);
+         max_counters = std::max(max_counters, res.audited_counters);
          const bool died = res.term_signal == SIGKILL;
          if (died)
          {
@@ -1450,7 +1510,7 @@ namespace
          if (res.closed)
             ++clean_closes;
          std::string failure = res.failure;
-         if (failure.empty() && res.opened && p.recovery == sal::recovery_mode::none)
+         if (failure.empty() && res.opened && p.recovery == sal::recovery_mode::none && !unknown)
          {
             const auto want = was_dirty ? sal::recovery_mode::app_crash : sal::recovery_mode::none;
             if (sal::recovery_mode(res.recovery) != want)
@@ -1475,20 +1535,50 @@ namespace
             res.failure = failure;
             return res;
          }
-         // (a death before the open returned leaves the store as dirty as it was)
-         dirty = res.closed ? false : (res.opened || was_dirty || died);
+         // How the store was left. The shutdown record is written as the open's last step
+         // and the clean record as the close's last, so a death right around either can
+         // have fallen on either side of it.
+         const bool was_unknown = unknown;
+         unknown                = false;
+         if (res.closed || res.died_at == "close:clean_record_written")
+            dirty = false;
+         else if (!res.opened)
+         {
+            if (res.died_at == "open:record_written" || res.died_at == "open:threads_started")
+               dirty = true;
+            else if (!was_dirty || was_unknown)
+               unknown = res.died_at.empty() || was_unknown;  // a clean store stays clean
+         }
+         else if (res.done && res.died_at.empty())
+            unknown = true;  // killed by the parent somewhere in the close
+         else
+            dirty = true;
          return res;
+      }
+      void absorb(const campaign& o)
+      {
+         lives += o.lives, deaths += o.deaths, deaths_in_recovery += o.deaths_in_recovery;
+         clean_closes += o.clean_closes, publications += o.publications;
+         roots_verified += o.roots_verified, audits += o.audits, stores += o.stores;
+         objects_audited += o.objects_audited;
+         max_objects  = std::max(max_objects, o.max_objects);
+         max_counters = std::max(max_counters, o.max_counters);
+         for (auto& [name, n] : o.deaths_at)
+            deaths_at[name] += n;
+         failures.insert(failures.end(), o.failures.begin(), o.failures.end());
       }
       void summary(const char* title) const
       {
          std::printf("%s: %llu lives on %llu stores, %llu deaths (%llu before the open returned), "
                      "%llu clean closes, %llu publications acknowledged, %llu root checks, %llu "
-                     "audits, %zu failures\n",
+                     "audits (%llu object counts checked, largest store %llu objects, %llu "
+                     "branch-set counters), %zu failures\n",
                      title, (unsigned long long)lives, (unsigned long long)stores,
                      (unsigned long long)deaths, (unsigned long long)deaths_in_recovery,
                      (unsigned long long)clean_closes, (unsigned long long)publications,
                      (unsigned long long)roots_verified, (unsigned long long)audits,
-                     failures.size());
+                     (unsigned long long)objects_audited, (unsigned long long)max_objects,
+                     (unsigned long long)max_counters, failures.size());
          for (auto& f : failures)
             std::printf("  FAILURE %s\n", f.c_str());
          std::fflush(stdout);
@@ -1532,8 +1622,9 @@ TEST_CASE("large engine: death at every crash point", "[large-crash][points]")
    // runs the workload and closes.
    std::map<std::string, uint64_t> passes;
    {
-      auto p = c.plan();
-      REQUIRE(c.life(p, 150000).failure == "");
+      auto p      = c.plan();
+      p.clean_end = false;
+      REQUIRE(c.life(p).failure == "");
       p          = c.plan();
       p.counting = true;
       auto r     = c.life(p);
@@ -1565,13 +1656,35 @@ TEST_CASE("large engine: death at every crash point", "[large-crash][points]")
          auto           p  = c.plan();
          p.point           = name;
          p.at              = at;
-         if (arms_before_open(name) && !c.dirty)
+         if (name.starts_with("recover:") && !c.dirty)
          {
             // recovery has to have something to recover: a death first
-            auto q = c.plan();
-            c.life(q, int64_t(20000 + rng() % 200000));
+            auto q      = c.plan();
+            q.clean_end = false;
+            c.life(q, int64_t(rng() % 150000));
          }
-         auto r = c.life(p);
+         p.counting = true;  // (a life that closes reports what it passed)
+         auto r     = c.life(p);
+         for (auto& [point, n] : r.counts)
+            passes[point] = std::max(passes[point], n);
+         if (r.failure.empty() && r.died_at != name && round == 0)
+         {
+            // Not reached on a store that has been written to for a while: some points
+            // are only passed while a store is new (its file growing, its first open).
+            campaign young(seed + 7);
+            young.verbose = c.verbose;
+            auto q        = young.plan();
+            q.point       = name;
+            q.at          = 1;
+            auto y        = young.life(q);
+            if (y.failure.empty() && young.dirty)
+            {
+               q          = young.plan();
+               q.workload = false;
+               young.life(q);
+            }
+            c.absorb(young);
+         }
          if (r.failure.empty() && !r.opened && rng() % 2 == 0 && !recovery_points.empty())
          {
             // it died while recovering: die once more in the recovery of that
@@ -1580,6 +1693,28 @@ TEST_CASE("large engine: death at every crash point", "[large-crash][points]")
             q.at    = 1 + rng() % 3;
             c.life(q);
          }
+      }
+   // A second chance for the points no life has died at yet: the store has grown since
+   // their turn (wide routers, long release queues), and more is known about how often
+   // each is passed.
+   for (int chance = 0; chance < 3; ++chance)
+      for (auto& name : points)
+      {
+         if (c.deaths_at.count(name) || !passes.count(name) || passes[name] == 0)
+            continue;
+         if (name.starts_with("recover:") && !c.dirty)
+         {
+            auto q      = c.plan();
+            q.clean_end = false;
+            c.life(q, int64_t(rng() % 150000));
+         }
+         auto p     = c.plan();
+         p.point    = name;
+         p.at       = 1 + rng() % std::max<uint64_t>(1, passes[name] / 2);
+         p.counting = true;
+         auto r     = c.life(p);
+         for (auto& [point, n] : r.counts)
+            passes[point] = std::max(passes[point], n);
       }
    // whatever the last death left is recovered and checked
    {
@@ -1594,8 +1729,10 @@ TEST_CASE("large engine: death at every crash point", "[large-crash][points]")
          not_died.push_back(name);
    std::printf("crash points: %zu, died at %zu; never died at:", points.size(),
                points.size() - not_died.size());
+   (void)never_passed;
    for (auto& name : not_died)
-      std::printf(" %s%s", name.c_str(), never_passed.count(name) ? "(never passed)" : "");
+      std::printf(" %s%s", name.c_str(),
+                  passes.count(name) && passes[name] ? "" : "(never passed)");
    std::printf("\n");
    if (env_u64("LGE_CRASH_VERBOSE", 0))
       for (auto& [name, n] : c.deaths_at)
@@ -1612,10 +1749,14 @@ TEST_CASE("large engine: death at random moments", "[large-crash][random]")
    for (uint64_t i = 0; i < kills; ++i)
    {
       auto p = c.plan();
+      p.txns = uint32_t(env_u64("LGE_CRASH_TXNS", 120));
       if (i % 9 == 8)
          c.life(p);  // now and then a life that closes the store
       else
-         c.life(p, int64_t(rng() % 3 == 0 ? rng() % 3000 : rng() % 400000));
+      {
+         p.clean_end = false;  // (a life the kill comes too late for stops by itself)
+         c.life(p, int64_t(rng() % 3 == 0 ? rng() % 3000 : rng() % 500000));
+      }
    }
    auto p     = c.plan();
    p.workload = false;
@@ -1732,4 +1873,155 @@ TEST_CASE("large engine: a subtree at a long key survives the page split that st
       check(a.error.empty(), "audit: " + a.error);
    });
    REQUIRE(failure == "");
+}
+
+// ── deaths inside operations of the segment provider that offer no marker ──────────────
+// The provider's free-segment map and its queue of prepared segments are structures of
+// another library, updated by several stores each. The tests below stop at the marker just
+// before such an update, make the update's first store themselves through a mapping of the
+// allocator's state file, and die: the state a death between two stores of the update
+// leaves.
+namespace
+{
+   struct provider_layout
+   {
+      size_t free_level0 = 0;  // offset of the free map's lowest level in the state file
+      size_t queue_bits = 0, queue_produced = 0;  // of the prepared-segment queue's words
+      static size_t word_with(const void* object, size_t size, uint64_t value, const char* what)
+      {
+         size_t found = size, n = 0;
+         for (size_t off = 0; off + 8 <= size; off += 8)
+         {
+            uint64_t w;
+            std::memcpy(&w, static_cast<const char*>(object) + off, 8);
+            if (w == value)
+               found = off, ++n;
+         }
+         if (n != 1)
+            throw std::runtime_error(std::string("cannot locate ") + what);
+         return found;
+      }
+      provider_layout()
+      {
+         using state = sal::mapped_memory::allocator_state;
+         using prov  = sal::mapped_memory::segment_provider;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+         const size_t provider = offsetof(state, _segment_provider);
+         const size_t free_map = provider + offsetof(prov, free_segments);
+         const size_t queue    = provider + offsetof(prov, ready_pinned_segments);
+#pragma GCC diagnostic pop
+         {
+            // one bit set: word 5 of the lowest level holds 8, word 0 of the next holds 32
+            auto map = std::make_unique<ucc::hierarchical_bitmap<sal::max_segment_count>>();
+            map->set(5 * 64 + 3);
+            free_level0 = free_map + word_with(map.get(), sizeof(*map), 8, "the free map") - 40;
+         }
+         {
+            auto q = std::make_unique<ucc::poly_buffer<sal::segment_number>>();
+            q->push(sal::segment_number(9));
+            q->push(sal::segment_number(9));
+            queue_bits     = queue + word_with(q.get(), sizeof(*q), 3, "the queue's slot bits");
+            queue_produced = queue + word_with(q.get(), sizeof(*q), 2, "the queue's push count");
+         }
+      }
+   };
+   char* g_state_file = nullptr;  // the allocator's state file, mapped by the child
+   const provider_layout& layout()
+   {
+      static const provider_layout l;
+      return l;
+   }
+   void map_state_file(const fs::path& dir)
+   {
+      const int fd = ::open((dir / "header").c_str(), O_RDWR);
+      if (fd < 0)
+         child_fail("cannot open the allocator's state file");
+      struct stat st;
+      ::fstat(fd, &st);
+      void* p = ::mmap(nullptr, size_t(st.st_size), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+      if (p == MAP_FAILED)
+         child_fail("cannot map the allocator's state file");
+      g_state_file = static_cast<char*>(p);
+   }
+   // At "provider:take_free": the provider is about to take the lowest free segment. When
+   // that is the last one of its 64, clearing its bit is followed by clearing the word's
+   // bit one level up. Do the first and die.
+   bool tear_free_map()
+   {
+      auto* level0 = reinterpret_cast<std::atomic<uint64_t>*>(g_state_file + layout().free_level0);
+      for (uint32_t w = 0; w < 64; ++w)
+         if (const uint64_t bits = level0[w].load())
+         {
+            if (std::popcount(bits) != 1)
+               return false;
+            level0[w].store(0);
+            return true;
+         }
+      return false;
+   }
+   // At "provider:marked_queued": the provider is about to push a prepared segment: store
+   // it in its slot, set the slot's bit, then count it. Die between the last two.
+   bool tear_queue_push()
+   {
+      auto* bits     = reinterpret_cast<std::atomic<uint64_t>*>(g_state_file + layout().queue_bits);
+      auto* produced = reinterpret_cast<std::atomic<uint64_t>*>(g_state_file + layout().queue_produced);
+      bits->fetch_or(uint64_t(1) << (produced->load() & 63));
+      return true;
+   }
+
+   // Lives with the special hook until one dies of it, then one that must open, verify,
+   // audit and work on.
+   std::string death_inside(const char* point, bool (*special)(), bool close_first)
+   {
+      campaign c(env_u64("LGE_CRASH_SEED", 1) + 31);
+      static const fs::path* dir;
+      dir = &c.dir->path;
+      for (int attempt = 0; attempt < 40; ++attempt)
+      {
+         auto p = c.plan();
+         if (close_first && attempt == 0)
+         {
+            // a store that was closed: the death then falls in the open that follows
+            c.life(p);
+            continue;
+         }
+         p.point   = point;
+         p.at      = 1;
+         // (the hook maps the state file on first use, then runs the tear)
+         static bool (*tear)();
+         tear      = special;
+         p.special = +[] {
+            if (!g_state_file)
+               map_state_file(*dir);
+            return tear();
+         };
+         p.txns = 400;
+         auto r = c.life(p);
+         if (!r.failure.empty())
+            return r.failure;
+         if (r.died_at != point)
+            continue;
+         for (int after = 0; after < 2; ++after)
+         {
+            auto q = c.plan();
+            r      = run_life(c.dir->path, q, c.state, -1, 10);
+            if (!r.failure.empty())
+               return "after the death: " + r.failure;
+         }
+         return {};
+      }
+      return "the state to tear never came up";
+   }
+}  // namespace
+
+TEST_CASE("large engine: death between the stores that take a free segment",
+          "[large-crash][provider]")
+{
+   REQUIRE(death_inside("provider:take_free", &tear_free_map, false) == "");
+}
+TEST_CASE("large engine: death between the stores that queue a prepared segment",
+          "[large-crash][provider]")
+{
+   REQUIRE(death_inside("provider:marked_queued", &tear_queue_push, false) == "");
 }

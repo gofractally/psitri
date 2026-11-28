@@ -2509,17 +2509,17 @@ namespace sal
       if (provider_state.ready_unpinned_segments.usage() > 2)
          return;
 
-      SAL_CRASH_POINT("provider:take_free");
+      SAL_CRASH_POINT("provider:spare_take_free");
       segment_number seg_num{provider_state.free_segments.unset_first_set()};
       if (seg_num == provider_state.free_segments.invalid_index)
          seg_num = provider_allocate_new_segment();
-      SAL_CRASH_POINT("provider:taken");
+      SAL_CRASH_POINT("provider:spare_taken");
       provider_prepare_segment(seg_num, false /* don't pin it*/);
-      SAL_CRASH_POINT("provider:prepared");
+      SAL_CRASH_POINT("provider:spare_prepared");
       _mapped_state->_segment_data.added_to_provider_queue(seg_num);
-      SAL_CRASH_POINT("provider:marked_queued");
+      SAL_CRASH_POINT("provider:spare_marked_queued");
       provider_state.ready_unpinned_segments.push(seg_num);
-      SAL_CRASH_POINT("provider:pushed");
+      SAL_CRASH_POINT("provider:spare_pushed");
    }
 
    segment_number allocator::provider_allocate_new_segment()

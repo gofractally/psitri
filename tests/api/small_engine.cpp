@@ -566,6 +566,47 @@ TEST_CASE("Small Engine: storage stays bounded under churn at constant live size
    REQUIRE(u.mapped_bytes <= 2 * settled_mapped);
 }
 
+// What the churn test above depends on, without the timing. A reader that is
+// slow to let go of its snapshot keeps that whole version alive; when the
+// writer has made its last commit by then, nothing used to release the
+// version until some later commit, and flush_releases() returned with it
+// still counted as in use (the churn bound failed this way whenever the
+// reader thread was not scheduled for the last few hundred transactions).
+// flush_releases() releases versions no reader holds any more.
+TEST_CASE("Small Engine: flush_releases gives back a version its last reader has left",
+          "[small][churn][retired]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 64));
+   const model m{2000, 20};
+   auto        ws  = db->start_write_session();
+   uint64_t    seq = 0;
+   auto        run = [&](uint64_t txns) {
+      for (uint64_t i = 0; i < txns; ++i)
+      {
+         auto tx = ws->start_transaction(0);
+         m.apply(tx, ++seq);
+         tx.commit();
+      }
+   };
+   run(3 * m.rows / m.batch);
+   db->flush_releases();
+   const uint64_t live = db->usage().used_bytes;
+   {
+      auto rs  = db->start_read_session();
+      auto cur = rs->create_cursor(0);
+      run(2 * m.rows / m.batch);  // every row rewritten twice under the reader
+      db->flush_releases();
+      // the reader's version is kept, whole: about one more live set
+      REQUIRE(db->usage().used_bytes > live + live / 2);
+   }
+   // The reader is gone, and no commit follows.
+   db->flush_releases();
+   INFO("live " << live << " used " << db->usage().used_bytes);
+   REQUIRE(db->usage().used_bytes <= live + live / 8);
+}
+
 // The storage ceiling is max_segments. Reaching it in the middle of a
 // transaction must be an ordinary failure: an exception, the transaction
 // rolled back, everything committed before still there, and the store usable.
@@ -1521,6 +1562,79 @@ TEST_CASE("Small Engine: a writer ahead of the releaser waits instead of reporti
    for (cur.seek_begin(); !cur.is_end(); cur.next())
       ++keys;
    REQUIRE(keys == 20000);
+}
+
+namespace
+{
+   // A typed value whose first release on the background releaser takes a
+   // long time: a releaser thread the operating system is not scheduling.
+   struct stalling_value
+   {
+      static constexpr uint16_t type_id = 79;
+      struct t_pod
+      {
+         uint64_t n;
+         char     filler[2000];
+         static void retain(void*, const t_pod&) {}
+         static void release(void*, const t_pod&)
+         {
+            if (std::this_thread::get_id() != writer.load() && !stalled.exchange(true))
+               std::this_thread::sleep_for(std::chrono::milliseconds(400));
+         }
+      };
+      t_pod pod{};
+      t_pod take_pod() && { return pod; }
+      static stalling_value make_from_pod(const t_pod& p, bool) { return {p}; }
+      static inline std::atomic<std::thread::id> writer{};
+      static inline std::atomic<bool>            stalled{false};
+   };
+}  // namespace
+
+// A store is full when it has no room, not when the releaser is late. The
+// wait for queued releases used to give up after 16 waits of half a
+// millisecond, so on a machine with more runnable threads than processors
+// (where the releaser can go unscheduled for far longer) a writer was told
+// "storage limit reached" on a store that was an eighth full. This is that
+// situation made certain: the releaser stops for 400 ms with most of the
+// store queued behind it.
+TEST_CASE("Small Engine: a releaser that is not being scheduled is waited for",
+          "[small][limit][releaser][stall]")
+{
+   temporary_directory tmp;
+   auto db = database::open(tmp.path, psitri::open_mode::create_only,
+                            small_config(psitri::sync_mode::none, 4));
+   db->register_value_types<stalling_value>();
+   stalling_value::writer  = std::this_thread::get_id();
+   stalling_value::stalled = false;
+   const uint64_t live = 2000, upserts = 40000;  // 4 MiB live, 80 MiB written
+   std::string    refused;
+   {
+      auto     ws = db->start_write_session();
+      uint64_t n  = 0;
+      while (n < upserts && refused.empty())
+      {
+         try
+         {
+            auto tx = ws->start_transaction(0);
+            for (int j = 0; j < 200; ++j, ++n)
+            {
+               stalling_value v;
+               v.pod.n = n;
+               tx.upsert(scattered_key("w", n % live), std::move(v));
+            }
+            tx.commit();
+         }
+         catch (const engine::storage_full& e)
+         {
+            refused = e.what();
+         }
+      }
+   }
+   INFO("refused: " << refused);
+   REQUIRE(stalling_value::stalled.load());
+   REQUIRE(refused.empty());
+   db->flush_releases();
+   REQUIRE(db->usage().used_bytes * 4 < db->usage().limit_bytes);
 }
 
 // A transaction may be handed from the thread that started it to another,

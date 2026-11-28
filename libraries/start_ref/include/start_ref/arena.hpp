@@ -51,6 +51,7 @@
 #include <sal/mapping.hpp>
 
 #include <start_ref/config.hpp>
+#include <start_ref/crash_point.hpp>
 #include <start_ref/freeset.hpp>
 
 namespace start_ref
@@ -355,7 +356,9 @@ namespace start_ref
 
          _was_clean  = _hdr->clean.load(std::memory_order_relaxed) != 0;
          _derived_ok = _was_clean;
+         START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "open.before_unclean_mark" : "large.open.before_unclean_mark"));
          _hdr->clean.store(0, std::memory_order_relaxed);
+         START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "open.after_unclean_mark" : "large.open.after_unclean_mark"));
          // The free map and reference counts are not flushed by commits, so
          // after a power loss they are only trustworthy if the "open" mark
          // reached storage before anything changed them. Close always writes
@@ -374,7 +377,11 @@ namespace start_ref
          // agree again and the next growth starts where the count says.
          for (sal::block_allocator* file : {_data.get(), _free.get(), _refs.get()})
             if (file->num_blocks() > nseg)
+            {
+               START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "open.before_trim" : "large.open.before_trim"));
                file->truncate(nseg);
+               START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "open.after_trim" : "large.open.after_trim"));
+            }
          if (nseg)
          {
             _data->reserve(nseg);
@@ -408,14 +415,19 @@ namespace start_ref
             // asynchronous request could still let the mark arrive first.
             // On storage there is no reserve: its lines go back to the free
             // map, and the next open collects it again from what is free.
+            START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "close.before_reserve_return" : "large.close.before_reserve_return"));
             pool_return_();
+            START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "close.after_reserve_return" : "large.close.after_reserve_return"));
             if (_derived_ok && _free && _refs)
             {
                const sync_type st = std::max(_cfg.sync_mode, sync_type::msync_sync);
                _free->sync(st);
+               START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "close.between_map_syncs" : "large.close.between_map_syncs"));
                _refs->sync(st);
             }
+            START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "close.before_clean_mark" : "large.close.before_clean_mark"));
             _hdr->clean.store(_derived_ok ? 1 : 0, std::memory_order_relaxed);
+            START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "close.after_clean_mark" : "large.close.after_clean_mark"));
             _meta->sync(sync_type::full);
          }
       }
@@ -632,6 +644,7 @@ namespace start_ref
                return;
          }
          const uint32_t s = i / lines_per_segment;
+         START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "free" : "large.free"));
          freeset_(s).free_run(i % lines_per_segment, n);
       }
 
@@ -667,7 +680,9 @@ namespace start_ref
       void set_root(uint32_t slot, uint64_t v)
       {
          assert(slot < max_roots);
+         START_REF_CRASH_POINT("root.before_store");
          _hdr->roots[slot].store(v, std::memory_order_release);
+         START_REF_CRASH_POINT("root.after_store");
          if (_cfg.sync_mode != sync_type::none)
             _meta->sync(_cfg.sync_mode);
       }
@@ -684,7 +699,11 @@ namespace start_ref
          pool_forget_();  // the maps are rebuilt from the tree; so is the reserve, in rebuild_end
          const uint32_t nseg = num_segments();
          for (uint32_t s = 0; s < nseg; ++s)
+         {
+            START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "recover.reset_map" : "large.recover.reset_map"));
             freeset_(s).init(true);
+         }
+         START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "recover.before_reset_counts" : "large.recover.before_reset_counts"));
          std::memset(reinterpret_cast<void*>(_ref_base), 0,
                      size_t(nseg) * lines_per_segment);
       }
@@ -730,6 +749,7 @@ namespace start_ref
             _ref_base[i].store(uint8_t(cur + 1), std::memory_order_relaxed);
             return false;
          }
+         START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "recover.mark" : "large.recover.mark"));
          claim_run(i, n);
          return true;
       }
@@ -751,6 +771,7 @@ namespace start_ref
          const uint32_t nseg = num_segments();
          for (uint32_t s = 0; s < nseg; ++s)
          {
+            START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "recover.finish_map" : "large.recover.finish_map"));
             freeset_(s).rebuild_from_l0();
             _segs[s].state.store(SEG_UNOWNED, std::memory_order_relaxed);
             for (auto& d : _segs[s].dirty)
@@ -865,13 +886,23 @@ namespace start_ref
       // that work and returns true if there was any, in which case the
       // allocation is tried again. Called on the allocating thread with no
       // arena lock held.
-      using reclaim_fn = bool (*)(void*);
+      //
+      // `patient` says who is asking. An allocation that is about to be
+      // refused as "store full" is patient: the hook waits until the work it
+      // found is done, however long the releaser takes to be scheduled,
+      // because a store with dead storage queued is not full. A remove
+      // looking for a run the reserve does not have just now is not: it gets
+      // a short bounded wait and then goes the ordinary way.
+      using reclaim_fn = bool (*)(void*, bool patient);
       void set_reclaim(reclaim_fn f, void* ctx) noexcept
       {
          _reclaim_fn  = f;
          _reclaim_ctx = ctx;
       }
-      bool try_reclaim() noexcept { return _reclaim_fn && _reclaim_fn(_reclaim_ctx); }
+      bool try_reclaim(bool patient) noexcept
+      {
+         return _reclaim_fn && _reclaim_fn(_reclaim_ctx, patient);
+      }
 
       // Companion link to the large-value arena (the 32 KiB-grain second instance).
       // The line arena holds it so view/drain allocators (which carry only an
@@ -961,6 +992,7 @@ namespace start_ref
             return grow_locked_();
          if (cur != UINT32_MAX && cur + 1 < nseg && qualifies_(cur + 1))
          {
+            START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "segment.claim" : "large.segment.claim"));
             _segs[cur + 1].state.store(SEG_OWNED, std::memory_order_relaxed);
             _stats.segments_reused.fetch_add(1, std::memory_order_relaxed);
             return cur + 1;
@@ -988,6 +1020,7 @@ namespace start_ref
          }
          if (best_len)
          {
+            START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "segment.claim" : "large.segment.claim"));
             _segs[best_start].state.store(SEG_OWNED, std::memory_order_relaxed);
             _stats.segments_reused.fetch_add(1, std::memory_order_relaxed);
             return best_start;
@@ -1016,6 +1049,7 @@ namespace start_ref
                 _segs[s].state.compare_exchange_strong(state, SEG_OWNED,
                                                        std::memory_order_acq_rel))
             {
+               START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "segment.sweep_claim" : "large.segment.sweep_claim"));
                _stats.segments_reused.fetch_add(1, std::memory_order_relaxed);
                return s;
             }
@@ -1355,6 +1389,7 @@ namespace start_ref
          {
             _pool.have -= n;
             pool_publish_();
+            START_REF_CRASH_POINT("reserve.draw");
          }
          return at;
       }
@@ -1404,6 +1439,7 @@ namespace start_ref
          {
             _pool.have += kept;
             pool_publish_();
+            START_REF_CRASH_POINT("reserve.repay");
          }
          return kept;
       }
@@ -1459,9 +1495,13 @@ namespace start_ref
          const uint32_t batch = std::min(_cfg.grow_batch, _cfg.max_segments - first);
          for (uint32_t k = 0; k < batch; ++k)
          {
+            START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "grow.before_data" : "large.grow.before_data"));
             _data->alloc();
+            START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "grow.after_data" : "large.grow.after_data"));
             _free->alloc();
+            START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "grow.after_map" : "large.grow.after_map"));
             _refs->alloc();
+            START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "grow.after_counts" : "large.grow.after_counts"));
             const uint32_t s = first + k;
             new (&freeset_(s)) seg_freeset;
             freeset_(s).init(true);
@@ -1472,7 +1512,9 @@ namespace start_ref
          }
          if (first + batch == _cfg.max_segments)
             pool_establish_(first, first + batch);  // before the new segments can be seen
+         START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "grow.before_count" : "large.grow.before_count"));
          _hdr->num_segments.store(first + batch, std::memory_order_release);
+         START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "grow.after_count" : "large.grow.after_count"));
          _segs[first].state.store(SEG_OWNED, std::memory_order_relaxed);
          return first;
       }
@@ -1480,7 +1522,10 @@ namespace start_ref
       void release_claim_(uint32_t s) noexcept
       {
          if (s != UINT32_MAX)
+         {
+            START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "segment.release" : "large.segment.release"));
             _segs[s].state.store(SEG_UNOWNED, std::memory_order_release);
+         }
       }
 
       void mark_dirty_(uint32_t seg, uint32_t line_lo, uint32_t line_hi /*incl*/) noexcept
@@ -1591,6 +1636,7 @@ namespace start_ref
          // Take the segment back from idle; if another session needed it
          // meanwhile, claim afresh at the first allocation.
          _seg_idle        = false;
+         START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "segment.resume" : "large.segment.resume"));
          uint8_t expected = arena_t<Geo>::SEG_IDLE;
          if (!_a->_segs[_segment].state.compare_exchange_strong(
                  expected, arena_t<Geo>::SEG_OWNED, std::memory_order_acq_rel))
@@ -1663,6 +1709,7 @@ namespace start_ref
    inline void session_t<Geo>::finish_alloc_(line_idx g, uint32_t n, bool in_segment) noexcept
    {
       arena_t<Geo>& a = *_a;
+      START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "alloc" : "large.alloc"));
       for (uint32_t k = 0; k < n; ++k)
          a._ref_base[g + k].store(1, std::memory_order_relaxed);
       if (a._cfg.sync_mode != sync_type::none)
@@ -1957,7 +2004,7 @@ namespace start_ref
       // commit, dead subtrees for the releaser): have it happen, once, and
       // look again. The hook's wait is bounded and is for the releaser,
       // never for another writer.
-      if (g == null_idx && _a->try_reclaim())
+      if (g == null_idx && _a->try_reclaim(/*patient=*/false))
          g = _a->pool_draw_(n);
       if (g != null_idx)
       {
@@ -1980,6 +2027,9 @@ namespace start_ref
       // The hook reporting work does not mean this allocation can now be
       // met (another writer may keep the releaser busy for ever while n
       // lines in a row exist nowhere), so the number of rounds is bounded.
+      // Each round waits for all the work it found, so the bound is on how
+      // often other writers may take what was freed, not on the time the
+      // releaser is given.
       uint32_t   reclaims       = 0;
       const auto reclaim_helped = [&]() noexcept
       {
@@ -1988,7 +2038,7 @@ namespace start_ref
          // for another size can find them.
          if (s.unpark_())
             return true;
-         return reclaims++ < max_reclaim_rounds && a.try_reclaim();
+         return reclaims++ < max_reclaim_rounds && a.try_reclaim(/*patient=*/true);
       };
       auto claim = [&](uint32_t cur, bool prefer_grow, bool sweep) -> uint32_t
       {

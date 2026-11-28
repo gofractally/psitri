@@ -317,7 +317,7 @@ TEST_CASE("an allocation that can never fit gives up even if reclaim keeps repor
    // A reclaim hook that always says it freed something, as it would while
    // another writer keeps queueing releases, and frees nothing this
    // allocation can use.
-   a.set_reclaim([](void*) noexcept { ++calls; return true; }, nullptr);
+   a.set_reclaim([](void*, bool) noexcept { ++calls; return true; }, nullptr);
    auto tx = ses.start_transaction(0);
    REQUIRE_THROWS_AS(tx.alloc_lines(2), arena_full);
    REQUIRE(calls > 0);
@@ -884,7 +884,7 @@ TEST_CASE("a reserve miss asks for queued releases once", "[arena][limit][reserv
    auto  taken = take_everything(ses, 1);
    static uint64_t calls;
    calls = 0;
-   a.set_reclaim([](void*) noexcept { ++calls; return true; }, nullptr);
+   a.set_reclaim([](void*, bool) noexcept { ++calls; return true; }, nullptr);
    auto tx  = ses.start_transaction(0);
    auto use = ses.use_reserve();
    try  // every nine-line run the reserve can give, flexible or guaranteed

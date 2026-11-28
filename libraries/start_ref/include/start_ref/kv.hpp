@@ -1065,6 +1065,7 @@ namespace start_ref::kv
          _rel_cv.notify_one();
          if (_rel_thread.joinable())
             _rel_thread.join();
+         START_REF_CRASH_POINT("close.after_releaser_stop");
          _arena.set_defer(nullptr, nullptr);  // remaining releases are inline
          _arena.set_reclaim(nullptr, nullptr);
          _large.set_reclaim(nullptr, nullptr);
@@ -1075,8 +1076,10 @@ namespace start_ref::kv
             const root_ptr p = decode_root(raw);
             engine_t v{part_alloc<bval>(&_arena)};
             v.allocator_mut().vhooks = &_vh;
+            START_REF_CRASH_POINT("close.release_retired");
             v.cow_release(p);
          }
+         START_REF_CRASH_POINT("close.before_arenas");
          // [persist/reopen] Do NOT release the published live roots on close.
          // They are the durable committed trees (arena.set_root persisted them);
          // a later reopen re-adopts them in the ctor. Releasing here would free
@@ -1132,8 +1135,16 @@ namespace start_ref::kv
       }
       // SPEC §19: wait until the background releaser has emptied its ring
       // (drain gates and shutdown ordering call this)
+      // It first releases every retired version that no reader holds any
+      // more. That otherwise happens at the next commit, so after a writer's
+      // last commit a version a reader let go of later would stay counted in
+      // usage() for as long as nothing commits.
       void flush_releases() noexcept
       {
+         {
+            std::lock_guard g(_root_mx);
+            drain_retired_();
+         }
          while (_rel_tail.load(std::memory_order_acquire) !=
                 _rel_head.load(std::memory_order_acquire))
             std::this_thread::yield();
@@ -1260,14 +1271,21 @@ namespace start_ref::kv
          sized_thread walker(release_stack_bytes, [&] {
             try
             {
+               START_REF_CRASH_POINT("recover.begin");
                _arena.rebuild_begin();
+               START_REF_CRASH_POINT("recover.between_resets");
                _large.rebuild_begin();
                recover_marker marker{_arena, _large};
                engine_t       view{part_alloc<bval>(&_arena)};
                for (uint32_t i = 0; i < kMaxRoots; ++i)
+               {
                   view.recover_mark(_live_root[i], marker);  // the root slot's own reference
+                  START_REF_CRASH_POINT("recover.after_root");
+               }
                _arena.rebuild_end();
+               START_REF_CRASH_POINT("recover.between_ends");
                _large.rebuild_end();
+               START_REF_CRASH_POINT("recover.done");
             }
             catch (const std::exception& e)
             {
@@ -1288,13 +1306,21 @@ namespace start_ref::kv
       // publishes any more (normally done at the next commit, which this
       // writer may never reach without the room), then waits for the
       // releaser's queue. True if either had anything to do.
-      static bool reclaim_cb_(void* ctx) noexcept
+      static bool reclaim_cb_(void* ctx, bool patient) noexcept
       {
          auto* db      = static_cast<database*>(ctx);
          bool  drained = false;
          {
-            // try_lock: never wait here for a commit that is publishing
-            std::unique_lock lock(db->_root_mx, std::try_to_lock);
+            // A remove never waits here for a commit that is publishing. An
+            // allocation about to be refused does: that commit may be about
+            // to retire and release the very room it needs. (Nothing
+            // allocates while holding this mutex, so the wait cannot be for
+            // this thread.)
+            std::unique_lock lock(db->_root_mx, std::defer_lock);
+            if (patient)
+               lock.lock();
+            else
+               (void)lock.try_lock();
             if (lock.owns_lock() && !db->_retired.empty())
             {
                const size_t before = db->_retired.size();
@@ -1304,24 +1330,49 @@ namespace start_ref::kv
          }
          // Wait for the releaser to get through what was queued when we came
          // in, and no longer: other writers can keep adding to the queue for
-         // ever, and this runs inside a writer's transaction. Bounded in time
-         // as well (reclaim_max_wait), in case the releaser is slow or is not
-         // being scheduled.
+         // ever, and this runs inside a writer's transaction.
          const uint32_t upto   = db->_rel_head.load(std::memory_order_acquire);
          const bool     queued = db->_rel_tail.load(std::memory_order_acquire) != upto;
          if (queued)
          {
-            const auto until = std::chrono::steady_clock::now() + reclaim_max_wait;
-            while (int32_t(db->_rel_tail.load(std::memory_order_acquire) - upto) < 0 &&
-                   std::chrono::steady_clock::now() < until)
-               std::this_thread::yield();
+            using clock   = std::chrono::steady_clock;
+            uint32_t seen = db->_rel_tail.load(std::memory_order_acquire);
+            auto     mark = clock::now();
+            // Impatient: bounded in time (reclaim_max_wait). Patient: for as
+            // long as the releaser keeps advancing, and reclaim_stall_limit
+            // beyond its last step. The releaser may simply not be scheduled
+            // (more runnable threads than processors), and what it holds is
+            // room this writer is entitled to; only a releaser that has
+            // stopped altogether ends the wait.
+            const auto limit = patient ? clock::duration(reclaim_stall_limit)
+                                       : clock::duration(reclaim_max_wait);
+            for (uint32_t spins = 0;; ++spins)
+            {
+               const uint32_t tail = db->_rel_tail.load(std::memory_order_acquire);
+               if (int32_t(tail - upto) >= 0)
+                  break;
+               const auto now = clock::now();
+               if (patient && tail != seen)
+                  seen = tail, mark = now;
+               else if (now - mark >= limit)
+                  break;
+               if (patient && spins > 64)  // give the releaser a processor
+                  std::this_thread::sleep_for(std::chrono::microseconds(50));
+               else
+                  std::this_thread::yield();
+            }
          }
          return queued || drained;
       }
-      // The longest one call of the reclaim hook waits for the releaser. A
-      // remove that the reserve cannot serve calls it once; an ordinary
-      // allocation at most 16 times before it reports the store full.
+      // The longest one impatient call of the reclaim hook waits for the
+      // releaser: a remove that the reserve cannot serve makes one.
       static constexpr std::chrono::microseconds reclaim_max_wait{500};
+      // How long a patient call (an ordinary allocation about to be refused)
+      // goes on waiting for a releaser that has not completed a single
+      // queued release. Far beyond any scheduling delay: past it the
+      // releaser is taken to be stuck (in a typed value's release hook, say)
+      // and the allocation is refused after all.
+      static constexpr std::chrono::seconds reclaim_stall_limit{30};
       static bool defer_cb_(void* ctx, uint64_t raw) noexcept
       {
          return static_cast<database*>(ctx)->rel_push_(raw);
@@ -1373,7 +1424,9 @@ namespace start_ref::kv
                continue;
             }
             const root_ptr p = decode_root(raw);
+            START_REF_CRASH_POINT("releaser.before_release");
             v.cow_release(p);  // non-deferring allocator: full cascade here
+            START_REF_CRASH_POINT("releaser.after_release");
             _rel[t % kRelRing].store(0, std::memory_order_release);
             _rel_tail.store(t + 1, std::memory_order_release);
          }
@@ -1441,7 +1494,9 @@ namespace start_ref::kv
             const root_ptr p = decode_root(_retired[i]);
             engine_t v{part_alloc<bval>(&_arena, /*defer=*/true)};
             v.allocator_mut().vhooks = &_vh;
+            START_REF_CRASH_POINT("retire.before_release");
             v.cow_release(p);  // big generations route to the releaser
+            START_REF_CRASH_POINT("retire.after_release");
             _retired[i] = _retired.back();
             _retired.pop_back();
             ++_drain_roots;
@@ -1837,7 +1892,9 @@ namespace start_ref::kv
                t.adopt_root(it->start_root, it->start_count);
             else
                t.adopt_root(root_ptr::null(), 0);
+            START_REF_CRASH_POINT("abort.before_release");
             t.cow_release(diverged);  // drop the working's diverged ref
+            START_REF_CRASH_POINT("abort.after_release");
          }
          it->lock.unlock();  // reverse order
       }
@@ -1897,8 +1954,10 @@ namespace start_ref::kv
                t.cow_release(nr);
          }
       };
+      START_REF_CRASH_POINT("commit.before_flush");
       _large_tx.commit(); // continuation/head data must precede root publication
       _tx.commit();  // data msync + floor advance (layer 1)
+      START_REF_CRASH_POINT("commit.after_flush");
       {
          std::lock_guard g(db->_root_mx);
          try
@@ -1922,9 +1981,13 @@ namespace start_ref::kv
             db->_arena.set_root(r.index, encode_root(nr));
             if (!old.is_null())
                db->_retired.push_back(encode_root(old));
+            START_REF_CRASH_POINT("commit.after_root");
          }
+         START_REF_CRASH_POINT("commit.before_drain");
          db->drain_retired_();
+         START_REF_CRASH_POINT("commit.after_drain");
       }
+      START_REF_CRASH_POINT("commit.published");
       for (auto it = _roots.rbegin(); it != _roots.rend(); ++it)
          it->lock.unlock();
       _roots.clear();
@@ -1971,6 +2034,7 @@ namespace start_ref::kv
          if (!live.is_null() && !t.cow_retain(live))
             throw_root_references();
          t.adopt_root(live, 0);
+         START_REF_CRASH_POINT("refresh.before_release");
          t.cow_release(old);
       }
       return t;
@@ -2053,7 +2117,9 @@ namespace start_ref::kv
             throw_root_references();
          _tx->_held_roots.push_back(t._root);  // the incoming tree's reference
       }
+      START_REF_CRASH_POINT("set_root.before_adopt");
       w.adopt_root(t._root, t._count);  // repoint working to the incoming root
+      START_REF_CRASH_POINT("set_root.after_adopt");
       if (t._db && !t._root.is_null())
          t._db->tree_gone_();  // the handle no longer holds a root: the transaction does
       t._db   = nullptr;
@@ -2068,7 +2134,10 @@ namespace start_ref::kv
       engine_t  v{part_alloc<bval>(&db->_arena)};
       v.allocator_mut().vhooks = &db->_vh;
       for (const root_ptr r : _held_roots)
+      {
+         START_REF_CRASH_POINT("set_root.release_held");
          v.cow_release(r);
+      }
       _held_roots.clear();
    }
 

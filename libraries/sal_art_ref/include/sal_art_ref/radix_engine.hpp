@@ -4930,10 +4930,9 @@ namespace sal_art_ref::radix
          {
             _working = std::move(s.working);
             SAL_CRASH_POINT("savepoint:working_restored");
-            // The subtrees open at the savepoint are found by KEY. A set_root() since then
-            // closed every handle that was open, and a subtree opened after it sits where
-            // another one sat at the savepoint: restoring by position gave that handle the
-            // other subtree's working root, and commit stored it under the wrong key.
+            // The subtrees open at the savepoint are found by KEY, not by position: a
+            // set_root() since then has closed every handle that was open, and a subtree
+            // opened after it sits where another one sat at the savepoint.
             for (auto& saved : s.children)
             {
                std::unique_ptr<tree_handle> h;

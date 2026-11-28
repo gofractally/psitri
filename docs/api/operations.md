@@ -232,6 +232,33 @@ Comprehensive power-loss, arbitrary process-kill, disk-full, storage-corruption,
 and sustained beyond-RAM validation is incomplete. Select the library against your
 application's failure model and test recovery on the target storage stack.
 
+### Large Engine: stopping without closing
+
+A Large Engine store records whether its last read-write owner closed it. When it did
+not, and the same boot of the operating system is still running, the next read-write
+`open` runs the light pass (`sal::recovery_mode::app_crash`) by default: it recounts every
+reference from the published roots, frees what no root reaches, and rebuilds the
+segments' bookkeeping, at a cost that follows the live data. `db->recovery_performed()`
+says what ran. A read-only open of such a store throws; open it read-write once.
+
+Passing `sal::recovery_mode::deferred_cleanup` skips that pass and opens at once. It is
+a trade of space for start-up time: every object the dead owner held only in memory, and
+every segment its sessions were writing, stays allocated until a later open runs the
+light pass (asked for by name, or after the next unclean stop). Nothing published is
+lost either way.
+
+A transaction that commits several roots (`open_root`) stores them one after another: a
+process that dies between two of those stores leaves the first root new and the others
+old. Put state that must change together under one root.
+
+`tests/api/large_engine_crash.cpp` kills a writing process at each marked step of the
+allocator and the engine and at random moments, in `sync_mode::none`, and after every
+death checks each root against a model and audits every reference count. The audit
+walks the trees with the engine's own node decoding: it is independent of the counts
+and the free-space accounting it checks, not of how nodes are laid out. Before a
+release, also run it once with `LGE_CRASH_ROUNDS=6 LGE_CRASH_RANDOM=300`, and, if the
+store-of-64-segments case was disabled with `LGE_CRASH_BIG=0`, with that case on.
+
 ### Small Engine: stopping without closing
 
 A Small Engine store records whether its last owner closed it.

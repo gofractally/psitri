@@ -50,19 +50,32 @@ if(Catch2_FOUND)
         list(APPEND _lge_sources "${_lge_sal_dir}/${_src}")
     endforeach()
     # Every marker name in the sources, for "which points did a campaign never die at".
+    # A marker anywhere under libraries/ outside the two libraries this binary compiles
+    # with SAL_CRASH_POINTS, or one whose name the pattern below does not capture, would
+    # never be targeted: both stop the configuration.
     file(GLOB_RECURSE _lge_marked CONFIGURE_DEPENDS
-        "${PSITRI_SOURCE_DIR}/libraries/sal/include/sal/mapped_memory/*.hpp"
-        "${PSITRI_SOURCE_DIR}/libraries/sal/include/sal/alloc*.hpp"
-        "${PSITRI_SOURCE_DIR}/libraries/sal/include/sal/control_block*.hpp"
-        "${PSITRI_SOURCE_DIR}/libraries/sal/src/*.cpp"
-        "${PSITRI_SOURCE_DIR}/libraries/sal_art_ref/include/*.hpp")
+        "${PSITRI_SOURCE_DIR}/libraries/*.hpp" "${PSITRI_SOURCE_DIR}/libraries/*.cpp")
     set(_lge_points "")
     foreach(_file ${_lge_marked})
-        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_file}")
+        if(_file MATCHES "/sal/crash_point\\.hpp$")
+            continue()
+        endif()
         file(READ "${_file}" _text)
-        string(REGEX MATCHALL "SAL_CRASH_POINT\\(\"[a-z_:]+\"" _found "${_text}")
+        string(REGEX MATCHALL "SAL_CRASH_POINT *\\(" _uses "${_text}")
+        string(REGEX MATCHALL "SAL_CRASH_POINT\\(\"[a-z0-9_]+:[a-z0-9_]+\"\\)" _found "${_text}")
+        list(LENGTH _uses _n_uses)
+        list(LENGTH _found _n_found)
+        if(NOT _n_uses EQUAL _n_found)
+            message(FATAL_ERROR "${_file}: ${_n_uses} SAL_CRASH_POINT uses, ${_n_found} with a name of the form \"area:step\" (a-z, 0-9, _)")
+        endif()
+        if(_n_uses GREATER 0 AND NOT _file MATCHES "/libraries/(sal|sal_art_ref)/")
+            message(FATAL_ERROR "${_file}: crash points outside libraries/sal and libraries/sal_art_ref are not compiled into large-engine-crash-tests")
+        endif()
+        if(_n_uses GREATER 0)
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_file}")
+        endif()
         foreach(_match ${_found})
-            string(REGEX REPLACE "SAL_CRASH_POINT\\(\"([a-z_:]+)\"" "\\1" _name "${_match}")
+            string(REGEX REPLACE "SAL_CRASH_POINT\\(\"([a-z0-9_:]+)\"\\)" "\\1" _name "${_match}")
             list(APPEND _lge_points "${_name}")
         endforeach()
     endforeach()
@@ -85,7 +98,7 @@ if(Catch2_FOUND)
     target_compile_features(large-engine-crash-tests PRIVATE cxx_std_23)
     set_target_properties(large-engine-crash-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME large-engine-crash-tests COMMAND large-engine-crash-tests)
-    set_tests_properties(large-engine-crash-tests PROPERTIES TIMEOUT 1800)
+    set_tests_properties(large-engine-crash-tests PROPERTIES TIMEOUT 900)
 
     # The same writer and reader cases on the engines layered over others.
     if(TARGET psitri)

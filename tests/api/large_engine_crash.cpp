@@ -14,7 +14,9 @@
 // it against a model and audits every reference count, then runs writers on
 // several roots with readers holding snapshots, and kills itself with SIGKILL
 // the n-th time a chosen marker is passed (or the parent kills it at a random
-// moment). The next child does the same on the same store: it recovers,
+// moment). (The audit walks the trees with the engine's own node decoding and
+// the allocator's resolve(): it is independent of the reference counts, the
+// free map and the space accounting it checks, not of how nodes are laid out.) The next child does the same on the same store: it recovers,
 // verifies, audits, and carries on writing.
 //
 // Environment (all optional):
@@ -930,7 +932,8 @@ namespace
 
    bool arms_before_open(const std::string& point)
    {
-      return point.starts_with("recover:") || point.starts_with("open:");
+      return point.starts_with("recover:") || point.starts_with("open:") ||
+             point.starts_with("repair:");
    }
 
    // Writers pause while the store's file is near its ceiling, so that the compactor and
@@ -1731,7 +1734,7 @@ TEST_CASE("large engine: death at every crash point", "[large-crash][points]")
    // A second chance for the points no life has died at yet: the store has grown since
    // their turn (wide routers, long release queues), and more is known about how often
    // each is passed.
-   for (int chance = 0; chance < 3; ++chance)
+   for (int chance = 0; chance < 8; ++chance)
       for (auto& name : points)
       {
          if (c.deaths_at.count(name) || !passes.count(name) || passes[name] == 0)
@@ -1744,7 +1747,7 @@ TEST_CASE("large engine: death at every crash point", "[large-crash][points]")
          }
          auto p     = c.plan();
          p.point    = name;
-         p.at       = 1 + rng() % std::max<uint64_t>(1, passes[name] / 2);
+         p.at       = chance % 2 ? 1 : 1 + rng() % std::max<uint64_t>(1, passes[name] / 2);
          p.counting = true;
          auto r     = c.life(p);
          for (auto& [point, n] : r.counts)
@@ -1767,6 +1770,40 @@ TEST_CASE("large engine: death at every crash point", "[large-crash][points]")
    for (auto& name : not_died)
       std::printf(" %s%s", name.c_str(),
                   passes.count(name) && passes[name] ? "" : "(never passed)");
+   // Every marker must have been died at, except those named here with the reason. One
+   // that is listed as unreachable and is passed after all, or a new marker no life dies
+   // at, fails the test.
+   static const std::map<std::string, const char*> unreachable = {
+       {"cb:zone_files_grown", "passed when a store is created (a second zone of control "
+                               "blocks needs two million objects): the [creation] case dies here"},
+       {"cb:zone_initialized", "passed when a store is created (a second zone of control "
+                               "blocks needs two million objects): the [creation] case dies here"},
+       {"range:last_share_released", "needs the release thread to return every other share "
+                                     "between two instructions of the writer"},
+       {"range:rehome_children_retained", "needs a full region of share counters"},
+       {"range:rehome_left_shared", "needs a full region of share counters"},
+       {"range:rehomed", "needs a full region of share counters"},
+       {"router:grown", "a divider router that cannot take a branch in place: not produced"},
+       {"close:queued_release_done", "the release thread empties its queues before it stops"},
+       {"clone:saturated_children_retained", "255 live versions: the [versions] case dies here"},
+       {"clone:saturated_shares_returned", "255 live versions: the [versions] case dies here"},
+       {"clone:saturated_reborn", "255 live versions: the [versions] case dies here"},
+   };
+   // Passed only when two threads race; died at when the race happens to come up.
+   static const std::set<std::string> rare = {"segment:unallocated"};
+   if (only.empty() && rounds >= 3)
+   {
+      for (auto& name : not_died)
+      {
+         INFO("no life died at crash point " << name);
+         CHECK((unreachable.count(name) || rare.count(name)));
+      }
+      for (auto& [name, why] : unreachable)
+      {
+         INFO(name << " is listed as unreachable (" << why << ") but was passed");
+         CHECK((!passes.count(name) || passes[name] == 0 || std::string(why).find("] case dies here") != std::string::npos));
+      }
+   }
    std::printf("\n");
    if (env_u64("LGE_CRASH_VERBOSE", 0))
       for (auto& [name, n] : c.deaths_at)
@@ -2195,7 +2232,45 @@ namespace
       }
    }
 
+   // Inside commit(): at the marker just before the root-table store, every watched root
+   // (the one being replaced too) still reaches exactly the bytes it reached. Checked on
+   // the objects only: the committing thread holds the root's lock, so no cursor.
+   const root_image*         g_watch       = nullptr;  // inplace_roots images
+   const std::set<uint16_t>* g_watch_writers = nullptr;
+   database*                 g_watch_db    = nullptr;
+   std::atomic<bool>         g_watch_on{false};
+   std::atomic<uint64_t>     g_watch_checks{0};
+   bool check_inside_commit();
+
    constexpr uint32_t inplace_roots = 5;  // 0..4 are published and watched; 6 is churned
+   bool check_inside_commit()
+   {
+      if (!g_watch_on.load(std::memory_order_relaxed))
+         return false;
+      auto& alloc = g_watch_db->underlying_allocator();
+      auto  ses   = alloc.create_session();
+      auto  pin   = ses->lock();
+      for (uint32_t r = 0; r < inplace_roots; ++r)
+         for (auto& [addr, was] : g_watch[r].objects)
+         {
+            auto [obj, loc] = alloc.resolve(sal::ptr_address(addr));
+            check(obj != nullptr, "inside commit: an object of a published root does not resolve");
+            if (loc.cacheline() == was.location)
+               check(obj->size() == was.size &&
+                         hash_bytes({reinterpret_cast<const char*>(obj), size_t(obj->size())}) ==
+                             was.bytes,
+                     "inside commit: object " + std::to_string(addr) + " of published root " +
+                         std::to_string(r) + " was changed where it lies");
+            else
+               check(!g_watch_writers->count(
+                         *reinterpret_cast<const sal::mapped_memory::segment*>(
+                              reinterpret_cast<const char*>(obj) - loc.segment_offset())
+                              ->_session_id),
+                     "inside commit: a published object was moved by a writer");
+         }
+      g_watch_checks.fetch_add(1);
+      return false;  // never die here
+   }
    template <class H>
    void fill(H& h, uint32_t root, uint64_t gen, uint32_t keys)
    {
@@ -2315,6 +2390,11 @@ TEST_CASE("large engine: what a published root reaches does not change before th
       };
       take();
       unchanged("nothing done");
+      g_watch         = base;
+      g_watch_writers = &writers;
+      g_watch_db      = db.get();
+      crash::special.store(&check_inside_commit);
+      crash::arm("root:store_before", 1);
 
       {  // a transaction's work, while it is open and after it is aborted
          auto tx = ws->start_transaction(0);
@@ -2371,16 +2451,21 @@ TEST_CASE("large engine: what a published root reaches does not change before th
       unchanged("after all unpublished work");
 
       // Publish on root 0 and root 2: the others, which share with them, do not move.
+      g_watch_on.store(true);  // the next two root stores are checked from inside
       {
          auto tx = ws->start_transaction(0);
          scribble(tx, *ws, 20, true);
          tx.commit();
       }
+      g_watch_on.store(false);
       unchanged("after publishing root 0", 0);
       base[0] = image_of(*db, 0);
+      g_watch_on.store(true);
       ws->set_root(2, mine);
+      g_watch_on.store(false);
       unchanged("after publishing root 2 with set_root", 2);
       base[2] = image_of(*db, 2);
+      check(g_watch_checks.load() == 2, "the check inside commit did not run");
 
       // Compaction: churn another root until the compactor has moved objects, some of them
       // objects the watched roots reach.
@@ -2393,7 +2478,9 @@ TEST_CASE("large engine: what a published root reaches does not change before th
             for (uint32_t i = 0; i < 12; ++i)
                tx.upsert(key_of(uint32_t(mix(round, n, i) % 500)),
                          std::string(size_t(mix(round, n, i) % 2000), 'c'));
+            g_watch_on.store(n == 0);  // one commit a round is checked from inside
             tx.commit();
+            g_watch_on.store(false);
          }
          throttle(*db);
          unchanged("while the compactor works (round " + std::to_string(round) + ")");
@@ -2414,6 +2501,7 @@ TEST_CASE("large engine: what a published root reaches does not change before th
                   (unsigned long long)crash::counts()["compact:redirected"],
                   (unsigned long long)crash::counts()["cow:redirected"]);
       std::fflush(stdout);
+      crash::arm("", 0);
       // die with a transaction open, a kept tree being edited and a snapshot held
       auto tx = ws->start_transaction(0);
       scribble(tx, *ws, 30, true);
@@ -2714,7 +2802,7 @@ TEST_CASE("large engine: aborting a savepoint after set_root restores the subtre
 
 
 // ── gofractally/psitri#45 on a store of more than 64 segments ──────────────────────────
-// Opt-in (LGE_CRASH_BIG=1): it writes about 2.4 GiB, twice.
+// It writes about 2.4 GiB, twice (seconds); LGE_CRASH_BIG=0 skips it.
 //
 // The free-segment map's lowest level has one 64-bit word per 64 segments. When the provider
 // takes the last free segment of word 0 and the process dies between the store that clears
@@ -2800,12 +2888,12 @@ namespace
    }
 }  // namespace
 
-TEST_CASE("large engine: the torn free map on a store of more than 64 segments (opt-in)",
+TEST_CASE("large engine: the torn free map on a store of more than 64 segments",
           "[large-crash][provider-big]")
 {
-   if (env_u64("LGE_CRASH_BIG", 0) == 0)
+   if (env_u64("LGE_CRASH_BIG", 1) == 0)
    {
-      SUCCEED("set LGE_CRASH_BIG=1 to run (writes about 5 GiB under the temporary directory)");
+      SUCCEED("disabled with LGE_CRASH_BIG=0 (it writes about 5 GiB under the temporary directory)");
       return;
    }
    temporary_directory torn, copy;
@@ -2956,6 +3044,14 @@ TEST_CASE("large engine: death while a store is created", "[large-crash][creatio
       }
    totals.summary("death while a store is created");
    REQUIRE(totals.failures.empty());
+   if (only.empty())
+      for (const char* name : {"cb:zone_files_grown", "cb:zone_initialized", "provider:file_grown",
+                               "open:process_state_reset", "repair:states_stored",
+                               "repair:free_map_rebuilt", "open:record_written"})
+      {
+         INFO(name);
+         CHECK(totals.deaths_at[name] > 0);
+      }
 }
 
 TEST_CASE("large engine: a store left by a death refuses a read-only open and recovers after it",
@@ -3088,31 +3184,32 @@ TEST_CASE("large engine: what was committed before the store filled up is there 
    REQUIRE(reopen_filled(dir.path, committed, 2 * ceiling) == "");
 }
 
-// The defects, expected to fail until a full store is reported to the writer instead:
-// a node whose database reaches max_database_size stops with SIGABRT,
-TEST_CASE("large engine: a writer that fills the store gets an exception, not an abort",
-          "[large-crash][full][!shouldfail]")
+// The two defects, asserted as they are today so that these cases say exactly what
+// happens and fail when it changes (then: rewrite them to require the new behaviour).
+// A node whose database reaches max_database_size stops with SIGABRT: the writer gets no
+// exception it could handle,
+TEST_CASE("large engine: DEFECT: a writer that fills the store is aborted, with no exception",
+          "[large-crash][full]")
 {
    temporary_directory      dir;
    uint32_t                 committed = 0;
    std::vector<std::string> notes;
    const auto               ended = fill_to_ceiling(dir.path, committed, notes);
-   REQUIRE(ended == "");
-   REQUIRE(notes.size() == 1);
-   REQUIRE(notes[0].starts_with("the writer got an exception"));
+   REQUIRE(ended == "the child died of signal 6");  // abort() in the provider thread's wrapper
+   REQUIRE(notes.empty());                          // no exception reached the writer
 }
-// and it stops again soon after every later open with the same ceiling (the provider wants
-// its queues of prepared segments full and there is no segment to prepare), so the store can
-// be neither read for long nor made smaller until max_database_size is raised.
-TEST_CASE("large engine: a store that filled up opens again with the same ceiling",
-          "[large-crash][full][!shouldfail]")
+// and it stops the same way soon after every later open with the same ceiling, so the store
+// can be neither read for long nor made smaller until max_database_size is raised.
+TEST_CASE("large engine: DEFECT: a store that filled up aborts again when opened with the same "
+          "ceiling",
+          "[large-crash][full]")
 {
    temporary_directory      dir;
    uint32_t                 committed = 0;
    std::vector<std::string> notes;
    (void)fill_to_ceiling(dir.path, committed, notes);
    REQUIRE(committed > 20);
-   REQUIRE(reopen_filled(dir.path, committed, ceiling) == "");
+   REQUIRE(reopen_filled(dir.path, committed, ceiling) == "the child died of signal 6");
 }
 
 // ── branch-set counters at their limit ──────────────────────────────────────────────────
@@ -3237,8 +3334,8 @@ TEST_CASE("large engine: death with more than 255 live versions sharing branch s
       ++lives;
       for (auto& n : notes)
          if (auto eq = n.find('='); eq != std::string::npos)
-            passes[n.substr(0, eq)] =
-                std::max(passes[n.substr(0, eq)], std::strtoull(n.c_str() + eq + 1, nullptr, 10));
+            passes[n.substr(0, eq)] = std::max<uint64_t>(
+                passes[n.substr(0, eq)], std::strtoull(n.c_str() + eq + 1, nullptr, 10));
       if (failure == "the child died of signal 9")
       {
          ++deaths;
@@ -3276,5 +3373,82 @@ TEST_CASE("large engine: death with more than 255 live versions sharing branch s
                   (unsigned long long)(passes.count(name) ? passes[name] : 0),
                   (unsigned long long)(died.count(name) ? died[name] : 0));
    std::printf("\n");
-   CHECK(passes["clone:saturated_reborn"] > 0);
+   for (const char* name : {"clone:saturated_children_retained", "clone:saturated_shares_returned",
+                            "clone:saturated_reborn", "range:diverge_children_retained",
+                            "range:diverge_left_shared"})
+   {
+      INFO(name);
+      CHECK(died[name] > 0);
+   }
+}
+
+
+// A recovery that does not rebuild the segment states (an allocator opened without that
+// hook) can leave the state `free` on a segment whose bytes it went on to use. The repair
+// at open must not take the state word alone as proof that a segment is empty.
+TEST_CASE("large engine: a segment with data and a stale free state is not handed out",
+          "[large-crash][provider]")
+{
+   temporary_directory dir;
+   int                 fds[2];
+   REQUIRE(::pipe(fds) == 0);
+   uint64_t content = 0;
+   auto     failure = in_child([&] {
+      auto db = database::open(dir.path, psitri::open_mode::create_only, store_config());
+      {
+         auto ws = db->start_write_session();
+         auto tx = ws->start_transaction(0);
+         fill(tx, 0, 1, 1300);
+         tx.commit();
+      }
+      const auto     img = image_of(*db, 0);
+      const uint64_t report[2] = {img.objects.begin()->second.location * sal::cacheline_size /
+                                      sal::segment_size,
+                                  img.content};
+      if (::write(fds[1], report, sizeof(report)) != ssize_t(sizeof(report)))
+         child_fail("cannot report");
+   });
+   REQUIRE(failure == "");
+   uint64_t report[2];
+   REQUIRE(::read(fds[0], report, sizeof(report)) == ssize_t(sizeof(report)));
+   content = report[1];
+   wait_for_store_lock(dir.path);
+   {
+      // the state word of that segment: `free`
+      using state = sal::mapped_memory::allocator_state;
+      static_assert(sizeof(sal::mapped_memory::segment_meta) == 16);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+      const off_t at = off_t(offsetof(state, _segment_data) + report[0] * 16 + 12);
+#pragma GCC diagnostic pop
+      const int      fd       = ::open((dir.path / "header").c_str(), O_RDWR);
+      const uint32_t free_bit = 1u << 4;
+      REQUIRE(fd >= 0);
+      REQUIRE(::pwrite(fd, &free_bit, 4, at) == 4);
+      ::close(fd);
+   }
+   failure = in_child([&] {
+      auto db = database::open(dir.path, psitri::open_mode::open_existing, store_config());
+      {
+         // use the store: whatever the open handed out is written to
+         auto ws = db->start_write_session();
+         for (uint32_t n = 0; n < 40; ++n)
+         {
+            auto tx = ws->start_transaction(1);
+            tx.upsert(big_key(n), std::string(size_t(1) << 20, 'z'));
+            tx.commit();
+         }
+      }
+      uint64_t keys = 0;
+      {
+         auto rs = db->start_read_session();
+         auto c  = rs->create_cursor(0);
+         check(content_hash(c, keys) == content, "root 0 changed");
+      }
+      const auto a = audit(*db, false);
+      check(a.error.empty(), "audit: " + a.error);
+   });
+   REQUIRE(failure == "");
+   ::close(fds[0]);
+   ::close(fds[1]);
 }

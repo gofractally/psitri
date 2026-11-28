@@ -142,10 +142,8 @@ namespace sal
       auto [loc, node_ptr] =
           alloc_data<To>(size, from->address_seq(), std::forward<decltype(args)>(args)...);
       assert(loc != from.loc());
-      SAL_CRASH_POINT("realloc:data_written");
 
       control_block_data old_control = from.control().move(loc);
-      SAL_CRASH_POINT("realloc:redirected");
       // Some tree algorithms take one transient lifetime retain while cascading a
       // unique remove, then still relocate the same logical object. That extra
       // retain is not a second published owner; it is released before the mutation

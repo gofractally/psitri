@@ -330,7 +330,6 @@ namespace start_ref
                                                 sal::access_mode::read_write);
 
          const size_t meta_bytes = sizeof(meta_hdr) + size_t(_cfg.max_segments) * sizeof(seg_entry);
-         const bool   fresh      = _meta->size() < sizeof(meta_hdr);
          // A lower ceiling than the one the file was made for (but still at
          // or above the arena's size) needs fewer segment entries; the file
          // keeps the ones it has rather than being cut down.
@@ -339,9 +338,17 @@ namespace start_ref
          _hdr  = _meta->as<meta_hdr>();
          _segs = reinterpret_cast<seg_entry*>(reinterpret_cast<char*>(_hdr) + sizeof(meta_hdr));
 
+         // The header is new when its magic number is not there yet. The
+         // file is sized first (all zeros) and the magic is written last, so
+         // a process that stopped anywhere while creating the arena leaves a
+         // header with no magic: nothing was ever stored under it, and it is
+         // simply written again. (It used to be told apart by the file's
+         // size alone, and a stop after the sizing left a file that every
+         // later open refused as a geometry mismatch.)
+         const bool fresh = _hdr->magic == 0;
          if (fresh)
          {
-            _hdr->magic   = meta_magic;
+            START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "create.before_header" : "large.create.before_header"));
             _hdr->version = meta_version;
             _hdr->seg_bytes = segment_bytes;
             _hdr->page_bytes = disk_page_bytes;
@@ -349,6 +356,8 @@ namespace start_ref
             _hdr->clean.store(1, std::memory_order_relaxed);
             for (auto& r : _hdr->roots)
                r.store(0, std::memory_order_relaxed);
+            START_REF_CRASH_POINT((Geo::grain_bytes == start_ref::line_bytes ? "create.in_header" : "large.create.in_header"));
+            _hdr->magic = meta_magic;
          }
          else if (_hdr->magic != meta_magic || _hdr->version != meta_version ||
                   _hdr->seg_bytes != segment_bytes || _hdr->page_bytes != disk_page_bytes)

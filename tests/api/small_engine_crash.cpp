@@ -909,6 +909,8 @@ namespace
 
    // Every marker in the engine. A run reports which of them it reached.
    const char* const all_points[] = {
+       "create.before_header", "create.in_header", "large.create.before_header",
+       "large.create.in_header",
        "open.before_unclean_mark", "open.after_unclean_mark", "open.before_trim",
        "open.after_trim", "large.open.before_unclean_mark", "large.open.after_unclean_mark",
        "large.open.before_trim", "large.open.after_trim",
@@ -1130,7 +1132,117 @@ TEST_CASE("Small Engine: a process killed while the store grows or is full loses
    plan.writers          = 3;
    plan.txns             = 50;
    campaign(plan, cycles, env_u64("PSITRI_SMALL_CRASH_SEED", 20261128) + 2, "ceiling",
-            {"grow.after_data", "grow.before_count", "grow.after_count", "segment.claim",
-             "reserve.draw", "root.after_store", "recover.mark"},
+            {"segment.sweep_claim", "segment.release", "reserve.draw", "reserve.repay",
+             "root.after_store", "recover.mark"},
             /*empty_at_end=*/true);
+}
+
+// Growth extends three files and then records the new segment count; a
+// creation writes the header of a file it has just sized. A death between
+// any two of those steps, at creation and when a store that holds committed
+// data grows again, must leave a store that opens and has lost nothing.
+TEST_CASE("Small Engine: a process killed while a store is created or grows loses nothing",
+          "[small][crash][growth]")
+{
+   const uint64_t seed = env_u64("PSITRI_SMALL_CRASH_SEED", 20261128) + 3;
+   static const char* const creation[] = {
+       "create.before_header", "create.in_header", "large.create.before_header",
+       "large.create.in_header", "grow.before_data", "grow.after_data", "grow.after_map",
+       "grow.after_counts", "grow.before_count", "grow.after_count", "large.grow.before_data",
+       "large.grow.after_data", "large.grow.after_map", "large.grow.after_counts",
+       "large.grow.before_count", "large.grow.after_count"};
+   uint64_t deaths = 0, trims = 0;
+   for (const char* point : creation)
+      for (uint64_t at : {1, 3})
+      {
+         const bool header = std::string(point).find("create.") != std::string::npos;
+         // once per arena or per growth, the others once per new segment
+         if ((header || std::string(point).ends_with("_count")) && at != 1)
+            continue;
+         temporary_directory tmp;
+         store_model         model;
+         auto                plan = base_plan(psitri::sync_mode::none, 1024);
+         plan.seed  = seed;
+         plan.txns  = 40;
+         plan.point = point;
+         plan.at    = at;
+         INFO("creation: " << point << " at " << at);
+         std::vector<life_result> lives{run_life(tmp.path, plan)};
+         REQUIRE(lives.back().killed());
+         ++deaths;
+         // the next open finds files longer than the count and cuts them: die there too
+         if (!header)
+            for (const char* trim : {"open.before_trim", "open.after_trim", "large.open.before_trim",
+                                     "large.open.after_trim"})
+            {
+               plan.point = trim;
+               plan.at    = 1 + at % 3;
+               lives.push_back(run_life(tmp.path, plan));
+               REQUIRE((lives.back().killed() || lives.back().finished()));
+               trims += lives.back().killed();
+            }
+         plan.point.clear();
+         lives.push_back(run_life(tmp.path, plan));
+         REQUIRE(lives.back().finished());
+         verify(tmp.path, plan, model, lives);
+      }
+   REQUIRE(trims > 0);
+
+   // A store with committed data in every segment it has, growing again.
+   uint64_t regrow_deaths = 0;
+   for (const char* point : {"grow.before_data", "grow.after_data", "grow.after_map",
+                             "grow.after_counts", "grow.before_count", "grow.after_count"})
+   {
+      temporary_directory tmp;
+      store_model         model;
+      auto                plan = base_plan(psitri::sync_mode::none, 1024);
+      plan.seed             = seed;
+      plan.prof.fill        = true;
+      plan.prof.keyspace    = 60000;
+      plan.prof.chunk_every = 0;
+      plan.txns             = 60;
+      const uint64_t first_batch = 4 * uint64_t(start_ref::segment_bytes);
+      audit_result   a;
+      for (int life = 0; life < 200 && a.lines * 128 < first_batch * 3 / 4; ++life)
+      {
+         std::vector<life_result> lives{run_life(tmp.path, plan)};
+         REQUIRE(lives.back().finished());
+         verify(tmp.path, plan, model, lives, &a);
+      }
+      INFO("regrowth: " << point << ", " << a.lines * 128 << " bytes in use before");
+      REQUIRE(a.lines * 128 >= first_batch * 3 / 4);
+      plan.point = point;
+      plan.at    = std::string(point).ends_with("_count") ? 1 : 1 + regrow_deaths % 2;
+      bool died  = false;
+      for (int life = 0; life < 40 && !died; ++life)
+      {
+         std::vector<life_result> lives{run_life(tmp.path, plan)};
+         REQUIRE((lives.back().killed() || lives.back().finished()));
+         died = lives.back().killed();
+         if (died)
+         {
+            // and once more while the longer files are being cut back
+            plan.point = regrow_deaths % 2 ? "open.before_trim" : "open.after_trim";
+            plan.at    = 1;
+            lives.push_back(run_life(tmp.path, plan));
+            REQUIRE((lives.back().killed() || lives.back().finished()));
+         }
+         verify(tmp.path, plan, model, lives, &a);
+      }
+      REQUIRE(died);
+      ++regrow_deaths;
+      // and it still grows afterwards
+      plan.point.clear();
+      for (int life = 0; life < 60 && a.lines * 128 < first_batch + (4u << 20); ++life)
+      {
+         std::vector<life_result> lives{run_life(tmp.path, plan)};
+         REQUIRE(lives.back().finished());
+         verify(tmp.path, plan, model, lives, &a);
+      }
+      REQUIRE(a.lines * 128 >= first_batch);
+   }
+   std::printf("crash growth: %llu deaths during creation, %llu while trimming, %llu during "
+               "regrowth\n",
+               (unsigned long long)deaths, (unsigned long long)trims,
+               (unsigned long long)regrow_deaths);
 }

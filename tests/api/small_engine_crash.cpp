@@ -336,7 +336,7 @@ namespace
          m.erase(it);
       }
    }
-   constexpr uint32_t max_remove_steps = 8;
+   constexpr uint32_t max_remove_steps = 64;
 
    template <class Cursor>
    model_map scan(Cursor& c)
@@ -472,7 +472,12 @@ namespace
          for (uint32_t step = 0; !done; ++step)
          {
             if (step == max_remove_steps)
-               child_fail(8, "still no room for two small values after eight batches of removes");
+               child_fail(8, "still no room for two small values after 64 batches of removes");
+            // What the removes freed comes back when the version before them
+            // is released, and a reader or snapshot on that version holds it
+            // for as long as it stays there: give them time to move on.
+            if (step)
+               std::this_thread::sleep_for(std::chrono::milliseconds(2 * step));
             try
             {
                auto tx = ws->start_transaction(r);
@@ -591,9 +596,18 @@ namespace
             watchers.emplace_back(guarded([&, i] {
                std::mt19937_64 rng(mix(plan.seed, 77, i));
                auto            rs = db->start_read_session();
-               auto            ws = db->start_write_session();  // for owned snapshots
+               // A write session keeps a reference to the version of each
+               // root it last worked on, for as long as it lives or until
+               // its next transaction on that root: an idle one keeps that
+               // whole version's storage from being freed. Elsewhere that is
+               // wanted here (the session below falls versions behind); on a
+               // store kept at its ceiling it would turn every remove into
+               // one that frees nothing, so there the session is made anew
+               // each time round.
+               auto            kept_session = db->start_write_session();
                while (!stop.load(std::memory_order_relaxed))
                {
+                  auto ws = plan.prof.fill ? db->start_write_session() : kept_session;
                   const uint32_t root = uint32_t(rng() % 12);
                   if (rng() % 16 == 0)
                   {

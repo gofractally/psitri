@@ -140,7 +140,7 @@ namespace
    enum txn_kind : char
    {
       plain  = 'p',  // the generated operations on the previous version
-      shrink = 's',  // the store was full: removes only
+      shrink = 's',  // the store was full: nothing but the bookkeeping, after removes
       revert = 'r',  // the root replaced by an older snapshot, then the operations
    };
 
@@ -150,6 +150,7 @@ namespace
       uint32_t max_ops      = 24;
       bool     fill         = false;  // values sized to fill the store
       uint32_t chunk_every  = 40;     // root 0 writes a chunked value this often (0: never)
+      bool     stash        = true;   // keep and put back snapshots through other root slots
    };
 
    uint64_t mix(uint64_t a, uint64_t b, uint64_t c)
@@ -239,17 +240,7 @@ namespace
          return it;
       };
       std::mt19937_64 rng(mix(seed, root, k));
-      if (kind == shrink)
-      {
-         for (uint32_t n = 0; n < 400; ++n)
-         {
-            auto it = data_key(rng());
-            if (it == m.end())
-               break;
-            drop(std::string(it->first));
-         }
-      }
-      else
+      if (kind != shrink)
       {
          const uint32_t ops = 1 + uint32_t(rng() % p.max_ops);
          for (uint32_t op = 0; op < ops; ++op)
@@ -320,6 +311,32 @@ namespace
          log.erase(0, log.size() - log_versions * log_record);
       put(log_key, std::make_shared<std::string>(std::move(log)));
    }
+
+   // The store refused transaction k as full: a transaction of removes only
+   // (it changes no bookkeeping, so the root stays at version k - 1 with
+   // fewer keys). `step` counts such transactions before version k. A
+   // refused remove is what the engine promises not to do at its ceiling.
+   template <class Tx>
+   void apply_removes(Tx* tx, model_map& m, uint64_t seed, uint32_t root, uint64_t k,
+                      uint32_t step, const profile& p)
+   {
+      std::mt19937_64 rng(mix(seed ^ 0x5eed0fu, root, k * 16 + step));
+      for (uint32_t n = 0; n < 400; ++n)
+      {
+         auto it = m.lower_bound(key_of(uint32_t(rng() % p.keyspace)));
+         while (it != m.end() && it->first.starts_with("m/"))
+            ++it;
+         if (it == m.end())
+            for (it = m.begin(); it != m.end() && it->first.starts_with("m/");)
+               ++it;
+         if (it == m.end())
+            return;
+         if (tx && tx->remove(it->first) != 0)
+            throw std::runtime_error("model: a key the model holds is not in the store");
+         m.erase(it);
+      }
+   }
+   constexpr uint32_t max_remove_steps = 8;
 
    template <class Cursor>
    model_map scan(Cursor& c)
@@ -393,7 +410,7 @@ namespace
       for (uint32_t n = 0; n < plan.txns; ++n)
       {
          ++k;
-         if (k % 13 == 0)
+         if (plan.prof.stash && k % 13 == 0)
          {
             // Keep the current version as a second root: the two slots then
             // share every node.
@@ -431,7 +448,7 @@ namespace
             next    = cur;
             txn_kind kind = plain;
             uint64_t base = 0;
-            if (k % 13 == 6 && !stash.empty())
+            if (plan.prof.stash && k % 13 == 6 && !stash.empty())
             {
                // Write something, then throw it away by replacing the root
                // with the stashed (older) snapshot, and write on top of that.
@@ -449,19 +466,34 @@ namespace
          catch (const engine::storage_full&)
          {
          }
-         if (!done)
+         // The store is full. Transactions of removes only, each followed by
+         // an attempt at a version that writes just its bookkeeping (which
+         // is an ordinary write and may be refused in its turn).
+         for (uint32_t step = 0; !done; ++step)
          {
-            // The store is full: this version removes instead.
+            if (step == max_remove_steps)
+               child_fail(8, "still no room for two small values after eight batches of removes");
             try
             {
                auto tx = ws->start_transaction(r);
-               next    = cur;
-               apply_txn(&tx, next, log_of(cur), plan.seed, r, k, shrink, 0, plan.prof);
+               apply_removes(&tx, cur, plan.seed, r, k, step, plan.prof);
                tx.commit();
             }
             catch (const engine::storage_full& e)
             {
-               child_fail(5, e.what());  // removes must not be refused
+               child_fail(5, (std::string("a transaction of removes only was refused: ") +
+                              e.what()).c_str());
+            }
+            try
+            {
+               auto tx = ws->start_transaction(r);
+               next    = cur;
+               apply_txn(&tx, next, log_of(cur), plan.seed, r, k, shrink, step + 1, plan.prof);
+               tx.commit();
+               done = true;
+            }
+            catch (const engine::storage_full&)
+            {
             }
          }
          cur = std::move(next);
@@ -505,27 +537,23 @@ namespace
          ++k;
          model_map na, nb;
          bool      done = false;
-         for (txn_kind kind : {plain, shrink})
+         try
          {
-            try
-            {
-               auto tx = ws->start_transaction(pair_a);
-               auto hb = tx.open_root(pair_b);
-               na = a, nb = b;
-               apply_txn(&tx, na, log_of(a), plan.seed, pair_a, k, kind, 0, plan.prof);
-               apply_txn(&hb, nb, log_of(b), plan.seed, pair_b, k, kind, 0, plan.prof);
-               tx.commit();
-               done = true;
-               break;
-            }
-            catch (const engine::storage_full& e)
-            {
-               if (kind == shrink)
-                  child_fail(5, e.what());
-            }
+            auto tx = ws->start_transaction(pair_a);
+            auto hb = tx.open_root(pair_b);
+            na = a, nb = b;
+            apply_txn(&tx, na, log_of(a), plan.seed, pair_a, k, plain, 0, plan.prof);
+            apply_txn(&hb, nb, log_of(b), plan.seed, pair_b, k, plain, 0, plan.prof);
+            tx.commit();
+            done = true;
+         }
+         catch (const engine::storage_full& e)
+         {
+            // the campaign at the ceiling runs without this writer
+            child_fail(9, e.what());
          }
          if (!done)
-            child_fail(5, "pair writer made no progress");
+            child_fail(9, "pair writer made no progress");
          a = std::move(na), b = std::move(nb);
          const ack_record both[2] = {{pair_a, 0, k}, {pair_b, 0, k}};
          if (::write(ack_fd, both, sizeof(both)) != ssize_t(sizeof(both)))
@@ -795,7 +823,7 @@ namespace
    struct store_model
    {
       root_history roots[6];
-      uint64_t     torn_pairs = 0, verified = 0, refused = 0, reverted = 0;
+      uint64_t     torn_pairs = 0, verified = 0, refused = 0, reverted = 0, removes_ahead = 0;
       store_model()
       {
          for (auto& r : roots)
@@ -872,7 +900,14 @@ namespace
                m = h.versions.at(base);
             }
             else
+            {
                REQUIRE((kind == plain || kind == shrink));
+               REQUIRE(base <= max_remove_steps);  // the removes-only transactions before it
+               REQUIRE((kind == shrink) == (base > 0));
+               for (uint32_t step = 0; step < base; ++step)
+                  apply_removes(static_cast<engine::transaction*>(nullptr), m, plan.seed, r, v,
+                                step, plan.prof);
+            }
             apply_txn(static_cast<engine::transaction*>(nullptr), m, prev, plan.seed, r, v, kind,
                       base, plan.prof);
             h.versions[v] = std::move(m);
@@ -880,6 +915,24 @@ namespace
          h.version = k;
          while (h.versions.size() > 48)
             h.versions.erase(h.versions.begin());
+         // Removes-only transactions of the next version may have been
+         // committed (each one whole) before the process died: the root is
+         // then version k with those keys gone, and the next life goes on
+         // from exactly that.
+         if (plan.prof.fill)
+         {
+            model_map m = h.versions.at(k);
+            for (uint32_t step = 0; step < max_remove_steps && found.size() != m.size(); ++step)
+            {
+               apply_removes(static_cast<engine::transaction*>(nullptr), m, plan.seed, r, k + 1,
+                             step, plan.prof);
+               if (found.size() == m.size())
+               {
+                  h.versions[k] = m;
+                  model.removes_ahead += 1;
+               }
+            }
+         }
          require_equal(found, h.versions.at(k), r);
       }
       // The two roots written together: published one after the other.
@@ -999,7 +1052,8 @@ namespace
       {
          std::vector<life_result> lives;
          std::string              story;
-         const uint32_t           chain = 1 + uint32_t(rng() % 3);
+         // (at the ceiling one life per verification: see removes_ahead)
+         const uint32_t           chain = plan.prof.fill ? 1 : 1 + uint32_t(rng() % 3);
          for (uint32_t link = 0; link < chain; ++link)
          {
             plan.seed  = seed;
@@ -1159,6 +1213,8 @@ TEST_CASE("Small Engine: a process killed while the store grows or is full loses
    plan.prof.fill        = true;
    plan.prof.keyspace    = 30000;
    plan.prof.chunk_every = 0;
+   plan.prof.stash       = false;  // these run in the other campaigns; here every
+   plan.pair             = false;  // refused write is followed by removes
    plan.writers          = 3;
    plan.txns             = 50;
    campaign(plan, cycles, env_u64("PSITRI_SMALL_CRASH_SEED", 20261128) + 2, "ceiling",

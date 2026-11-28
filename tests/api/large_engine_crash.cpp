@@ -19,9 +19,9 @@
 //
 // Environment (all optional):
 //   LGE_CRASH_SEED       seed of the campaign (default 1)
-//   LGE_CRASH_ROUNDS     deaths attempted per crash point (default 2)
-//   LGE_CRASH_RANDOM     random-time kills (default 40)
-//   LGE_CRASH_TXNS       transactions per writer per life (default 40)
+//   LGE_CRASH_ROUNDS     deaths attempted per crash point (default 3)
+//   LGE_CRASH_RANDOM     random-time kills (default 60)
+//   LGE_CRASH_TXNS       transactions per writer per life (default 60; 120 for random kills)
 //   LGE_CRASH_POINT      only this crash point (default: all)
 //   LGE_CRASH_VERBOSE    1: one line per life
 //   LGE_CRASH_DB_MB      max_database_size of the stores, in MiB (default 1024)
@@ -352,12 +352,13 @@ namespace
    {
       uint32_t keyspace = 900;
       uint32_t max_ops  = 20;
+      uint32_t removes  = 55;  // percent of the remove operations drawn that are carried out
    };
    // Root 3 grows wide: thousands of keys, so its routers reach the dense kinds whose
    // versions share branch sets through counters.
    profile profile_of(uint32_t root)
    {
-      return root == 3 ? profile{20000, 90} : profile{};
+      return root == 3 ? profile{20000, 90, 25} : profile{};
    }
 
    // The operations of one phase of one publication, on the store through `h` (null: on the
@@ -433,6 +434,8 @@ namespace
                h->upsert(key, std::string_view(*v));
             put(key, entry{std::move(v), nullptr});
          }
+         else if (pick < 89 && (r >> 40) % 100 >= p.removes)
+            continue;  // (what keeps a root at its size)
          else if (pick < 84)  // remove
          {
             auto it = data_key(r);
@@ -749,6 +752,9 @@ namespace
       (void)alloc;
       return true;
    }
+   // expect_no_leak false: the store was opened with deferred cleanup, which keeps the dead
+   // owner's counts. Then a count may be higher than the references found, never lower, and
+   // nothing is said about leaks or segment space.
    audit_result audit(database& db, bool expect_no_leak)
    {
       using namespace sal_art_ref;
@@ -833,7 +839,7 @@ namespace
                    return;
                 }
                 ++seen;
-                if (refs != it->second)
+                if (expect_no_leak ? refs != it->second : refs < it->second)
                 {
                    if (wrong++ == 0)
                       first_wrong = "object " + std::to_string(*adr) + " has count " +
@@ -1483,7 +1489,7 @@ namespace
          life_plan p;
          p.seed = seed;
          p.prof = prof;
-         p.txns = uint32_t(env_u64("LGE_CRASH_TXNS", 40));
+         p.txns = uint32_t(env_u64("LGE_CRASH_TXNS", 60));
          return p;
       }
       // Run a life and check what it reported against how the store was left before it.
@@ -1613,7 +1619,7 @@ TEST_CASE("large engine: a workload with no death verifies and audits", "[large-
 TEST_CASE("large engine: death at every crash point", "[large-crash][points]")
 {
    const uint64_t seed   = env_u64("LGE_CRASH_SEED", 1);
-   const uint64_t rounds = env_u64("LGE_CRASH_ROUNDS", 2);
+   const uint64_t rounds = env_u64("LGE_CRASH_ROUNDS", 3);
    const auto     only   = env_str("LGE_CRASH_POINT");
    campaign       c(seed);
    std::mt19937_64 rng(mix(seed, 4242));
@@ -1743,7 +1749,7 @@ TEST_CASE("large engine: death at every crash point", "[large-crash][points]")
 TEST_CASE("large engine: death at random moments", "[large-crash][random]")
 {
    const uint64_t  seed  = env_u64("LGE_CRASH_SEED", 1);
-   const uint64_t  kills = env_u64("LGE_CRASH_RANDOM", 40);
+   const uint64_t  kills = env_u64("LGE_CRASH_RANDOM", 60);
    campaign        c(seed + 1000);
    std::mt19937_64 rng(mix(seed, 99));
    for (uint64_t i = 0; i < kills; ++i)
@@ -2026,4 +2032,595 @@ TEST_CASE("large engine: death between the stores that queue a prepared segment"
           "[large-crash][provider]")
 {
    REQUIRE(death_inside("provider:marked_queued", &tear_queue_push, false) == "");
+}
+
+// ── is anything a published root reaches ever changed before the next root store? ─────
+// The model stands on this: a root in the root table, and everything it reaches, stays as
+// it is until that slot is stored again. The engine edits in place what only the writer
+// owns, and the compactor moves objects behind their control blocks. The test below takes,
+// for each published root, the logical content (through a reader's cursor) and the bytes of
+// every object the root reaches, and takes them again after each kind of activity that
+// must not change them.
+namespace
+{
+   struct object_image
+   {
+      uint64_t location = 0;  // cacheline of the object's bytes
+      uint32_t size     = 0;
+      uint64_t bytes    = 0;  // hash of them
+      uint16_t session  = 0;  // the session that wrote the segment they are in
+   };
+   struct root_image
+   {
+      uint64_t                                  content = 0;  // keys, values, subtrees
+      uint64_t                                  keys    = 0;
+      std::unordered_map<uint32_t, object_image> objects;
+   };
+   template <class Cursor>
+   uint64_t content_hash(Cursor& c, uint64_t& keys)
+   {
+      uint64_t h = 0x1234;
+      for (bool ok = c.seek_begin(); ok; ok = c.next())
+      {
+         ++keys;
+         h = mix(h, hash_bytes(c.key()));
+         if (c.is_subtree())
+         {
+            auto     sub = c.subtree().snapshot_cursor();  // trees inside trees
+            uint64_t n   = 0;
+            h            = mix(h, content_hash(sub, n), 2);
+         }
+         else
+         {
+            auto v = c.template value<std::string>();
+            if (!v)
+               child_fail("a key without a readable value");
+            h = mix(h, hash_bytes(*v), 1);
+         }
+      }
+      return h;
+   }
+   root_image image_of(database& db, uint32_t root)
+   {
+      using namespace sal_art_ref;
+      using namespace sal_art_ref::radix;
+      root_image out;
+      {
+         auto rs     = db.start_read_session();
+         auto c      = rs->create_cursor(root);
+         out.content = content_hash(c, out.keys);
+      }
+      auto& alloc = db.underlying_allocator();
+      auto  ses   = alloc.create_session();
+      auto  pin   = ses->lock();  // no segment read below is recycled meanwhile
+      std::unordered_map<uint32_t, uint32_t>      counters;
+      std::vector<sal::ptr_address>               todo;
+      const std::function<void(sal::ptr_address)> ref = [&](sal::ptr_address a) {
+         if (a != sal::null_ptr_address && out.objects.emplace(*a, object_image{}).second)
+            todo.push_back(a);
+      };
+      ref(alloc.root_objects()[root].load(std::memory_order_relaxed).root);
+      while (!todo.empty())
+      {
+         const auto a = todo.back();
+         todo.pop_back();
+         auto [obj, loc] = alloc.resolve(a);
+         if (!obj)
+            child_fail("an object a published root reaches does not resolve");
+         auto& img    = out.objects[*a];
+         img.location = loc.cacheline();
+         img.size     = obj->size();
+         img.bytes =
+             hash_bytes({reinterpret_cast<const char*>(obj), size_t(obj->size())});
+         img.session = *reinterpret_cast<const sal::mapped_memory::segment*>(
+                            reinterpret_cast<const char*>(obj) - loc.segment_offset())
+                            ->_session_id;
+         if (!walk_dense<bitset_r2_node>(alloc, obj, counters, ref) &&
+             !walk_dense<bitset_r4_node>(alloc, obj, counters, ref) &&
+             !walk_dense<full_radix_node>(alloc, obj, counters, ref))
+            alloc.type_ops(obj).visit_children(obj, ref);
+      }
+      return out;
+   }
+   struct image_stats
+   {
+      uint64_t objects = 0, unmoved = 0, moved = 0;
+   };
+   // `writers`: the session numbers of every session that writes in this test. An object
+   // found at another place must have been put there by a session that is none of them
+   // (the compactor's).
+   void same_image(const root_image& before, const root_image& after, const std::string& when,
+                   const std::set<uint16_t>& writers, image_stats& stats)
+   {
+      check(before.content == after.content && before.keys == after.keys,
+            when + ": the content read through a snapshot cursor changed");
+      check(before.objects.size() == after.objects.size(),
+            when + ": the set of objects the root reaches changed");
+      for (auto& [addr, was] : before.objects)
+      {
+         auto it = after.objects.find(addr);
+         check(it != after.objects.end(), when + ": an object the root reached is gone");
+         const auto& now = it->second;
+         ++stats.objects;
+         if (now.location == was.location)
+         {
+            ++stats.unmoved;
+            check(now.size == was.size && now.bytes == was.bytes,
+                  when + ": object " + std::to_string(addr) + " was changed where it lies");
+         }
+         else
+         {
+            ++stats.moved;
+            check(!writers.count(now.session),
+                  when + ": object " + std::to_string(addr) +
+                      " was moved by a writer (session " + std::to_string(now.session) +
+                      "): a published object was copied for writing and redirected");
+         }
+      }
+   }
+
+   constexpr uint32_t inplace_roots = 5;  // 0..4 are published and watched; 6 is churned
+   template <class H>
+   void fill(H& h, uint32_t root, uint64_t gen, uint32_t keys)
+   {
+      for (uint32_t i = 0; i < keys; ++i)
+      {
+         const size_t size = i % 13 == 0 ? 200 + i % 3000 : i % 97 == 0 ? 20000 + i * 7 : i % 60;
+         h.upsert(key_of(i), std::string_view(*make_value(root, gen, i, size)));
+      }
+   }
+   template <class WS>
+   auto small_tree(WS& ws, uint64_t gen)
+   {
+      auto wt = ws.start_write_transaction(ws.create_temporary_tree());
+      for (uint32_t j = 0; j < 40; ++j)
+         wt.upsert("sub/" + std::to_string(j), std::string(size_t(10 + j * 5), char('a' + gen % 26)));
+      return wt.get_tree();
+   }
+   // Edits of every kind on a handle whose result is not published.
+   template <class H, class WS>
+   void scribble(H& h, WS& ws, uint64_t gen, bool subtrees)
+   {
+      for (uint32_t i = 0; i < 700; ++i)
+      {
+         const uint32_t k = uint32_t(mix(gen, i) % 1300);
+         switch (i % 7)
+         {
+            case 0:
+            case 1:
+               h.upsert(key_of(k), std::string(size_t(mix(gen, i, 3) % 90), 'x'));  // same or other size
+               break;
+            case 2:
+               h.upsert(key_of(k), std::string(size_t(150 + mix(gen, i, 5) % 9000), 'y'));
+               break;
+            case 3:
+               h.remove(key_of(k));
+               break;
+            case 4:
+               h.upsert(key_of(k), std::string_view(*make_value(9, gen, i, 100 + i % 50)));
+               break;
+            case 5:
+               if (i % 35 == 5)
+                  h.remove_range_counted(key_of(k), key_of(k) + "\xff");
+               else
+                  h.upsert(key_of(k + 5000), "new");
+               break;
+            case 6:
+               if (subtrees && i % 70 == 6)
+                  h.upsert_subtree("s/" + std::to_string(i % 5), small_tree(ws, gen + i));
+               break;
+         }
+      }
+      h.upsert("k/BIG", std::string(size_t((2u << 20) + 300000), char('A' + gen % 26)));
+   }
+}  // namespace
+
+TEST_CASE("large engine: what a published root reaches does not change before the next store "
+          "of that root",
+          "[large-crash][in-place]")
+{
+   temporary_directory dir;
+   uint64_t            contents[inplace_roots] = {};
+   int                 pipe_fds[2];
+   REQUIRE(::pipe(pipe_fds) == 0);
+   // 1: a process that builds the roots, checks them through every kind of unpublished work
+   // and through compaction, and dies with work in progress.
+   auto failure = in_child([&] {
+      crash::install();
+      crash::counting.store(true);
+      auto               db = database::open(dir.path, psitri::open_mode::create_only, store_config());
+      auto               ws = db->start_write_session();
+      auto               other = db->start_write_session();
+      std::set<uint16_t> writers{uint16_t(*ws->get_root(0).session()->get_session_num())};
+      {
+         auto tx = ws->start_transaction(0);
+         fill(tx, 0, 1, 1300);
+         tx.upsert("k/BIG", std::string(size_t((2u << 20) + 500000), 'B'));
+         for (uint32_t j = 0; j < 5; ++j)
+            tx.upsert_subtree("s/" + std::to_string(j), small_tree(*ws, j));
+         tx.commit();
+      }
+      ws->set_root(1, ws->get_root(0));  // root 1 shares everything with root 0
+      auto mine = [&] {
+         auto wt = ws->start_write_transaction(ws->create_temporary_tree());
+         fill(wt, 2, 2, 900);
+         return wt.get_tree();
+      }();
+      ws->set_root(2, mine);  // the session keeps `mine`
+      {
+         // root 3: its own keys, and subtrees that are root 0's and root 2's trees
+         auto tx = ws->start_transaction(3);
+         fill(tx, 3, 3, 300);
+         tx.upsert_subtree("s/whole0", ws->get_root(0));
+         tx.upsert_subtree("s/whole2", ws->get_root(2));
+         tx.upsert_subtree("s/part", ws->get_root(0).get_subtree("s/1"));
+         tx.commit();
+      }
+      {
+         // root 4: written by another session, never touched again
+         auto tx = other->start_transaction(4);
+         fill(tx, 4, 4, 600);
+         tx.commit();
+      }
+      writers.insert(uint16_t(*other->get_root(4).session()->get_session_num()));
+
+      root_image   base[inplace_roots];
+      image_stats  stats;
+      auto take = [&] {
+         for (uint32_t r = 0; r < inplace_roots; ++r)
+            base[r] = image_of(*db, r);
+      };
+      auto unchanged = [&](const std::string& when, int except = -1) {
+         for (uint32_t r = 0; r < inplace_roots; ++r)
+            if (int(r) != except)
+               same_image(base[r], image_of(*db, r), when + ", root " + std::to_string(r), writers,
+                          stats);
+      };
+      take();
+      unchanged("nothing done");
+
+      {  // a transaction's work, while it is open and after it is aborted
+         auto tx = ws->start_transaction(0);
+         scribble(tx, *ws, 10, true);
+         tx.open_subtree("s/2").upsert("sub/3", "edited in place");
+         unchanged("during an open transaction on root 0");
+         tx.abort();
+      }
+      unchanged("after an aborted transaction on root 0");
+      {  // savepoints inside a transaction that is then dropped
+         auto tx = ws->start_transaction(0);
+         scribble(tx, *ws, 11, false);
+         {
+            auto frame = tx.sub_transaction();
+            scribble(tx, *ws, 12, true);
+            unchanged("inside a savepoint");
+            frame.abort();
+         }
+         {
+            auto frame = tx.sub_transaction();
+            scribble(tx, *ws, 13, false);
+            frame.commit();
+         }
+         scribble(tx, *ws, 14, false);
+         unchanged("after savepoints, transaction still open");
+      }
+      unchanged("after a transaction with savepoints was dropped");
+      {  // a tree taken from a root, edited, never published
+         auto wt = ws->start_write_transaction(ws->get_root(1));
+         scribble(wt, *ws, 15, true);
+         unchanged("a tree taken from root 1 edited");
+         auto t = wt.get_tree();
+         auto w2 = other->start_write_transaction(other->get_root(3));
+         scribble(w2, *other, 16, true);
+         unchanged("a tree taken from root 3 edited by another session");
+      }
+      {  // the tree the session published with set_root and kept
+         auto wt = ws->start_write_transaction(std::move(mine));
+         scribble(wt, *ws, 17, true);
+         unchanged("the session's kept tree edited after set_root (handle moved in)");
+         mine = wt.get_tree();
+         auto w2 = ws->start_write_transaction(mine);
+         scribble(w2, *ws, 18, false);
+         unchanged("the session's kept tree edited after set_root (handle copied)");
+      }
+      {  // a subtree a published root owns, opened and edited
+         auto tx = ws->start_transaction(3);
+         tx.open_subtree("s/whole0").upsert(key_of(3), "through root 3");
+         tx.open_subtree("s/part").upsert("sub/1", "through root 3");
+         scribble(tx.open_subtree("s/whole2"), *ws, 19, false);
+         unchanged("subtrees of root 3 opened and edited");
+         tx.abort();
+      }
+      unchanged("after all unpublished work");
+
+      // Publish on root 0 and root 2: the others, which share with them, do not move.
+      {
+         auto tx = ws->start_transaction(0);
+         scribble(tx, *ws, 20, true);
+         tx.commit();
+      }
+      unchanged("after publishing root 0", 0);
+      base[0] = image_of(*db, 0);
+      ws->set_root(2, mine);
+      unchanged("after publishing root 2 with set_root", 2);
+      base[2] = image_of(*db, 2);
+
+      // Compaction: churn another root until the compactor has moved objects, some of them
+      // objects the watched roots reach.
+      const auto moved_before = stats.moved;
+      for (uint32_t round = 0; round < 400 && stats.moved < moved_before + 200; ++round)
+      {
+         for (uint32_t n = 0; n < 60; ++n)
+         {
+            auto tx = ws->start_transaction(6);
+            for (uint32_t i = 0; i < 12; ++i)
+               tx.upsert(key_of(uint32_t(mix(round, n, i) % 500)),
+                         std::string(size_t(mix(round, n, i) % 2000), 'c'));
+            tx.commit();
+         }
+         throttle(*db);
+         unchanged("while the compactor works (round " + std::to_string(round) + ")");
+      }
+      check(stats.moved >= moved_before + 200,
+            "the compactor moved too few objects of the watched roots to say anything (" +
+                std::to_string(stats.moved - moved_before) + ")");
+      check(crash::counts()["compact:redirected"] > 0, "the compactor did not run");
+
+      for (uint32_t r = 0; r < inplace_roots; ++r)
+         if (::write(pipe_fds[1], &base[r].content, 8) != 8)
+            child_fail("cannot report");
+      std::printf("in-place: %llu object comparisons, %llu at the same place and byte-identical, "
+                  "%llu moved by the compactor; compactor redirects %llu, allocator "
+                  "copy-on-write redirects %llu\n",
+                  (unsigned long long)stats.objects, (unsigned long long)stats.unmoved,
+                  (unsigned long long)stats.moved,
+                  (unsigned long long)crash::counts()["compact:redirected"],
+                  (unsigned long long)crash::counts()["cow:redirected"]);
+      std::fflush(stdout);
+      // die with a transaction open, a kept tree being edited and a snapshot held
+      auto tx = ws->start_transaction(0);
+      scribble(tx, *ws, 30, true);
+      auto wt = other->start_write_transaction(other->get_root(4));
+      scribble(wt, *other, 31, false);
+      ::kill(::getpid(), SIGKILL);
+   });
+   REQUIRE(failure == "the child died of signal 9");
+   for (uint32_t r = 0; r < inplace_roots; ++r)
+      REQUIRE(::read(pipe_fds[0], &contents[r], 8) == 8);
+   wait_for_store_lock(dir.path);
+
+   // 2: after the death. Opened without recovery of the counts first (deferred cleanup),
+   // then, after another death, with the light pass. Each time: the roots hold what they
+   // held, a writer's unpublished work does not change them, and what it publishes on one
+   // root leaves the others alone.
+   for (const auto mode : {sal::recovery_mode::deferred_cleanup, sal::recovery_mode::none})
+   {
+      failure = in_child([&] {
+         auto db = database::open(dir.path, psitri::open_mode::open_existing, store_config(), mode);
+         check(db->recovery_performed() ==
+                   (mode == sal::recovery_mode::none ? sal::recovery_mode::app_crash : mode),
+               "unexpected recovery mode");
+         auto               ws = db->start_write_session();
+         std::set<uint16_t> writers{uint16_t(*ws->get_root(0).session()->get_session_num())};
+         root_image         base[inplace_roots];
+         image_stats        stats;
+         for (uint32_t r = 0; r < inplace_roots; ++r)
+         {
+            base[r] = image_of(*db, r);
+            check(base[r].content == contents[r],
+                  "root " + std::to_string(r) + " does not hold what it held before the death");
+         }
+         auto unchanged = [&](const std::string& when, int except = -1) {
+            for (uint32_t r = 0; r < inplace_roots; ++r)
+               if (int(r) != except)
+                  same_image(base[r], image_of(*db, r), when + ", root " + std::to_string(r),
+                             writers, stats);
+         };
+         {
+            auto tx = ws->start_transaction(0);
+            scribble(tx, *ws, 40, true);
+            tx.open_subtree("s/2").upsert("sub/3", "edited in place");
+            unchanged("after the death: during a transaction on root 0");
+            tx.abort();
+         }
+         {
+            auto wt = ws->start_write_transaction(ws->get_root(2));
+            scribble(wt, *ws, 41, false);
+            auto tx = ws->start_transaction(3);
+            scribble(tx.open_subtree("s/whole0"), *ws, 42, false);
+            unchanged("after the death: a tree of root 2 and a subtree of root 3 edited");
+         }
+         {
+            auto tx = ws->start_transaction(4);
+            scribble(tx, *ws, 43, false);
+            tx.commit();
+         }
+         unchanged("after the death: root 4 published", 4);
+         {
+            // put root 4 back as it was (root 1's tree would do as well: any content)
+            auto tx = ws->start_transaction(4);
+            for (bool more = true; more;)
+            {
+               auto c = tx.snapshot_cursor();
+               more   = c.seek_begin();
+               if (more)
+                  tx.remove_range_counted(std::string(c.key()), "\xff\xff\xff\xff");
+            }
+            fill(tx, 4, 4, 600);
+            tx.commit();
+         }
+         uint64_t keys = 0;
+         {
+            auto rs = db->start_read_session();
+            auto c  = rs->create_cursor(4);
+            check(content_hash(c, keys) == contents[4], "root 4 was not rebuilt as it was");
+         }
+         ::kill(::getpid(), SIGKILL);
+      });
+      REQUIRE(failure == "the child died of signal 9");
+      wait_for_store_lock(dir.path);
+   }
+   // 3: and a last open that audits everything (the deferred open's leaks are reclaimed by
+   // the light pass that followed it).
+   failure = in_child([&] {
+      auto db = database::open(dir.path, psitri::open_mode::open_existing, store_config());
+      check(db->recovery_performed() == sal::recovery_mode::app_crash, "unexpected recovery mode");
+      for (uint32_t r = 0; r < inplace_roots; ++r)
+      {
+         uint64_t keys = 0;
+         auto     rs   = db->start_read_session();
+         auto     c    = rs->create_cursor(r);
+         check(content_hash(c, keys) == contents[r],
+               "root " + std::to_string(r) + " does not hold what it held");
+      }
+      const auto a = audit(*db, true);
+      check(a.error.empty(), "audit: " + a.error);
+   });
+   REQUIRE(failure == "");
+   ::close(pipe_fds[0]);
+   ::close(pipe_fds[1]);
+}
+
+
+TEST_CASE("large engine: the published-root check notices a change", "[large-crash][in-place]")
+{
+   // The test above is only worth something if it fails when a published object changes.
+   for (int kind = 0; kind < 2; ++kind)
+   {
+      temporary_directory dir;
+      const auto failure = in_child([&] {
+         auto db = database::open(dir.path, psitri::open_mode::create_only, store_config());
+         auto ws = db->start_write_session();
+         {
+            auto tx = ws->start_transaction(0);
+            fill(tx, 0, 1, 400);
+            tx.commit();
+         }
+         ws->set_root(1, ws->get_root(0));
+         const auto  before = image_of(*db, 1);
+         image_stats stats;
+         if (kind == 0)
+         {
+            // one byte of one object root 1 reaches, changed where it lies
+            auto [obj, loc] = db->underlying_allocator().resolve(
+                sal::ptr_address(before.objects.begin()->first));
+            const_cast<char*>(reinterpret_cast<const char*>(obj))[obj->size() - 1] ^= 1;
+         }
+         else
+         {
+            auto tx = ws->start_transaction(1);
+            tx.upsert(key_of(1), "changed");
+            tx.commit();
+         }
+         same_image(before, image_of(*db, 1), "negative control", {}, stats);
+      });
+      INFO(failure);
+      REQUIRE(failure.starts_with("negative control"));
+   }
+}
+
+TEST_CASE("large engine: deaths around opens that defer cleanup", "[large-crash][deferred]")
+{
+   const uint64_t  seed = env_u64("LGE_CRASH_SEED", 1);
+   campaign        c(seed + 500);
+   std::mt19937_64 rng(mix(seed, 501));
+   for (int round = 0; round < int(env_u64("LGE_CRASH_DEFERRED", 8)); ++round)
+   {
+      auto p      = c.plan();
+      p.clean_end = false;
+      c.life(p, int64_t(rng() % 120000));  // a death
+      // opened without recounting: everything published is there, counts are never too
+      // low, the store is written to; then it dies or closes
+      p               = c.plan();
+      p.recovery      = sal::recovery_mode::deferred_cleanup;
+      p.leaks_allowed = true;
+      p.clean_end     = round % 3 == 0;
+      c.life(p, p.clean_end ? -1 : int64_t(rng() % 120000));
+      if (round % 2)
+      {
+         p               = c.plan();  // twice in a row
+         p.recovery      = sal::recovery_mode::deferred_cleanup;
+         p.leaks_allowed = true;
+         p.clean_end     = false;
+         c.life(p, int64_t(rng() % 120000));
+      }
+      // the light pass, asked for by name (the store may have been closed): exact again
+      p          = c.plan();
+      p.recovery = sal::recovery_mode::app_crash;
+      c.life(p);
+   }
+   c.summary("deaths around deferred-cleanup opens");
+   REQUIRE(c.failures.empty());
+}
+
+// A value of several continuation chunks, each nearly a segment: death while it is built,
+// while it is published, and while the version it replaced is released.
+TEST_CASE("large engine: death while a value of several chunks is written and replaced",
+          "[large-crash][large-value]")
+{
+   temporary_directory dir;
+   const size_t        huge = (68u << 20) + 12345;
+   auto value_of = [&](char fill) {
+      std::string v(huge, fill);
+      for (size_t at = 0; at + 8 <= v.size(); at += 1 << 20)
+         std::memcpy(v.data() + at, &at, 8);
+      return v;
+   };
+   // What root 0 must hold after each step: 0 = no value, else the fill byte.
+   struct step
+   {
+      const char* point;
+      uint64_t    at;
+      char        write;     // the value this life tries to publish
+      const char* allowed;   // fill bytes the next open may find ('-' = none)
+   };
+   const step steps[] = {
+       {"large:head_allocated", 1, 'A', "-"},   {"large:chunk_allocated", 1, 'A', "-"},
+       {"large:chunk_linked", 2, 'A', "-"},     {"root:store_before", 1, 'A', "-"},
+       {"root:store_after", 1, 'A', "A"},       {"large:chunk_linked", 1, 'B', "A"},
+       {"commit:old_root_held", 1, 'B', "B"},   {"release:children_released", 3, 'C', "BC"},
+       {"final_release:decremented", 1, 'D', "CD"}, {"", 0, 'E', "E"},
+   };
+   std::string expect = "-";
+   for (const auto& st : steps)
+   {
+      const auto failure = in_child([&] {
+         crash::install();
+         auto db = database::open(dir.path, psitri::open_mode::create_or_open, store_config());
+         {
+            auto rs = db->start_read_session();
+            auto c  = rs->create_cursor(0);
+            auto v  = c.get<std::string>("huge");
+            check(expect.find(v ? (*v)[9] : '-') != std::string::npos,
+                  std::string("the value found is not one the last life could have left: ") +
+                      (v ? (*v)[9] : '-'));
+            if (v)
+               check(*v == value_of((*v)[9]), "the value read back is damaged");
+            check(c.get<std::string>("small") ==
+                      (v ? std::optional<std::string>("kept") : std::nullopt),
+                  "the small key published with the value is not in the state the value is in");
+         }
+         const auto a = audit(*db, true);
+         check(a.error.empty(), "audit: " + a.error);
+         auto ws = db->start_write_session();
+         auto rs = db->start_read_session();
+         auto held = rs->create_cursor(0);  // the old value stays referenced for a while
+         crash::arm(st.point, st.at);
+         {
+            auto tx = ws->start_transaction(0);
+            tx.upsert("huge", value_of(st.write));
+            tx.upsert("small", "kept");
+            tx.commit();
+         }
+         held = rs->create_cursor(0);  // drops the last reference to the old version
+         db->wait_for_compactor();
+         check(std::string(st.point).empty(), "the crash point was not reached");
+      });
+      if (std::string(st.point).empty())
+         REQUIRE(failure == "");
+      else
+         REQUIRE(failure == "the child died of signal 9");
+      wait_for_store_lock(dir.path);
+      expect = st.allowed;
+   }
 }

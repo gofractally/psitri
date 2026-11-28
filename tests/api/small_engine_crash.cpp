@@ -23,7 +23,10 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -75,6 +78,53 @@ namespace
    {
       const char* v = std::getenv(name);
       return v ? std::strtoull(v, nullptr, 10) : fallback;
+   }
+
+   // ── the store's file locks ──────────────────────────────────────────────
+   // Every file of a store is locked (flock, exclusive, non-blocking) by the
+   // process that has it open. A killed process is reaped before the kernel
+   // has necessarily closed its files, so an open straight after waitpid can
+   // still find a lock held (seen on Linux as EWOULDBLOCK from open).
+   const char* const store_files[] = {"data.part",       "free.part",       "refs.part",
+                                      "meta.part",       "large/data.part", "large/free.part",
+                                      "large/refs.part", "large/meta.part"};
+   // -1: no such file; 0: not locked; otherwise the errno of the flock.
+   int lock_state(const std::filesystem::path& file)
+   {
+      const int fd = ::open(file.c_str(), O_RDONLY);
+      if (fd < 0)
+         return -1;
+      int err = 0;
+      if (::flock(fd, LOCK_EX | LOCK_NB) == 0)
+         ::flock(fd, LOCK_UN);
+      else
+         err = errno;
+      ::close(fd);
+      return err;
+   }
+   void wait_for_store_locks(const std::filesystem::path& dir)
+   {
+      for (const char* name : store_files)
+         for (int attempt = 0; lock_state(dir / name) > 0; ++attempt)
+         {
+            if (attempt == 20000)
+               throw std::runtime_error("the lock of a dead process on " + (dir / name).string() +
+                                        " was never released");
+            ::usleep(1000);
+         }
+   }
+   // For a child whose open failed: which file, and what holds it.
+   void report_open_failure(const std::filesystem::path& dir, const std::exception& e)
+   {
+      std::fprintf(stderr, "crash child (pid %d): open of %s failed: %s\n", int(::getpid()),
+                   dir.c_str(), e.what());
+      for (const char* name : store_files)
+      {
+         const int st = lock_state(dir / name);
+         std::fprintf(stderr, "   %-16s %s%s\n", name,
+                      st < 0 ? "absent" : st == 0 ? "present, not locked" : "flock(LOCK_EX|LOCK_NB): ",
+                      st > 0 ? std::strerror(st) : "");
+      }
    }
 
    // ── the crash hook ──────────────────────────────────────────────────────
@@ -407,6 +457,7 @@ namespace
       }
       uint64_t k = seq_of(cur);
       ack(ack_fd, r, k);  // what the store held when this life began
+      ack(ack_fd, stash_base + r, seq_of(stash));
       for (uint32_t n = 0; n < plan.txns; ++n)
       {
          ++k;
@@ -420,6 +471,7 @@ namespace
                tx.primary().set_root(ws->get_root(r));
                tx.commit();
                stash = cur;
+               ack(ack_fd, stash_base + r, seq_of(stash));
             }
             catch (const engine::storage_full&)
             {
@@ -571,7 +623,16 @@ namespace
       try
       {
          crash::arm(plan.point, plan.at);  // before open: recovery is part of a life
-         auto db = database::open(dir, psitri::open_mode::create_or_open, plan.cfg);
+         std::shared_ptr<database> db;
+         try
+         {
+            db = database::open(dir, psitri::open_mode::create_or_open, plan.cfg);
+         }
+         catch (const std::exception& e)
+         {
+            report_open_failure(dir, e);
+            ::_exit(10);
+         }
          std::atomic<bool>        stop{false};
          std::atomic<int>         failed{0};
          std::vector<std::thread> threads, watchers;
@@ -663,7 +724,9 @@ namespace
    {
       int      status = 0;
       bool     any_ack[16] = {};
-      uint64_t acked[16]   = {};
+      uint64_t acked[16]   = {};  // the highest version acknowledged, per root
+      uint64_t first[16]   = {};  // the first: what the life found in the store
+      bool     hung        = false;  // killed by the parent's deadline
       bool     killed() const { return WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL; }
       bool     finished() const { return WIFEXITED(status) && WEXITSTATUS(status) == 0; }
    };
@@ -671,7 +734,7 @@ namespace
    // Run one life. kill_after_us >= 0: the parent kills it that long after
    // its first acknowledgement.
    life_result run_life(const std::filesystem::path& dir, const life_plan& plan,
-                        int64_t kill_after_us = -1)
+                        int64_t kill_after_us = -1, bool from_start = false)
    {
       int fds[2];
       REQUIRE(::pipe(fds) == 0);
@@ -689,17 +752,37 @@ namespace
       std::thread       killer;
       if (kill_after_us >= 0)
          killer = std::thread([&] {
+            // from_start: the clock runs from the fork, so the death can
+            // fall inside open and recovery
             const auto t0 = std::chrono::steady_clock::now();
-            while (!first.load() && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(20))
+            while (!from_start && !first.load() &&
+                   std::chrono::steady_clock::now() - t0 < std::chrono::seconds(20))
                std::this_thread::sleep_for(std::chrono::microseconds(100));
             std::this_thread::sleep_for(std::chrono::microseconds(kill_after_us));
             ::kill(pid, SIGKILL);
          });
+      // A child that stops making progress is killed, not waited for: the
+      // deadline is far beyond what a life takes.
+      const auto deadline = std::chrono::steady_clock::now() +
+                            std::chrono::seconds(env_u64("PSITRI_SMALL_CRASH_LIFE_SECONDS", 600));
       ack_record rec;
-      while (::read(fds[0], &rec, sizeof(rec)) == ssize_t(sizeof(rec)))
+      for (;;)
       {
+         pollfd waiting{fds[0], POLLIN, 0};
+         if (::poll(&waiting, 1, 1000) == 0)
+         {
+            if (std::chrono::steady_clock::now() < deadline)
+               continue;
+            r.hung = true;
+            ::kill(pid, SIGKILL);
+            break;
+         }
+         if (::read(fds[0], &rec, sizeof(rec)) != ssize_t(sizeof(rec)))
+            break;
          if (rec.root < 16)
          {
+            if (!r.any_ack[rec.root])
+               r.first[rec.root] = rec.version;
             r.any_ack[rec.root] = true;
             r.acked[rec.root]   = std::max(r.acked[rec.root], rec.version);
          }
@@ -712,6 +795,10 @@ namespace
          killer.join();
       ::waitpid(pid, &r.status, 0);
       ::close(fds[0]);
+      wait_for_store_locks(dir);
+      INFO("a child did not finish within its deadline; armed marker '"
+           << plan.point << "' at " << plan.at);
+      REQUIRE_FALSE(r.hung);
       return r;
    }
 
@@ -838,12 +925,40 @@ namespace
    {
       root_history roots[6];
       uint64_t     torn_pairs = 0, verified = 0, refused = 0, reverted = 0, removes_ahead = 0;
+      // The highest version ever acknowledged or verified, per root slot.
+      uint64_t     floor[16] = {};
       store_model()
       {
          for (auto& r : roots)
             r.versions[0] = {};
       }
    };
+
+   // A life's first acknowledgement for a root is the version it found in the
+   // store. If that is below what an earlier life had acknowledged, the store
+   // lost an acknowledged transaction, whatever the life went on to commit
+   // again. Returns what was lost, or nothing.
+   std::string regression(const life_result& life, const uint64_t floor[16])
+   {
+      for (uint32_t r = 0; r < 16; ++r)
+         if (life.any_ack[r] && life.first[r] < floor[r])
+            return "root " + std::to_string(r) + " came back at version " +
+                   std::to_string(life.first[r]) + " after version " + std::to_string(floor[r]) +
+                   " had been acknowledged";
+      return {};
+   }
+   // Run a life of a store the parent keeps a model of.
+   life_result live(const std::filesystem::path& dir, const life_plan& plan, store_model& model,
+                    int64_t kill_after_us = -1, bool from_start = false)
+   {
+      const life_result life = run_life(dir, plan, kill_after_us, from_start);
+      const std::string lost = regression(life, model.floor);
+      INFO(lost);
+      REQUIRE(lost.empty());
+      for (uint32_t r = 0; r < 16; ++r)
+         model.floor[r] = std::max(model.floor[r], life.acked[r]);
+      return life;
+   }
 
    void require_equal(const model_map& found, const model_map& want, uint32_t root)
    {
@@ -926,7 +1041,8 @@ namespace
                       base, plan.prof);
             h.versions[v] = std::move(m);
          }
-         h.version = k;
+         h.version      = k;
+         model.floor[r] = std::max(model.floor[r], k);
          while (h.versions.size() > 48)
             h.versions.erase(h.versions.begin());
          // Removes-only transactions of the next version may have been
@@ -961,13 +1077,31 @@ namespace
             auto c = rs->create_cursor(stash_base + r);
             found  = scan(c);
          }
+         const uint64_t k = seq_of(found);
+         INFO("stash of root " << r << " holds version " << k << ", acknowledged "
+                               << acked[stash_base + r]);
+         // a stash whose commit returned is there, and never an older one
+         REQUIRE(k >= acked[stash_base + r]);
+         REQUIRE(k >= model.floor[stash_base + r]);
+         model.floor[stash_base + r] = k;
          if (found.empty())
             continue;
-         const uint64_t k = seq_of(found);
-         INFO("stash of root " << r << " holds version " << k);
+         REQUIRE(plan.prof.stash);
          REQUIRE(k <= model.roots[r].version);
          REQUIRE(model.roots[r].versions.count(k));
          require_equal(found, model.roots[r].versions.at(k), stash_base + r);
+      }
+      // Root slots nothing writes to stay empty.
+      for (uint32_t r : {6u, 7u, 12u, 13u, 14u, 15u})
+      {
+         auto c = rs->create_cursor(r);
+         INFO("root " << r << " should be empty");
+         REQUIRE_FALSE(c.seek_begin());
+      }
+      if (!plan.pair)
+      {
+         REQUIRE(found_version[pair_a] == 0);
+         REQUIRE(found_version[pair_b] == 0);
       }
       rs.reset();
       const audit_result a = audit(*db);
@@ -1038,6 +1172,7 @@ namespace
          stats.points[n];
       const auto t0 = std::chrono::steady_clock::now();
       size_t     next_point = 0;
+      INFO("campaign " << name << ", seed " << seed << " (PSITRI_SMALL_CRASH_SEED sets the base)");
       audit_result last_audit;
       plan.seed = seed;
       for (const auto& marker : first)
@@ -1049,12 +1184,12 @@ namespace
             // these need a store that was not closed
             plan.point = "commit.published";
             plan.at    = 7;
-            lives.push_back(run_life(tmp.path, plan));
+            lives.push_back(live(tmp.path, plan, model));
             REQUIRE(lives.back().killed());
          }
          plan.point = marker;
          plan.at    = 1;
-         lives.push_back(run_life(tmp.path, plan));
+         lives.push_back(live(tmp.path, plan, model));
          INFO(name << ": no death at marker " << marker << ", status " << lives.back().status);
          REQUIRE(lives.back().killed());
          ++stats.lives, ++stats.point_deaths;
@@ -1072,6 +1207,7 @@ namespace
             plan.seed  = seed;
             plan.point.clear();
             int64_t        kill_us = -1;
+            bool           from_start = false;
             const uint32_t pick    = uint32_t(rng() % 100);
             const bool     unclean = !database::closed_cleanly(tmp.path);
             bool           certain = false;
@@ -1106,7 +1242,10 @@ namespace
             else if (pick < 62)
                plan.point = names[next_point++ % names.size()];
             else if (pick < 90)
-               kill_us = int64_t(rng() % 40000);
+            {
+               kill_us    = int64_t(rng() % 40000);
+               from_start = rng() % 2;  // half of them can fall inside open and recovery
+            }
             if (!plan.point.empty())
             {
                auto& p = stats.points[plan.point];
@@ -1115,7 +1254,7 @@ namespace
                if (certain)
                   plan.at = plan.point == "recover.mark" ? 1 + rng() % 50 : 1;
             }
-            const life_result life = run_life(tmp.path, plan, kill_us);
+            const life_result life = live(tmp.path, plan, model, kill_us, from_start);
             ++stats.lives;
             INFO(name << " cycle " << cycle << " link " << link << " point '" << plan.point
                       << "' at " << plan.at << " kill_us " << kill_us << " status "
@@ -1285,7 +1424,7 @@ TEST_CASE("Small Engine: a process killed while a store is created or grows lose
          plan.point = point;
          plan.at    = at;
          INFO("creation: " << point << " at " << at);
-         std::vector<life_result> lives{run_life(tmp.path, plan)};
+         std::vector<life_result> lives{live(tmp.path, plan, model)};
          REQUIRE(lives.back().killed());
          ++deaths;
          // the next open finds files longer than the count and cuts them: die there too
@@ -1295,12 +1434,12 @@ TEST_CASE("Small Engine: a process killed while a store is created or grows lose
             {
                plan.point = trim;
                plan.at    = 1 + at % 3;
-               lives.push_back(run_life(tmp.path, plan));
+               lives.push_back(live(tmp.path, plan, model));
                REQUIRE((lives.back().killed() || lives.back().finished()));
                trims += lives.back().killed();
             }
          plan.point.clear();
-         lives.push_back(run_life(tmp.path, plan));
+         lives.push_back(live(tmp.path, plan, model));
          REQUIRE(lives.back().finished());
          verify(tmp.path, plan, model, lives);
       }
@@ -1323,7 +1462,7 @@ TEST_CASE("Small Engine: a process killed while a store is created or grows lose
       audit_result   a;
       for (int life = 0; life < 200 && a.lines * 128 < first_batch * 3 / 4; ++life)
       {
-         std::vector<life_result> lives{run_life(tmp.path, plan)};
+         std::vector<life_result> lives{live(tmp.path, plan, model)};
          REQUIRE(lives.back().finished());
          verify(tmp.path, plan, model, lives, &a);
       }
@@ -1334,7 +1473,7 @@ TEST_CASE("Small Engine: a process killed while a store is created or grows lose
       bool died  = false;
       for (int life = 0; life < 40 && !died; ++life)
       {
-         std::vector<life_result> lives{run_life(tmp.path, plan)};
+         std::vector<life_result> lives{live(tmp.path, plan, model)};
          REQUIRE((lives.back().killed() || lives.back().finished()));
          died = lives.back().killed();
          if (died)
@@ -1342,7 +1481,7 @@ TEST_CASE("Small Engine: a process killed while a store is created or grows lose
             // and once more while the longer files are being cut back
             plan.point = regrow_deaths % 2 ? "open.before_trim" : "open.after_trim";
             plan.at    = 1;
-            lives.push_back(run_life(tmp.path, plan));
+            lives.push_back(live(tmp.path, plan, model));
             REQUIRE((lives.back().killed() || lives.back().finished()));
          }
          verify(tmp.path, plan, model, lives, &a);
@@ -1353,7 +1492,7 @@ TEST_CASE("Small Engine: a process killed while a store is created or grows lose
       plan.point.clear();
       for (int life = 0; life < 60 && a.lines * 128 < first_batch + (4u << 20); ++life)
       {
-         std::vector<life_result> lives{run_life(tmp.path, plan)};
+         std::vector<life_result> lives{live(tmp.path, plan, model)};
          REQUIRE(lives.back().finished());
          verify(tmp.path, plan, model, lives, &a);
       }
@@ -1704,6 +1843,7 @@ TEST_CASE("Small Engine: a failed flush of data pages ends the process before th
    ::close(fds[0]);
    int status = 0;
    ::waitpid(pid, &status, 0);
+   wait_for_store_locks(tmp.path);
    REQUIRE(WIFEXITED(status));
    REQUIRE(WEXITSTATUS(status) == sal::durable_io_failure_exit_code);
    REQUIRE(acked == 1);
@@ -1804,6 +1944,7 @@ TEST_CASE("Small Engine: recovery keeps typed values and says that it found them
    int status = 0;
    ::waitpid(pid, &status, 0);
    REQUIRE(WIFSIGNALED(status));
+   wait_for_store_locks(tmp.path);
    auto db = database::open(tmp.path, psitri::open_mode::open_existing, cfg);
    REQUIRE(db->recovered_on_open());
    REQUIRE(db->typed_values_found_by_recovery() == 500);  // shared by two roots, counted once
@@ -1827,4 +1968,54 @@ TEST_CASE("Small Engine: recovery keeps typed values and says that it found them
    db = database::open(tmp.path, psitri::open_mode::open_existing, cfg);
    REQUIRE_FALSE(db->recovered_on_open());
    REQUIRE(db->typed_values_found_by_recovery() == 0);
+}
+
+// The harness's own check, checked: a store that comes back older than what
+// was acknowledged is caught at the next life's first acknowledgement, even
+// though that life then commits the lost versions again.
+TEST_CASE("Small Engine crash harness: a store that lost acknowledged versions is caught",
+          "[small][crash][selftest]")
+{
+   temporary_directory tmp;
+   store_model         model;
+   auto                plan = base_plan(psitri::sync_mode::none, 1024);
+   plan.seed                = 99;
+   plan.txns                = 40;
+   std::vector<life_result> lives{live(tmp.path, plan, model)};
+   verify(tmp.path, plan, model, lives);
+   REQUIRE(model.roots[0].version == 40);
+   // Put root 0 back to its stashed snapshot (version 38) behind the model's back.
+   std::fflush(nullptr);
+   const pid_t pid = ::fork();
+   REQUIRE(pid >= 0);
+   if (pid == 0)
+   {
+      try
+      {
+         auto db = database::open(tmp.path, psitri::open_mode::open_existing, plan.cfg);
+         auto ws = db->start_write_session();
+         auto tx = ws->start_transaction(0);
+         tx.primary().set_root(ws->get_root(stash_base));
+         tx.commit();
+      }
+      catch (...)
+      {
+         ::_exit(3);
+      }
+      ::_exit(0);
+   }
+   int status = 0;
+   ::waitpid(pid, &status, 0);
+   REQUIRE((WIFEXITED(status) && WEXITSTATUS(status) == 0));
+   wait_for_store_locks(tmp.path);
+   const life_result next = run_life(tmp.path, plan);
+   REQUIRE(next.finished());
+   REQUIRE(next.acked[0] > 40);  // it went on and passed the old version again
+   const std::string lost = regression(next, model.floor);
+   INFO("regression said: " << lost);
+   REQUIRE(lost.find("root 0 came back at version 38 after version 40") != std::string::npos);
+   // The comparison with the model alone does not see it: the versions that
+   // were lost have been committed again, identically.
+   std::vector<life_result> after{next};
+   verify(tmp.path, plan, model, after);
 }

@@ -1346,9 +1346,12 @@ namespace sal_art_ref::radix
                   // taken keep alive.
                   nn->for_each_entry([&](uint8_t, smart_address sa)
                                      { if (sa.is_pointer()) _ses->retain(sa.as_pointer()); });
+                  SAL_CRASH_POINT("clone:saturated_children_retained");
                   for (int j = 0; j < r; ++j)
                      rr_leave<N>(nn, j);
+                  SAL_CRASH_POINT("clone:saturated_shares_returned");
                   rr_birth<N>(nn);
+                  SAL_CRASH_POINT("clone:saturated_reborn");
                }
                smart_address tv = nn->term_value();
                if (tv.is_pointer()) _ses->retain(tv.as_pointer());  // term held directly

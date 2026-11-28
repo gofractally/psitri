@@ -923,6 +923,8 @@ namespace
       bool               expect_clean = false;                  // the store was closed cleanly
       bool               leaks_allowed = false;                 // after a deferred-cleanup open
       uint32_t           writers = 0x7f;  // which of the seven writers run (bit per writer)
+      bool               arm_early = false;  // arm before the open, whatever the point
+      uint32_t           hold_versions = 0;  // root 3's writer keeps this many versions alive
       bool (*special)()            = nullptr;
    };
 
@@ -1018,8 +1020,20 @@ namespace
                            std::atomic<bool>& stop)
    {
       auto ws = db.start_write_session();
+      // Versions of the root kept alive while it is written on: every version of a dense
+      // router shares its branch sets with the others through one-byte counters, so more
+      // than 255 live versions take the counters to their limit, and dropping them in
+      // bursts has the release thread giving shares back while the writer takes them.
+      std::deque<decltype(ws->get_root(r))> versions;
+      const uint32_t hold = r == 3 ? plan.hold_versions : 0;
       for (uint32_t n = 0; n < plan.txns && !stop.load(std::memory_order_relaxed); ++n)
       {
+         if (hold)
+         {
+            versions.push_back(ws->get_root(r));
+            if (versions.size() > hold)
+               versions.erase(versions.begin(), versions.begin() + (n % 7 == 0 ? hold / 2 : 1));
+         }
          const uint64_t k = st.version + 1;
          if (mix(plan.seed ^ 0xD00D, r, k) % 5 == 0 && !reverts(r, k))
          {
@@ -1219,7 +1233,8 @@ namespace
       g_segment_file = dir / "segs";
       crash::counting.store(plan.counting);
       crash::special.store(plan.special);
-      if (arms_before_open(plan.point))
+      const bool early = arms_before_open(plan.point) || plan.arm_early;
+      if (early)
          crash::arm(plan.point, plan.at);
       {
          auto db = open_and_verify(dir, plan, state);
@@ -1236,7 +1251,7 @@ namespace
                      stash_now(*ws, r, state[r].stash_version);
                }
             }
-            if (!arms_before_open(plan.point))
+            if (!early)
                crash::arm(plan.point, plan.at);
             send(m_ready);
             std::atomic<bool>        stop{false};
@@ -2898,4 +2913,368 @@ TEST_CASE("large engine: the torn free map on a store of more than 64 segments (
    // is one (if this ever stops failing, the reasoning in #45 about large stores is wrong).
    const bool defect = !failure.empty() || before != after;
    CHECK(defect);
+}
+
+
+// ── the gaps the campaigns above leave ──────────────────────────────────────────────────
+
+// Death at every step of the FIRST open of a store, and at the first passes of everything
+// after it: whatever is left must open (or be created again) and work.
+TEST_CASE("large engine: death while a store is created", "[large-crash][creation]")
+{
+   const uint64_t seed = env_u64("LGE_CRASH_SEED", 1);
+   campaign       totals(seed);
+   totals.stores = 0;
+   const auto only = env_str("LGE_CRASH_POINT");
+   for (const char* name : all_points)
+      for (uint64_t at : {1, 2})
+      {
+         if (!only.empty() && only != name)
+            continue;
+         if (at == 2 && !std::string(name).starts_with("open:") &&
+             !std::string(name).starts_with("provider:") &&
+             !std::string(name).starts_with("segment:") &&
+             !std::string(name).starts_with("cb:") && !std::string(name).starts_with("session:"))
+            continue;
+         campaign c(seed + 77);
+         c.verbose   = totals.verbose;
+         auto p      = c.plan();
+         p.point     = name;
+         p.at        = at;
+         p.arm_early = true;  // from before the files exist
+         p.txns      = 6;
+         c.unknown   = true;  // (nothing is said about which recovery the next open runs)
+         auto r      = c.life(p);
+         if (r.failure.empty() && !r.closed)
+         {
+            c.unknown  = true;
+            auto q     = c.plan();
+            q.txns     = 6;
+            c.life(q);  // opens what the death left, verifies, audits, writes, closes
+         }
+         totals.absorb(c);
+      }
+   totals.summary("death while a store is created");
+   REQUIRE(totals.failures.empty());
+}
+
+TEST_CASE("large engine: a store left by a death refuses a read-only open and recovers after it",
+          "[large-crash][read-only]")
+{
+   campaign c(env_u64("LGE_CRASH_SEED", 1) + 60);
+   auto     p  = c.plan();
+   p.clean_end = false;
+   REQUIRE(c.life(p, 60000).failure == "");
+   wait_for_store_lock(c.dir->path);
+   const auto failure = in_child([&] {
+      try
+      {
+         auto db = database::open(c.dir->path, psitri::open_mode::read_only, store_config());
+      }
+      catch (const std::runtime_error& e)
+      {
+         check(std::string(e.what()).find("not shut down cleanly") != std::string::npos,
+               std::string("unexpected refusal: ") + e.what());
+         return;
+      }
+      child_fail("a read-only open of a store its owner did not close was accepted");
+   });
+   REQUIRE(failure == "");
+   // the refused open changed nothing: the next owner recovers and finds everything
+   auto r = c.life(c.plan());
+   REQUIRE(r.failure == "");
+   REQUIRE(sal::recovery_mode(r.recovery) == sal::recovery_mode::app_crash);
+   // and once closed, a read-only open reads it
+   const auto reads = in_child([&] {
+      auto db = database::open(c.dir->path, psitri::open_mode::read_only, store_config());
+      auto rs = db->start_read_session();
+      for (uint32_t root = 0; root < data_roots; ++root)
+      {
+         auto c2 = rs->create_cursor(root);
+         auto st = c.state[root];  // as verified when the last life began: bring it to
+         replay(st, c.seed, root, st.acked, c.prof);  // what that life acknowledged
+         if (auto d = compare_tree(c2, st.model, 5); !d.empty())
+            child_fail("read-only: root " + std::to_string(root) + ": " + d);
+      }
+   });
+   REQUIRE(reads == "");
+}
+
+// ── the store at its ceiling ────────────────────────────────────────────────────────────
+namespace
+{
+   constexpr int64_t ceiling = int64_t(512) << 20;  // 16 segments
+   // Write 1 MiB values, one commit each, into a store of 16 segments until something
+   // gives. Returns how the writing process ended; `committed` is the number of commits
+   // that returned.
+   std::string fill_to_ceiling(const fs::path& dir, uint32_t& committed,
+                               std::vector<std::string>& notes)
+   {
+      int fds[2];
+      if (::pipe(fds) != 0)
+         throw std::runtime_error("pipe failed");
+      g_notes     = &notes;
+      auto result = in_child([&] {
+         auto cfg              = store_config();
+         cfg.max_database_size = ceiling;
+         auto db = database::open(dir, psitri::open_mode::create_or_open, cfg);
+         auto ws = db->start_write_session();
+         for (uint32_t i = 0; i < 4000; ++i)
+         {
+            try
+            {
+               auto tx = ws->start_transaction(0);
+               tx.upsert(big_key(i), std::string_view(*make_value(0, i, 0, big_value_size)));
+               tx.commit();
+            }
+            catch (const std::exception& e)
+            {
+               note(std::string("the writer got an exception: ") + e.what());
+               return;
+            }
+            const uint32_t done = i + 1;
+            if (::write(fds[1], &done, 4) != 4)
+               child_fail("cannot report");
+         }
+         note("4000 MiB fitted into a 512 MiB store");
+      });
+      g_notes = nullptr;
+      ::close(fds[1]);
+      committed = 0;
+      for (uint32_t n; ::read(fds[0], &n, 4) == 4;)
+         committed = n;
+      ::close(fds[0]);
+      return result;
+   }
+   // Open the store that filled up, with the given ceiling: every committed value reads
+   // back, the audit is clean, and half of the keys can be removed.
+   std::string reopen_filled(const fs::path& dir, uint32_t committed, int64_t max_size)
+   {
+      wait_for_store_lock(dir);
+      return in_child([&] {
+         auto cfg              = store_config();
+         cfg.max_database_size = max_size;
+         auto db               = database::open(dir, psitri::open_mode::open_existing, cfg);
+         check(damaged_keys(*db, 0, committed) == 0, "committed values are missing or damaged");
+         const auto a = audit(*db, true);
+         check(a.error.empty(), "audit: " + a.error);
+         auto ws = db->start_write_session();
+         for (uint32_t i = 0; i < committed / 2; ++i)
+         {
+            auto tx = ws->start_transaction(0);
+            check(tx.remove(big_key(i)) == 0, "a committed key cannot be removed");
+            tx.commit();
+         }
+         check(damaged_keys(*db, committed / 2, committed) == 0, "the remaining values are damaged");
+      });
+   }
+}  // namespace
+
+// What happens today when a store reaches max_database_size: the segment provider's thread
+// throws "maximum block number reached" and the thread wrapper aborts the process
+// (segment_thread.cpp). Under the process-death model nothing committed is lost, which
+// this test checks by reopening with a higher ceiling.
+TEST_CASE("large engine: what was committed before the store filled up is there afterwards",
+          "[large-crash][full]")
+{
+   temporary_directory      dir;
+   uint32_t                 committed = 0;
+   std::vector<std::string> notes;
+   const auto               ended = fill_to_ceiling(dir.path, committed, notes);
+   std::printf("store at its ceiling of 512 MiB: %u commits of 1 MiB returned, then: %s%s\n",
+               committed, ended.empty() ? "the writer returned; " : ended.c_str(),
+               notes.empty() ? "" : notes[0].c_str());
+   REQUIRE(committed > 20);
+   REQUIRE(reopen_filled(dir.path, committed, 2 * ceiling) == "");
+}
+
+// The defects, expected to fail until a full store is reported to the writer instead:
+// a node whose database reaches max_database_size stops with SIGABRT,
+TEST_CASE("large engine: a writer that fills the store gets an exception, not an abort",
+          "[large-crash][full][!shouldfail]")
+{
+   temporary_directory      dir;
+   uint32_t                 committed = 0;
+   std::vector<std::string> notes;
+   const auto               ended = fill_to_ceiling(dir.path, committed, notes);
+   REQUIRE(ended == "");
+   REQUIRE(notes.size() == 1);
+   REQUIRE(notes[0].starts_with("the writer got an exception"));
+}
+// and it stops again soon after every later open with the same ceiling (the provider wants
+// its queues of prepared segments full and there is no segment to prepare), so the store can
+// be neither read for long nor made smaller until max_database_size is raised.
+TEST_CASE("large engine: a store that filled up opens again with the same ceiling",
+          "[large-crash][full][!shouldfail]")
+{
+   temporary_directory      dir;
+   uint32_t                 committed = 0;
+   std::vector<std::string> notes;
+   (void)fill_to_ceiling(dir.path, committed, notes);
+   REQUIRE(committed > 20);
+   REQUIRE(reopen_filled(dir.path, committed, ceiling) == "");
+}
+
+// ── branch-set counters at their limit ──────────────────────────────────────────────────
+// A version of a dense router shares each of its 16 ranges' branch sets with the versions
+// it was cloned from, through one-byte counters. A commit that changes one key gives the
+// new version its own set for one range and one more share of the other 15. With more than
+// 255 versions alive those counters reach their limit (the code path of psibase#2268), and
+// dropping versions in bursts has the release thread returning shares while the writer
+// takes them. One root of 20,000 keys, one key changed per commit, 300 versions held.
+namespace
+{
+   constexpr uint32_t narrow_keys = 20000;
+   // Every commit changes a key of ONE of the router's 16 ranges (first key byte after "k/"
+   // below 16), so the other 15 are shared by every version alive.
+   std::string narrow_key(uint64_t j)
+   {
+      static const std::vector<uint32_t> in_range = [] {
+         std::vector<uint32_t> v;
+         for (uint32_t i = 0; i < narrow_keys; ++i)
+            if (i % 9 != 0 && ((uint32_t(i * 2654435761u) >> 16) >> 8) < 16)
+               v.push_back(i);
+         return v;
+      }();
+      return key_of(in_range[mix(j, 1) % in_range.size()]);
+   }
+   model_map   narrow_model(uint64_t commits)
+   {
+      model_map m;
+      for (uint32_t i = 0; i < narrow_keys; ++i)
+         m[key_of(i)] = entry{std::make_shared<std::string>("base"), nullptr};
+      for (uint64_t j = 0; j < commits; ++j)
+         m[narrow_key(j)] = entry{std::make_shared<std::string>("v" + std::to_string(j)), nullptr};
+      m[seq_key] = entry{std::make_shared<std::string>(reinterpret_cast<const char*>(&commits), 8),
+                         nullptr};
+      return m;
+   }
+   // One life: verify against `acked` commits (or one more), audit, then `more` commits with
+   // versions held. Reports each returned commit through `fd`.
+   void narrow_life(const fs::path& dir, uint64_t acked, uint32_t more, const std::string& point,
+                    uint64_t at, int fd)
+   {
+      crash::install();
+      crash::counting.store(true);
+      if (arms_before_open(point))
+         crash::arm(point, at);
+      auto db = database::open(dir, psitri::open_mode::create_or_open, store_config());
+      uint64_t found;
+      {
+         auto rs = db->start_read_session();
+         auto c  = rs->create_cursor(0);
+         found   = stored_u64(c, seq_key);
+         if (found == 0 && !c.seek_begin())
+         {
+            auto ws = db->start_write_session();
+            auto tx = ws->start_transaction(0);
+            for (auto& [k, e] : narrow_model(0))
+               tx.upsert(k, std::string_view(*e.value));
+            tx.commit();
+            c = rs->create_cursor(0);
+         }
+         check(found == acked || found == acked + 1,
+               "the root is at commit " + std::to_string(found) + ", acknowledged " +
+                   std::to_string(acked));
+         if (auto d = compare_tree(c, narrow_model(found), found); !d.empty())
+            child_fail("at commit " + std::to_string(found) + ": " + d);
+      }
+      const auto a = audit(*db, true);
+      check(a.error.empty(), "audit: " + a.error);
+      if (::write(fd, &found, 8) != 8)
+         child_fail("cannot report");
+      {
+         auto ws = db->start_write_session();
+         std::deque<decltype(ws->get_root(0))> versions;
+         if (!arms_before_open(point))
+            crash::arm(point, at);
+         for (uint64_t j = found; j < found + more; ++j)
+         {
+            versions.push_back(ws->get_root(0));
+            if (versions.size() > 300)
+               versions.erase(versions.begin(), versions.begin() + (j % 97 == 0 ? 200 : 1));
+            {
+               auto tx = ws->start_transaction(0);
+               tx.upsert(narrow_key(j), "v" + std::to_string(j));
+               const uint64_t n = j + 1;
+               tx.upsert(seq_key, std::string_view(reinterpret_cast<const char*>(&n), 8));
+               tx.commit();
+            }
+            const uint64_t n = j + 1;
+            if (::write(fd, &n, 8) != 8)
+               child_fail("cannot report");
+         }
+      }  // the versions go at once: a long release queue for the close to finish
+      db.reset();
+      for (auto& [name, n] : crash::counts())
+         if (name.starts_with("clone:") || name.starts_with("range:") ||
+             name.starts_with("router:") || name.starts_with("close:queued") ||
+             name.starts_with("recover:unreach") || name.starts_with("recover:free_word"))
+            note(name + "=" + std::to_string(n));
+   }
+}  // namespace
+
+TEST_CASE("large engine: death with more than 255 live versions sharing branch sets",
+          "[large-crash][versions]")
+{
+   temporary_directory dir;
+   uint64_t            acked = 0;
+   std::map<std::string, uint64_t> passes, died;
+   uint64_t            lives = 0, deaths = 0;
+   std::mt19937_64     rng(env_u64("LGE_CRASH_SEED", 1) + 5);
+   auto life = [&](const std::string& point, uint64_t at) {
+      int fds[2];
+      REQUIRE(::pipe(fds) == 0);
+      std::vector<std::string> notes;
+      g_notes            = &notes;
+      wait_for_store_lock(dir.path);
+      const auto failure = in_child([&] { narrow_life(dir.path, acked, 900, point, at, fds[1]); });
+      g_notes            = nullptr;
+      ::close(fds[1]);
+      for (uint64_t n; ::read(fds[0], &n, 8) == 8;)
+         acked = n;
+      ::close(fds[0]);
+      ++lives;
+      for (auto& n : notes)
+         if (auto eq = n.find('='); eq != std::string::npos)
+            passes[n.substr(0, eq)] =
+                std::max(passes[n.substr(0, eq)], std::strtoull(n.c_str() + eq + 1, nullptr, 10));
+      if (failure == "the child died of signal 9")
+      {
+         ++deaths;
+         ++died[point];
+         return std::string();
+      }
+      return failure;
+   };
+   REQUIRE(life("", 0) == "");
+   REQUIRE(life("", 0) == "");
+   const char* const wanted[] = {
+       "clone:ranges_shared",             "clone:saturated_children_retained",
+       "clone:saturated_shares_returned", "clone:saturated_reborn",
+       "range:diverge_children_retained", "range:diverge_left_shared",
+       "range:last_share_released",       "range:rehome_children_retained",
+       "range:rehome_left_shared",        "range:rehomed",
+       "router:grown",                    "close:queued_release_done",
+       "recover:unreachable_cb_reset",    "recover:free_word_stored",
+   };
+   for (int round = 0; round < 2; ++round)
+      for (const char* name : wanted)
+      {
+         const uint64_t seen = passes.count(name) ? passes[name] : 0;
+         if (seen == 0)
+            continue;
+         if (std::string(name).starts_with("recover:"))
+            REQUIRE(life("commit:published", 1 + rng() % 800) == "");  // a death to recover from
+         REQUIRE(life(name, round == 0 ? 1 : 1 + rng() % seen) == "");
+      }
+   REQUIRE(life("", 0) == "");
+   std::printf("more than 255 live versions: %llu lives, %llu deaths, %llu commits acknowledged; ",
+               (unsigned long long)lives, (unsigned long long)deaths, (unsigned long long)acked);
+   for (const char* name : wanted)
+      std::printf("%s passed %llu died %llu; ", name,
+                  (unsigned long long)(passes.count(name) ? passes[name] : 0),
+                  (unsigned long long)(died.count(name) ? died[name] : 0));
+   std::printf("\n");
+   CHECK(passes["clone:saturated_reborn"] > 0);
 }

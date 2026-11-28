@@ -1838,10 +1838,10 @@ TEST_CASE("large engine: a subtree at a long key survives the page split that st
    temporary_directory dir;
    const auto failure = in_child([&] {
       auto db = database::open(dir.path, psitri::open_mode::create_only, store_config());
-      auto ws = db->start_write_session();
       std::map<std::string, submap> want;
       for (uint32_t round = 0; round < 4; ++round)
       {
+         auto ws = db->start_write_session();
          auto tx = ws->start_transaction(0);
          for (uint32_t i = 0; i < 120; ++i)
          {
@@ -1859,16 +1859,18 @@ TEST_CASE("large engine: a subtree at a long key survives the page split that st
          }
          tx.commit();
       }
-      auto rs = db->start_read_session();
-      auto c  = rs->create_cursor(0);
-      auto it = want.begin();
-      for (bool ok = c.seek_begin(); ok; ok = c.next(), ++it)
       {
-         check(it != want.end() && c.key() == it->first, "the keys read back differ");
-         check(c.is_subtree(), "a subtree key reads back as a value");
-         check(scan_subtree(c) == it->second, "a subtree reads back with other contents");
+         auto rs = db->start_read_session();
+         auto c  = rs->create_cursor(0);
+         auto it = want.begin();
+         for (bool ok = c.seek_begin(); ok; ok = c.next(), ++it)
+         {
+            check(it != want.end() && c.key() == it->first, "the keys read back differ");
+            check(c.is_subtree(), "a subtree key reads back as a value");
+            check(scan_subtree(c) == it->second, "a subtree reads back with other contents");
+         }
+         check(it == want.end(), "subtree keys are missing");
       }
-      check(it == want.end(), "subtree keys are missing");
       const auto a = audit(*db, true);
       check(a.error.empty(), "audit: " + a.error);
    });

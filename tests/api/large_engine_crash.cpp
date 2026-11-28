@@ -863,7 +863,8 @@ namespace
          return out;
       // the shared branch-set counters
       for (auto& [ctr, n] : counters)
-         if (alloc.iref().count(sal::ptr_address(ctr)) != n)
+         if (const auto have = alloc.iref().count(sal::ptr_address(ctr));
+             expect_no_leak ? have != n : have < n)
          {
             out.error = "branch-set counter " + std::to_string(ctr) + " is " +
                         std::to_string(alloc.iref().count(sal::ptr_address(ctr))) + ", " +

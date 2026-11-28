@@ -39,6 +39,54 @@ if(Catch2_FOUND)
     add_test(NAME small-engine-crash-tests COMMAND small-engine-crash-tests)
     set_tests_properties(small-engine-crash-tests PROPERTIES TIMEOUT 900)
 
+    # Large Engine: death of the process at chosen points (gofractally/psitri#44).
+    # The crash points are compiled in only here: this binary builds the allocator's
+    # sources itself with SAL_CRASH_POINTS, and does not link the sal library, so that
+    # every translation unit in it agrees about the markers.
+    get_target_property(_lge_sal_sources sal SOURCES)
+    get_target_property(_lge_sal_dir sal SOURCE_DIR)
+    set(_lge_sources api/large_engine_crash.cpp)
+    foreach(_src ${_lge_sal_sources})
+        list(APPEND _lge_sources "${_lge_sal_dir}/${_src}")
+    endforeach()
+    # Every marker name in the sources, for "which points did a campaign never die at".
+    file(GLOB_RECURSE _lge_marked CONFIGURE_DEPENDS
+        "${PSITRI_SOURCE_DIR}/libraries/sal/include/sal/mapped_memory/*.hpp"
+        "${PSITRI_SOURCE_DIR}/libraries/sal/include/sal/alloc*.hpp"
+        "${PSITRI_SOURCE_DIR}/libraries/sal/include/sal/control_block*.hpp"
+        "${PSITRI_SOURCE_DIR}/libraries/sal/src/*.cpp"
+        "${PSITRI_SOURCE_DIR}/libraries/sal_art_ref/include/*.hpp")
+    set(_lge_points "")
+    foreach(_file ${_lge_marked})
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_file}")
+        file(READ "${_file}" _text)
+        string(REGEX MATCHALL "SAL_CRASH_POINT\\(\"[a-z_:]+\"" _found "${_text}")
+        foreach(_match ${_found})
+            string(REGEX REPLACE "SAL_CRASH_POINT\\(\"([a-z_:]+)\"" "\\1" _name "${_match}")
+            list(APPEND _lge_points "${_name}")
+        endforeach()
+    endforeach()
+    list(REMOVE_DUPLICATES _lge_points)
+    list(SORT _lge_points)
+    set(_lge_inc "")
+    foreach(_name ${_lge_points})
+        string(APPEND _lge_inc "\"${_name}\",\n")
+    endforeach()
+    file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/lge_crash/large_engine_crash_points.inc"
+         CONTENT "${_lge_inc}")
+    add_executable(large-engine-crash-tests ${_lge_sources})
+    target_compile_definitions(large-engine-crash-tests PRIVATE SAL_CRASH_POINTS XXH_INLINE_ALL)
+    target_include_directories(large-engine-crash-tests PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/lge_crash"
+        "${PSITRI_SOURCE_DIR}/libraries/sal/include"
+        "${PSITRI_SOURCE_DIR}/libraries/sal_art_ref/include"
+        "${PSITRI_SOURCE_DIR}/libraries/psitri_api/include")
+    target_link_libraries(large-engine-crash-tests PRIVATE adb ucc Catch2::Catch2WithMain)
+    target_compile_features(large-engine-crash-tests PRIVATE cxx_std_23)
+    set_target_properties(large-engine-crash-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME large-engine-crash-tests COMMAND large-engine-crash-tests)
+    set_tests_properties(large-engine-crash-tests PROPERTIES TIMEOUT 1800)
+
     # The same writer and reader cases on the engines layered over others.
     if(TARGET psitri)
         add_executable(layered-conformance-tests api/layered.cpp)

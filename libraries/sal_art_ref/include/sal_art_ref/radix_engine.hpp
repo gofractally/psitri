@@ -4893,21 +4893,37 @@ namespace sal_art_ref::radix
          // was: the same subtrees open, each with the working root it had, and none of those
          // opened since. (Writes through a subtree handle go to that handle's own working
          // root, not to its parent's, until commit writes them back.)
+         //
+         // Restoring runs in frame::abort() and in ~frame(), which must not fail: everything
+         // it could need to allocate is allocated when the savepoint is taken (the list it
+         // rebuilds, and a handle for each open subtree in case set_root() has closed the
+         // original by then). A savepoint taken with no subtree open allocates nothing.
          struct savepoint
          {
-            root_ptr                                       working;
-            std::vector<std::pair<std::string, savepoint>> children;
+            struct child
+            {
+               std::string                  key;
+               std::unique_ptr<tree_handle> spare;  // used if the handle was closed since
+               std::unique_ptr<savepoint>   saved;
+            };
+            root_ptr                working;
+            std::vector<child>      children;
+            std::vector<open_child> rebuilt;  // empty, with room for every child
          };
          savepoint save() const
          {
-            savepoint s{_working, {}};
+            savepoint s{_working, {}, {}};
             SAL_CRASH_POINT("savepoint:working_retained");
             s.children.reserve(_children.size());
+            s.rebuilt.reserve(_children.size());
             for (const auto& c : _children)
-               s.children.emplace_back(c.key, c.h->save());
+               s.children.push_back(
+                   {c.key,
+                    std::unique_ptr<tree_handle>(new tree_handle(_t, sal::null_ptr_address, false)),
+                    std::make_unique<savepoint>(c.h->save())});
             return s;
          }
-         void restore(savepoint&& s)
+         void restore(savepoint&& s) noexcept
          {
             _working = std::move(s.working);
             SAL_CRASH_POINT("savepoint:working_restored");
@@ -4915,20 +4931,18 @@ namespace sal_art_ref::radix
             // closed every handle that was open, and a subtree opened after it sits where
             // another one sat at the savepoint: restoring by position gave that handle the
             // other subtree's working root, and commit stored it under the wrong key.
-            std::vector<open_child> restored;
-            restored.reserve(s.children.size());
-            for (auto& [key, saved] : s.children)
+            for (auto& saved : s.children)
             {
                std::unique_ptr<tree_handle> h;
                for (auto& c : _children)
-                  if (c.h && c.key == key)
+                  if (c.h && c.key == saved.key)
                      h = std::move(c.h);  // still open: the caller's reference stays good
                if (!h)
-                  h.reset(new tree_handle(_t, sal::null_ptr_address, false));
-               h->restore(std::move(saved));
-               restored.push_back({key, std::move(h)});
+                  h = std::move(saved.spare);
+               h->restore(std::move(*saved.saved));
+               s.rebuilt.push_back({std::move(saved.key), std::move(h)});  // room was reserved
             }
-            _children = std::move(restored);  // drops the subtrees opened since
+            _children = std::move(s.rebuilt);  // drops the subtrees opened since
          }
 
         public:

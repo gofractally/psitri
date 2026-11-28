@@ -289,11 +289,28 @@ updates the active state, closes and reopens the database, and restores the
 saved version. Handles belong to their originating database; do not copy their
 raw IDs into another database.
 
-The Large Engine's `sub_transaction()` saves the primary working root and the count of opened
-children. Aborting restores that root and discards children opened in the frame.
-It does not rewind all other roots or every child editor already open when the
-frame began. Use an owned manifest replacement when your rollback boundary
-covers a complete hierarchy of application state.
+The Large Engine's `sub_transaction()` is a savepoint over the transaction's primary root. It
+keeps the primary working root and, for every subtree open through `open_subtree` or
+`create_subtree` at that moment, that subtree's key and working root. Aborting the frame
+(or destroying it without `commit()`) puts the primary root back and leaves open exactly
+the subtrees that were open at the savepoint, each as it was then:
+
+- Edits made inside the frame, on the primary root or through any subtree handle, are
+  discarded. Edits made before the frame, including those made through a subtree handle
+  and not yet written back, are kept.
+- Subtrees opened inside the frame are closed and what was written through them is
+  discarded.
+- Subtrees are matched by key. If `primary().set_root(...)` was called inside the frame
+  (it closes every open subtree handle), the subtrees that were open at the savepoint are
+  open again after the abort, with the edits they held at the savepoint. References
+  obtained from `open_subtree` before that `set_root` are no longer valid; call
+  `open_subtree` again.
+- Aborting does not allocate and cannot fail; what it needs is set aside when the
+  savepoint is taken (nothing, when no subtree is open).
+
+Other roots of the transaction (`open_root`) are not covered by the frame. Use an owned
+manifest replacement when your rollback boundary covers a complete hierarchy of
+application state.
 
 ## Optional configurations
 

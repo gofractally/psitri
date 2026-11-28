@@ -388,6 +388,11 @@ namespace sal
       _mapped_state->_read_lock_queue.reset_all_session_locks();
       SAL_CRASH_POINT("open:process_state_reset");
 
+      // Before anything reads the provider's maps or queues: the owner before this one
+      // may have died in the middle of updating one of them.
+      if (!_read_only)
+         repair_provider_state();
+
       mlock_pinned_segments();
 
       if (!_read_only)
@@ -745,6 +750,55 @@ namespace sal
       }
       SAL_WARN("rebuild_segment_metadata: {} segments hold live data, {} are free", with_data,
                num_segs - with_data);
+   }
+
+   /**
+    * Make the segment provider's state whole again after an owner that died at any
+    * instruction.
+    *
+    * The free-segment map and the map of pinned segments are bitmaps with summary levels
+    * above the bits; setting or clearing a bit stores the bit first and the summaries
+    * after. A death in between leaves a summary that promises a set bit in a word that
+    * has none, and the search for the first free segment then follows the promise into
+    * the wrong word: it returns a segment that is not free, or one past the end of the
+    * store. The queues of prepared segments count their entries in one word and mark the
+    * occupied slots in another; a death between the two leaves a slot marked that no
+    * count covers, and the next push to that slot waits for it forever.
+    *
+    * Both are consumed by this constructor (it prepares the first segments) before any
+    * recovery the engine decides on, and by an open that runs no recovery at all (the
+    * store's record says it was closed, because the death fell inside the previous open;
+    * or the caller asked to defer cleanup). So they are rebuilt here, on every read-write
+    * open, from the parts a single store keeps true: the lowest level of each bitmap and
+    * each segment's own state word. Every segment that was free, taken from the free map,
+    * or prepared and queued, and that no session had claimed, goes back to the free map,
+    * as a clean close leaves it; the queues start empty.
+    */
+   void allocator::repair_provider_state()
+   {
+      auto&          provider = _mapped_state->_segment_provider;
+      auto&          seg_data = _mapped_state->_segment_data;
+      const uint32_t num_segs = _block_alloc.num_blocks();
+
+      std::vector<uint32_t> free_segs, pinned_segs;
+      for (uint32_t i = 0; i < num_segs; ++i)
+      {
+         if (provider.free_segments.test(i) || seg_data.is_unclaimed(segment_number(i)))
+            free_segs.push_back(i);
+         if (provider.mlock_segments.test(i))
+            pinned_segs.push_back(i);
+      }
+      provider.ready_pinned_segments.clear();
+      provider.ready_unpinned_segments.clear();
+      provider.free_segments.reset();
+      for (uint32_t i : free_segs)
+      {
+         provider.free_segments.set(i);
+         seg_data.returned_to_free(segment_number(i));
+      }
+      provider.mlock_segments.reset();
+      for (uint32_t i : pinned_segs)
+         provider.mlock_segments.set(i);
    }
 
    void allocator::sync_control_state(sync_type st) noexcept

@@ -667,6 +667,7 @@ namespace sal
       void                    begin_recovery_walk();
       void                    finish_recovery_walk();
       void                    rebuild_segment_metadata();
+      void                    repair_provider_state();
 
      public:
       bool read_only() const noexcept { return _read_only; }

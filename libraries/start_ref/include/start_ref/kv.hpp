@@ -110,10 +110,10 @@ namespace start_ref::kv
    // relocation indirection). docs/start_ref_multiroot_design.md.
    inline constexpr uint32_t kMaxRoots = 16;
 
-   class database;
-   class write_session;
-   class transaction;
-   class tree_handle;
+   class START_REF_CRASH_ABI database;
+   class START_REF_CRASH_ABI write_session;
+   class START_REF_CRASH_ABI transaction;
+   class START_REF_CRASH_ABI tree_handle;
 
    [[gnu::cold, noreturn]] inline void throw_root_references()
    {
@@ -719,7 +719,7 @@ namespace start_ref::kv
       bool                    _slot_busy = false;  // a live cursor is using _rs's slot
    };
 
-   class write_session;
+   class START_REF_CRASH_ABI write_session;
 
    // A root's writer lock, held by a transaction from start to commit or
    // abort. It belongs to the transaction, not to a thread: a transaction may
@@ -746,7 +746,7 @@ namespace start_ref::kv
       std::binary_semaphore* _gate = nullptr;
    };
 
-   class transaction
+   class START_REF_CRASH_ABI transaction
    {
      public:
       // primary-root mutations/reads (forward to the primary handle's tree)
@@ -874,7 +874,7 @@ namespace start_ref::kv
    };
 
    // Targets one root inside a multi-root transaction (adb root_handle).
-   class tree_handle
+   class START_REF_CRASH_ABI tree_handle
    {
      public:
       void insert(key_view k, value_view v) { upsert(k, v); }
@@ -894,7 +894,7 @@ namespace start_ref::kv
       uint32_t     _ri;
    };
 
-   class write_session
+   class START_REF_CRASH_ABI write_session
    {
      public:
       transaction start_transaction(uint32_t root_index);
@@ -981,7 +981,7 @@ namespace start_ref::kv
       std::array<std::optional<engine_t>, kMaxRoots> _aux;  // roots >= 1, lazy
    };
 
-   class database : public std::enable_shared_from_this<database>
+   class START_REF_CRASH_ABI database : public std::enable_shared_from_this<database>
    {
      public:
       static std::shared_ptr<database> create(std::filesystem::path dir, runtime_config cfg = {})
@@ -1091,7 +1091,6 @@ namespace start_ref::kv
             const root_ptr p = decode_root(raw);
             engine_t v{part_alloc<bval>(&_arena)};
             v.allocator_mut().vhooks = &_vh;
-            START_REF_CRASH_POINT("close.release_retired");
             v.cow_release(p);
          }
          START_REF_CRASH_POINT("close.before_arenas");

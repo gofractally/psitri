@@ -31,6 +31,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -445,6 +446,10 @@ namespace
    void single_writer(database& db, const life_plan& plan, uint32_t r, int ack_fd)
    {
       auto      ws = db.start_write_session();
+      // A second session on the same root, used now and then: each time it
+      // finds the root moved on and has to let go of the version it held.
+      // (Not at the ceiling, where a version held back is storage held back.)
+      auto      other = plan.prof.fill ? nullptr : db.start_write_session();
       model_map cur, stash;
       {
          auto rs = db.start_read_session();
@@ -476,6 +481,11 @@ namespace
             catch (const engine::storage_full&)
             {
             }
+         }
+         if (other && k % 7 == 5)
+         {
+            auto tx = other->start_transaction(r);
+            tx.abort();
          }
          if (k % 11 == 3)
          {
@@ -693,11 +703,25 @@ namespace
                   }
                   else
                   {
-                     auto     c = rs->create_cursor(root);
-                     uint64_t n = 0;
+                     // A snapshot is one version: its keys come in order, every
+                     // value reads, and its sequence number does not change
+                     // while other writers commit.
+                     auto              c      = rs->create_cursor(root);
+                     const auto        before = c.get<std::string>(seq_key);
+                     uint64_t          n      = 0;
+                     std::string       last;
                      for (c.lower_bound(key_of(uint32_t(rng() % 1500))); !c.is_end() && n < 100;
-                          c.next())
-                        n += c.value<std::string>()->size() != SIZE_MAX;
+                          c.next(), ++n)
+                     {
+                        const std::string key(c.key());
+                        if (n && !(last < key))
+                           throw std::runtime_error("reader: keys of a snapshot out of order");
+                        if (!c.value<std::string>())
+                           throw std::runtime_error("reader: a key of a snapshot has no value");
+                        last = key;
+                     }
+                     if (c.get<std::string>(seq_key) != before)
+                        throw std::runtime_error("reader: a snapshot changed under its reader");
                      if (rng() % 8 == 0)
                         std::this_thread::sleep_for(std::chrono::microseconds(rng() % 3000));
                   }
@@ -845,16 +869,21 @@ namespace
       [[noreturn]] void unsupported() { throw std::runtime_error("audit: unsupported node"); }
    };
 
-   census walk_roots(database& db)
+   // `versions`: walk these root words instead of the sixteen root slots.
+   census walk_roots(database& db, const std::vector<uint64_t>* versions = nullptr)
    {
       census                   c{db.store(), db.large_store(), {}, {}};
       start_ref::kv::engine_t  view{start_ref::part_alloc<start_ref::kv::bval>(&db.store())};
-      for (uint32_t i = 0; i < start_ref::kv::kMaxRoots; ++i)
+      std::vector<uint64_t>    slots;
+      if (!versions)
       {
-         const uint64_t raw = db.store().get_root(i);
+         for (uint32_t i = 0; i < start_ref::kv::kMaxRoots; ++i)
+            slots.push_back(db.store().get_root(i));
+         versions = &slots;
+      }
+      for (const uint64_t raw : *versions)
          if (raw)
             view.recover_mark(start_ref::kv::decode_root(raw), c);
-      }
       return c;
    }
 
@@ -1110,35 +1139,17 @@ namespace
       ++model.verified;
    }
 
-   // Every marker in the engine. A run reports which of them it reached.
-   const char* const all_points[] = {
-       "create.before_header", "create.in_header", "large.create.before_header",
-       "large.create.in_header",
-       "open.before_unclean_mark", "open.after_unclean_mark", "open.before_trim",
-       "open.after_trim", "large.open.before_unclean_mark", "large.open.after_unclean_mark",
-       "large.open.before_trim", "large.open.after_trim",
-       "recover.begin", "recover.reset_map", "recover.before_reset_counts",
-       "recover.between_resets", "large.recover.reset_map", "large.recover.before_reset_counts",
-       "recover.mark", "large.recover.mark", "recover.after_root", "recover.finish_map",
-       "recover.between_ends", "large.recover.finish_map", "recover.done",
-       "commit.before_flush", "commit.after_flush", "root.before_store", "root.after_store",
-       "commit.after_root", "commit.before_drain", "commit.after_drain", "commit.published",
-       "retire.before_release", "retire.after_release", "releaser.before_release",
-       "releaser.after_release", "refresh.before_release",
-       "abort.before_release", "abort.after_release",
-       "set_root.before_adopt", "set_root.after_adopt", "set_root.release_held",
-       "alloc", "free", "large.alloc", "large.free",
-       "grow.before_data", "grow.after_data", "grow.after_map", "grow.after_counts",
-       "grow.before_count", "grow.after_count", "large.grow.before_data", "large.grow.after_data",
-       "large.grow.after_map", "large.grow.after_counts", "large.grow.before_count",
-       "large.grow.after_count",
-       "segment.claim", "segment.sweep_claim", "segment.release", "segment.resume",
-       "large.segment.resume", "reserve.draw", "reserve.repay",
-       "close.after_releaser_stop", "close.release_retired", "close.before_arenas",
-       "close.before_reserve_return", "close.after_reserve_return", "close.between_map_syncs",
-       "close.before_clean_mark", "close.after_clean_mark", "large.close.before_reserve_return",
-       "large.close.between_map_syncs", "large.close.before_clean_mark",
-       "large.close.after_clean_mark"};
+   // Every marker compiled into the engine: the macro registers each one
+   // before main runs (start_ref/crash_point.hpp), so this list cannot fall
+   // behind the engine.
+   std::vector<std::string> engine_markers()
+   {
+      std::vector<std::string> names(start_ref::testing::markers().begin(),
+                                     start_ref::testing::markers().end());
+      std::sort(names.begin(), names.end());
+      names.erase(std::unique(names.begin(), names.end()), names.end());
+      return names;
+   }
 
    struct point_state
    {
@@ -1167,7 +1178,7 @@ namespace
       store_model         model;
       campaign_stats      stats;
       std::mt19937_64     rng(seed);
-      std::vector<std::string> names(std::begin(all_points), std::end(all_points));
+      const std::vector<std::string> names = engine_markers();
       for (const auto& n : names)
          stats.points[n];
       const auto t0 = std::chrono::steady_clock::now();
@@ -1534,11 +1545,13 @@ namespace
       std::string                            damage;
       uint64_t                               looks = 0;  // how often intact() was asked
 
-      void take(database& d)
+      // `versions`: these root words (versions held by snapshots and
+      // readers) instead of the root slots
+      void take(database& d, const std::vector<uint64_t>* versions = nullptr)
       {
          db = &d;
          lines.clear(), grains.clear();
-         const census c = walk_roots(d);
+         const census c = walk_roots(d, versions);
          for (const auto& [i, refs] : c.line_refs)
             lines.emplace_back(i, checksum(d.store().get(i), start_ref::line_bytes));
          for (const auto& [g, refs] : c.grain_refs)
@@ -1597,10 +1610,39 @@ namespace
       }
    };
 
+   // Inside commit: called by the engine's markers. Just before each root
+   // store the bytes every slot reaches, and the versions snapshots and
+   // readers hold, must still be as they were; just after it the slots'
+   // baseline is taken again, so that the second store of a two-root commit
+   // is watched like the first.
+   namespace watching
+   {
+      frozen*     slots = nullptr;
+      frozen*     held  = nullptr;
+      std::string violation;
+      uint64_t    root_stores = 0;
+      void hook(const char* name)
+      {
+         if (!slots)
+            return;
+         if (std::strcmp(name, "root.before_store") == 0)
+         {
+            ++root_stores;
+            if (!slots->intact())
+               violation = slots->damage + " (reachable from a root slot) changed inside commit";
+            else if (!held->intact())
+               violation = held->damage + " (of a version a snapshot or reader holds) changed "
+                                          "inside commit";
+         }
+         else if (std::strcmp(name, "root.after_store") == 0)
+            slots->take(*slots->db);
+      }
+   }  // namespace watching
+
    struct in_place_stats
    {
       uint64_t commits = 0, aborts = 0, stashes = 0, reverts = 0, old_snapshots = 0, pairs = 0,
-               checks = 0, reopened_clean = 0, reopened_killed = 0;
+               checks = 0, reopened_clean = 0, reopened_killed = 0, root_stores = 0;
    };
 
    // `rounds` transactions of every kind on an open store, checking that the
@@ -1611,8 +1653,15 @@ namespace
       std::mt19937_64 rng(seed);
       auto            sessions = {db.start_write_session(), db.start_write_session()};
       auto            rs       = db.start_read_session();
-      frozen          ice;
+      frozen          ice, held_ice;
       ice.take(db);
+      // versions kept alive by owned snapshots and readers, as root words
+      std::vector<uint64_t> held_versions;
+      held_ice.take(db, &held_versions);
+      watching::slots = &ice;
+      watching::held  = &held_ice;
+      watching::violation.clear();
+      start_ref::testing::crash_hook.store(&watching::hook, std::memory_order_release);
       {
          // the detector detects: one byte of one published line, put back
          if (!ice.lines.empty())
@@ -1628,8 +1677,30 @@ namespace
          auto c = rs->create_cursor(root);
          return scan(c);
       };
-      std::vector<std::pair<uint32_t, start_ref::kv::tree>> kept;  // old owned snapshots
-      std::vector<std::unique_ptr<engine::cursor>>          readers;
+      struct kept_tree
+      {
+         uint32_t            first;   // the root it is a snapshot of
+         start_ref::kv::tree second;
+         uint64_t            version;  // its root word
+      };
+      struct reader
+      {
+         std::unique_ptr<engine::cursor> cursor;
+         uint64_t                        version;
+      };
+      std::vector<kept_tree> kept;  // old owned snapshots
+      std::vector<reader>    readers;
+      // The held set changed: what stays must be intact, then it is the new baseline.
+      auto rehold = [&] {
+         INFO(held_ice.damage << " (of a held version) changed");
+         REQUIRE(held_ice.intact());
+         held_versions.clear();
+         for (const auto& k : kept)
+            held_versions.push_back(k.version);
+         for (const auto& r : readers)
+            held_versions.push_back(r.version);
+         held_ice.take(db, &held_versions);
+      };
       for (uint64_t round = 0; round < rounds; ++round)
       {
          auto&          ws   = *(sessions.begin() + rng() % 2);
@@ -1643,16 +1714,41 @@ namespace
                INFO(ice.damage << " changed " << when);
                REQUIRE(false);
             }
+            if (!held_ice.intact())
+            {
+               INFO(held_ice.damage << " (of a version a snapshot or reader holds) changed "
+                                    << when);
+               REQUIRE(false);
+            }
+            INFO(watching::violation);
+            REQUIRE(watching::violation.empty());
          };
          // readers come and go; old owned snapshots are kept for a while
+         bool changed = false;
          if (rng() % 5 == 0)
-            readers.push_back(std::make_unique<engine::cursor>(rs->create_cursor(uint32_t(rng() % 12))));
+         {
+            const uint32_t slot = uint32_t(rng() % 12);
+            readers.push_back({std::make_unique<engine::cursor>(rs->create_cursor(slot)),
+                               db.store().get_root(slot)});
+            changed = true;
+         }
          if (readers.size() > 6 || (!readers.empty() && rng() % 7 == 0))
+         {
             readers.erase(readers.begin() + rng() % readers.size());
+            changed = true;
+         }
          if (rng() % 6 == 0)
-            kept.emplace_back(r, ws->get_root(r));
+         {
+            kept.push_back({r, ws->get_root(r), db.store().get_root(r)});
+            changed = true;
+         }
          if (kept.size() > 8)
+         {
             kept.erase(kept.begin() + rng() % kept.size());
+            changed = true;
+         }
+         if (changed)
+            rehold();
 
          model_map cur = model_of(r);
          uint64_t  k   = seq_of(cur) + 1;
@@ -1675,7 +1771,7 @@ namespace
             tx.primary().set_root(ws->get_root(r));
             still("by set_root of the live tree into another slot");
             tx.commit();
-            ice.take(db);
+            still("by the commit that stored the root");
             ++st.stashes;
          }
          else if (what < 32)
@@ -1696,6 +1792,7 @@ namespace
                   }
                   tx.primary().set_root(std::move(it->second));
                   kept.erase(it);
+                  rehold();
                   old = true;
                   break;
                }
@@ -1705,7 +1802,7 @@ namespace
             apply_txn(&w, base, log_of(cur), seed ^ round, r, k, revert, seq_of(base), prof);
             still("by writes on top of an old snapshot");
             tx.commit();
-            ice.take(db);
+            still("by the commit that stored the root");
             ++(old ? st.old_snapshots : st.reverts);
          }
          else if (what < 44)
@@ -1722,7 +1819,7 @@ namespace
             apply_txn(&wb, b, log_of(b), seed ^ round, pair_b, pk, plain, 0, prof);
             still("by a two-root transaction");
             tx.commit();
-            ice.take(db);
+            still("by the commit that stored the two roots");
             ++st.pairs;
          }
          else
@@ -1737,13 +1834,16 @@ namespace
                apply_txn(&tx, cur, log_of(cur), seed ^ round, r, k, plain, 0, prof);
             still("by a transaction before its commit");
             tx.commit();
-            ice.take(db);
+            still("by the commit that stored the root");
             ++st.commits;
          }
       }
       readers.clear();
       kept.clear();
-      st.checks += ice.looks;
+      start_ref::testing::crash_hook.store(nullptr, std::memory_order_release);
+      watching::slots = watching::held = nullptr;
+      st.checks += ice.looks + held_ice.looks;
+      st.root_stores = watching::root_stores;
    }
 }  // namespace
 
@@ -1798,6 +1898,7 @@ TEST_CASE("Small Engine: nothing a published root reaches is written before the 
                (unsigned long long)st.reopened_clean);
    REQUIRE(st.reverts > 0);
    REQUIRE(st.old_snapshots > 0);
+   REQUIRE(st.root_stores > st.commits);  // the checks inside commit ran
    REQUIRE(st.reopened_killed > 0);
 }
 
@@ -1821,17 +1922,24 @@ TEST_CASE("Small Engine: a failed flush of data pages ends the process before th
    {
       ::close(fds[0]);
       ::close(STDERR_FILENO);  // the diagnostic is expected
-      auto db = database::open(tmp.path, psitri::open_mode::create_only, cfg);
-      auto ws = db->start_write_session();
-      for (uint64_t k = 1; k <= 2; ++k)
+      try
       {
-         auto tx = ws->start_transaction(0);
-         tx.upsert("version", std::string(1, char('0' + k)));
-         tx.upsert("payload", std::string(3000, char('a' + k)));
-         if (k == 2)
-            fail_msync_in.store(1);  // the next msync: this commit's data pages
-         tx.commit();
-         ack(fds[1], 0, k);
+         auto db = database::open(tmp.path, psitri::open_mode::create_only, cfg);
+         auto ws = db->start_write_session();
+         for (uint64_t k = 1; k <= 2; ++k)
+         {
+            auto tx = ws->start_transaction(0);
+            tx.upsert("version", std::string(1, char('0' + k)));
+            tx.upsert("payload", std::string(3000, char('a' + k)));
+            if (k == 2)
+               fail_msync_in.store(1);  // the next msync: this commit's data pages
+            tx.commit();
+            ack(fds[1], 0, k);
+         }
+      }
+      catch (...)
+      {
+         ::_exit(3);  // never back into the test runner
       }
       ::_exit(0);
    }
@@ -1918,27 +2026,33 @@ TEST_CASE("Small Engine: recovery keeps typed values and says that it found them
    REQUIRE(pid >= 0);
    if (pid == 0)
    {
-      auto db = database::open(tmp.path, psitri::open_mode::create_only, cfg);
-      db->register_value_types<ticket>();
-      auto ws = db->start_write_session();
+      try
       {
-         auto tx = ws->start_transaction(0);
-         for (uint64_t i = 0; i < 500; ++i)
+         auto db = database::open(tmp.path, psitri::open_mode::create_only, cfg);
+         db->register_value_types<ticket>();
+         auto ws = db->start_write_session();
+         {
+            auto tx = ws->start_transaction(0);
+            for (uint64_t i = 0; i < 500; ++i)
+               tx.upsert(key_of(uint32_t(i)), ticket{i});
+            tx.upsert("plain", "bytes");
+            auto r1 = tx.open_root(1);
+            tx.commit();
+         }
+         {
+            // a second root that shares the first one's tree
+            auto tx = ws->start_transaction(1);
+            tx.primary().set_root(ws->get_root(0));
+            tx.commit();
+         }
+         auto tx = ws->start_transaction(0);  // never committed
+         for (uint64_t i = 500; i < 600; ++i)
             tx.upsert(key_of(uint32_t(i)), ticket{i});
-         tx.upsert("plain", "bytes");
-         auto r1 = tx.open_root(1);
-         tx.commit();
+         ::kill(::getpid(), SIGKILL);
       }
+      catch (...)
       {
-         // a second root that shares the first one's tree
-         auto tx = ws->start_transaction(1);
-         tx.primary().set_root(ws->get_root(0));
-         tx.commit();
       }
-      auto tx = ws->start_transaction(0);  // never committed
-      for (uint64_t i = 500; i < 600; ++i)
-         tx.upsert(key_of(uint32_t(i)), ticket{i});
-      ::kill(::getpid(), SIGKILL);
       ::_exit(1);
    }
    int status = 0;
@@ -2018,4 +2132,138 @@ TEST_CASE("Small Engine crash harness: a store that lost acknowledged versions i
    // were lost have been committed again, identically.
    std::vector<life_result> after{next};
    verify(tmp.path, plan, model, after);
+}
+
+// Every marker in the engine is died at, at least once, in every run of this
+// test: a marker is tried on a new store, then on stores prepared in the ways
+// that lead to the steps a new store does not take, and the test fails if a
+// marker is left that is not on the short list of ones no test can reach.
+TEST_CASE("Small Engine: the process is killed at every marker the engine has",
+          "[small][crash][markers]")
+{
+   // Markers of the large-value arena that need more data than a test writes.
+   static const std::pair<const char*, const char*> out_of_reach[] = {
+       {"large.segment.release",
+        "a large-value segment is given up only when it cannot place a run: 2 GiB of large values"},
+       {"large.segment.sweep_claim",
+        "the large-value arena's ceiling is at least one 2 GiB segment of large values"},
+   };
+   const uint64_t seed = env_u64("PSITRI_SMALL_CRASH_SEED", 20261128) + 5;
+   auto           normal = base_plan(psitri::sync_mode::none, 1024);
+   normal.seed           = seed;
+   normal.txns           = 30;
+   auto full             = base_plan(psitri::sync_mode::none, 6);
+   full.seed             = seed;
+   full.prof.fill        = true;
+   full.prof.keyspace    = 30000;
+   full.prof.chunk_every = 0;
+   full.prof.stash       = false;
+   full.pair             = false;
+   full.writers          = 3;
+   full.txns             = 50;
+
+   std::vector<std::string> todo = engine_markers();
+   REQUIRE(todo.size() > 60);
+   for (const auto& [marker, why] : out_of_reach)
+   {
+      INFO(marker << " is listed as out of reach but is not a marker of the engine");
+      REQUIRE(std::erase(todo, std::string(marker)) == 1);
+   }
+   struct prepared
+   {
+      const char* name;
+      const char* first;  // a death that sets the store up, or null
+      uint64_t    at;
+      bool        clean_life;  // one life that closes, before anything else
+   };
+   static const prepared ways[] = {
+       {"a new store", nullptr, 0, false},
+       {"a store closed once", nullptr, 0, true},
+       {"a store left unclean", "commit.published", 40, true},
+       {"a store killed while it grew", "grow.after_data", 1, false},
+       {"a store killed while its large-value arena grew", "large.grow.after_data", 1, false},
+   };
+   std::map<std::string, std::string> reached_by;
+   uint64_t                           lives_run = 0;
+   for (const prepared& way : ways)
+      for (const std::string& marker : std::vector<std::string>(todo))
+      {
+         temporary_directory      tmp;
+         store_model              model;
+         auto                     plan = normal;
+         std::vector<life_result> lives;
+         if (way.clean_life)
+         {
+            lives.push_back(live(tmp.path, plan, model));
+            REQUIRE(lives.back().finished());
+         }
+         if (way.first)
+         {
+            plan.point = way.first;
+            plan.at    = way.at;
+            lives.push_back(live(tmp.path, plan, model));
+            REQUIRE(lives.back().killed());
+         }
+         plan.point = marker;
+         plan.at    = 1;
+         lives.push_back(live(tmp.path, plan, model));
+         lives_run += lives.size();
+         INFO("marker " << marker << " on " << way.name);
+         REQUIRE((lives.back().killed() || lives.back().finished()));
+         if (lives.back().killed())
+         {
+            reached_by[marker] = way.name;
+            std::erase(todo, marker);
+         }
+         verify(tmp.path, plan, model, lives);
+      }
+   // What is left needs a store at its ceiling: one such store for all of them.
+   if (!todo.empty())
+   {
+      temporary_directory tmp;
+      store_model         model;
+      auto                plan = full;
+      for (int life = 0; life < 400 && !model.refused; ++life)
+      {
+         std::vector<life_result> lives{live(tmp.path, plan, model)};
+         verify(tmp.path, plan, model, lives);
+         ++lives_run;
+      }
+      REQUIRE(model.refused > 0);
+      for (const std::string& marker : std::vector<std::string>(todo))
+         for (int attempt = 0; attempt < 6; ++attempt)
+         {
+            plan.point = marker;
+            plan.at    = 1;
+            std::vector<life_result> lives{live(tmp.path, plan, model)};
+            ++lives_run;
+            REQUIRE((lives.back().killed() || lives.back().finished()));
+            const bool died = lives.back().killed();
+            verify(tmp.path, plan, model, lives);
+            if (died)
+            {
+               reached_by[marker] = "a store at its ceiling";
+               std::erase(todo, marker);
+               break;
+            }
+         }
+   }
+   std::map<std::string, std::string> by_way;
+   for (const auto& [marker, way] : reached_by)
+      if (way != std::string(ways[0].name))
+         by_way[way] += " " + marker;
+   std::printf("crash markers: %zu markers died at in %llu lives; %zu on a new store",
+               reached_by.size(), (unsigned long long)lives_run,
+               reached_by.size() - [&] { size_t n = 0; for (auto& [w, m] : by_way) n += size_t(std::count(m.begin(), m.end(), ' ')); return n; }());
+   for (const auto& [way, markers] : by_way)
+      std::printf("\n  on %s:%s", way.c_str(), markers.c_str());
+   std::printf("\n  listed as out of reach:");
+   for (const auto& [marker, why] : out_of_reach)
+      std::printf(" %s (%s)", marker, why);
+   std::printf("\n");
+   std::string left;
+   for (const auto& m : todo)
+      left += " " + m;
+   INFO("markers never died at:" << left);
+   REQUIRE(todo.empty());
 }

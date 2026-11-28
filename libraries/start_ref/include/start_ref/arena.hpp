@@ -114,7 +114,7 @@ namespace start_ref
    // Grain-parameterized: line_geometry (128 B) reproduces today's constants
    // verbatim; large_geometry (32 KiB) is the same allocator at a coarser grain.
    template <class Geo>
-   class arena_t;
+   class START_REF_CRASH_ABI arena_t;
 
    // One of <=64 reader slots (a u64 bitmap). pin/unpin bracket a snapshot's
    // lifetime; the pin IS the smart pointer for everything reachable under it.
@@ -143,7 +143,7 @@ namespace start_ref
 
    // One per writer thread. Owns the active segment claim and the txn floor.
    template <class Geo>
-   class session_t
+   class START_REF_CRASH_ABI session_t
    {
       static constexpr uint32_t line_bytes        = Geo::grain_bytes;
       static constexpr uint32_t lines_per_segment = Geo::units_per_segment;
@@ -275,7 +275,7 @@ namespace start_ref
    };
 
    template <class Geo>
-   class arena_t
+   class START_REF_CRASH_ABI arena_t
    {
       // Grain geometry — line_geometry (default) reproduces the original
       // constants verbatim; the names shadow the file-scope globals so the
